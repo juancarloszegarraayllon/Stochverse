@@ -132,10 +132,14 @@ async function boot() {
     state.sports = dm.sports || [];
     state.soccerComps = dm.soccer_comps || [];
     state.sportSubtabs = {};
+    state.catSubtabs = {};
     for (var i = 0; i < state.sports.length; i++) {
       state.sportSubtabs[state.sports[i].name] = state.sports[i].subtabs || [];
     }
-    renderCatTabs(); // Show menu immediately
+    for (var i = 0; i < state.categories.length; i++) {
+      state.catSubtabs[state.categories[i].name] = state.categories[i].subtabs || [];
+    }
+    renderCatTabs();
 
     // Step 2: Load real counts in background
     var r1 = await fetch("/api/categories");
@@ -146,11 +150,15 @@ async function boot() {
     state.sports = d2.sports || [];
     state.soccerComps = d2.soccer_comps || [];
     state.sportSubtabs = {};
+    state.catSubtabs = {};
     for (var i = 0; i < state.sports.length; i++) {
       state.sportSubtabs[state.sports[i].name] = state.sports[i].subtabs || [];
     }
-    renderCatTabs(); // Update with real counts
-    if (state.category === "Sports") renderNav();
+    for (var i = 0; i < state.categories.length; i++) {
+      state.catSubtabs[state.categories[i].name] = state.categories[i].subtabs || [];
+    }
+    renderCatTabs();
+    if (state.category) renderNav();
   } catch(ex) { console.error("boot error", ex); }
 }
 
@@ -204,49 +212,63 @@ function selectCat(key) {
 
 function renderNav() {
   var nav = document.getElementById("nav");
-  if (state.category !== "Sports" || state.search) { nav.style.display = "none"; return; }
-  nav.style.display = "block";
-  nav.innerHTML = "";
+  if (!state.category || state.category === "All" || state.search) { nav.style.display = "none"; return; }
 
-  var total = 0;
-  for (var i = 0; i < state.sports.length; i++) total += state.sports[i].count;
-
-  var allBtn = document.createElement("button");
-  allBtn.className = "nav-item" + (!state.sport ? " active" : "");
-  allBtn.textContent = "All sports (" + total + ")";
-  allBtn.addEventListener("click", function() { selectSport(null); });
-  nav.appendChild(allBtn);
-
-  for (var i = 0; i < state.sports.length; i++) {
-    var s = state.sports[i];
-    var isActive = state.sport === s.name;
-    var btn = document.createElement("button");
-    btn.className = "nav-item" + (isActive ? " active" : "");
-    btn.textContent = s.name + " (" + s.count + ")" + (isActive ? " \u25be" : " \u25b8");
-    (function(name) {
-      btn.addEventListener("click", function() { selectSport(name); });
-    })(s.name);
-    nav.appendChild(btn);
-
-    if (isActive) {
-      var subtabs = (state.sportSubtabs && state.sportSubtabs[s.name]) || [];
-      if (subtabs.length > 0) {
-        var allComp = document.createElement("button");
-        allComp.className = "nav-child" + (!state.soccerComp ? " active" : "");
-        allComp.textContent = "All";
-        allComp.addEventListener("click", function() { selectComp(null); });
-        nav.appendChild(allComp);
-        for (var j = 0; j < subtabs.length; j++) {
-          var comp = subtabs[j];
-          var cb = document.createElement("button");
-          cb.className = "nav-child" + (state.soccerComp === comp ? " active" : "");
-          cb.textContent = (state.soccerComp === comp ? "▸ " : "") + comp;
-          (function(c) {
-            cb.addEventListener("click", function() { selectComp(c); });
-          })(comp);
-          nav.appendChild(cb);
+  if (state.category === "Sports") {
+    nav.style.display = "block";
+    nav.innerHTML = "";
+    var total = 0;
+    for (var i = 0; i < state.sports.length; i++) total += state.sports[i].count;
+    var allBtn = document.createElement("button");
+    allBtn.className = "nav-item" + (!state.sport ? " active" : "");
+    allBtn.textContent = "All sports (" + total + ")";
+    allBtn.addEventListener("click", function() { selectSport(null); });
+    nav.appendChild(allBtn);
+    for (var i = 0; i < state.sports.length; i++) {
+      var s = state.sports[i];
+      var isActive = state.sport === s.name;
+      var btn = document.createElement("button");
+      btn.className = "nav-item" + (isActive ? " active" : "");
+      btn.textContent = s.name + " (" + s.count + ")" + (isActive ? " ▾" : " ▸");
+      (function(name) { btn.addEventListener("click", function() { selectSport(name); }); })(s.name);
+      nav.appendChild(btn);
+      if (isActive) {
+        var subtabs = (state.sportSubtabs && state.sportSubtabs[s.name]) || [];
+        if (subtabs.length > 0) {
+          var allComp = document.createElement("button");
+          allComp.className = "nav-child" + (!state.soccerComp ? " active" : "");
+          allComp.textContent = "All";
+          allComp.addEventListener("click", function() { selectComp(null); });
+          nav.appendChild(allComp);
+          for (var j = 0; j < subtabs.length; j++) {
+            var comp = subtabs[j];
+            var cb = document.createElement("button");
+            cb.className = "nav-child" + (state.soccerComp === comp ? " active" : "");
+            cb.textContent = (state.soccerComp === comp ? "▸ " : "") + comp;
+            (function(c) { cb.addEventListener("click", function() { selectComp(c); }); })(comp);
+            nav.appendChild(cb);
+          }
         }
       }
+    }
+  } else {
+    var subtabs = (state.catSubtabs && state.catSubtabs[state.category]) || [];
+    if (subtabs.length === 0) { nav.style.display = "none"; return; }
+    nav.style.display = "block";
+    nav.innerHTML = "";
+    var allBtn = document.createElement("button");
+    allBtn.className = "nav-item" + (!state.soccerComp ? " active" : "");
+    allBtn.textContent = "All";
+    allBtn.addEventListener("click", function() { selectComp(null); });
+    nav.appendChild(allBtn);
+    for (var i = 0; i < subtabs.length; i++) {
+      var tag = subtabs[i];
+      var isActive = state.soccerComp === tag;
+      var btn = document.createElement("button");
+      btn.className = "nav-item" + (isActive ? " active" : "");
+      btn.textContent = (isActive ? "▸ " : "") + tag;
+      (function(t) { btn.addEventListener("click", function() { selectComp(t); }); })(tag);
+      nav.appendChild(btn);
     }
   }
 }
