@@ -15,13 +15,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:Helveti
 #search-input:focus{border-color:var(--green)}
 #search-input::placeholder{color:var(--text-muted)}
 #date-sel{background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:13px;font-family:inherit;outline:none;cursor:pointer}
-#undated-label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim);cursor:pointer;white-space:nowrap}
-#undated-toggle{width:32px;height:18px;appearance:none;background:var(--bg3);border:1px solid var(--border);border-radius:9px;cursor:pointer;position:relative;transition:background 0.2s}
-#undated-toggle:checked{background:var(--green);border-color:var(--green)}
-#undated-toggle::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;background:#fff;border-radius:50%;transition:left 0.2s}
-#undated-toggle:checked::after{left:16px}
-#refresh-btn{background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:8px 14px;border-radius:6px;font-size:13px;cursor:pointer;font-family:inherit}
-#refresh-btn:hover{border-color:var(--green);color:var(--green)}
+#sort-sel{background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:13px;font-family:inherit;outline:none;cursor:pointer}
 #cat-tabs{display:flex;gap:0;border-bottom:1px solid var(--green);overflow-x:auto;scrollbar-width:none}
 #cat-tabs::-webkit-scrollbar{display:none}
 .cat-tab{padding:8px 16px;font-size:12px;color:var(--text-muted);cursor:pointer;border:none;background:transparent;font-family:inherit;white-space:nowrap;border-bottom:2px solid transparent;transition:color 0.2s;margin-bottom:-1px}
@@ -79,12 +73,17 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:Helveti
       <option value="all">All dates</option>
       <option value="today">Today</option>
       <option value="week">This week</option>
+      <option value="custom">Custom</option>
     </select>
-    <label id="undated-label">
-      <input type="checkbox" id="undated-toggle" checked>
-      Include undated
-    </label>
-    <button id="refresh-btn">Refresh</button>
+    <div id="custom-dates" style="display:none;gap:6px;align-items:center;display:none">
+      <input type="date" id="date-from" style="background:#0a0a0a;border:1px solid #1a1a1a;color:#fff;padding:7px 10px;border-radius:6px;font-size:12px;font-family:inherit;outline:none">
+      <span style="color:#444;font-size:12px">to</span>
+      <input type="date" id="date-to" style="background:#0a0a0a;border:1px solid #1a1a1a;color:#fff;padding:7px 10px;border-radius:6px;font-size:12px;font-family:inherit;outline:none">
+    </div>
+    <select id="sort-sel">
+      <option value="earliest">Earliest first</option>
+      <option value="latest">Latest first</option>
+    </select>
   </div>
   <div id="cat-tabs"></div>
 </div>
@@ -104,7 +103,8 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:Helveti
 <script>
 var state = {
   category: null, sport: null, soccerComp: null,
-  search: "", dateFilter: "all", includeUndated: true,
+  search: "", dateFilter: "all", dateFrom: "", dateTo: "",
+  sort: "earliest",
   offset: 0, total: 0, loading: false, allLoaded: false,
   categories: [], sports: [], soccerComps: []
 };
@@ -279,7 +279,9 @@ async function loadMore() {
   if (state.loading || state.allLoaded || state.category === null) return;
   state.loading = true;
   document.getElementById("loader").style.display = "flex";
-  var url = "/api/events?offset=" + state.offset + "&limit=24&date_filter=" + state.dateFilter + "&include_undated=" + state.includeUndated + "&sort=earliest";
+  var url = "/api/events?offset=" + state.offset + "&limit=24&date_filter=" + state.dateFilter + "&sort=" + state.sort;
+  if (state.dateFilter === "custom" && state.dateFrom) url += "&date_from=" + state.dateFrom;
+  if (state.dateFilter === "custom" && state.dateTo) url += "&date_to=" + state.dateTo;
   if (state.category && state.category !== "All") url += "&category=" + encodeURIComponent(state.category);
   if (state.sport) url += "&sport=" + encodeURIComponent(state.sport);
   if (state.soccerComp) url += "&soccer_comp=" + encodeURIComponent(state.soccerComp);
