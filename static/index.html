@@ -124,9 +124,6 @@ var CAT_EMOJI = {
 };
 
 async function boot() {
-  // Show loading tabs immediately
-  var el = document.getElementById("cat-tabs");
-  el.innerHTML = "<button class="cat-tab active"></button><span style="color:#444;font-size:12px;padding:8px 16px">Loading...</span>";
   try {
     var r1 = await fetch("/api/categories");
     var d1 = await r1.json();
@@ -135,7 +132,6 @@ async function boot() {
     var d2 = await r2.json();
     state.sports = d2.sports || [];
     state.soccerComps = d2.soccer_comps || [];
-    // Store subtabs per sport
     state.sportSubtabs = {};
     for (var i = 0; i < state.sports.length; i++) {
       state.sportSubtabs[state.sports[i].name] = state.sports[i].subtabs || [];
