@@ -357,17 +357,10 @@ def get_data():
         open_dt  = safe_dt(first_mk.get("open_time"))
         kickoff_dt = None
         if game_date and sport and sport in DURATION:
-            # exp_dt = expected_expiration_time = kickoff time (market expires at game start)
-            # close_dt = settlement date (weeks later) - do NOT use for kickoff
-            if exp_dt and exp_dt.date() == game_date:
+            # exp_dt = expected_expiration_time = kickoff time
+            # Allow 1-day difference for games that cross midnight UTC
+            if exp_dt and abs((exp_dt.date() - game_date).days) <= 1:
                 kickoff_dt = exp_dt
-            # Timezone edge case: game at night may have exp_dt on next UTC day
-            elif exp_dt:
-                import pytz as _ptz
-                _east = _ptz.timezone("US/Eastern")
-                exp_eastern = exp_dt.astimezone(_east)
-                if exp_eastern.date() == game_date:
-                    kickoff_dt = exp_dt
         sort_dt = game_date if game_date else (exp_dt.date() if exp_dt else (close_dt.date() if close_dt else None))
         outcomes = []
         for mk in mkts:
