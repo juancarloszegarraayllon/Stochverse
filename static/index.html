@@ -333,7 +333,18 @@ document.getElementById("search-input").addEventListener("input", function(e) {
   var val = e.target.value;
   searchTimer = setTimeout(function() {
     state.search = val.trim();
-    state.offset = 0; state.allLoaded = false;
+    state.offset = 0;
+    state.allLoaded = false;
+    // When searching, show results across all categories
+    if (state.search) {
+      state.category = "All";
+      state.sport = null;
+      state.soccerComp = null;
+      renderCatTabs();
+      renderNav();
+      document.getElementById("home-screen").style.display = "none";
+      document.getElementById("cards-grid").style.display = "grid";
+    }
     document.getElementById("cards-grid").innerHTML = "";
     loadMore();
   }, 350);
