@@ -437,7 +437,9 @@ def get_events(
             if category == "Sports":
                 if not r["_is_sport"]: continue
             else:
-                if r["category"] != category: continue
+                # Map display name to Kalshi API category names
+                kalshi_cats = DISPLAY_TO_CATS.get(category, [category])
+                if r["category"] not in kalshi_cats: continue
 
         # Sport filter - skip when searching globally
         if not search and sport and sport != "All sports":
