@@ -360,7 +360,7 @@ def get_data():
         kickoff_dt = None
         if game_date and sport and sport in DURATION:
             # exp_dt = game_end time on Kalshi. Subtract duration to get kickoff.
-            if exp_dt and abs((exp_dt.date() - game_date).days) <= 1:
+            if exp_dt and abs((exp_dt.date() - game_date).days) <= 2:
                 kickoff_dt = exp_dt - DURATION[sport]
         sort_dt = game_date if game_date else (exp_dt.date() if exp_dt else (close_dt.date() if close_dt else None))
         outcomes = []
