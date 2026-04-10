@@ -410,42 +410,41 @@ function appendCards(events) {
 }
 
 function buildCard(ev) {
-  const sport  = ev._sport || '';
-  const cat    = ev.category || 'Other';
-  const catMeta = {
-    'Sports':'🏟️','Elections':'🗳️','Politics':'🏛️','Economics':'📈',
-    'Financials':'💰','Crypto':'₿','Companies':'🏢','Entertainment':'🎬',
-    'Climate and Weather':'🌍','Science and Technology':'🔬',
-    'Health':'🏥','Social':'👥','World':'🌐','Transportation':'✈️','Mentions':'💬',
-  };
-  const sportIcons = {Soccer:'⚽',Basketball:'🏀',Baseball:'⚾',Football:'🏈',Hockey:'🏒',Tennis:'🎾',Golf:'⛳',MMA:'🥊',Cricket:'🏏',Esports:'🎮',Motorsport:'🏎️',Boxing:'🥊',Rugby:'🏉',Lacrosse:'🥍',Chess:'♟️',Darts:'🎯','Aussie Rules':'🏉','Other Sports':'🏆'};
-  const icon  = sport ? (sportIcons[sport] || catMeta[cat] || '📊') : (catMeta[cat] || '📊');
-  const label = sport || cat;
-  const dt    = ev._display_dt || '';
-  const ticker = ev.event_ticker || '';
-  const series = ev.series_ticker || '';
-  const url = series ? `https://kalshi.com/markets/${series.toLowerCase()}/${series.toLowerCase().replace('kx','')}/${ticker.toLowerCase()}` : '';
+  var sport  = ev._sport || '';
+  var cat    = ev.category || 'Other';
+  var catMeta = {'Sports':'🏟️','Elections':'🗳️','Politics':'🏛️','Economics':'📈','Financials':'💰','Crypto':'₿','Companies':'🏢','Entertainment':'🎬','Climate and Weather':'🌍','Science and Technology':'🔬','Health':'🏥','Social':'👥','World':'🌐','Transportation':'✈️','Mentions':'💬'};
+  var sportIcons = {'Soccer':'⚽','Basketball':'🏀','Baseball':'⚾','Football':'🏈','Hockey':'🏒','Tennis':'🎾','Golf':'⛳','MMA':'🥊','Cricket':'🏏','Esports':'🎮','Motorsport':'🏎️','Boxing':'🥊','Rugby':'🏉','Lacrosse':'🥍','Chess':'♟️','Darts':'🎯','Aussie Rules':'🏉','Other Sports':'🏆'};
+  var icon  = sport ? (sportIcons[sport] || catMeta[cat] || '📊') : (catMeta[cat] || '📊');
+  var label = sport || cat;
+  var dt    = ev._display_dt || '';
+  var ticker = ev.event_ticker || '';
+  var series = ev.series_ticker || '';
+  var url = series ? 'https://kalshi.com/markets/' + series.toLowerCase() + '/' + series.toLowerCase().replace('kx','') + '/' + ticker.toLowerCase() : '';
 
-  const outcomes = (ev.outcomes || []).slice(0,5).map(o => `
-    <div class="outcome-row">
-      <div class="outcome-label">${o.label}</div>
-      <div class="outcome-chance">${o.chance}</div>
-      <div class="outcome-odds">
-        <div class="odds-box odds-yes"><div class="odds-label">YES</div><div class="odds-price">${o.yes}</div></div>
-        <div class="odds-box odds-no"><div class="odds-label">NO</div><div class="odds-price">${o.no}</div></div>
-      </div>
-    </div>`).join('');
+  var outHtml = '';
+  var outcomes = ev.outcomes || [];
+  for (var i = 0; i < Math.min(outcomes.length, 5); i++) {
+    var o = outcomes[i];
+    outHtml += '<div class="outcome-row">';
+    outHtml += '<div class="outcome-label">' + o.label + '</div>';
+    outHtml += '<div class="outcome-chance">' + o.chance + '</div>';
+    outHtml += '<div class="outcome-odds">';
+    outHtml += '<div class="odds-box odds-yes"><div class="odds-label">YES</div><div class="odds-price">' + o.yes + '</div></div>';
+    outHtml += '<div class="odds-box odds-no"><div class="odds-label">NO</div><div class="odds-price">' + o.no + '</div></div>';
+    outHtml += '</div></div>';
+  }
 
-  return `<div class="market-card">
-    <div class="card-top">
-      <span class="cat-pill">${label}</span>
-      ${dt ? `<span class="card-date">${dt}</span>` : ''}
-    </div>
-    <div class="card-icon">${icon}</div>
-    <div class="card-title">${ev.title}</div>
-    <div class="card-ticker">${url ? `<a href="${url}" target="_blank">${ticker}</a>` : `<span style="font-size:10px;color:#444;font-family:monospace">${ticker}</span>`}</div>
-    ${outcomes}
-  </div>`;
+  var dtHtml = dt ? '<span class="card-date">' + dt + '</span>' : '';
+  var tickerHtml = url ? '<a href="' + url + '" target="_blank">' + ticker + '</a>' : '<span style="font-size:10px;color:#444;font-family:monospace">' + ticker + '</span>';
+
+  var html = '<div class="market-card">';
+  html += '<div class="card-top"><span class="cat-pill">' + label + '</span>' + dtHtml + '</div>';
+  html += '<div class="card-icon">' + icon + '</div>';
+  html += '<div class="card-title">' + ev.title + '</div>';
+  html += '<div class="card-ticker">' + tickerHtml + '</div>';
+  html += outHtml;
+  html += '</div>';
+  return html;
 }
 
 function updateCountBar() {
