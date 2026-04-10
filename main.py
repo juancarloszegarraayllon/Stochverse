@@ -12,28 +12,71 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 UTC = timezone.utc
 
 # ── Paste all constants from app.py ───────────────────────────────────────────
-TOP_CATS = ["Sports","Elections","Politics","Economics","Financials",
+# Kalshi API category names (must match exactly what API returns)
+KALSHI_CATS = ["Sports","Elections","Politics","Economics","Financials",
 "Crypto","Companies","Entertainment","Climate and Weather",
 "Science and Technology","Health","Social","World","Transportation","Mentions"]
+
+# Display names for UI (broader, cleaner)
+CAT_DISPLAY = {
+    "Sports":                "Sports",
+    "Elections":             "Politics",   # merge Elections into Politics
+    "Politics":              "Politics",
+    "Economics":             "Economics",
+    "Financials":            "Financials",
+    "Crypto":                "Crypto",
+    "Companies":             "Companies",
+    "Entertainment":         "Culture",
+    "Climate and Weather":   "Climate",
+    "Science and Technology":"Tech & Science",
+    "Health":                "Health",
+    "Social":                "Social",
+    "World":                 "World",
+    "Transportation":        "Transportation",
+    "Mentions":              "Mentions",
+}
+
+# UI tabs - deduplicated display names in order
+TOP_CATS = ["Sports","Politics","Economics","Financials","Crypto",
+"Companies","Culture","Climate","Tech & Science","Health","Social",
+"World","Transportation","Mentions"]
+
+# Map display name back to Kalshi API categories
+DISPLAY_TO_CATS = {
+    "Sports":         ["Sports"],
+    "Politics":       ["Politics","Elections"],
+    "Economics":      ["Economics"],
+    "Financials":     ["Financials"],
+    "Crypto":         ["Crypto"],
+    "Companies":      ["Companies"],
+    "Culture":        ["Entertainment"],
+    "Climate":        ["Climate and Weather"],
+    "Tech & Science": ["Science and Technology"],
+    "Health":         ["Health"],
+    "Social":         ["Social"],
+    "World":          ["World"],
+    "Transportation": ["Transportation"],
+    "Mentions":       ["Mentions"],
+}
 
 
 # ── Category subcategory tags ─────────────────────────────────────────────────
 CAT_TAGS = {
-    "Elections":    ["US Elections","Senate","House","Governor","Primaries","Approval","Confirmation","CA-","TX-","NY-","FL-"],
-    "Politics":     ["Trump","Congress","Senate","tariff","immigration","SCOTUS","Supreme Court","executive","legislation","bill","policy","approval"],
-    "Economics":    ["Fed","Federal Reserve","rate","inflation","GDP","jobs","unemployment","housing","recession","trade","deficit","interest rate"],
-    "Financials":   ["S&P","Nasdaq","Dow","gold","silver","oil","gas","treasury","bond","yield","stock","market"],
-    "Crypto":       ["BTC","bitcoin","ETH","ethereum","SOL","solana","DOGE","dogecoin","XRP","ripple","BNB","crypto","coin"],
-    "Companies":    ["IPO","Elon Musk","Tesla","SpaceX","Apple","Google","Meta","Amazon","Microsoft","CEO","layoff","earnings","revenue","profit"],
-    "Entertainment":["music","album","chart","Grammy","Oscar","Emmy","Netflix","Spotify","box office","movie","film","TV","television","Billboard","award"],
-    "Climate and Weather":["hurricane","storm","temperature","snow","rain","flood","wildfire","climate","drought","tornado","earthquake"],
-    "Science and Technology":["AI","artificial intelligence","GPT","LLM","space","NASA","SpaceX","medicine","vaccine","FDA","energy","nuclear","renewable","autonomous"],
-    "Health":       ["covid","virus","disease","cancer","vaccine","FDA","drug","treatment","hospital","mental health","outbreak"],
-    "Social":       ["social media","Twitter","X.com","TikTok","Instagram","Facebook","YouTube","influencer","viral"],
-    "World":        ["China","Russia","Ukraine","Israel","Gaza","Iran","Europe","NATO","UN","Middle East","Korea","India","Japan","Mexico","Canada","UK","Germany","France","Australia","Brazil","Argentina","Peru","Colombia","Venezuela"],
-    "Transportation":["airline","flight","Tesla","EV","electric vehicle","car","auto","train","infrastructure","FAA","highway"],
-    "Mentions":     ["mention","media","coverage","headline"],
+    "Politics":       ["US Elections","Senate","House","Governor","Primaries","Trump","Trump Agenda","Congress","Bills","SCOTUS","Tariffs","Immigration","Foreign Elections","Local","Recurring","Approval Ratings","Cabinet"],
+    "Economics":      ["Fed","Interest Rates","Inflation","CPI","GDP","Jobs","Unemployment","Housing","Oil","Recession","Trade","Global"],
+    "Financials":     ["S&P 500","Nasdaq","Dow","Gold","Metals","Oil & Gas","Treasuries","Agriculture","Volatility"],
+    "Crypto":         ["Bitcoin","Ethereum","Solana","Dogecoin","XRP","BNB","Pre-Market","Altcoins"],
+    "Companies":      ["Earnings","IPOs","Elon Musk","Tesla","SpaceX","CEOs","Tech","Layoffs","AI","Mergers","Streaming"],
+    "Culture":        ["Movies","Television","Music","Awards","Oscars","Grammys","Emmys","Video games","Netflix","Spotify","Billboard","Rotten Tomatoes"],
+    "Climate":        ["Hurricanes","Temperature","Snow & Rain","Climate Change","Natural Disasters","Heat","Energy"],
+    "Tech & Science": ["AI","Space","Medicine","Energy","LLMs","OpenAI","Biotech","Autonomous vehicles"],
+    "Health":         ["Disease","Vaccines","FDA","Mental health","Drugs","Measles","Flu"],
+    "Social":         ["Social media","Demographics","Culture","Religion","Immigration"],
+    "World":          ["Middle East","Europe","Asia","China","Russia","Ukraine","NATO","UN","Latin America","Africa"],
+    "Transportation": ["Airlines","Electric vehicles","Infrastructure","FAA","Boeing"],
+    "Mentions":       ["Trump","Elon Musk","Taylor Swift","Sports","Politics","AI","Economy"],
 }
+
 CAT_META = {
     "Sports":("🏟️","pill-sports"),"Elections":("🗳️","pill-elections"),
     "Politics":("🏛️","pill-politics"),"Economics":("📈","pill-economics"),
@@ -404,8 +447,8 @@ def get_events(
         if soccer_comp and soccer_comp != "All":
             if sport == "Soccer" or r["_sport"] == "Soccer":
                 if r["_soccer_comp"] != soccer_comp: continue
-            else:
-                # Non-soccer subtab filter
+            elif sport and r["_is_sport"]:
+                # Non-soccer sport subtab filter
                 sp = r["_sport"]
                 tabs_def = SPORT_SUBTABS.get(sp, [])
                 if tabs_def:
@@ -413,6 +456,56 @@ def get_events(
                     series = r.get("series_ticker", "").upper()
                     subtab = lk.get(series, "Other")
                     if subtab != soccer_comp: continue
+            else:
+                # Non-sport category keyword filter
+                KEYWORD_MAP = {
+                    "Bitcoin":        ["bitcoin","btc"],
+                    "Ethereum":       ["ethereum","eth"],
+                    "Solana":         ["solana","sol"],
+                    "Dogecoin":       ["dogecoin","doge"],
+                    "XRP":            ["xrp","ripple"],
+                    "BNB":            ["bnb","binance"],
+                    "S&P 500":        ["s&p","s&p 500","spx","spy"],
+                    "Nasdaq":         ["nasdaq","ndx","qqq"],
+                    "Dow":            ["dow","djia"],
+                    "Gold":           ["gold","xau"],
+                    "US Elections":   ["us election","presidential","electoral"],
+                    "Fed":            ["fed","federal reserve","fomc"],
+                    "Interest Rates": ["interest rate","rate cut","rate hike","basis point"],
+                    "Inflation":      ["inflation","cpi","pce","price"],
+                    "GDP":            ["gdp","gross domestic"],
+                    "Jobs":           ["jobs","employment","payroll","unemployment"],
+                    "AI":             ["artificial intelligence"," ai ","openai","chatgpt","llm","gpt","claude","gemini"],
+                    "LLMs":           ["llm","large language","openai","anthropic","gemini","claude","gpt"],
+                    "Trump Agenda":   ["trump","executive order","tariff","deport","doge"],
+                    "Tariffs":        ["tariff","trade war","import tax","customs"],
+                    "Approval Ratings":["approval rating","approve","disapprove","favorability"],
+                    "Oscars":         ["oscar","academy award"],
+                    "Grammys":        ["grammy"],
+                    "Emmys":          ["emmy"],
+                    "Billboard":      ["billboard","hot 100","chart"],
+                    "Rotten Tomatoes":["rotten tomatoes","tomatometer"],
+                    "Netflix":        ["netflix"],
+                    "Spotify":        ["spotify"],
+                    "Hurricanes":     ["hurricane","tropical storm","cyclone"],
+                    "Daily Temperature":["temperature","high temp","low temp","degrees"],
+                    "Snow and rain":  ["snow","rain","precipitation","blizzard"],
+                    "Natural disasters":["earthquake","tornado","flood","wildfire","disaster"],
+                    "Disease":        ["disease","virus","outbreak","measles","flu","covid"],
+                    "Vaccines":       ["vaccine","vaccination","immunization"],
+                    "China":          ["china","chinese","beijing","xi jinping"],
+                    "Russia":         ["russia","russian","putin","moscow","ukraine"],
+                    "Ukraine":        ["ukraine","ukrainian","zelensky","war"],
+                    "Middle East":    ["israel","gaza","iran","saudi","middle east","hamas"],
+                    "Latin America":  ["mexico","brazil","argentina","venezuela","colombia"],
+                    "Elon Musk":      ["elon musk","elon","musk","doge","tesla","spacex","x.com","twitter"],
+                    "Tesla":          ["tesla","tsla"],
+                    "SpaceX":         ["spacex","starship","falcon","rocket"],
+                }
+                keywords = KEYWORD_MAP.get(soccer_comp, [soccer_comp.lower()])
+                title_lower = r["title"].lower()
+                if not any(kw in title_lower for kw in keywords):
+                    continue
 
         # Search
         if search:
@@ -511,11 +604,16 @@ def get_meta():
 @app.get("/api/categories")
 def get_categories():
     records = get_data()
-    cats = {}
+    # Count by display name
+    display_counts = {}
     for r in records:
         c = r["category"]
-        cats[c] = cats.get(c,0) + 1
-    return {"categories": [{"name":c,"count":cats.get(c,0),"subtabs":CAT_TAGS.get(c,[])} for c in TOP_CATS if c in cats]}
+        disp = CAT_DISPLAY.get(c, c)
+        display_counts[disp] = display_counts.get(disp, 0) + 1
+    return {"categories": [
+        {"name": d, "count": display_counts.get(d, 0), "subtabs": CAT_TAGS.get(d, [])}
+        for d in TOP_CATS if display_counts.get(d, 0) > 0
+    ]}
 
 @app.get("/api/refresh")
 def refresh():
