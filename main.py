@@ -362,6 +362,8 @@ def get_data():
             # exp_dt = game_end time on Kalshi. Subtract duration to get kickoff.
             if exp_dt and abs((exp_dt.date() - game_date).days) <= 2:
                 kickoff_dt = exp_dt - DURATION[sport]
+            import logging as _lg
+            _lg.warning(f"KICK {event_ticker}: sport={sport}, game_date={game_date}, exp_dt={exp_dt}, kickoff_dt={kickoff_dt}")
         sort_dt = game_date if game_date else (exp_dt.date() if exp_dt else (close_dt.date() if close_dt else None))
         outcomes = []
         for mk in mkts:
