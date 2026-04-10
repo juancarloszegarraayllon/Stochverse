@@ -304,8 +304,10 @@ function selectCat(key) {
     return;
   }
   document.getElementById('home-screen').style.display = 'none';
-  document.getElementById('cards-grid').style.display = 'grid';
-  document.getElementById('cards-grid').innerHTML = '';
+  const grid = document.getElementById('cards-grid');
+  grid.style.display = 'grid';
+  grid.innerHTML = '';
+  document.getElementById('count-bar').textContent = '';
   loadMore();
 }
 
@@ -382,14 +384,18 @@ async function loadMore() {
 
   try {
     const res = await fetch(`${API}/api/events?${params}`);
-    const data = await res.json();
-    state.total = data.total;
-    state.offset += data.events.length;
-    if (state.offset >= state.total) state.allLoaded = true;
-    appendCards(data.events);
+    const text = await res.text();
+    console.log('API response:', text.substring(0, 200));
+    const data = JSON.parse(text);
+    state.total = data.total || 0;
+    const events = data.events || [];
+    state.offset += events.length;
+    if (events.length === 0 || state.offset >= state.total) state.allLoaded = true;
+    appendCards(events);
     updateCountBar();
   } catch(e) {
-    console.error(e);
+    console.error('loadMore error:', e);
+    document.getElementById('count-bar').textContent = 'Error loading data. Check console.';
   } finally {
     state.loading = false;
     document.getElementById('loader').style.display = 'none';
