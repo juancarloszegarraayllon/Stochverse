@@ -387,7 +387,7 @@ def get_data():
             yes    = f"{int(round(yf*100))}¢"  if yf is not None else "—"
             no     = f"{int(round(nf*100))}¢"  if nf is not None else "—"
             outcomes.append({"label":label[:35],"chance":chance,"yes":yes,"no":no})
-        # For display: show time from kickoff_dt but date from game_date (more reliable)
+        # Only show date/time if we have a kickoff time
         if kickoff_dt and game_date:
             try:
                 import pytz as _pytz
@@ -399,9 +399,7 @@ def get_data():
                 mon = game_date.strftime("%b")
                 display = f"{mon} {game_date.day}, {hour}:{kt.strftime('%M')}{ampm} {tz_label}"
             except:
-                display = fmt_date(kickoff_dt)
-        elif game_date:
-            display = game_date.strftime("%b %-d")
+                display = ""
         else:
             display = ""
         return sort_dt, game_date, kickoff_dt, display, outcomes
