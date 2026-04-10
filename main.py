@@ -338,10 +338,10 @@ def get_data():
         lambda r: SOCCER_COMP.get(r["_series"],"Other") if r["_sport"]=="Soccer" else "", axis=1)
 
     DURATION = {
-        "Soccer": timedelta(hours=2), "Baseball": timedelta(hours=3),
-        "Basketball": timedelta(hours=2, minutes=30),
-        "Hockey": timedelta(hours=2, minutes=30),
-        "Football": timedelta(hours=3), "Cricket": timedelta(hours=4),
+        "Soccer": timedelta(hours=3), "Baseball": timedelta(hours=4),
+        "Basketball": timedelta(hours=3, minutes=30),
+        "Hockey": timedelta(hours=3, minutes=30),
+        "Football": timedelta(hours=4), "Cricket": timedelta(hours=5),
     }
 
     def extract(row):
@@ -357,14 +357,12 @@ def get_data():
         open_dt  = safe_dt(first_mk.get("open_time"))
         kickoff_dt = None
         if game_date and sport and sport in DURATION:
-            # Prefer open_time as kickoff (most accurate)
-            # Fall back to expiration - duration estimate
-            if open_dt and open_dt.date() == game_date:
-                kickoff_dt = open_dt
+            # Use close_time - duration to estimate kickoff
+            # close_time includes ~1hr buffer after game end on Kalshi
+            if close_dt:
+                kickoff_dt = close_dt - DURATION[sport]
             elif exp_dt:
                 kickoff_dt = exp_dt - DURATION[sport]
-            elif close_dt:
-                kickoff_dt = close_dt - DURATION[sport]
         sort_dt = game_date if game_date else (close_dt.date() if close_dt else None)
         outcomes = []
         for mk in mkts:
