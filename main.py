@@ -16,6 +16,19 @@ TOP_CATS = ["Sports","Elections","Politics","Economics","Financials",
 "Crypto","Companies","Entertainment","Climate and Weather",
 "Science and Technology","Health","Social","World","Transportation","Mentions"]
 
+
+# ── Category subcategory tags ─────────────────────────────────────────────────
+CAT_TAGS = {
+    "Elections":    ["US Elections","International","House","Senate","Primaries","Governor"],
+    "Politics":     ["Trump","Congress","International","SCOTUS","Local","Tariffs"],
+    "Economics":    ["Fed","Inflation","GDP","Jobs","Housing","Oil","Global"],
+    "Financials":   ["S&P","Nasdaq","Metals","Agriculture","Oil & Gas","Treasuries"],
+    "Crypto":       ["BTC","ETH","SOL","DOGE","XRP","BNB"],
+    "Companies":    ["IPOs","Elon Musk","CEOs","Tech","Layoffs"],
+    "Entertainment":["Music","Television","Movies","Awards","Video games"],
+    "Climate and Weather":["Hurricanes","Temperature","Snow and rain","Climate change"],
+    "Science and Technology":["AI","Space","Medicine","Energy"],
+}
 CAT_META = {
     "Sports":("🏟️","pill-sports"),"Elections":("🗳️","pill-elections"),
     "Politics":("🏛️","pill-politics"),"Economics":("📈","pill-economics"),
@@ -487,7 +500,7 @@ def get_meta():
             tabs_def = SPORT_SUBTABS.get(k, [])
             subtabs = [t for t,_ in tabs_def] if tabs_def else []
         sports_list.append({"name": k, "count": 0, "icon": SPORT_ICONS.get(k,"🏆"), "subtabs": subtabs})
-    cats_list = [{"name": c, "count": 0} for c in TOP_CATS]
+    cats_list = [{"name": c, "count": 0, "subtabs": CAT_TAGS.get(c, [])} for c in TOP_CATS]
     return {"categories": cats_list, "sports": sports_list, "soccer_comps": soccer_comps}
 
 @app.get("/api/categories")
@@ -497,7 +510,7 @@ def get_categories():
     for r in records:
         c = r["category"]
         cats[c] = cats.get(c,0) + 1
-    return {"categories": [{"name":c,"count":cats.get(c,0)} for c in TOP_CATS if c in cats]}
+    return {"categories": [{"name":c,"count":cats.get(c,0),"subtabs":CAT_TAGS.get(c,[])} for c in TOP_CATS if c in cats]}
 
 @app.get("/api/refresh")
 def refresh():
