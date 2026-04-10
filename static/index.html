@@ -34,7 +34,11 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 .market-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px}
 .market-card:hover{border-color:#333}
 .card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.card-pills{display:flex;flex-direction:column;gap:2px}
 .cat-pill{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim)}
+.subcat-pill{font-size:10px;color:#555;letter-spacing:0.3px}
+.sub-pill{font-size:10px;color:#555;letter-spacing:0.3px;text-transform:uppercase}
+.sub-pill{font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:0.3px;color:#444;border-left:1px solid #222;padding-left:6px}
 .card-date{font-size:11px;color:var(--text-muted);white-space:nowrap}
 .card-icon{font-size:20px}
 .card-title{font-size:13px;font-weight:600;line-height:1.4;color:var(--text)}
@@ -343,8 +347,14 @@ function buildCard(ev) {
   var outcomes = ev.outcomes || [];
 
   var h = "<div class=\"market-card\">";
-  h += "<div class=\"card-top\"><span class=\"cat-pill\">" + label + "</span>";
+  var subcat = ev._subcat || "";
+  h += "<div class=\"card-top\">";
+  h += "<div style=\"display:flex;gap:6px;align-items:center;flex-wrap:wrap\">";
+  h += "<span class=\"cat-pill\">" + label + "</span>";
+  if (subcat) h += "<span class=\"sub-pill\">" + subcat + "</span>";
+  h += "</div>";
   if (dt) h += "<span class=\"card-date\">" + dt + "</span>";
+  h += "</div>";
   h += "</div>";
   if (icon) h += "<div class=\"card-icon\">" + icon + "</div>";
   h += "<div class=\"card-title\">" + ev.title + "</div>";
