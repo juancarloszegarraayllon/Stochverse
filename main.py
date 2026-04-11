@@ -743,11 +743,12 @@ def get_events(
                 g = match_game(title, sport)
                 if g:
                     rc["_live_state"] = {
-                        "label":         compact_label(g),
-                        "short_detail":  g.get("short_detail", ""),
-                        "display_clock": g.get("display_clock", ""),
-                        "period":        g.get("period", 0),
-                        "league":        g.get("league", ""),
+                        "label":          compact_label(g),
+                        "short_detail":   g.get("short_detail", ""),
+                        "display_clock":  g.get("display_clock", ""),
+                        "period":         g.get("period", 0),
+                        "league":         g.get("league", ""),
+                        "captured_at_ms": g.get("captured_at_ms", 0),
                     }
         formatted.append(rc)
     return {"total": total, "offset": offset, "limit": limit, "events": formatted}

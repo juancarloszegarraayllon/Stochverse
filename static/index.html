@@ -421,12 +421,90 @@ function buildDateText(ev) {
 function renderTimeSlot(ev) {
   if (isLive(ev)) {
     var t = liveTimeLabel(ev);
-    var suffix = t ? ' · ' + t : '';
-    return '<span class="live-badge"><span class="live-dot"></span>LIVE' + suffix + '</span>';
+    var suffix = t ? ' \u00B7 ' + t : '';
+    // Stash ESPN state on the badge so the 500ms tick loop can
+    // interpolate the clock between backend refreshes.
+    var attrs = '';
+    var live = ev._live_state;
+    if (live && live.display_clock && live.period && live.captured_at_ms) {
+      attrs += ' data-live-sport="' + (ev._sport || '') + '"';
+      attrs += ' data-live-period="' + live.period + '"';
+      attrs += ' data-live-clock-initial="' + String(live.display_clock).replace(/"/g, '') + '"';
+      attrs += ' data-live-captured="' + live.captured_at_ms + '"';
+    }
+    return '<span class="live-badge"' + attrs + '><span class="live-dot"></span><span class="live-text">LIVE' + suffix + '</span></span>';
   }
   var dt = buildDateText(ev);
   return dt ? '<span class="card-date">' + dt + '</span>' : '';
 }
+
+// Parse a clock string to total seconds. Handles "8:47" (quarter/
+// period clock) and "38'" or "38" (soccer minute).
+function parseClockSecs(s) {
+  if (!s) return null;
+  s = String(s).trim();
+  var m = s.match(/^(\d+):(\d{1,2})$/);
+  if (m) return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  m = s.match(/^(\d+)'?$/);
+  if (m) return parseInt(m[1], 10) * 60;
+  return null;
+}
+
+function formatMMSS(secs) {
+  if (secs < 0) secs = 0;
+  var m = Math.floor(secs / 60);
+  var s = secs % 60;
+  return m + ':' + (s < 10 ? '0' + s : s);
+}
+
+function buildLiveLabel(sport, period, clockSecs) {
+  if (sport === 'Soccer') {
+    var mins = Math.floor(clockSecs / 60);
+    var tick = mins + "'";
+    if (period === 1) return '1st ' + tick;
+    if (period === 2) return '2nd ' + tick;
+    return tick;
+  }
+  var clockStr = formatMMSS(clockSecs);
+  if (sport === 'Hockey') return 'P' + period + ' ' + clockStr;
+  if (sport === 'Basketball' || sport === 'Football') return 'Q' + period + ' ' + clockStr;
+  return clockStr;
+}
+
+// 500ms tick loop: re-interpolate the clock on every visible live
+// badge so Q2 8:47 → Q2 8:46.5 → Q2 8:46 without waiting for the next
+// backend refresh. Count-down for NBA/NFL/NHL, count-up for soccer.
+function tickLiveClocks() {
+  var badges = document.querySelectorAll('.live-badge[data-live-sport]');
+  if (!badges.length) return;
+  var now = Date.now();
+  for (var i = 0; i < badges.length; i++) {
+    var badge = badges[i];
+    var sport = badge.getAttribute('data-live-sport');
+    var period = parseInt(badge.getAttribute('data-live-period') || '0', 10);
+    var initial = badge.getAttribute('data-live-clock-initial');
+    var captured = parseInt(badge.getAttribute('data-live-captured') || '0', 10);
+    if (!initial || !captured) continue;
+    var baseSecs = parseClockSecs(initial);
+    if (baseSecs === null) continue;
+    var elapsed = Math.max(0, Math.floor((now - captured) / 1000));
+    // Cap drift so a stale capture doesn't run the clock to zero.
+    if (elapsed > 60) elapsed = 60;
+    var newSecs;
+    if (sport === 'Soccer') {
+      newSecs = baseSecs + elapsed;
+    } else {
+      newSecs = Math.max(0, baseSecs - elapsed);
+    }
+    var label = buildLiveLabel(sport, period, newSecs);
+    var text = badge.querySelector('.live-text');
+    if (text) {
+      var full = 'LIVE \u00B7 ' + label;
+      if (text.textContent !== full) text.textContent = full;
+    }
+  }
+}
+setInterval(tickLiveClocks, 500);
 
 function buildCard(ev) {
   var sport = ev._sport || "";

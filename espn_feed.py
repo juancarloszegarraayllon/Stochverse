@@ -123,10 +123,12 @@ async def _fetch_league(client, slug: str, league: str, sport: str):
             log.debug("espn %s: HTTP %d", slug, r.status_code)
             return None
         data = r.json()
+        now_ms = int(time.time() * 1000)
         out = []
         for ev in data.get("events", []):
             parsed = _parse_event(ev, league, sport)
             if parsed:
+                parsed["captured_at_ms"] = now_ms
                 out.append(parsed)
         return out
     except Exception as e:
