@@ -297,18 +297,30 @@ async def run_sofascore_feed():
         log.warning("httpx not installed — sofascore feed disabled")
         return
     STATUS["running"] = True
-    # SofaScore's API is behind Cloudflare and 403s any request that
-    # doesn't look like a browser. Send the same headers the web UI
-    # sends: a real Chrome UA, an Accept header, and a Referer/Origin
-    # that matches their site.
+    # SofaScore's API is behind Cloudflare, which 403s any request
+    # that doesn't look like a real browser tab. Send the full set
+    # of headers the sofascore.com web UI sends: real Chrome UA,
+    # Accept-Language, Accept-Encoding, Referer + Origin pinned to
+    # the site, plus the Sec-Fetch-* and Sec-Ch-Ua-* hints modern
+    # Chromium includes automatically.
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/122.0.0.0 Safari/537.36",
+                      "Chrome/125.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
         "Referer": "https://www.sofascore.com/",
         "Origin": "https://www.sofascore.com",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "Sec-Ch-Ua": '"Chromium";v="125", "Not.A/Brand";v="24", "Google Chrome";v="125"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "DNT": "1",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
     async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
         while True:
