@@ -795,6 +795,37 @@ def get_events(
     except Exception:
         match_game = None
         compact_label = None
+
+    def _score_display(title: str, g: dict) -> str:
+        """Build an ordered score string whose team order matches how
+        the teams appear in the Kalshi event title. ESPN's feed uses
+        home/away which doesn't always line up with Kalshi, so we pick
+        whichever team phrase appears *first* in the title and put
+        that team on the left."""
+        if not g:
+            return ""
+        hs = g.get("home_score", "")
+        as_ = g.get("away_score", "")
+        if hs == "" or as_ == "":
+            return ""
+        ha = g.get("home_abbr", "") or "HOME"
+        aa = g.get("away_abbr", "") or "AWAY"
+        tl = (title or "").lower()
+        def first_pos(phrases):
+            best = -1
+            for p in phrases or ():
+                if not p:
+                    continue
+                idx = tl.find(p)
+                if idx >= 0 and (best == -1 or idx < best):
+                    best = idx
+            return best
+        home_pos = first_pos(g.get("home_phrases", []))
+        away_pos = first_pos(g.get("away_phrases", []))
+        if home_pos >= 0 and (away_pos < 0 or home_pos < away_pos):
+            return f"{ha} {hs} - {aa} {as_}"
+        return f"{aa} {as_} - {ha} {hs}"
+
     formatted = []
     for r in page:
         rc = dict(r)
@@ -818,6 +849,7 @@ def get_events(
                         "away_abbr":      g.get("away_abbr", ""),
                         "home_score":     g.get("home_score", ""),
                         "away_score":     g.get("away_score", ""),
+                        "score_display":  _score_display(title, g),
                     }
         formatted.append(rc)
     return {"total": total, "offset": offset, "limit": limit, "events": formatted}

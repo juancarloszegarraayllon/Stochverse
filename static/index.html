@@ -420,11 +420,13 @@ function buildDateText(ev) {
   return dt;
 }
 
-// Build an "AWY 12 - HME 15" style score string from _live_state when
-// we have team abbreviations and both sides' scores. Returns "" if
-// anything is missing.
+// Score string to display on a live/final badge. The backend builds
+// this in the same team order as the Kalshi event title so it lines
+// up with the outcome labels in the card body.
 function liveScoreString(live) {
   if (!live) return "";
+  if (live.score_display) return live.score_display;
+  // Legacy fallback in case an older cached record lacks score_display.
   var hs = live.home_score, as = live.away_score;
   if (hs === undefined || hs === null || hs === "" ||
       as === undefined || as === null || as === "") return "";
@@ -440,12 +442,8 @@ function renderTimeSlot(ev) {
     // live clock, with the box score when we have it.
     var live = ev._live_state;
     if (live && live.state === "post") {
-      var score = "";
-      if (live.home_score !== "" && live.away_score !== "") {
-        var a = (live.away_abbr || "") + " " + live.away_score;
-        var h = (live.home_abbr || "") + " " + live.home_score;
-        score = ' \u00B7 <span class="final-score">' + a + " " + h + '</span>';
-      }
+      var finalScore = liveScoreString(live);
+      var score = finalScore ? ' \u00B7 <span class="final-score">' + finalScore + '</span>' : '';
       return '<span class="final-badge">FINAL' + score + '</span>';
     }
     var scoreStr = liveScoreString(live);
