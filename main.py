@@ -1023,6 +1023,71 @@ def espn_status():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/sportsdb_day_probe")
+async def sportsdb_day_probe(sport: str = "Basketball", d: str = ""):
+    """Debug: TheSportsDB's /livescore.php endpoint is Patreon-only
+    (confirmed 404 on free key 3), but their /eventsday.php endpoint
+    IS free and returns all scheduled events for a given date with
+    intHomeScore / intAwayScore / strStatus / strProgress fields.
+    For in-progress matches, these fields may be updated in near
+    real time. Probe the endpoint for the given sport/date to see
+    whether the free tier returns usable live data for games we
+    care about (e.g. Turkish Basketball, J League)."""
+    try:
+        import httpx
+        if not d:
+            d = date.today().isoformat()
+        sport_enc = sport.replace(" ", "%20")
+        url = f"https://www.thesportsdb.com/api/v1/json/3/eventsday.php?d={d}&s={sport_enc}"
+        async with httpx.AsyncClient(headers={"User-Agent": "oddsiq/1.0"}) as client:
+            r = await client.get(url, timeout=15.0)
+            out = {"sport": sport, "date": d, "status_code": r.status_code, "url": url}
+            if r.status_code != 200:
+                out["body_raw"] = r.text[:800]
+                return out
+            try:
+                data = r.json() or {}
+            except Exception as e:
+                out["parse_error"] = str(e)
+                out["body_raw"] = r.text[:800]
+                return out
+            events = data.get("events")
+            if not isinstance(events, list):
+                out["event_count"] = 0
+                out["raw_body_preview"] = str(data)[:500]
+                return out
+            out["event_count"] = len(events)
+            # Show which statuses are present — tells us if any games
+            # are currently in progress.
+            statuses: Dict[str, int] = {}
+            live_with_score = 0
+            sample_live = None
+            for ev in events:
+                st = (ev.get("strStatus") or "").strip() or "(empty)"
+                statuses[st] = statuses.get(st, 0) + 1
+                is_live = st.lower() not in ("", "(empty)", "not started", "match finished", "ft", "finished", "cancelled", "postponed")
+                has_score = ev.get("intHomeScore") not in (None, "") and ev.get("intAwayScore") not in (None, "")
+                if is_live and has_score and sample_live is None:
+                    sample_live = {
+                        "home": ev.get("strHomeTeam"),
+                        "away": ev.get("strAwayTeam"),
+                        "home_score": ev.get("intHomeScore"),
+                        "away_score": ev.get("intAwayScore"),
+                        "status": ev.get("strStatus"),
+                        "progress": ev.get("strProgress"),
+                        "league": ev.get("strLeague"),
+                    }
+                if is_live and has_score:
+                    live_with_score += 1
+            out["status_breakdown"] = statuses
+            out["live_with_score_count"] = live_with_score
+            out["sample_live_event"] = sample_live
+            out["first_event_fields"] = sorted(list(events[0].keys())) if events else []
+            out["first_event"] = events[0] if events else None
+            return out
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
 @app.get("/api/kalshi_event_raw")
 def kalshi_event_raw(ticker: str = "", status: str = "open", prefer: str = "sport"):
     """Debug: fetches several pages of Kalshi events and returns
