@@ -768,12 +768,19 @@ function buildCard(ev) {
 
   if (hasGroups) {
     // Tab strip. First group is active by default (backend orders
-    // them moneyline → spread → total → BTTS → 1H).
+    // them moneyline → spread → total → BTTS → 1H). Each tab
+    // carries the sibling's own event_ticker + URL so clicking it
+    // updates the card-ticker link to point at Kalshi's page for
+    // the market type now being shown.
     h += '<div class="market-tabs">';
     for (var t = 0; t < groups.length; t++) {
       var g = groups[t];
       var activeCls = t === 0 ? " active" : "";
-      h += '<button class="market-tab' + activeCls + '" data-group="' + g.type_code + '" onclick="window.switchMarketTab(this)">';
+      h += '<button class="market-tab' + activeCls + '"'
+         + ' data-group="' + g.type_code + '"'
+         + ' data-ticker="' + (g.event_ticker || "") + '"'
+         + ' data-url="' + (g.url || "") + '"'
+         + ' onclick="window.switchMarketTab(this)">';
       h += g.label;
       h += "</button>";
     }
@@ -796,7 +803,10 @@ function buildCard(ev) {
 }
 
 // Tab click handler: toggle .active on both the clicked tab and
-// its matching .market-group panel within the same card.
+// its matching .market-group panel within the same card, and
+// swap the card-ticker link/text to point at the active tab's
+// own Kalshi event page so users can jump straight to the right
+// market type (winner / spread / totals) on Kalshi.
 window.switchMarketTab = function(btn) {
   var card = btn.closest(".market-card");
   if (!card) return;
@@ -809,6 +819,22 @@ window.switchMarketTab = function(btn) {
   var panels = card.querySelectorAll(".market-group");
   for (var j = 0; j < panels.length; j++) {
     panels[j].classList.toggle("active", panels[j].getAttribute("data-group") === code);
+  }
+  // Update the card-ticker reference so the visible ticker +
+  // href match whichever tab is active. Falls back silently if
+  // the sibling didn't publish a URL.
+  var newTicker = btn.getAttribute("data-ticker") || "";
+  var newUrl    = btn.getAttribute("data-url") || "";
+  var tickerBox = card.querySelector(".card-ticker");
+  if (tickerBox && newTicker) {
+    var a = tickerBox.querySelector("a");
+    if (a) {
+      if (newUrl) a.setAttribute("href", newUrl);
+      a.textContent = newTicker;
+    } else {
+      var span = tickerBox.querySelector("span");
+      if (span) span.textContent = newTicker;
+    }
   }
 };
 

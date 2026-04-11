@@ -317,10 +317,34 @@ def _group_game_markets(records):
             # they still surface as individual cards.
             continue
         groups = []
-        for _series, (type_code, label, _priority, is_primary) in ordered:
+        for _series, (type_code, fallback_label, _priority, is_primary) in ordered:
             rec = type_map.get(type_code)
             if not rec:
                 continue
+            # Use Kalshi's own label from the event title so the tab
+            # strip matches what Kalshi shows. Sibling titles look
+            # like "Washington at Pittsburgh: Puck Line" — everything
+            # after the last ": " is the market-type label Kalshi
+            # publishes. Moneyline events have no ": " suffix, so we
+            # fall back to the map default for those.
+            title = str(rec.get("title") or "")
+            if ": " in title and not is_primary:
+                label = title.rsplit(": ", 1)[-1].strip() or fallback_label
+            else:
+                label = fallback_label
+            # Build the Kalshi URL for this specific sibling so the
+            # card's ticker link can update to point at the market
+            # type that's currently shown on the active tab.
+            sib_ticker = str(rec.get("event_ticker", ""))
+            sib_series = str(rec.get("series_ticker", ""))
+            if sib_series:
+                _s = sib_series.lower()
+                sib_url = (
+                    f"https://kalshi.com/markets/{_s}/"
+                    f"{_s.replace('kx', '')}/{sib_ticker.lower()}"
+                )
+            else:
+                sib_url = ""
             groups.append({
                 "type_code": type_code,
                 "label":     label,
@@ -328,8 +352,10 @@ def _group_game_markets(records):
                 # applied per-request by the /api/events formatter so
                 # live WebSocket prices flow through without needing
                 # to rebuild the get_data() cache.
-                "_outcomes": rec.get("outcomes", []),
-                "event_ticker": rec.get("event_ticker", ""),
+                "_outcomes":     rec.get("outcomes", []),
+                "event_ticker":  sib_ticker,
+                "series_ticker": sib_series,
+                "url":           sib_url,
             })
             if not is_primary:
                 to_drop.add(rec.get("event_ticker"))
@@ -1103,10 +1129,12 @@ def get_events(
         if mg:
             rc["market_groups"] = [
                 {
-                    "type_code":    g.get("type_code", ""),
-                    "label":        g.get("label", ""),
-                    "event_ticker": g.get("event_ticker", ""),
-                    "outcomes":     _format_outcomes(g.get("_outcomes", [])),
+                    "type_code":     g.get("type_code", ""),
+                    "label":         g.get("label", ""),
+                    "event_ticker":  g.get("event_ticker", ""),
+                    "series_ticker": g.get("series_ticker", ""),
+                    "url":           g.get("url", ""),
+                    "outcomes":      _format_outcomes(g.get("_outcomes", [])),
                 }
                 for g in mg
             ]
