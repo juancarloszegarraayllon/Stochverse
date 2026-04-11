@@ -46,9 +46,12 @@ LEAGUES = [
     # Hockey
     ("hockey/nhl", "NHL", "Hockey"),
     ("hockey/mens-college-hockey", "NCAA Hockey", "Hockey"),
-    # Tennis
-    ("tennis/atp", "ATP", "Tennis"),
-    ("tennis/wta", "WTA", "Tennis"),
+    # Tennis — ESPN's tennis scoreboard returns tournaments, not
+    # individual matches, with empty top-level competitors. My
+    # current _parse_event can't extract anything usable from this
+    # shape, so polling tennis/atp / tennis/wta just returns 0
+    # games across the board. Dropped until we write a
+    # tennis-specific drill-down parser.
     # Golf
     ("golf/pga", "PGA Tour", "Golf"),
     ("golf/liv", "LIV Golf", "Golf"),
