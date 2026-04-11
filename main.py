@@ -554,11 +554,16 @@ def get_events(
                 if not any(kw in title_lower for kw in keywords):
                     continue
 
-        # Search
+        # Search — match all whitespace-separated tokens in any order
+        # against title or event_ticker (case-insensitive).
         if search:
-            s = search.lower()
-            if s not in r["title"].lower() and s not in r["event_ticker"].lower():
-                continue
+            tokens = [t for t in search.lower().split() if t]
+            if tokens:
+                title_l = r["title"].lower()
+                ticker_l = r["event_ticker"].lower()
+                haystack = title_l + " " + ticker_l
+                if not all(tok in haystack for tok in tokens):
+                    continue
 
         # Date filter
         if date_filter != "all":
