@@ -465,12 +465,15 @@ def _format_outcomes(stored_outcomes):
     overlaying live WebSocket prices from LIVE_PRICES where
     available. Markets with no real liquidity (zero size on both
     yes-side and no-side) show — instead of a computed mid-price,
-    matching how Kalshi's own UI renders illiquid markets."""
+    matching how Kalshi's own UI renders illiquid markets. Final
+    list is sorted by chance descending (with — values pushed to
+    the end) to match Kalshi's ordering convention for multi-
+    outcome markets."""
     try:
         from kalshi_ws import LIVE_PRICES
     except Exception:
         LIVE_PRICES = {}
-    out = []
+    tmp = []
     for o in stored_outcomes:
         tk = o.get("ticker", "")
         yb = o.get("_yb")
@@ -495,14 +498,17 @@ def _format_outcomes(stored_outcomes):
             chance_c = yes_c = no_c = None
         else:
             chance_c, yes_c, no_c = _midprice_and_ask(yb, ya, nb, na)
-        out.append({
+        tmp.append((chance_c, {
             "label":  o.get("label", ""),
             "ticker": tk,
             "chance": f"{int(round(chance_c))}%" if chance_c is not None else "—",
             "yes":    f"{int(round(yes_c))}¢"    if yes_c    is not None else "—",
             "no":     f"{int(round(no_c))}¢"     if no_c     is not None else "—",
-        })
-    return out
+        }))
+    # Sort by chance descending. None chances (dead markets) sort
+    # last so they don't mask liquid outcomes above the fold.
+    tmp.sort(key=lambda pair: (pair[0] is None, -(pair[0] or 0)))
+    return [item for _, item in tmp]
 
 
 # ── Cache with TTL ─────────────────────────────────────────────────────────────
