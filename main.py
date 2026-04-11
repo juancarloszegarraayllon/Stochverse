@@ -48,11 +48,16 @@ async def startup_event():
         asyncio.create_task(run_sportsdb_feed())
     except Exception as e:
         logging.getLogger("oddsiq").warning("failed to start sportsdb feed: %s", e)
-    try:
-        from sofascore_feed import run_sofascore_feed
-        asyncio.create_task(run_sofascore_feed())
-    except Exception as e:
-        logging.getLogger("oddsiq").warning("failed to start sofascore feed: %s", e)
+    # SofaScore's Varnish layer started returning HTTP 403 for every
+    # request from Railway's datacenter IP, so we stop running the
+    # poller to avoid wasting requests. The code stays in place — if
+    # SofaScore ever unblocks us or we move the fetch client-side,
+    # re-enable by uncommenting this block.
+    # try:
+    #     from sofascore_feed import run_sofascore_feed
+    #     asyncio.create_task(run_sofascore_feed())
+    # except Exception as e:
+    #     logging.getLogger("oddsiq").warning("failed to start sofascore feed: %s", e)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 UTC = timezone.utc
