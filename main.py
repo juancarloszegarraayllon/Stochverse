@@ -744,12 +744,17 @@ def get_events(
                 if g:
                     rc["_live_state"] = {
                         "label":          compact_label(g),
+                        "state":          g.get("state", ""),
                         "short_detail":   g.get("short_detail", ""),
                         "display_clock":  g.get("display_clock", ""),
                         "period":         g.get("period", 0),
                         "league":         g.get("league", ""),
                         "captured_at_ms": g.get("captured_at_ms", 0),
                         "clock_running":  g.get("clock_running", True),
+                        "home_abbr":      g.get("home_abbr", ""),
+                        "away_abbr":      g.get("away_abbr", ""),
+                        "home_score":     g.get("home_score", ""),
+                        "away_score":     g.get("away_score", ""),
                     }
         formatted.append(rc)
     return {"total": total, "offset": offset, "limit": limit, "events": formatted}

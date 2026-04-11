@@ -81,6 +81,8 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 .card-time-slot{display:inline-flex;align-items:center;flex-shrink:0}
 .live-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--red);text-transform:uppercase;letter-spacing:0.8px}
 .live-dot{width:7px;height:7px;border-radius:50%;background:var(--red);box-shadow:0 0 6px rgba(255,51,51,0.9);animation:live-pulse 1.2s infinite ease-in-out}
+.final-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.8px}
+.final-score{color:var(--text);font-weight:700;letter-spacing:0.3px}
 @keyframes live-pulse{0%,55%{opacity:1;transform:scale(1)}65%,100%{opacity:0.25;transform:scale(0.85)}}
 .cat-tab-live{color:var(--red) !important}
 .cat-tab-live:hover{color:var(--red) !important}
@@ -420,6 +422,19 @@ function buildDateText(ev) {
 
 function renderTimeSlot(ev) {
   if (isLive(ev)) {
+    // ESPN says the game has already ended even though Kalshi's
+    // market is still open for settlement — show FINAL instead of a
+    // live clock, with the box score when we have it.
+    var live = ev._live_state;
+    if (live && live.state === "post") {
+      var score = "";
+      if (live.home_score !== "" && live.away_score !== "") {
+        var a = (live.away_abbr || "") + " " + live.away_score;
+        var h = (live.home_abbr || "") + " " + live.home_score;
+        score = ' \u00B7 <span class="final-score">' + a + " " + h + '</span>';
+      }
+      return '<span class="final-badge">FINAL' + score + '</span>';
+    }
     var t = liveTimeLabel(ev);
     var suffix = t ? ' \u00B7 ' + t : '';
     // Stash ESPN state on the badge so the 500ms tick loop can
@@ -428,7 +443,6 @@ function renderTimeSlot(ev) {
     // freeze the clock instead of counting it down through a
     // commercial / timeout.
     var attrs = '';
-    var live = ev._live_state;
     if (live && live.display_clock && live.period && live.captured_at_ms) {
       attrs += ' data-live-sport="' + (ev._sport || '') + '"';
       attrs += ' data-live-period="' + live.period + '"';

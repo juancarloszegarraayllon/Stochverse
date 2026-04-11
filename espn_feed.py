@@ -96,6 +96,10 @@ def _annotate_clock_running(games: List[Dict[str, Any]]):
     global _PREV_OBS
     next_obs: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     for g in games:
+        # Finished games don't have a running clock — nothing to annotate.
+        if g.get("state") != "in":
+            g["clock_running"] = False
+            continue
         key = (
             g.get("sport", ""),
             g.get("home_display", ""),
@@ -145,7 +149,9 @@ def _parse_event(ev: Dict[str, Any], league: str, sport: str) -> Optional[Dict[s
     status = ev.get("status") or {}
     stype = status.get("type") or {}
     state = stype.get("state", "")
-    if state != "in":
+    # Track both in-progress and completed games. "pre" (not started)
+    # is skipped because we have nothing useful to display for it.
+    if state not in ("in", "post"):
         return None
     comps = ev.get("competitions") or [{}]
     comp = comps[0] if comps else {}
@@ -165,6 +171,10 @@ def _parse_event(ev: Dict[str, Any], league: str, sport: str) -> Optional[Dict[s
         "away_phrases": _team_phrases(away_team),
         "home_display": home_team.get("displayName", ""),
         "away_display": away_team.get("displayName", ""),
+        "home_abbr": home_team.get("abbreviation", ""),
+        "away_abbr": away_team.get("abbreviation", ""),
+        "home_score": str(home.get("score", "")),
+        "away_score": str(away.get("score", "")),
         "state": state,
         "display_clock": status.get("displayClock", ""),
         "period": status.get("period", 0),
@@ -255,6 +265,8 @@ def compact_label(g: Dict[str, Any]) -> Optional[str]:
     from an ESPN game entry. Returns None if nothing useful is known."""
     if not g:
         return None
+    if g.get("state") == "post":
+        return "FINAL"
     sport = g.get("sport", "")
     clock = (g.get("display_clock") or "").strip()
     period = g.get("period", 0)
