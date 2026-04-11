@@ -1304,6 +1304,7 @@ def kalshi_event_raw(ticker: str = "", status: str = "", prefer: str = "sport"):
         result_counts: Dict[str, int] = {}
         sample_settled = None
         sample_active = None
+        compact_markets = []
         for mk in markets:
             if isinstance(mk, dict):
                 all_market_fields.update(mk.keys())
@@ -1315,6 +1316,28 @@ def kalshi_event_raw(ticker: str = "", status: str = "", prefer: str = "sport"):
                     sample_settled = mk
                 if sample_active is None and s_val == "active" and not r_val:
                     sample_active = mk
+                # Compact per-market summary so every team/outcome
+                # is visible in a single probe response without
+                # dumping 30+ full dicts.
+                compact_markets.append({
+                    "ticker":          mk.get("ticker"),
+                    "yes_sub_title":   mk.get("yes_sub_title"),
+                    "status":          mk.get("status"),
+                    "result":          mk.get("result"),
+                    "yes_bid_dollars": mk.get("yes_bid_dollars"),
+                    "yes_ask_dollars": mk.get("yes_ask_dollars"),
+                    "no_bid_dollars":  mk.get("no_bid_dollars"),
+                    "no_ask_dollars":  mk.get("no_ask_dollars"),
+                    "yes_bid_size_fp": mk.get("yes_bid_size_fp"),
+                    "yes_ask_size_fp": mk.get("yes_ask_size_fp"),
+                    "no_bid_size_fp":  mk.get("no_bid_size_fp"),
+                    "no_ask_size_fp":  mk.get("no_ask_size_fp"),
+                    "last_price_dollars": mk.get("last_price_dollars"),
+                    "volume_fp":       mk.get("volume_fp"),
+                    "volume_24h_fp":   mk.get("volume_24h_fp"),
+                    "open_interest_fp": mk.get("open_interest_fp"),
+                    "liquidity_dollars": mk.get("liquidity_dollars"),
+                })
         return {
             "event_ticker": picked.get("event_ticker"),
             "series_ticker": picked.get("series_ticker"),
@@ -1328,7 +1351,55 @@ def kalshi_event_raw(ticker: str = "", status: str = "", prefer: str = "sport"):
             "union_of_all_market_fields": sorted(list(all_market_fields)),
             "sample_active_market": sample_active,
             "sample_settled_market": sample_settled,
+            "all_markets_compact": compact_markets,
         }
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+@app.get("/api/kalshi_search")
+def kalshi_search(q: str = "", limit: int = 20):
+    """Debug: search Kalshi events (both open and closed) for any
+    whose title or event_ticker contains `q` (case-insensitive).
+    Returns the event_ticker + title for matches so you can copy
+    a ticker into /api/kalshi_event_raw without guessing."""
+    if not q:
+        return {"error": "q required"}
+    try:
+        client = get_client()
+        needle = q.lower()
+        hits = []
+        for s in ("open", "closed"):
+            cursor = None
+            for _ in range(15):
+                kw = {"limit": 200, "status": s, "with_nested_markets": False}
+                if cursor:
+                    kw["cursor"] = cursor
+                try:
+                    resp = client.get_events(**kw).to_dict()
+                except Exception as e:
+                    return {"error": f"get_events err on status={s}: {e}"}
+                for ev in resp.get("events", []) or []:
+                    title = (ev.get("title") or "").lower()
+                    ticker = (ev.get("event_ticker") or "").lower()
+                    if needle in title or needle in ticker:
+                        hits.append({
+                            "event_ticker": ev.get("event_ticker"),
+                            "title": ev.get("title"),
+                            "sub_title": ev.get("sub_title"),
+                            "series_ticker": ev.get("series_ticker"),
+                            "category": ev.get("category"),
+                            "status": s,
+                        })
+                        if len(hits) >= limit:
+                            break
+                if len(hits) >= limit:
+                    break
+                cursor = resp.get("cursor") or resp.get("next_cursor")
+                if not cursor:
+                    break
+            if len(hits) >= limit:
+                break
+        return {"q": q, "count": len(hits), "hits": hits}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
