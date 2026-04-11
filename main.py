@@ -392,28 +392,53 @@ def get_data():
         else:
             sort_ts_dt = None
         outcomes = []
+        def _cents(mk, dollars_key, cents_key):
+            v = mk.get(dollars_key)
+            if v is not None:
+                try: return float(v) * 100
+                except: pass
+            v = mk.get(cents_key)
+            if v is not None:
+                try: return float(v)
+                except: pass
+            return None
         for mk in mkts:
             label = str(mk.get("yes_sub_title") or "").strip()
             if not label:
                 t = str(mk.get("ticker") or "")
                 parts = t.rsplit("-", 1)
                 label = parts[-1] if len(parts) > 1 else t
-            yf = nf = None
-            try:
-                yd = mk.get("yes_bid_dollars")
-                nd = mk.get("no_bid_dollars")
-                if yd is not None: yf = float(yd)
-                if nd is not None: nf = float(nd)
-                if yf is None:
-                    yb = mk.get("yes_bid")
-                    if yb is not None: yf = float(yb)/100
-                if nf is None:
-                    nb = mk.get("no_bid")
-                    if nb is not None: nf = float(nb)/100
-            except: pass
-            chance = f"{int(round(yf*100))}%" if yf is not None else "—"
-            yes    = f"{int(round(yf*100))}¢"  if yf is not None else "—"
-            no     = f"{int(round(nf*100))}¢"  if nf is not None else "—"
+            yb = _cents(mk, "yes_bid_dollars", "yes_bid")
+            ya = _cents(mk, "yes_ask_dollars", "yes_ask")
+            nb = _cents(mk, "no_bid_dollars",  "no_bid")
+            na = _cents(mk, "no_ask_dollars",  "no_ask")
+            # Implied chance = midprice between yes bid and yes ask.
+            # In a two-sided market, yes_ask ≈ 100 - no_bid, so we can
+            # derive a fair mid even if only one side quotes an ask.
+            if yb is not None and ya is not None:
+                chance_c = (yb + ya) / 2
+            elif yb is not None and nb is not None:
+                chance_c = (yb + (100 - nb)) / 2
+            elif ya is not None and na is not None:
+                chance_c = ((100 - na) + ya) / 2
+            elif ya is not None:
+                chance_c = ya
+            elif yb is not None:
+                chance_c = yb
+            elif nb is not None:
+                chance_c = 100 - nb
+            elif na is not None:
+                chance_c = 100 - na
+            else:
+                chance_c = None
+            # YES/NO boxes show the ask (what you'd pay to buy), matching
+            # how Kalshi displays its order book prices. Fall back to bid
+            # if ask isn't quoted.
+            yes_c = ya if ya is not None else yb
+            no_c  = na if na is not None else nb
+            chance = f"{int(round(chance_c))}%" if chance_c is not None else "—"
+            yes    = f"{int(round(yes_c))}¢"    if yes_c    is not None else "—"
+            no     = f"{int(round(no_c))}¢"     if no_c     is not None else "—"
             outcomes.append({"label":label[:35],"chance":chance,"yes":yes,"no":no})
         # Show date+time if we have kickoff, otherwise just date
         if kickoff_dt and game_date:
