@@ -387,11 +387,11 @@ function isLive(ev) {
   } catch (e) { return false; }
 }
 
-// Approximate in-match minute for live soccer events, derived from
-// wall-clock time since kickoff. Kalshi provides the real game clock
-// via a sports feed that we don't have — this is a close-enough
-// estimate. Returns null for other sports or pre-kickoff/full-time.
+// Live game label shown next to the LIVE dot. Prefers ESPN-sourced
+// data (covers NBA/NFL/MLB/NHL/major soccer) and falls back to a
+// wall-clock soccer estimate for anything ESPN doesn't match.
 function liveTimeLabel(ev) {
+  if (ev._live_state && ev._live_state.label) return ev._live_state.label;
   if (ev._sport !== "Soccer" || !ev._kickoff_dt) return null;
   try {
     var k = new Date(ev._kickoff_dt).getTime();

@@ -39,6 +39,11 @@ async def startup_event():
         asyncio.create_task(run_ws_client(_all_market_tickers))
     except Exception as e:
         logging.getLogger("oddsiq").warning("failed to start ws client: %s", e)
+    try:
+        from espn_feed import run_espn_feed
+        asyncio.create_task(run_espn_feed())
+    except Exception as e:
+        logging.getLogger("oddsiq").warning("failed to start espn feed: %s", e)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 UTC = timezone.utc
@@ -720,12 +725,30 @@ def get_events(
 
     total = len(results)
     page  = results[offset:offset+limit]
-    # Overlay live WebSocket prices on the paginated page. We only copy
-    # the outcomes field so the cached records stay untouched.
+    # Overlay live WebSocket prices on the paginated page, and attach
+    # ESPN-sourced live game state when we can match by team names.
+    try:
+        from espn_feed import match_game, compact_label
+    except Exception:
+        match_game = None
+        compact_label = None
     formatted = []
     for r in page:
         rc = dict(r)
         rc["outcomes"] = _format_outcomes(r.get("outcomes", []))
+        if match_game is not None:
+            sport = r.get("_sport", "")
+            title = r.get("title", "")
+            if sport and title:
+                g = match_game(title, sport)
+                if g:
+                    rc["_live_state"] = {
+                        "label":         compact_label(g),
+                        "short_detail":  g.get("short_detail", ""),
+                        "display_clock": g.get("display_clock", ""),
+                        "period":        g.get("period", 0),
+                        "league":        g.get("league", ""),
+                    }
         formatted.append(rc)
     return {"total": total, "offset": offset, "limit": limit, "events": formatted}
 
@@ -841,6 +864,25 @@ def ws_raw():
     try:
         from kalshi_ws import RAW_SAMPLES
         return {"samples": list(RAW_SAMPLES)}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/espn_status")
+def espn_status():
+    """Debug endpoint: reports the ESPN scoreboard poller state."""
+    try:
+        from espn_feed import STATUS, ESPN_GAMES
+        return {"status": dict(STATUS), "games": len(ESPN_GAMES)}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/espn_raw")
+def espn_raw():
+    """Debug endpoint: returns the current ESPN_GAMES list so we can
+    inspect what matched from each league."""
+    try:
+        from espn_feed import ESPN_GAMES
+        return {"games": list(ESPN_GAMES)[:50]}
     except Exception as e:
         return {"error": str(e)}
 
