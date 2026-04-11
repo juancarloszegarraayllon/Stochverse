@@ -157,6 +157,9 @@ def _parse_event(ev: Dict[str, Any], sport_label: str) -> Optional[Dict[str, Any
                     m_in_period = max(1, elapsed_s // 60)
                     total_m = m_in_period if g["period"] == 1 else 45 + m_in_period
                     g["display_clock"] = f"{total_m}'"
+                    # Soccer clock runs continuously, so let the
+                    # frontend tick loop interpolate it.
+                    g["clock_running"] = True
         except Exception:
             pass
     return g
