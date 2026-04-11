@@ -7,6 +7,11 @@ from datetime import date, timedelta, timezone
 from typing import Optional
 
 app = FastAPI(title="OddsIQ API")
+
+@app.on_event("startup")
+async def startup_event():
+    global _cache
+    _cache = {"data": None, "ts": 0}
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 UTC = timezone.utc
@@ -313,7 +318,7 @@ def paginate(with_markets=False, max_pages=30):
     return events
 
 # ── Cache with TTL ─────────────────────────────────────────────────────────────
-_cache = {"data": None, "ts": 0}
+_cache = {"data": None, "ts": 0}  # cache cleared on startup
 CACHE_TTL = 1800
 
 def get_data():
@@ -652,7 +657,7 @@ def get_categories():
 @app.get("/api/refresh")
 def refresh():
     global _cache
-    _cache = {"data": None, "ts": 0}
+    _cache = {"data": None, "ts": 0}  # cache cleared on startup
     return {"ok": True}
 
 # ── Serve frontend ─────────────────────────────────────────────────────────────
