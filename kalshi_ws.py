@@ -90,9 +90,14 @@ def _sign_headers(private_key):
 
 def _extract_update(msg):
     """Parse one incoming WS message and return (ticker, update_dict) or
-    None if it's not a price update we care about. Coded defensively so
-    we tolerate slight variations in Kalshi's payload shape."""
+    None if it's not a price update we care about. The ticker channel
+    sends *_dollars string fields (e.g. "0.17") which we convert to
+    cents; we also accept raw cents fields as a fallback in case Kalshi
+    ever sends that shape."""
     if not isinstance(msg, dict):
+        return None
+    # Ignore explicit error frames (e.g. "Unknown channel name").
+    if msg.get("type") == "error":
         return None
     body = msg.get("msg") or msg.get("data") or msg
     if not isinstance(body, dict):
@@ -101,7 +106,23 @@ def _extract_update(msg):
     if not tk:
         return None
     fields = {}
+    # Dollar-string fields (what Kalshi's "ticker" channel actually sends).
+    for k_dollars, k_out in (
+        ("yes_bid_dollars", "yes_bid"),
+        ("yes_ask_dollars", "yes_ask"),
+        ("no_bid_dollars",  "no_bid"),
+        ("no_ask_dollars",  "no_ask"),
+    ):
+        v = body.get(k_dollars)
+        if v is not None:
+            try:
+                fields[k_out] = float(v) * 100
+            except Exception:
+                pass
+    # Raw cents fields as a fallback.
     for k in ("yes_bid", "yes_ask", "no_bid", "no_ask"):
+        if k in fields:
+            continue
         v = body.get(k)
         if v is not None:
             try:
