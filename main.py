@@ -1336,6 +1336,43 @@ def debug_team_search(q: str, sport: str = "Soccer"):
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
+@app.get("/api/debug_sofa_search")
+def debug_sofa_search(q: str, sport: str = ""):
+    """Same as debug_team_search but against SOFASCORE_GAMES. Useful
+    for figuring out whether SofaScore carries a specific match when
+    ESPN doesn't."""
+    try:
+        from sofascore_feed import SOFASCORE_GAMES, _normalize
+        needle = _normalize(q)
+        if not needle:
+            return {"q": q, "sport": sport, "hits": []}
+        hits = []
+        for g in SOFASCORE_GAMES:
+            if sport and g.get("sport") != sport:
+                continue
+            home_display_n = _normalize(g.get("home_display", ""))
+            away_display_n = _normalize(g.get("away_display", ""))
+            phrases = (g.get("home_phrases", []) or []) + (g.get("away_phrases", []) or [])
+            if (needle in home_display_n or needle in away_display_n
+                    or any(needle in p for p in phrases)):
+                hits.append({
+                    "sport": g.get("sport"),
+                    "league": g.get("league"),
+                    "home": g.get("home_display"),
+                    "away": g.get("away_display"),
+                    "home_phrases": g.get("home_phrases"),
+                    "away_phrases": g.get("away_phrases"),
+                    "state": g.get("state"),
+                    "home_score": g.get("home_score"),
+                    "away_score": g.get("away_score"),
+                    "short_detail": g.get("short_detail"),
+                })
+            if len(hits) >= 20:
+                break
+        return {"q": q, "sport": sport, "count": len(hits), "hits": hits}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
 @app.get("/api/debug_live")
 def debug_live(title: str, sport: str = "Soccer"):
     """Debug: runs match_game against ESPN and SofaScore for the
