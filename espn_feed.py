@@ -57,7 +57,6 @@ LEAGUES = [
     ("soccer/nor.1", "Eliteserien", "Soccer"),
     ("soccer/sui.1", "Swiss Super League", "Soccer"),
     ("soccer/aut.1", "Austrian Bundesliga", "Soccer"),
-    ("soccer/pol.1", "Ekstraklasa", "Soccer"),
     ("soccer/cze.1", "Czech Liga", "Soccer"),
     ("soccer/rus.1", "Russian Premier", "Soccer"),
     # European competitions
@@ -74,7 +73,6 @@ LEAGUES = [
     ("soccer/fra.coupe_de_france", "Coupe de France", "Soccer"),
     # Americas
     ("soccer/usa.1", "MLS", "Soccer"),
-    ("soccer/usa.2", "USL Championship", "Soccer"),
     ("soccer/usa.nwsl", "NWSL", "Soccer"),
     ("soccer/mex.1", "Liga MX", "Soccer"),
     ("soccer/bra.1", "Brasileiro", "Soccer"),
@@ -82,7 +80,7 @@ LEAGUES = [
     ("soccer/arg.1", "Argentina Primera", "Soccer"),
     ("soccer/col.1", "Colombia Primera A", "Soccer"),
     ("soccer/chi.1", "Chile Primera", "Soccer"),
-    ("soccer/ury.1", "Uruguay Primera", "Soccer"),
+    ("soccer/uru.1", "Uruguay Primera", "Soccer"),
     ("soccer/ecu.1", "Ecuador LigaPro", "Soccer"),
     ("soccer/ven.1", "Venezuela Primera", "Soccer"),
     ("soccer/per.1", "Peru Primera", "Soccer"),
@@ -93,9 +91,6 @@ LEAGUES = [
     ("soccer/concacaf.leagues.cup", "Leagues Cup", "Soccer"),
     # Asia / Oceania
     ("soccer/jpn.1", "J1 League", "Soccer"),
-    ("soccer/jpn.2", "J2 League", "Soccer"),
-    ("soccer/kor.1", "K League 1", "Soccer"),
-    ("soccer/kor.2", "K League 2", "Soccer"),
     ("soccer/chn.1", "Chinese Super League", "Soccer"),
     ("soccer/aus.1", "A-League", "Soccer"),
     ("soccer/ksa.1", "Saudi Pro League", "Soccer"),

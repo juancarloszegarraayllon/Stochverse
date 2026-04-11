@@ -995,10 +995,11 @@ def espn_raw():
 def debug_match(title: str, sport: str = "Soccer"):
     """Debug endpoint: given a Kalshi-style title and sport, report
     whether any ESPN game matches, and if not, show candidate ESPN
-    games for the sport that share any keyword. Useful for figuring
-    out why a specific live event isn't getting its score."""
+    games for the sport whose team phrases match as whole words
+    (same rules as the real matcher). Useful for figuring out why a
+    specific live event isn't getting its score."""
     try:
-        from espn_feed import ESPN_GAMES, match_game
+        from espn_feed import ESPN_GAMES, match_game, _normalize, _phrase_in_title
         matched = match_game(title, sport)
         out = {"title": title, "sport": sport, "matched": None, "candidates": []}
         if matched:
@@ -1014,24 +1015,20 @@ def debug_match(title: str, sport: str = "Soccer"):
                 "state": matched.get("state"),
             }
             return out
-        # Not matched — find candidates in the same sport whose home or
-        # away phrases contain any word from the title.
-        tl = title.lower()
-        tokens = [t for t in tl.split() if len(t) >= 3]
+        tl = _normalize(title)
         cands = []
         for g in ESPN_GAMES:
             if g.get("sport") != sport:
                 continue
-            phrases = (g.get("home_phrases", []) or []) + (g.get("away_phrases", []) or [])
-            hits = [tok for tok in tokens if any(tok in p for p in phrases)]
-            if hits:
+            home_hit = next((p for p in g.get("home_phrases", []) if _phrase_in_title(p, tl)), None)
+            away_hit = next((p for p in g.get("away_phrases", []) if _phrase_in_title(p, tl)), None)
+            if home_hit or away_hit:
                 cands.append({
                     "league": g.get("league"),
                     "home_display": g.get("home_display"),
                     "away_display": g.get("away_display"),
-                    "home_phrases": g.get("home_phrases"),
-                    "away_phrases": g.get("away_phrases"),
-                    "matched_tokens": hits,
+                    "home_hit": home_hit,
+                    "away_hit": away_hit,
                 })
         out["candidates"] = cands[:15]
         return out
