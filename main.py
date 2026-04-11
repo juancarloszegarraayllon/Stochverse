@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
 import os, time, tempfile, functools, asyncio, threading, logging
 from datetime import date, timedelta, timezone
 from typing import Optional
@@ -265,13 +264,32 @@ for _sp, _tabs in SPORT_SUBTABS.items():
 
 # ── Date helpers ───────────────────────────────────────────────────────────────
 def safe_dt(val):
+    """Parse a Kalshi datetime string (ISO 8601) into a UTC-aware
+    datetime. Accepts strings or already-parsed datetimes, returns
+    None on anything unparseable."""
+    if val is None:
+        return None
     try:
-        if val is None or val == "": return None
-        if isinstance(val, str) and val.strip() in ("", "NaT", "None", "nan"): return None
-        ts = pd.to_datetime(val, utc=True)
-        if pd.isna(ts): return None
-        return ts.to_pydatetime().astimezone(UTC)
-    except: return None
+        if isinstance(val, str):
+            s = val.strip()
+            if not s or s in ("NaT", "None", "nan"):
+                return None
+            # datetime.fromisoformat doesn't accept trailing Z before 3.11
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            from datetime import datetime as _dt
+            dt = _dt.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
+        # Already a datetime-ish object.
+        if hasattr(val, "astimezone"):
+            if val.tzinfo is None:
+                val = val.replace(tzinfo=UTC)
+            return val.astimezone(UTC)
+    except Exception:
+        return None
+    return None
 
 def parse_game_date_from_ticker(event_ticker: str):
     import re
@@ -444,17 +462,6 @@ def get_data():
     if not all_ev:
         return []
 
-    df = pd.DataFrame(all_ev)
-    df["category"] = df.get("category", pd.Series("Other", index=df.index)).fillna("Other").str.strip()
-    df["_series"]  = df.get("series_ticker", pd.Series("", index=df.index)).fillna("").str.upper()
-    df["_sport"]   = df["_series"].apply(get_sport)
-    df["_is_sport"]= df["_sport"] != ""
-    if "markets" not in df.columns:
-        df["markets"] = [[] for _ in range(len(df))]
-    df["markets"] = df["markets"].apply(lambda x: x if isinstance(x, list) else [])
-    df["_soccer_comp"] = df.apply(
-        lambda r: SOCCER_COMP.get(r["_series"],"Other") if r["_sport"]=="Soccer" else "", axis=1)
-
     DURATION = {
         "Soccer": timedelta(hours=3), "Baseball": timedelta(hours=3),
         "Basketball": timedelta(hours=2), "Hockey": timedelta(hours=2, minutes=30),
@@ -536,37 +543,60 @@ def get_data():
         return sort_dt, sort_ts_dt, game_date, kickoff_dt, exp_dt, display, outcomes
 
     records = []
-    for _, row in df.iterrows():
+    for ev in all_ev:
         try:
-            sort_dt, sort_ts_dt, game_date, kickoff_dt, game_end_dt, display_dt, outcomes = extract(row)
-            _sport = str(row.get("_sport",""))
-            _series = str(row.get("series_ticker","")).upper()
-            _soccer_comp = str(row.get("_soccer_comp",""))
-            if _sport == "Soccer" and _soccer_comp and _soccer_comp not in ("Other",""):
+            # Derive fields that used to come from DataFrame columns.
+            category = (ev.get("category") or "Other")
+            if isinstance(category, str):
+                category = category.strip() or "Other"
+            else:
+                category = "Other"
+            series_ticker_raw = ev.get("series_ticker") or ""
+            series = str(series_ticker_raw).upper()
+            _sport = get_sport(series)
+            _is_sport = bool(_sport)
+            _soccer_comp = SOCCER_COMP.get(series, "Other") if _sport == "Soccer" else ""
+            mkts = ev.get("markets")
+            if not isinstance(mkts, list):
+                mkts = []
+            # Stuff into the event dict so extract() can read them.
+            ev["category"] = category
+            ev["_sport"] = _sport
+            ev["_is_sport"] = _is_sport
+            ev["_soccer_comp"] = _soccer_comp
+            ev["markets"] = mkts
+
+            sort_dt, sort_ts_dt, game_date, kickoff_dt, game_end_dt, display_dt, outcomes = extract(ev)
+
+            if _sport == "Soccer" and _soccer_comp and _soccer_comp not in ("Other", ""):
                 _subcat = _soccer_comp
             elif _sport and _sport != "Soccer":
-                _subcat = SERIES_TO_SUBTAB.get(_sport, {}).get(_series, "")
+                _subcat = SERIES_TO_SUBTAB.get(_sport, {}).get(series, "")
             else:
                 _subcat = ""
+
             r = {
-                "event_ticker": str(row.get("event_ticker","")),
-                "title": str(row.get("title",""))[:90],
-                "category": str(row.get("category","Other")),
-                "series_ticker": str(row.get("series_ticker","")),
+                "event_ticker": str(ev.get("event_ticker", "")),
+                "title": str(ev.get("title", ""))[:90],
+                "category": category,
+                "series_ticker": str(series_ticker_raw),
                 "_sport": _sport,
-                "_soccer_comp": _soccer_comp,
+                "_soccer_comp": _soccer_comp if _soccer_comp != "Other" else "",
                 "_subcat": _subcat,
-                "_is_sport": bool(row.get("_is_sport",False)),
+                "_is_sport": _is_sport,
                 "_display_dt": display_dt,
                 "_kickoff_dt": kickoff_dt.isoformat() if kickoff_dt else None,
                 "_game_end_dt": game_end_dt.isoformat() if (kickoff_dt and game_end_dt) else None,
-                "_sort_dt": sort_dt.isoformat() if sort_dt else None,
                 "_sort_ts": sort_ts_dt.isoformat() if sort_ts_dt else None,
                 "outcomes": outcomes,
             }
             records.append(r)
-        except: pass
+        except Exception:
+            pass
 
+    # Free the raw events list explicitly so GC can reclaim the big
+    # Kalshi payloads before we return.
+    del all_ev
     _cache["data"] = records
     _cache["ts"] = now
     return records
@@ -892,6 +922,35 @@ def espn_raw():
         return {"games": list(ESPN_GAMES)[:50]}
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/api/memory")
+def memory_status():
+    """Debug endpoint: current RSS + cache sizes, for spotting leaks
+    or tuning memory pressure on Railway."""
+    info = {}
+    try:
+        import resource, sys
+        mem_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        mb = mem_kb / 1024 if sys.platform != "darwin" else mem_kb / (1024 * 1024)
+        info["rss_mb"] = round(mb, 1)
+    except Exception as e:
+        info["rss_error"] = str(e)
+    try:
+        cached = _cache.get("data") or []
+        info["cached_records"] = len(cached)
+    except Exception:
+        info["cached_records"] = None
+    try:
+        from kalshi_ws import LIVE_PRICES as _lp
+        info["live_prices"] = len(_lp)
+    except Exception:
+        info["live_prices"] = None
+    try:
+        from espn_feed import ESPN_GAMES as _eg
+        info["espn_games"] = len(_eg)
+    except Exception:
+        info["espn_games"] = None
+    return info
 
 # ── Serve frontend ─────────────────────────────────────────────────────────────
 import os as _os

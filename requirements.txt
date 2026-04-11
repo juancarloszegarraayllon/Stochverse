@@ -1,6 +1,5 @@
 fastapi
 uvicorn[standard]
-pandas
 kalshi-python-sync
 python-dotenv
 websockets
