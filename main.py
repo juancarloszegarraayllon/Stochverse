@@ -376,6 +376,9 @@ def get_data():
             if exp_dt and abs((exp_dt.date() - game_date).days) <= 2:
                 kickoff_dt = exp_dt - DURATION[sport]
 
+        # For non-sport events with no game_date, use close_dt as the resolve date
+        if not game_date and close_dt:
+            game_date = close_dt.date()
         sort_dt = game_date if game_date else (exp_dt.date() if exp_dt else (close_dt.date() if close_dt else None))
         outcomes = []
         for mk in mkts:
@@ -401,8 +404,9 @@ def get_data():
             yes    = f"{int(round(yf*100))}¢"  if yf is not None else "—"
             no     = f"{int(round(nf*100))}¢"  if nf is not None else "—"
             outcomes.append({"label":label[:35],"chance":chance,"yes":yes,"no":no})
-        # Show date+time if we have kickoff, otherwise just date
-        if kickoff_dt and game_date:
+        # Only show date+time for sport events with a valid kickoff
+        # Non-sport events (politics, economics etc.) show no date
+        if kickoff_dt and sport and sport in DURATION:
             try:
                 import pytz as _pytz
                 eastern = _pytz.timezone("US/Eastern")
@@ -410,12 +414,9 @@ def get_data():
                 hour = kt.hour % 12 or 12
                 ampm = "am" if kt.hour < 12 else "pm"
                 tz_label = kt.strftime("%Z")
-                # Use Eastern date (kt) not UTC game_date to avoid off-by-one at midnight
                 display = f"{kt.strftime('%b')} {kt.day}, {hour}:{kt.strftime('%M')}{ampm} {tz_label}"
             except:
-                display = game_date.strftime("%b %-d") if game_date else ""
-        elif game_date:
-            display = game_date.strftime("%b %-d")
+                display = ""
         else:
             display = ""
         return sort_dt, game_date, kickoff_dt, display, outcomes
