@@ -359,20 +359,16 @@ def get_data():
         event_ticker = str(row.get("event_ticker",""))
         sport = str(row.get("_sport",""))
         game_date = parse_game_date_from_ticker(event_ticker)
-        exp_dt = safe_dt(first_mk.get("expected_expiration_time"))
+        exp_dt   = safe_dt(first_mk.get("expected_expiration_time"))
         close_dt = safe_dt(first_mk.get("close_time"))
-
-        # Calculate kickoff: exp_dt is game END on Kalshi, subtract duration
+        open_dt  = safe_dt(first_mk.get("open_time"))
         kickoff_dt = None
         if game_date and sport and sport in DURATION:
-            if exp_dt and abs((exp_dt.date() - game_date).days) <= 3:
+            # exp_dt = game_end time on Kalshi. Subtract duration to get kickoff.
+            if exp_dt and abs((exp_dt.date() - game_date).days) <= 2:
                 kickoff_dt = exp_dt - DURATION[sport]
-            elif close_dt and abs((close_dt.date() - game_date).days) <= 3:
-                # Some sports use close_dt close to game time
-                kickoff_dt = close_dt - DURATION[sport]
 
         sort_dt = game_date if game_date else (exp_dt.date() if exp_dt else (close_dt.date() if close_dt else None))
-
         outcomes = []
         for mk in mkts:
             label = str(mk.get("yes_sub_title") or "").strip()
@@ -397,22 +393,24 @@ def get_data():
             yes    = f"{int(round(yf*100))}¢"  if yf is not None else "—"
             no     = f"{int(round(nf*100))}¢"  if nf is not None else "—"
             outcomes.append({"label":label[:35],"chance":chance,"yes":yes,"no":no})
-
-        # Build display string
-        display = ""
-        if kickoff_dt:
-            import pytz as _ptz
-            _east = _ptz.timezone("US/Eastern")
-            kt = kickoff_dt.astimezone(_east)
-            h = kt.hour % 12 or 12
-            ap = "am" if kt.hour < 12 else "pm"
-            tz = kt.strftime("%Z")
-            display = kt.strftime("%b") + " " + str(kt.day) + ", " + str(h) + ":" + kt.strftime("%M") + ap + " " + tz
-        if not display and game_date:
+        # Show date+time if we have kickoff, otherwise just date
+        if kickoff_dt and game_date:
+            try:
+                import pytz as _pytz
+                eastern = _pytz.timezone("US/Eastern")
+                kt = kickoff_dt.astimezone(eastern)
+                hour = kt.hour % 12 or 12
+                ampm = "am" if kt.hour < 12 else "pm"
+                tz_label = kt.strftime("%Z")
+                # Use Eastern date (kt) not UTC game_date to avoid off-by-one at midnight
+                display = f"{kt.strftime('%b')} {kt.day}, {hour}:{kt.strftime('%M')}{ampm} {tz_label}"
+            except:
+                display = game_date.strftime("%b %-d") if game_date else ""
+        elif game_date:
             display = game_date.strftime("%b %-d")
-
+        else:
+            display = ""
         return sort_dt, game_date, kickoff_dt, display, outcomes
-
 
     records = []
     for _, row in df.iterrows():
@@ -625,10 +623,6 @@ def get_sports():
 
     sports.sort(key=lambda x: list(_SPORT_SERIES.keys()).index(x["name"]) if x["name"] in _SPORT_SERIES else 99)
     return {"sports": sports, "soccer_comps": sorted(soccer_comps)}
-
-@app.get("/api/version")
-def get_version():
-    return {"version": "2.0-kickoff-fixed", "ts": "2026-04-10"}
 
 @app.get("/api/meta")
 def get_meta():
