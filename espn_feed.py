@@ -52,13 +52,10 @@ LEAGUES = [
     ("soccer/ned.2", "Eerste Divisie", "Soccer"),
     ("soccer/ned.cup", "KNVB Beker", "Soccer"),
     ("soccer/por.1", "Liga Portugal", "Soccer"),
-    ("soccer/por.2", "Liga Portugal 2", "Soccer"),
-    ("soccer/por.taca", "Taça de Portugal", "Soccer"),
     ("soccer/sco.1", "Scottish Premiership", "Soccer"),
     ("soccer/sco.2", "Scottish Championship", "Soccer"),
     ("soccer/sco.3", "Scottish League One", "Soccer"),
     ("soccer/bel.1", "Belgian Pro", "Soccer"),
-    ("soccer/bel.cup", "Belgian Cup", "Soccer"),
     ("soccer/tur.1", "Super Lig", "Soccer"),
     ("soccer/gre.1", "Greek Super League", "Soccer"),
     ("soccer/den.1", "Danish Superliga", "Soccer"),
@@ -255,15 +252,35 @@ def _annotate_clock_running(games: List[Dict[str, Any]]):
 
 def _team_phrases(team: Dict[str, Any]) -> List[str]:
     """Lowercased, accent-stripped, digraph-expanded phrases for
-    matching a team against Kalshi titles. Skips anything shorter
-    than 3 chars to avoid abbreviation false positives."""
+    matching a team against Kalshi titles. In addition to the full
+    normalized name, also emits individual words and first/last
+    two-word combinations so titles like "Utrecht vs Telstar"
+    (Kalshi) match ESPN's "FC Utrecht" via the bare word "utrecht",
+    and "AVS Futebol SAD vs Guimaraes" matches "Vitória de
+    Guimaraes" via "guimaraes". 3-char minimum prevents abbreviation
+    false positives."""
     phrases = set()
     for key in ("displayName", "shortDisplayName", "nickname", "location", "name"):
         v = team.get(key)
-        if v:
-            for variant in _phrase_variants(v):
-                if len(variant) >= 3:
-                    phrases.add(variant)
+        if not v:
+            continue
+        for variant in _phrase_variants(v):
+            if len(variant) >= 3:
+                phrases.add(variant)
+            words = variant.split()
+            # Each standalone word (length ≥ 3).
+            for w in words:
+                if len(w) >= 3:
+                    phrases.add(w)
+            # First two and last two words (covers "FC Bayern
+            # Munich" → "fc bayern" / "bayern munich").
+            if len(words) >= 2:
+                first_two = " ".join(words[:2])
+                if len(first_two) >= 3:
+                    phrases.add(first_two)
+                last_two = " ".join(words[-2:])
+                if len(last_two) >= 3:
+                    phrases.add(last_two)
     # Sort longest first so matching prefers specific names.
     return sorted(phrases, key=lambda s: -len(s))
 
