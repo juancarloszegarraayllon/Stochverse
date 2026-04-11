@@ -1076,6 +1076,60 @@ def sofascore_raw():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/debug_sofa")
+def debug_sofa(title: str, sport: str = "Soccer"):
+    """Debug: exercises sofascore_feed.match_game for a given title
+    and sport, and dumps every game from SOFASCORE_GAMES whose home
+    or away phrases overlap the title so we can see exactly why a
+    match is or isn't happening."""
+    try:
+        from sofascore_feed import (
+            SOFASCORE_GAMES, match_game, _normalize, _phrase_in_title,
+        )
+        t = _normalize(title)
+        matched = match_game(title, sport)
+        matching_sport_games = [g for g in SOFASCORE_GAMES if g.get("sport") == sport]
+        out = {
+            "title": title,
+            "normalized_title": t,
+            "sport": sport,
+            "total_sofascore_games": len(SOFASCORE_GAMES),
+            "games_in_sport": len(matching_sport_games),
+            "matched": None,
+            "partial_hits": [],
+        }
+        if matched:
+            out["matched"] = {
+                "league": matched.get("league"),
+                "home": matched.get("home_display"),
+                "away": matched.get("away_display"),
+                "home_phrases": matched.get("home_phrases"),
+                "away_phrases": matched.get("away_phrases"),
+                "home_score": matched.get("home_score"),
+                "away_score": matched.get("away_score"),
+            }
+            return out
+        # Not matched — show any game where at least one side hits.
+        for g in matching_sport_games:
+            home_phrases = g.get("home_phrases", []) or []
+            away_phrases = g.get("away_phrases", []) or []
+            home_hits = [p for p in home_phrases if _phrase_in_title(p, t)]
+            away_hits = [p for p in away_phrases if _phrase_in_title(p, t)]
+            if home_hits or away_hits:
+                out["partial_hits"].append({
+                    "league": g.get("league"),
+                    "home": g.get("home_display"),
+                    "away": g.get("away_display"),
+                    "home_phrases": home_phrases,
+                    "away_phrases": away_phrases,
+                    "home_hits": home_hits,
+                    "away_hits": away_hits,
+                })
+        out["partial_hits"] = out["partial_hits"][:15]
+        return out
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
 @app.get("/api/sofascore_probe")
 async def sofascore_probe():
     """Debug: makes a fresh call to SofaScore's live football events
