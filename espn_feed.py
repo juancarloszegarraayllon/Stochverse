@@ -316,9 +316,13 @@ def _parse_event(ev: Dict[str, Any], league: str, sport: str) -> Optional[Dict[s
     status = ev.get("status") or {}
     stype = status.get("type") or {}
     state = stype.get("state", "")
-    # Track both in-progress and completed games. "pre" (not started)
-    # is skipped because we have nothing useful to display for it.
-    if state not in ("in", "post"):
+    # Track pre-match, in-progress, and completed games. Pre-match
+    # events are included so main.py can read the authoritative
+    # scheduled kickoff time (ESPN's ev.date) and override our
+    # DURATION-based estimate for upcoming games the user is
+    # previewing before kickoff. isLive() on the frontend treats
+    # "pre" as "not live" so no LIVE badge fires for them.
+    if state not in ("in", "post", "pre"):
         return None
     comps = ev.get("competitions") or [{}]
     comp = comps[0] if comps else {}
