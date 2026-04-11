@@ -29,24 +29,13 @@ log = logging.getLogger("espn_feed")
 # Sport names must match the Kalshi-derived `_sport` values so the
 # Kalshi→ESPN matcher can filter by sport first.
 LEAGUES = [
-    # Basketball
+    # Basketball — ESPN only publishes US leagues via this API.
+    # International basketball (Euroleague, Eurocup, BSL, ACB, etc.)
+    # is NOT available through /sports/basketball/<slug>/scoreboard.
     ("basketball/nba", "NBA", "Basketball"),
     ("basketball/wnba", "WNBA", "Basketball"),
     ("basketball/mens-college-basketball", "NCAAM", "Basketball"),
     ("basketball/womens-college-basketball", "NCAAW", "Basketball"),
-    ("basketball/euroleague", "Euroleague", "Basketball"),
-    ("basketball/eurocup", "EuroCup", "Basketball"),
-    ("basketball/fiba-basketball-champions-league", "FIBA CL", "Basketball"),
-    ("basketball/bsl", "BSL", "Basketball"),
-    ("basketball/tur.1", "Turkish BSL", "Basketball"),
-    ("basketball/tur.bsl", "Turkish BSL", "Basketball"),
-    ("basketball/esp.1", "ACB", "Basketball"),
-    ("basketball/acb", "ACB", "Basketball"),
-    ("basketball/ita.1", "Lega A", "Basketball"),
-    ("basketball/ger.1", "BBL", "Basketball"),
-    ("basketball/fra.1", "Pro A", "Basketball"),
-    ("basketball/gre.1", "Greek A1", "Basketball"),
-    ("basketball/aba", "ABA League", "Basketball"),
     # Football (American)
     ("football/nfl", "NFL", "Football"),
     ("football/college-football", "NCAAF", "Football"),
@@ -54,23 +43,15 @@ LEAGUES = [
     # Baseball
     ("baseball/mlb", "MLB", "Baseball"),
     ("baseball/college-baseball", "NCAAB", "Baseball"),
-    ("baseball/npb", "NPB", "Baseball"),
-    ("baseball/kbo", "KBO", "Baseball"),
     # Hockey
     ("hockey/nhl", "NHL", "Hockey"),
     ("hockey/mens-college-hockey", "NCAA Hockey", "Hockey"),
-    ("hockey/ahl", "AHL", "Hockey"),
-    ("hockey/khl", "KHL", "Hockey"),
-    ("hockey/shl", "SHL", "Hockey"),
-    ("hockey/liiga", "Liiga", "Hockey"),
-    ("hockey/del", "DEL", "Hockey"),
     # Tennis
     ("tennis/atp", "ATP", "Tennis"),
     ("tennis/wta", "WTA", "Tennis"),
     # Golf
     ("golf/pga", "PGA Tour", "Golf"),
     ("golf/liv", "LIV Golf", "Golf"),
-    ("golf/european-tour", "DP World Tour", "Golf"),
     ("golf/lpga", "LPGA", "Golf"),
     # MMA
     ("mma/ufc", "UFC", "MMA"),
@@ -78,20 +59,8 @@ LEAGUES = [
     ("mma/bellator", "Bellator", "MMA"),
     # Motorsport
     ("racing/f1", "Formula 1", "Motorsport"),
-    ("racing/nascar-cup-series", "NASCAR Cup", "Motorsport"),
-    ("racing/nascar-xfinity-series", "NASCAR Xfinity", "Motorsport"),
-    ("racing/indycar-series", "IndyCar", "Motorsport"),
-    ("racing/motogp", "MotoGP", "Motorsport"),
-    # Rugby
-    ("rugby/super-rugby", "Super Rugby", "Rugby"),
-    ("rugby/premiership-rugby", "Premiership Rugby", "Rugby"),
-    ("rugby/top-14", "Top 14", "Rugby"),
-    ("rugby/nrl", "NRL", "Rugby"),
-    ("rugby/united-rugby-championship", "URC", "Rugby"),
-    # Cricket
-    ("cricket/8048", "IPL", "Cricket"),  # ESPN cricket uses numeric IDs
-    ("cricket/ipl", "IPL", "Cricket"),
-    ("cricket/big-bash-league", "Big Bash", "Cricket"),
+    # Cricket — ESPN uses numeric IDs for cricket leagues.
+    ("cricket/8048", "IPL", "Cricket"),
     # Top European leagues
     ("soccer/eng.1", "EPL", "Soccer"),
     ("soccer/eng.2", "Championship", "Soccer"),

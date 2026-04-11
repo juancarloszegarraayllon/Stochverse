@@ -1021,6 +1021,52 @@ def espn_status():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/espn_probe")
+async def espn_probe(slug: str):
+    """Debug: make a raw call to ESPN's scoreboard endpoint for the
+    given slug (e.g. "tennis/atp", "basketball/euroleague") and
+    return status code + event count + a sample event so we can see
+    what ESPN actually publishes. Useful for figuring out why a
+    slug returns 200 OK but 0 matched events."""
+    try:
+        import httpx
+        url = f"https://site.api.espn.com/apis/site/v2/sports/{slug}/scoreboard"
+        async with httpx.AsyncClient(headers={"User-Agent": "oddsiq/1.0"}) as client:
+            r = await client.get(url, timeout=15.0)
+            out = {"slug": slug, "status_code": r.status_code}
+            if r.status_code != 200:
+                out["body_raw"] = r.text[:500]
+                return out
+            try:
+                data = r.json() or {}
+            except Exception as e:
+                out["parse_error"] = str(e)
+                return out
+            events = data.get("events") or []
+            out["event_count"] = len(events) if isinstance(events, list) else None
+            out["league_name"] = (data.get("leagues") or [{}])[0].get("name", "")
+            if events and isinstance(events, list):
+                ev = events[0]
+                out["sample_event_id"] = ev.get("id")
+                out["sample_event_name"] = ev.get("name") or ev.get("shortName")
+                status = (ev.get("status") or {}).get("type", {})
+                out["sample_state"] = status.get("state")
+                out["sample_detail"] = status.get("shortDetail")
+                comps = (ev.get("competitions") or [{}])[0]
+                cps = comps.get("competitors") or []
+                out["sample_competitor_count"] = len(cps)
+                if cps:
+                    out["sample_competitor_0"] = {
+                        "id": cps[0].get("id"),
+                        "type": cps[0].get("type"),
+                        "team": (cps[0].get("team") or {}).get("displayName"),
+                        "athlete": (cps[0].get("athlete") or {}).get("displayName"),
+                        "score": cps[0].get("score"),
+                    }
+            return out
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
 @app.get("/api/espn_raw")
 def espn_raw():
     """Debug endpoint: returns the current ESPN_GAMES list so we can
