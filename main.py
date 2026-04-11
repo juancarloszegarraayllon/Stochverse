@@ -264,31 +264,57 @@ for _sp, _tabs in SPORT_SUBTABS.items():
 
 # ── Date helpers ───────────────────────────────────────────────────────────────
 def safe_dt(val):
-    """Parse a Kalshi datetime string (ISO 8601) into a UTC-aware
-    datetime. Accepts strings or already-parsed datetimes, returns
-    None on anything unparseable."""
+    """Parse a datetime from whatever Kalshi sends us into a UTC-aware
+    datetime. Tolerates multiple ISO 8601 variations (with/without Z,
+    microseconds, offsets) and falls back to strptime with common
+    formats. Returns None for anything unparseable."""
     if val is None:
         return None
-    try:
-        if isinstance(val, str):
-            s = val.strip()
-            if not s or s in ("NaT", "None", "nan"):
-                return None
-            # datetime.fromisoformat doesn't accept trailing Z before 3.11
-            if s.endswith("Z"):
-                s = s[:-1] + "+00:00"
-            from datetime import datetime as _dt
-            dt = _dt.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-            return dt.astimezone(UTC)
-        # Already a datetime-ish object.
-        if hasattr(val, "astimezone"):
+    # Already a datetime-ish object.
+    if hasattr(val, "astimezone"):
+        try:
             if val.tzinfo is None:
                 val = val.replace(tzinfo=UTC)
             return val.astimezone(UTC)
-    except Exception:
+        except Exception:
+            return None
+    if not isinstance(val, str):
         return None
+    s = val.strip()
+    if not s or s in ("NaT", "None", "nan"):
+        return None
+    from datetime import datetime as _dt
+    # Try fromisoformat first on the raw string (Py 3.11+ handles Z
+    # and most variants directly), then on a Z→+00:00 normalized form.
+    candidates = [s]
+    if s.endswith("Z"):
+        candidates.append(s[:-1] + "+00:00")
+    for candidate in candidates:
+        try:
+            dt = _dt.fromisoformat(candidate)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
+        except Exception:
+            pass
+    # strptime fallback for anything fromisoformat chokes on.
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            dt = _dt.strptime(s, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
+        except Exception:
+            continue
     return None
 
 def parse_game_date_from_ticker(event_ticker: str):
@@ -474,7 +500,7 @@ def get_data():
     def extract(row):
         mkts = row.get("markets")
         if not isinstance(mkts, list) or not mkts:
-            return None, None, None, "", []
+            return None, None, None, None, None, "", []
         first_mk = mkts[0]
         event_ticker = str(row.get("event_ticker",""))
         sport = str(row.get("_sport",""))
@@ -594,9 +620,16 @@ def get_data():
         except Exception:
             pass
 
+    raw_count = len(all_ev)
     # Free the raw events list explicitly so GC can reclaim the big
     # Kalshi payloads before we return.
     del all_ev
+    sport_count = sum(1 for r in records if r.get("_is_sport"))
+    kickoff_count = sum(1 for r in records if r.get("_kickoff_dt"))
+    logging.getLogger("oddsiq").info(
+        "get_data: raw=%d records=%d sport=%d kickoff=%d",
+        raw_count, len(records), sport_count, kickoff_count,
+    )
     _cache["data"] = records
     _cache["ts"] = now
     return records
