@@ -64,6 +64,10 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 .header-yes{color:var(--green-dim)}
 .header-no{color:var(--red)}
 .outcome-row{display:flex;align-items:center;gap:6px;padding:4px 0;border-top:1px solid var(--border)}
+.market-card .outcome-row-extra{display:none}
+.market-card.expanded .outcome-row-extra{display:flex}
+.outcome-expand-btn{margin-top:6px;padding:6px 10px;background:transparent;border:1px solid var(--border);border-radius:5px;color:var(--text-dim);font-family:inherit;font-size:11px;cursor:pointer;width:100%;text-align:center;transition:color 0.15s,border-color 0.15s}
+.outcome-expand-btn:hover{color:var(--text);border-color:var(--text-muted)}
 .outcome-label{flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .outcome-chance{min-width:58px;text-align:center;font-size:11px;color:var(--text-dim);flex-shrink:0;border-radius:4px}
 .outcome-odds{display:flex;gap:4px;flex-shrink:0}
@@ -706,8 +710,8 @@ function buildCard(ev) {
   h += "</div>";
   // Tennis scoreboard (2 rows per player) when available.
   h += buildTennisScore(ev);
-  var max = Math.min(outcomes.length, 5);
-  if (max > 0) {
+  var total = outcomes.length;
+  if (total > 0) {
     h += "<div class=\"outcome-header\">";
     h += "<div class=\"outcome-label\"></div>";
     h += "<div class=\"header-chance\">Probability</div>";
@@ -717,9 +721,13 @@ function buildCard(ev) {
     h += "</div>";
     h += "</div>";
   }
-  for (var i = 0; i < max; i++) {
+  // Render every outcome. Rows beyond the first 5 get an
+  // "outcome-row-extra" class that's hidden by default; a
+  // toggle button at the bottom reveals them when clicked.
+  for (var i = 0; i < total; i++) {
     var o = outcomes[i];
-    h += "<div class=\"outcome-row\">";
+    var extraClass = i >= 5 ? " outcome-row-extra" : "";
+    h += "<div class=\"outcome-row" + extraClass + "\">";
     h += "<div class=\"outcome-label\">" + o.label + "</div>";
     h += "<div class=\"outcome-chance\">" + o.chance + "</div>";
     h += "<div class=\"outcome-odds\">";
@@ -727,9 +735,28 @@ function buildCard(ev) {
     h += "<div class=\"odds-box odds-no\">" + o.no + "</div>";
     h += "</div></div>";
   }
+  if (total > 5) {
+    var hidden = total - 5;
+    h += '<button class="outcome-expand-btn" data-total="' + total + '" onclick="window.toggleCardOutcomes(this)">';
+    h += "Show all " + total + " outcomes (" + hidden + " more)";
+    h += "</button>";
+  }
   h += "</div>";
   return h;
 }
+
+// Toggle expanded state on a card and update the button label.
+// Called inline from the "Show all N outcomes" button.
+window.toggleCardOutcomes = function(btn) {
+  var card = btn.closest(".market-card");
+  if (!card) return;
+  var total = parseInt(btn.getAttribute("data-total") || "0", 10);
+  var hidden = Math.max(0, total - 5);
+  var expanded = card.classList.toggle("expanded");
+  btn.textContent = expanded
+    ? "Show less"
+    : ("Show all " + total + " outcomes (" + hidden + " more)");
+};
 
 function updateCountBar() {
   var bar = document.getElementById("count-bar");
