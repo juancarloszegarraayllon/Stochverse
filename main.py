@@ -48,6 +48,11 @@ async def startup_event():
         asyncio.create_task(run_sportsdb_feed())
     except Exception as e:
         logging.getLogger("oddsiq").warning("failed to start sportsdb feed: %s", e)
+    try:
+        from sofascore_feed import run_sofascore_feed
+        asyncio.create_task(run_sofascore_feed())
+    except Exception as e:
+        logging.getLogger("oddsiq").warning("failed to start sofascore feed: %s", e)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 UTC = timezone.utc
@@ -805,6 +810,10 @@ def get_events(
         from sportsdb_feed import match_game as sdb_match_game
     except Exception:
         sdb_match_game = None
+    try:
+        from sofascore_feed import match_game as sofa_match_game
+    except Exception:
+        sofa_match_game = None
 
     def _score_display(title: str, g: dict) -> str:
         """Build an ordered score string whose team order matches how
@@ -851,6 +860,8 @@ def get_events(
                 g = match_game(title, sport)
             if g is None and sdb_match_game is not None:
                 g = sdb_match_game(title, sport)
+            if g is None and sofa_match_game is not None:
+                g = sofa_match_game(title, sport)
         if g:
             rc["_live_state"] = {
                 "label":          compact_label(g) if compact_label else "",
@@ -1022,6 +1033,49 @@ def sportsdb_raw():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/sportsdb_probe")
+async def sportsdb_probe():
+    """Debug: makes a fresh call to TheSportsDB's Soccer livescore
+    endpoint and returns the raw response so we can tell whether the
+    free key is actually getting live data (vs being gated behind
+    their Patreon tier)."""
+    try:
+        import httpx
+        from sportsdb_feed import BASE_URL
+        url = f"{BASE_URL}/livescore.php?s=Soccer"
+        async with httpx.AsyncClient() as client:
+            r = await client.get(url, timeout=15.0)
+            ct = r.headers.get("content-type", "")
+            out = {"status_code": r.status_code, "content_type": ct}
+            if "json" in ct:
+                try:
+                    out["body"] = r.json()
+                except Exception:
+                    out["body_raw"] = r.text[:2000]
+            else:
+                out["body_raw"] = r.text[:2000]
+            return out
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/sofascore_status")
+def sofascore_status():
+    """Debug endpoint: reports the SofaScore poller state."""
+    try:
+        from sofascore_feed import STATUS, SOFASCORE_GAMES
+        return {"status": dict(STATUS), "games": len(SOFASCORE_GAMES)}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/sofascore_raw")
+def sofascore_raw():
+    """Debug endpoint: returns the current SOFASCORE_GAMES list."""
+    try:
+        from sofascore_feed import SOFASCORE_GAMES
+        return {"games": list(SOFASCORE_GAMES)[:50]}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/api/live_audit")
 def live_audit():
     """Debug endpoint: reports the Live-tab pipeline end-to-end.
@@ -1047,7 +1101,7 @@ def live_audit():
         total_live += 1
         sp = r.get("_sport") or "(none)"
         by_sport[sp] = by_sport.get(sp, 0) + 1
-    espn_matched = sportsdb_matched = unmatched = 0
+    espn_matched = sportsdb_matched = sofascore_matched = unmatched = 0
     sample_unmatched = []
     try:
         from espn_feed import match_game as em
@@ -1057,6 +1111,10 @@ def live_audit():
         from sportsdb_feed import match_game as sm
     except Exception:
         sm = None
+    try:
+        from sofascore_feed import match_game as fm
+    except Exception:
+        fm = None
     for r in records:
         kdt = r.get("_kickoff_dt")
         gdt = r.get("_game_end_dt")
@@ -1079,6 +1137,10 @@ def live_audit():
         if g_sdb:
             sportsdb_matched += 1
             continue
+        g_sofa = fm(title, sport) if fm and sport and title else None
+        if g_sofa:
+            sofascore_matched += 1
+            continue
         unmatched += 1
         if len(sample_unmatched) < 20:
             sample_unmatched.append({"title": title, "sport": sport})
@@ -1088,6 +1150,7 @@ def live_audit():
         "by_sport": by_sport,
         "espn_matched": espn_matched,
         "sportsdb_matched": sportsdb_matched,
+        "sofascore_matched": sofascore_matched,
         "unmatched": unmatched,
         "sample_unmatched": sample_unmatched,
     }
