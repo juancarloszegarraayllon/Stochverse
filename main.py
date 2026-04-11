@@ -418,13 +418,26 @@ def get_data():
                 display = f"{kt.strftime('%b')} {kt.day}, {hour}:{kt.strftime('%M')}{ampm} {tz_label}"
             except:
                 display = ""
-        elif game_date and not sport:
-            # Non-sport event - show date only if within next 2 years
+        elif not sport:
+            # Non-sport event - try to get release time from exp_dt or close_dt
             try:
+                import pytz as _pytz
                 from datetime import date as _d2
-                days_out = (game_date - _d2.today()).days
-                if -30 <= days_out <= 730:
-                    display = game_date.strftime("%b %-d, %Y")
+                eastern = _pytz.timezone("US/Eastern")
+                # Use exp_dt if available, fall back to close_dt
+                ref_dt = exp_dt or close_dt
+                if ref_dt:
+                    days_out = (ref_dt.date() - _d2.today()).days
+                    if -30 <= days_out <= 730:
+                        kt = ref_dt.astimezone(eastern)
+                        hour = kt.hour % 12 or 12
+                        ampm = "am" if kt.hour < 12 else "pm"
+                        tz_label = kt.strftime("%Z")
+                        display = f"{kt.strftime('%b')} {kt.day}, {hour}:{kt.strftime('%M')}{ampm} {tz_label}"
+                elif game_date:
+                    days_out = (game_date - _d2.today()).days
+                    if -30 <= days_out <= 730:
+                        display = game_date.strftime("%b %-d, %Y")
             except:
                 display = ""
         return sort_dt, game_date, kickoff_dt, display, outcomes
