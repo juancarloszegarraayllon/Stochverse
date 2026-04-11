@@ -584,6 +584,21 @@ def get_data():
             sort_ts_dt = None
         outcomes = []
         for mk in mkts:
+            # Skip markets that have already settled — result=yes or
+            # result=no means the outcome is definitively resolved
+            # (team eliminated, player scored more than X, etc.), and
+            # status=finalized/closed means trading is over. These
+            # markets still appear in Kalshi's API response with stale
+            # yes_bid/yes_ask from their last tradable moment, so we
+            # need to drop them explicitly — otherwise eliminated
+            # Women's CL teams or out-of-contention Golden Boot
+            # players would keep showing old percentages.
+            mk_result = str(mk.get("result") or "").lower()
+            mk_status = str(mk.get("status") or "").lower()
+            if mk_result in ("yes", "no"):
+                continue
+            if mk_status in ("finalized", "settled", "determined"):
+                continue
             label = str(mk.get("yes_sub_title") or "").strip()
             if not label:
                 t = str(mk.get("ticker") or "")
