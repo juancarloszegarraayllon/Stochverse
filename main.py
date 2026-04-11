@@ -297,45 +297,32 @@ def get_client():
     _client = KalshiClient(cfg)
     return _client
 
-def fetch_status(client, status, with_markets, max_pages):
-    """Fetch all events for a given status, return list."""
-    import logging as _log
-    events, cursor = [], None
-    for _ in range(max_pages):
-        try:
-            kw = {"limit":200,"status":status}
-            if with_markets: kw["with_nested_markets"] = True
-            if cursor: kw["cursor"] = cursor
-            resp  = client.get_events(**kw).to_dict()
-            batch = resp.get("events",[])
-            if not batch: break
-            events.extend(batch)
-            cursor = resp.get("cursor") or resp.get("next_cursor")
-            if not cursor: break
-            time.sleep(0.05)
-        except Exception as e:
-            _log.warning(f"fetch_status error status={status}: {e}")
-            if "429" in str(e): time.sleep(3)
-            else: break
-    _log.warning(f"fetch_status done status={status}: {len(events)} events")
-    return events
-
 def paginate(with_markets=False, max_pages=30):
     client = get_client()
-    seen = set()
     events = []
-    # Always fetch open events first
-    for ev in fetch_status(client, "open", with_markets, max_pages):
-        eid = ev.get("event_ticker","")
-        if eid not in seen:
-            seen.add(eid)
-            events.append(ev)
-    # Then add closed (live/in-progress) events
-    for ev in fetch_status(client, "closed", with_markets, max_pages):
-        eid = ev.get("event_ticker","")
-        if eid not in seen:
-            seen.add(eid)
-            events.append(ev)
+    seen = set()
+    # Fetch both open and closed to include live/in-progress games
+    for status in ["open", "closed"]:
+        cursor = None
+        for _ in range(max_pages):
+            try:
+                kw = {"limit":200,"status":status}
+                if with_markets: kw["with_nested_markets"] = True
+                if cursor: kw["cursor"] = cursor
+                resp  = client.get_events(**kw).to_dict()
+                batch = resp.get("events",[])
+                if not batch: break
+                for ev in batch:
+                    eid = ev.get("event_ticker","")
+                    if eid not in seen:
+                        seen.add(eid)
+                        events.append(ev)
+                cursor = resp.get("cursor") or resp.get("next_cursor")
+                if not cursor: break
+                time.sleep(0.05)
+            except Exception as e:
+                if "429" in str(e): time.sleep(3)
+                else: break
     return events
 
 # ── Cache with TTL ─────────────────────────────────────────────────────────────
@@ -348,12 +335,8 @@ def get_data():
     if _cache["data"] is not None and now - _cache["ts"] < CACHE_TTL:
         return _cache["data"]
 
-    import logging as _log2
     all_ev = paginate(with_markets=True, max_pages=30)
-    _log2.warning(f"paginate returned {len(all_ev)} events")
     if not all_ev:
-        _cache["data"] = []
-        _cache["ts"] = now
         return []
 
     df = pd.DataFrame(all_ev)
@@ -393,9 +376,6 @@ def get_data():
             if exp_dt and abs((exp_dt.date() - game_date).days) <= 2:
                 kickoff_dt = exp_dt - DURATION[sport]
 
-        # For non-sport events with no game_date, use close_dt as the resolve date
-        if not game_date and close_dt:
-            game_date = close_dt.date()
         sort_dt = game_date if game_date else (exp_dt.date() if exp_dt else (close_dt.date() if close_dt else None))
         outcomes = []
         for mk in mkts:
@@ -421,10 +401,8 @@ def get_data():
             yes    = f"{int(round(yf*100))}¢"  if yf is not None else "—"
             no     = f"{int(round(nf*100))}¢"  if nf is not None else "—"
             outcomes.append({"label":label[:35],"chance":chance,"yes":yes,"no":no})
-        # Show date+time for sports kickoffs; date-only for non-sport events
-        display = ""
-        if kickoff_dt:
-            # Sport event with calculated kickoff time
+        # Show date+time if we have kickoff, otherwise just date
+        if kickoff_dt and game_date:
             try:
                 import pytz as _pytz
                 eastern = _pytz.timezone("US/Eastern")
@@ -432,31 +410,14 @@ def get_data():
                 hour = kt.hour % 12 or 12
                 ampm = "am" if kt.hour < 12 else "pm"
                 tz_label = kt.strftime("%Z")
+                # Use Eastern date (kt) not UTC game_date to avoid off-by-one at midnight
                 display = f"{kt.strftime('%b')} {kt.day}, {hour}:{kt.strftime('%M')}{ampm} {tz_label}"
             except:
-                display = ""
-        elif not sport:
-            # Non-sport event - try to get release time from exp_dt or close_dt
-            try:
-                import pytz as _pytz
-                from datetime import date as _d2
-                eastern = _pytz.timezone("US/Eastern")
-                # Use exp_dt if available, fall back to close_dt
-                ref_dt = exp_dt or close_dt
-                if ref_dt:
-                    days_out = (ref_dt.date() - _d2.today()).days
-                    if -30 <= days_out <= 730:
-                        kt = ref_dt.astimezone(eastern)
-                        hour = kt.hour % 12 or 12
-                        ampm = "am" if kt.hour < 12 else "pm"
-                        tz_label = kt.strftime("%Z")
-                        display = f"{kt.strftime('%b')} {kt.day}, {hour}:{kt.strftime('%M')}{ampm} {tz_label}"
-                elif game_date:
-                    days_out = (game_date - _d2.today()).days
-                    if -30 <= days_out <= 730:
-                        display = game_date.strftime("%b %-d, %Y")
-            except:
-                display = ""
+                display = game_date.strftime("%b %-d") if game_date else ""
+        elif game_date:
+            display = game_date.strftime("%b %-d")
+        else:
+            display = ""
         return sort_dt, game_date, kickoff_dt, display, outcomes
 
     records = []
@@ -483,7 +444,6 @@ def get_data():
                 "_is_sport": bool(row.get("_is_sport",False)),
                 "_display_dt": display_dt,
                 "_kickoff_dt": kickoff_dt.isoformat() if kickoff_dt else None,
-                "_debug": {"exp": str(exp_dt) if exp_dt else None, "close": str(close_dt) if close_dt else None},
                 "_sort_dt": sort_dt.isoformat() if sort_dt else None,
                 "outcomes": outcomes,
             }
