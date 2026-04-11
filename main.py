@@ -834,19 +834,12 @@ def get_events(
     except Exception:
         sofa_match_game = None
 
-    def _score_display(title: str, g: dict) -> str:
-        """Build an ordered score string whose team order matches how
-        the teams appear in the Kalshi event title. ESPN phrases are
-        already accent-stripped/lowercased, so normalize the title
-        the same way before searching."""
+    def _needs_flip(title: str, g: dict) -> bool:
+        """Returns True if the home/away orientation should be flipped
+        to match the Kalshi title order. Uses whichever team phrase
+        appears first in the normalized title to decide."""
         if not g:
-            return ""
-        hs = g.get("home_score", "")
-        as_ = g.get("away_score", "")
-        if hs == "" or as_ == "":
-            return ""
-        ha = g.get("home_abbr", "") or "HOME"
-        aa = g.get("away_abbr", "") or "AWAY"
+            return False
         try:
             from espn_feed import _normalize
             tl = _normalize(title or "")
@@ -864,8 +857,39 @@ def get_events(
         home_pos = first_pos(g.get("home_phrases", []))
         away_pos = first_pos(g.get("away_phrases", []))
         if home_pos >= 0 and (away_pos < 0 or home_pos < away_pos):
-            return f"{ha} {hs} - {aa} {as_}"
-        return f"{aa} {as_} - {ha} {hs}"
+            return False
+        return True
+
+    def _score_display(title: str, g: dict) -> str:
+        """Build an ordered score string whose team order matches how
+        the teams appear in the Kalshi event title."""
+        if not g:
+            return ""
+        hs = g.get("home_score", "")
+        as_ = g.get("away_score", "")
+        if hs == "" or as_ == "":
+            return ""
+        ha = g.get("home_abbr", "") or "HOME"
+        aa = g.get("away_abbr", "") or "AWAY"
+        if _needs_flip(title, g):
+            return f"{aa} {as_} - {ha} {hs}"
+        return f"{ha} {hs} - {aa} {as_}"
+
+    def _flip_score_pairs(label: str) -> str:
+        """Flip each "H-A" pair in a space-separated tennis label
+        ("6-3 4-5 30-0" → "3-6 5-4 0-30") so the per-set breakdown
+        matches the Kalshi-title orientation of score_display."""
+        if not label:
+            return label
+        parts = label.split()
+        flipped = []
+        for p in parts:
+            if "-" in p:
+                a, b = p.split("-", 1)
+                flipped.append(f"{b}-{a}")
+            else:
+                flipped.append(p)
+        return " ".join(flipped)
 
     formatted = []
     for r in page:
@@ -882,8 +906,15 @@ def get_events(
             if g is None and sofa_match_game is not None:
                 g = sofa_match_game(title, sport)
         if g:
+            # Base compact label from the feed. For tennis we flip
+            # the per-set pairs to match the Kalshi title order so
+            # the "6-3 4-5 30-0" breakdown lines up with the
+            # "ALC 1 - SIN 1" summary to its left.
+            base_label = compact_label(g) if compact_label else ""
+            if g.get("sport") == "Tennis" and _needs_flip(title, g):
+                base_label = _flip_score_pairs(base_label)
             rc["_live_state"] = {
-                "label":          compact_label(g) if compact_label else "",
+                "label":          base_label,
                 "state":          g.get("state", ""),
                 "short_detail":   g.get("short_detail", ""),
                 "display_clock":  g.get("display_clock", ""),
