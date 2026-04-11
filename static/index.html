@@ -34,9 +34,9 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 #cards-grid.list-view{grid-template-columns:1fr;gap:14px;max-width:600px}
 #layout-toggle{background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:7px 10px;border-radius:6px;font-size:13px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:5px;flex-shrink:0}
 #layout-toggle:hover{border-color:var(--green);color:var(--green)}
-.market-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px}
+.market-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0;overflow:hidden}
 .market-card:hover{border-color:#333}
-.card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:6px;flex-wrap:wrap;min-width:0}
 .card-pills{display:flex;flex-direction:column;gap:2px}
 .cat-pill{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim)}
 .subcat-pill{font-size:10px;color:#555;letter-spacing:0.3px}
@@ -78,8 +78,9 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 .outcome-chance.flash-down{animation:flash-down-bg 0.9s ease-out;border-radius:3px}
 .odds-box.flash-up{animation:flash-up-box 0.9s ease-out}
 .odds-box.flash-down{animation:flash-down-box 0.9s ease-out}
-.card-time-slot{display:inline-flex;align-items:center;flex-shrink:0}
-.live-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--red);text-transform:uppercase;letter-spacing:0.8px}
+.card-time-slot{display:inline-flex;align-items:center;min-width:0;max-width:100%;flex-shrink:1}
+.live-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--red);text-transform:uppercase;letter-spacing:0.8px;max-width:100%;min-width:0}
+.live-badge .live-text{white-space:normal;overflow-wrap:anywhere;word-break:break-word}
 .live-dot{width:7px;height:7px;border-radius:50%;background:var(--red);box-shadow:0 0 6px rgba(255,51,51,0.9);animation:live-pulse 1.2s infinite ease-in-out}
 .final-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.8px}
 .final-score{color:var(--text);font-weight:700;letter-spacing:0.3px}
@@ -88,6 +89,67 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 .cat-tab-live:hover{color:var(--red) !important}
 .cat-tab-live.active{color:var(--red) !important;background:rgba(255,51,51,0.1);border-bottom-color:var(--red) !important}
 .cat-tab-live::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--red);margin-right:7px;box-shadow:0 0 6px rgba(255,51,51,0.9);animation:live-pulse 1.2s infinite ease-in-out;vertical-align:middle}
+
+/* ── Tablet / small desktop ─────────────────────────────────────────── */
+@media (max-width: 900px) {
+  #header{padding:10px 16px 0}
+  #controls{flex-wrap:wrap;gap:8px}
+  #logo{font-size:1.4rem;order:1}
+  #layout-toggle{order:2;margin-left:auto}
+  #search-input{order:3;flex:1 1 100%;min-width:0}
+  #date-sel{order:4}
+  #sort-sel{order:5}
+  #custom-dates{order:6;flex:1 1 100%}
+  #main{margin-top:150px}
+  #nav{top:150px;height:calc(100vh - 150px);width:170px;min-width:170px}
+  #content{padding:14px}
+  #cards-grid{grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+}
+
+/* ── Phone ──────────────────────────────────────────────────────────── */
+@media (max-width: 600px) {
+  #header{padding:8px 12px 0}
+  #logo{font-size:1.2rem;order:1;flex:0 0 auto}
+  #controls{gap:6px;padding-bottom:8px}
+  /* Row 1: Logo + Date + Sort. Row 2: full-width search. */
+  #layout-toggle{display:none}
+  #date-sel{order:2;flex:0 1 auto;min-width:0;font-size:12px;padding:7px 8px}
+  #sort-sel{order:3;flex:0 1 auto;min-width:0;font-size:12px;padding:7px 8px}
+  #search-input{order:4;flex:1 1 100%;min-width:0;font-size:13px;padding:7px 12px}
+  .cat-tab{padding:8px 12px;font-size:13px}
+  #main{margin-top:130px;display:block}
+  /* Sidebar on phone becomes a horizontal scroll strip above the cards */
+  #nav{position:static;width:auto;min-width:0;height:auto;max-height:none;border-right:none;border-bottom:1px solid var(--border);padding:8px 12px;display:none;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;white-space:nowrap;scrollbar-width:none}
+  #nav::-webkit-scrollbar{display:none}
+  #nav .nav-item{display:inline-block;width:auto;padding:6px 10px;margin-right:4px;font-size:12px;border:1px solid var(--border);border-radius:16px}
+  #nav .nav-item.active{border-color:var(--green);background:rgba(0,170,0,0.1)}
+  #nav .nav-child{display:inline-block;width:auto;padding:5px 10px 5px 10px;margin-right:4px;font-size:11px;border:1px solid var(--border);border-radius:14px}
+  #nav .nav-child.active{border-color:var(--green);background:rgba(0,170,0,0.1)}
+  #content{padding:10px}
+  #cards-grid{grid-template-columns:1fr;gap:10px}
+  .market-card{padding:12px}
+  .card-title{font-size:13px}
+  .outcome-label{font-size:11px}
+  .outcome-chance{min-width:52px;font-size:11px}
+  .odds-box{padding:4px 6px;min-width:34px;font-size:11px}
+  .header-chance{min-width:52px}
+  .header-odds-box{padding:0 6px;min-width:34px}
+  .live-badge{font-size:10px;letter-spacing:0.5px}
+  .final-badge{font-size:10px;letter-spacing:0.5px}
+  #home-screen{padding:0 20px;text-align:center}
+  #home-screen h2{font-size:1.2rem}
+}
+
+/* ── Small phone ────────────────────────────────────────────────────── */
+@media (max-width: 380px) {
+  #logo{font-size:1.1rem}
+  #date-sel,#sort-sel{flex:1}
+  .cat-tab{padding:7px 10px;font-size:12px}
+  .outcome-chance{min-width:46px}
+  .odds-box{min-width:30px;padding:4px 5px}
+  .header-chance{min-width:46px}
+  .header-odds-box{min-width:30px;padding:0 4px}
+}
 </style>
 </head>
 <body>

@@ -498,13 +498,24 @@ def get_data():
     if not all_ev:
         return []
 
+    # Rough "exp_dt − kickoff" window per sport. Kalshi's
+    # expected_expiration_time is set to the final-whistle + some
+    # settlement buffer, so these values are slightly longer than
+    # real game length. Used only for the wall-clock minute estimate
+    # when ESPN/SofaScore don't match the event.
     DURATION = {
-        "Soccer": timedelta(hours=3), "Baseball": timedelta(hours=3),
-        "Basketball": timedelta(hours=2), "Hockey": timedelta(hours=2, minutes=30),
-        "Football": timedelta(hours=3), "Cricket": timedelta(hours=4),
-        "Tennis": timedelta(hours=2), "Golf": timedelta(hours=4),
-        "MMA": timedelta(hours=3), "Esports": timedelta(hours=2),
-        "Motorsport": timedelta(hours=3), "Rugby": timedelta(hours=2),
+        "Soccer": timedelta(hours=2, minutes=15),
+        "Baseball": timedelta(hours=3),
+        "Basketball": timedelta(hours=2, minutes=30),
+        "Hockey": timedelta(hours=2, minutes=30),
+        "Football": timedelta(hours=3, minutes=30),
+        "Cricket": timedelta(hours=4),
+        "Tennis": timedelta(hours=2, minutes=30),
+        "Golf": timedelta(hours=4),
+        "MMA": timedelta(hours=3),
+        "Esports": timedelta(hours=2),
+        "Motorsport": timedelta(hours=3),
+        "Rugby": timedelta(hours=2),
     }
 
     def extract(row):

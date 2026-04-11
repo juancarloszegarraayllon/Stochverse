@@ -34,6 +34,7 @@ LEAGUES = [
     ("football/nfl", "NFL", "Football"),
     ("football/college-football", "NCAAF", "Football"),
     ("baseball/mlb", "MLB", "Baseball"),
+    ("baseball/college-baseball", "NCAAB", "Baseball"),
     ("hockey/nhl", "NHL", "Hockey"),
     # Top European leagues
     ("soccer/eng.1", "EPL", "Soccer"),
@@ -379,5 +380,9 @@ def compact_label(g: Dict[str, Any]) -> Optional[str]:
             return f"P{period}"
     if sport == "Baseball":
         # Baseball shortDetail is already compact: "Top 3rd", "Bot 7th"
+        return short or "LIVE"
+    if sport == "Tennis":
+        # SofaScore feed builds "Set 2 3-4 30-0" into short_detail;
+        # ESPN's tennis detail is similarly already compact.
         return short or "LIVE"
     return short or clock or "LIVE"

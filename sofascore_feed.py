@@ -162,6 +162,34 @@ def _parse_event(ev: Dict[str, Any], sport_label: str) -> Optional[Dict[str, Any
                     g["clock_running"] = True
         except Exception:
             pass
+    # Tennis: the plain "1st set" description isn't very useful, so
+    # build a richer label from the per-set game counts and the
+    # current game points. SofaScore's tennis score dict looks like:
+    #   {"current": 1, "period1": 6, "period2": 3, "point": "30"}
+    if sport_label == "Tennis":
+        try:
+            set_scores = []
+            for i in range(1, 6):
+                hp = home_score_obj.get(f"period{i}")
+                ap = away_score_obj.get(f"period{i}")
+                if hp is None and ap is None:
+                    continue
+                set_scores.append((
+                    int(hp) if hp is not None else 0,
+                    int(ap) if ap is not None else 0,
+                    i,
+                ))
+            if set_scores:
+                cur_h, cur_a, cur_n = set_scores[-1]
+                g["period"] = cur_n
+                label = f"Set {cur_n} {cur_h}-{cur_a}"
+                hp_pt = home_score_obj.get("point")
+                ap_pt = away_score_obj.get("point")
+                if hp_pt not in (None, "") or ap_pt not in (None, ""):
+                    label += f" {hp_pt or '0'}-{ap_pt or '0'}"
+                g["short_detail"] = label
+        except Exception:
+            pass
     return g
 
 
