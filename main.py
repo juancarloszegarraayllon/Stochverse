@@ -252,31 +252,29 @@ def get_sport(series_ticker):
 
 
 # ── Game-market grouping ──────────────────────────────────────────────────────
-# Kalshi publishes a single soccer game's different market types as
+# Kalshi publishes a single game's different market types as
 # separate events that all share the same game-suffix. Example for
-# Sevilla vs Atletico on Apr 11:
-#   KXLALIGAGAME-26APR11SEVATM     (moneyline — parent/primary card)
-#   KXLALIGASPREAD-26APR11SEVATM   (point spread)
-#   KXLALIGATOTAL-26APR11SEVATM    (over/under goals)
-#   KXLALIGABTTS-26APR11SEVATM     (both teams to score)
-#   KXLALIGA1H-26APR11SEVATM       (first-half winner)
+# Washington at Pittsburgh on Apr 11:
+#   KXNHLGAME-26APR11WSHPIT    (moneyline — parent/primary card)
+#   KXNHLSPREAD-26APR11WSHPIT  (puck line)
+#   KXNHLTOTAL-26APR11WSHPIT   (over/under goals)
 # Kalshi's own UI merges these into one card with tabs. We do the
 # same: the moneyline becomes the parent, the siblings become
 # additional market_groups on that parent, and the sibling events
 # are dropped from the top-level records list so they don't also
 # render as independent cards.
 #
-# First pass: La Liga only. Once we've eyeballed the UX on a real
-# Sevilla vs Atletico card we can extend this map to EPL / UCL /
-# Serie A / Bundesliga / Ligue 1 etc. — the pattern is identical
-# across leagues, only the prefix changes.
+# First pass: NHL only. Once we've eyeballed the UX on a real
+# Washington vs Pittsburgh card we can extend this map to NBA /
+# MLB / NFL / EPL / La Liga / UCL etc. — the pattern is identical
+# across leagues, only the prefix changes. NHL doesn't appear to
+# publish a BTTS or first-period sibling series, so this first
+# pass is three tabs: Winner / Puck Line / Totals.
 GAME_MARKET_PREFIXES = {
     # series_ticker prefix → (type_code, display_label, tab priority, is_primary)
-    "KXLALIGAGAME":   ("moneyline", "Winner",     0, True),
-    "KXLALIGASPREAD": ("spread",    "Spread",     1, False),
-    "KXLALIGATOTAL":  ("total",     "Totals",     2, False),
-    "KXLALIGABTTS":   ("btts",      "Both Score", 3, False),
-    "KXLALIGA1H":     ("firsthalf", "1st Half",   4, False),
+    "KXNHLGAME":   ("moneyline", "Winner",    0, True),
+    "KXNHLSPREAD": ("spread",    "Puck Line", 1, False),
+    "KXNHLTOTAL":  ("total",     "Totals",    2, False),
 }
 
 
