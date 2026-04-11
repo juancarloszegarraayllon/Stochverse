@@ -48,16 +48,18 @@ async def startup_event():
         asyncio.create_task(run_sportsdb_feed())
     except Exception as e:
         logging.getLogger("oddsiq").warning("failed to start sportsdb feed: %s", e)
-    # SofaScore's Varnish layer started returning HTTP 403 for every
-    # request from Railway's datacenter IP, so we stop running the
-    # poller to avoid wasting requests. The code stays in place — if
-    # SofaScore ever unblocks us or we move the fetch client-side,
-    # re-enable by uncommenting this block.
-    # try:
-    #     from sofascore_feed import run_sofascore_feed
-    #     asyncio.create_task(run_sofascore_feed())
-    # except Exception as e:
-    #     logging.getLogger("oddsiq").warning("failed to start sofascore feed: %s", e)
+    # SofaScore feed with a built-in exponential-backoff circuit
+    # breaker. When Cloudflare / Varnish blocks ≥50% of sports with
+    # 403s, the poll interval doubles up to a 10-minute cap until we
+    # get a healthy cycle, at which point it resets instantly to
+    # POLL_INTERVAL. So while we're blocked we waste at most a few
+    # requests per hour, and the moment the block lifts we catch
+    # back up on the next 30-second cycle.
+    try:
+        from sofascore_feed import run_sofascore_feed
+        asyncio.create_task(run_sofascore_feed())
+    except Exception as e:
+        logging.getLogger("oddsiq").warning("failed to start sofascore feed: %s", e)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 UTC = timezone.utc

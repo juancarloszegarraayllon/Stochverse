@@ -39,7 +39,9 @@ SPORTS = [
 ]
 
 BASE_URL = "https://api.sofascore.com/api/v1/sport/{slug}/events/live"
-POLL_INTERVAL = 15  # seconds between full refresh cycles
+POLL_INTERVAL = 30         # normal cycle (seconds)
+MAX_POLL_INTERVAL = 600    # hard cap when backing off (10 minutes)
+BACKOFF_THRESHOLD = 0.5    # back off when ≥50% of sports 403 / error
 
 SOFASCORE_GAMES: List[Dict[str, Any]] = []
 
@@ -52,6 +54,10 @@ STATUS = {
     # Per-sport fetch result for diagnosing why we might be returning
     # zero games. Shape: {slug: {"status": int|str, "count": int|None}}
     "per_sport": {},
+    # Circuit breaker state — tells us whether the feed is currently
+    # healthy or sitting in back-off after Cloudflare / Varnish hit us.
+    "current_interval": POLL_INTERVAL,
+    "backoff_active": False,
 }
 
 
@@ -323,7 +329,9 @@ async def run_sofascore_feed():
         "Pragma": "no-cache",
     }
     async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
+        current_interval = POLL_INTERVAL
         while True:
+            failure = False
             try:
                 tasks = [
                     _fetch_sport(client, slug, label)
@@ -333,15 +341,23 @@ async def run_sofascore_feed():
                 all_games: List[Dict[str, Any]] = []
                 sport_counts: Dict[str, int] = {}
                 per_sport: Dict[str, Dict[str, Any]] = {}
+                error_count = 0
                 for (slug, label), res in zip(SPORTS, results):
                     if isinstance(res, Exception):
                         per_sport[slug] = {"status": f"err:{type(res).__name__}", "count": None}
+                        error_count += 1
                         continue
                     if res is None:
                         per_sport[slug] = {"status": "none", "count": None}
+                        error_count += 1
                         continue
                     games, info = res
                     per_sport[slug] = info
+                    # Any non-200 response counts as a failure for
+                    # the circuit breaker, since Cloudflare/Varnish
+                    # returns 403 for everything when it's blocking.
+                    if isinstance(info.get("status"), int) and info["status"] != 200:
+                        error_count += 1
                     if games:
                         all_games.extend(games)
                         sport_counts[label] = sport_counts.get(label, 0) + len(games)
@@ -351,12 +367,29 @@ async def run_sofascore_feed():
                 STATUS["sports"] = sport_counts
                 STATUS["per_sport"] = per_sport
                 STATUS["last_error"] = None
-                log.info("sofascore: %d live games across %d sports (per_sport=%s)",
-                         len(all_games), len(sport_counts), per_sport)
+                # Trip the breaker when more than half the sports
+                # fail to return a 200 — that's the shape of a
+                # Cloudflare/Varnish hard block, not a quiet night.
+                failure = error_count >= max(1, int(len(SPORTS) * BACKOFF_THRESHOLD))
+                log.info(
+                    "sofascore: %d live games / %d sports ok / %d errors%s",
+                    len(all_games), len(sport_counts), error_count,
+                    " (backing off)" if failure else "",
+                )
             except Exception as e:
                 STATUS["last_error"] = f"{type(e).__name__}: {e}"
                 log.error("sofascore poll error: %s", e)
-            await asyncio.sleep(POLL_INTERVAL)
+                failure = True
+            # Exponential backoff on repeated failure, instant reset
+            # on first healthy cycle.
+            if failure:
+                current_interval = min(current_interval * 2, MAX_POLL_INTERVAL)
+                STATUS["backoff_active"] = True
+            else:
+                current_interval = POLL_INTERVAL
+                STATUS["backoff_active"] = False
+            STATUS["current_interval"] = current_interval
+            await asyncio.sleep(current_interval)
 
 
 def _phrase_in_title(phrase: str, normalized_title: str) -> bool:
