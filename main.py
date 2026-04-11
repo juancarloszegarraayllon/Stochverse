@@ -462,7 +462,10 @@ def _midprice_and_ask(yb, ya, nb, na):
 
 def _format_outcomes(stored_outcomes):
     """Turn stored raw-cents outcomes into display-ready outcomes,
-    overlaying live WebSocket prices from LIVE_PRICES where available."""
+    overlaying live WebSocket prices from LIVE_PRICES where
+    available. Markets with no real liquidity (zero size on both
+    yes-side and no-side) show — instead of a computed mid-price,
+    matching how Kalshi's own UI renders illiquid markets."""
     try:
         from kalshi_ws import LIVE_PRICES
     except Exception:
@@ -480,7 +483,18 @@ def _format_outcomes(stored_outcomes):
             if live.get("yes_ask") is not None: ya = live["yes_ask"]
             if live.get("no_bid")  is not None: nb = live["no_bid"]
             if live.get("no_ask")  is not None: na = live["no_ask"]
-        chance_c, yes_c, no_c = _midprice_and_ask(yb, ya, nb, na)
+        # Liquidity check: if neither YES side has real orders AND
+        # neither NO side has real orders, the market is dead and
+        # Kalshi shows "--%". Treat it the same way.
+        yb_sz = o.get("_yb_sz") or 0
+        ya_sz = o.get("_ya_sz") or 0
+        nb_sz = o.get("_nb_sz") or 0
+        na_sz = o.get("_na_sz") or 0
+        dead = (yb_sz == 0 and ya_sz == 0 and nb_sz == 0 and na_sz == 0)
+        if dead:
+            chance_c = yes_c = no_c = None
+        else:
+            chance_c, yes_c, no_c = _midprice_and_ask(yb, ya, nb, na)
         out.append({
             "label":  o.get("label", ""),
             "ticker": tk,
@@ -569,6 +583,20 @@ def get_data():
             ya = _cents_from(mk, "yes_ask_dollars", "yes_ask")
             nb = _cents_from(mk, "no_bid_dollars",  "no_bid")
             na = _cents_from(mk, "no_ask_dollars",  "no_ask")
+            # Raw liquidity sizes — used by _format_outcomes to
+            # recognize "no real market" cases (both sides have zero
+            # orders) and show — instead of computing a garbage
+            # midprice from Kalshi's (0, 100) placeholder values.
+            def _sz(key):
+                v = mk.get(key)
+                try:
+                    return float(v) if v is not None else 0.0
+                except Exception:
+                    return 0.0
+            yb_size = _sz("yes_bid_size_fp")
+            ya_size = _sz("yes_ask_size_fp")
+            nb_size = _sz("no_bid_size_fp")
+            na_size = _sz("no_ask_size_fp")
             # Store raw cents + market ticker. The chance/yes/no display
             # strings are computed per-request by _format_outcomes() so
             # live WebSocket updates flow through without rebuilding the
@@ -577,6 +605,8 @@ def get_data():
                 "label":  label[:35],
                 "ticker": str(mk.get("ticker","")),
                 "_yb": yb, "_ya": ya, "_nb": nb, "_na": na,
+                "_yb_sz": yb_size, "_ya_sz": ya_size,
+                "_nb_sz": nb_size, "_na_sz": na_size,
             })
         # Show date+time if we have kickoff, otherwise just date
         if kickoff_dt and game_date:
