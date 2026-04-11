@@ -354,7 +354,7 @@ def get_data():
     def extract(row):
         mkts = row.get("markets")
         if not isinstance(mkts, list) or not mkts:
-            return None, None, None, None, None, []
+            return None, None, None, "", []
         first_mk = mkts[0]
         event_ticker = str(row.get("event_ticker",""))
         sport = str(row.get("_sport",""))
