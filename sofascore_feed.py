@@ -16,7 +16,8 @@ import logging
 import re
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional
+from itertools import product
+from typing import Any, Dict, Iterable, List, Optional
 
 try:
     import httpx
@@ -54,44 +55,100 @@ STATUS = {
 }
 
 
+# Nordic / German character → ASCII digraph expansion. Applied BEFORE
+# NFD stripping so we can emit both "vasteras" and "vasteraas" as
+# phrase variants for names like "Västerås". Only chars whose strip
+# form differs from their digraph form live here; æ/ß/ı/ð/þ are
+# handled identically in _STRIP_MAP so they don't need variants.
+_DIGRAPH_MAP = {
+    "å": "aa", "ä": "ae", "ö": "oe", "ü": "ue", "ø": "oe",
+}
+
+# Precomposed characters that NFD doesn't decompose. Translated before
+# NFD so the "stripped" variant is guaranteed plain ASCII — covers
+# Kalshi titles that drop Nordic chars entirely ("Brondby" for
+# "Brøndby") as well as German ß and Turkish dotless i.
+_STRIP_MAP = str.maketrans({
+    "ø": "o", "Ø": "O",
+    "æ": "ae", "Æ": "Ae",
+    "ß": "ss",
+    "ı": "i", "İ": "I",
+    "ð": "d", "Ð": "D",
+    "þ": "th", "Þ": "Th",
+})
+
+
+def _nfd_strip(s: str) -> str:
+    s = s.translate(_STRIP_MAP)
+    s = unicodedata.normalize("NFD", s)
+    return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+
 def _normalize(s: Any) -> str:
     if not s:
         return ""
-    s = unicodedata.normalize("NFD", str(s))
-    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
-    return s.lower()
+    return _nfd_strip(str(s).lower())
+
+
+def _phrase_variants(raw: Any) -> Iterable[str]:
+    """Yield all normalized phrase variants of a team name, covering
+    every 2^N combination of stripped vs digraph-expanded Nordic /
+    German characters. Names without any special chars yield exactly
+    one variant (plain NFD fold)."""
+    if not raw:
+        return
+    low = str(raw).lower()
+    specials = [ch for ch in _DIGRAPH_MAP if ch in low]
+    if not specials:
+        result = _nfd_strip(low).strip()
+        if result:
+            yield result
+        return
+    seen = set()
+    for mask in product((False, True), repeat=len(specials)):
+        v = low
+        for i, ch in enumerate(specials):
+            if mask[i]:
+                v = v.replace(ch, _DIGRAPH_MAP[ch])
+            # else: leave the char; NFD will strip it
+        norm = _nfd_strip(v).strip()
+        if norm and norm not in seen:
+            seen.add(norm)
+            yield norm
 
 
 def _team_phrases(team: Dict[str, Any]) -> List[str]:
-    """Build accent-stripped search phrases from a SofaScore team dict."""
+    """Build accent-stripped + digraph-expanded phrases from a
+    SofaScore team dict. Longest phrases come first."""
     phrases = set()
+    # Full-name variants from each name-ish field.
     for key in ("name", "shortName", "fullName"):
         v = team.get(key)
         if v:
-            n = _normalize(v).strip()
-            if len(n) >= 3:
-                phrases.add(n)
+            for variant in _phrase_variants(v):
+                if len(variant) >= 3:
+                    phrases.add(variant)
     slug = team.get("slug")
     if slug:
-        # "mito-hollyhock" -> "mito hollyhock"
-        n = _normalize(slug.replace("-", " ")).strip()
-        if len(n) >= 3:
-            phrases.add(n)
-    # Last word + last two words of the full name, so "JEF United Chiba"
-    # also matches on "chiba" or "united chiba" in Kalshi titles that
-    # trim the club prefix.
+        for variant in _phrase_variants(slug.replace("-", " ")):
+            if len(variant) >= 3:
+                phrases.add(variant)
+    # Word-level phrases: last 1-2 words and first word, computed from
+    # each full-name variant so Västerås also produces "vasteras" and
+    # "vasteraas" as single-word phrases.
     for src in (team.get("name"), team.get("shortName"), team.get("fullName")):
         if not src:
             continue
-        words = _normalize(src).split()
-        if len(words) >= 2:
-            last_two = " ".join(words[-2:])
-            if len(last_two) >= 3:
-                phrases.add(last_two)
-            if len(words[-1]) >= 3:
-                phrases.add(words[-1])
-            if len(words[0]) >= 3:
-                phrases.add(words[0])
+        for variant in _phrase_variants(src):
+            words = variant.split()
+            if len(words) >= 2:
+                last_two = " ".join(words[-2:])
+                if len(last_two) >= 3:
+                    phrases.add(last_two)
+                if len(words[-1]) >= 3:
+                    phrases.add(words[-1])
+                if len(words[0]) >= 3:
+                    phrases.add(words[0])
     return sorted(phrases, key=lambda s: -len(s))
 
 
@@ -289,14 +346,34 @@ def _phrase_in_title(phrase: str, normalized_title: str) -> bool:
 
 
 def match_game(title: str, sport: str) -> Optional[Dict[str, Any]]:
+    """Return the SofaScore game whose team phrases best match the
+    Kalshi title. Score = len(longest home phrase hit) + len(longest
+    away phrase hit). Picking the max score disambiguates cases like
+    "Montevideo City vs Albion" vs a lurking Manchester City /
+    Brighton Albion game — the real match's longer phrases
+    ("montevideo city", "albion") outrank "city" / "albion"."""
     if not title or not sport:
         return None
     t = _normalize(title)
+    best = None
+    best_score = 0
     for g in SOFASCORE_GAMES:
         if g.get("sport") != sport:
             continue
-        home_hit = any(_phrase_in_title(p, t) for p in g.get("home_phrases", []))
-        away_hit = any(_phrase_in_title(p, t) for p in g.get("away_phrases", []))
-        if home_hit and away_hit:
-            return g
-    return None
+        home_best = 0
+        for p in g.get("home_phrases", []):
+            if _phrase_in_title(p, t) and len(p) > home_best:
+                home_best = len(p)
+        if home_best == 0:
+            continue
+        away_best = 0
+        for p in g.get("away_phrases", []):
+            if _phrase_in_title(p, t) and len(p) > away_best:
+                away_best = len(p)
+        if away_best == 0:
+            continue
+        score = home_best + away_best
+        if score > best_score:
+            best_score = score
+            best = g
+    return best

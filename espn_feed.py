@@ -15,7 +15,8 @@ import logging
 import re
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from itertools import product
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     import httpx
@@ -128,13 +129,65 @@ STATUS = {
 }
 
 
+# Nordic / German character → ASCII digraph expansion. Applied BEFORE
+# NFD stripping so we can emit both "vasteras" and "vasteraas" as
+# phrase variants for names like "Västerås". Only chars whose strip
+# form differs from their digraph form live here; æ/ß/ı/ð/þ are
+# handled identically in _STRIP_MAP so they don't need variants.
+_DIGRAPH_MAP = {
+    "å": "aa", "ä": "ae", "ö": "oe", "ü": "ue", "ø": "oe",
+}
+
+# Precomposed characters that NFD doesn't decompose. Translated before
+# NFD so the "stripped" variant is guaranteed plain ASCII — covers
+# Kalshi titles that drop Nordic chars entirely ("Brondby" for
+# "Brøndby") as well as German ß and Turkish dotless i.
+_STRIP_MAP = str.maketrans({
+    "ø": "o", "Ø": "O",
+    "æ": "ae", "Æ": "Ae",
+    "ß": "ss",
+    "ı": "i", "İ": "I",
+    "ð": "d", "Ð": "D",
+    "þ": "th", "Þ": "Th",
+})
+
+
+def _nfd_strip(s: str) -> str:
+    s = s.translate(_STRIP_MAP)
+    s = unicodedata.normalize("NFD", s)
+    return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+
 def _normalize(s: str) -> str:
     """Lowercase + strip accents, for case/accent-insensitive matching."""
     if not s:
         return ""
-    s = unicodedata.normalize("NFD", str(s))
-    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
-    return s.lower()
+    return _nfd_strip(str(s).lower())
+
+
+def _phrase_variants(raw: Any) -> Iterable[str]:
+    """Yield all normalized phrase variants for a team name, covering
+    every 2^N combination of stripped vs digraph-expanded Nordic /
+    German characters. Plain names yield a single variant."""
+    if not raw:
+        return
+    low = str(raw).lower()
+    specials = [ch for ch in _DIGRAPH_MAP if ch in low]
+    if not specials:
+        result = _nfd_strip(low).strip()
+        if result:
+            yield result
+        return
+    seen = set()
+    for mask in product((False, True), repeat=len(specials)):
+        v = low
+        for i, ch in enumerate(specials):
+            if mask[i]:
+                v = v.replace(ch, _DIGRAPH_MAP[ch])
+        norm = _nfd_strip(v).strip()
+        if norm and norm not in seen:
+            seen.add(norm)
+            yield norm
 
 
 def _parse_clock_secs(s: Optional[str]) -> Optional[int]:
@@ -193,16 +246,16 @@ def _annotate_clock_running(games: List[Dict[str, Any]]):
 
 
 def _team_phrases(team: Dict[str, Any]) -> List[str]:
-    """Lowercased, accent-stripped search phrases for matching a team
-    against Kalshi titles. Skips anything shorter than 3 chars to
-    avoid abbreviation false positives."""
+    """Lowercased, accent-stripped, digraph-expanded phrases for
+    matching a team against Kalshi titles. Skips anything shorter
+    than 3 chars to avoid abbreviation false positives."""
     phrases = set()
     for key in ("displayName", "shortDisplayName", "nickname", "location", "name"):
         v = team.get(key)
         if v:
-            s = _normalize(v).strip()
-            if len(s) >= 3:
-                phrases.add(s)
+            for variant in _phrase_variants(v):
+                if len(variant) >= 3:
+                    phrases.add(variant)
     # Sort longest first so matching prefers specific names.
     return sorted(phrases, key=lambda s: -len(s))
 
@@ -324,20 +377,36 @@ def _phrase_in_title(phrase: str, normalized_title: str) -> bool:
 
 
 def match_game(title: str, sport: str) -> Optional[Dict[str, Any]]:
-    """Return the first ESPN live game whose home and away team phrases
-    both appear in the Kalshi event title as whole words (case and
-    accent insensitive), or None."""
+    """Return the ESPN game whose home and away team phrases best
+    match the Kalshi title. Score = len(longest matching home
+    phrase) + len(longest matching away phrase). Picking the max
+    score disambiguates titles where multiple games could nominally
+    match on single common words like "city" or "albion"."""
     if not title or not sport:
         return None
     t = _normalize(title)
+    best = None
+    best_score = 0
     for g in ESPN_GAMES:
         if g.get("sport") != sport:
             continue
-        home_hit = any(_phrase_in_title(p, t) for p in g.get("home_phrases", []))
-        away_hit = any(_phrase_in_title(p, t) for p in g.get("away_phrases", []))
-        if home_hit and away_hit:
-            return g
-    return None
+        home_best = 0
+        for p in g.get("home_phrases", []):
+            if _phrase_in_title(p, t) and len(p) > home_best:
+                home_best = len(p)
+        if home_best == 0:
+            continue
+        away_best = 0
+        for p in g.get("away_phrases", []):
+            if _phrase_in_title(p, t) and len(p) > away_best:
+                away_best = len(p)
+        if away_best == 0:
+            continue
+        score = home_best + away_best
+        if score > best_score:
+            best_score = score
+            best = g
+    return best
 
 
 def compact_label(g: Dict[str, Any]) -> Optional[str]:
