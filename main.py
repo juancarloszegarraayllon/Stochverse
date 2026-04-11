@@ -1220,80 +1220,99 @@ async def sportsdb_day_probe(sport: str = "Basketball", d: str = ""):
         return {"error": f"{type(e).__name__}: {e}"}
 
 @app.get("/api/kalshi_event_raw")
-def kalshi_event_raw(ticker: str = "", status: str = "open", prefer: str = "sport"):
-    """Debug: fetches several pages of Kalshi events and returns
-    the full raw structure of one of them — every field on the
-    event and every field on each of its markets. Used to verify
-    whether Kalshi's public API exposes live game state (score,
-    clock, period, status, sub_title hints, etc.).
+def kalshi_event_raw(ticker: str = "", status: str = "", prefer: str = "sport"):
+    """Debug: fetches Kalshi events and returns the full raw
+    structure of one of them — every field on the event and on
+    each of its markets, plus a per-status / per-result summary
+    of the markets for quick eyeballing of settled vs active.
 
-    Params:
-      - ticker: return this exact event_ticker if found in the
-        fetched pages, otherwise error out.
-      - status: "open" (default) or "closed".
-      - prefer: "sport" (default) returns the first event whose
-        series_ticker matches a known sport; "any" returns the
-        first event regardless.
+    If `ticker` is given, searches both open and closed listings
+    (up to 15 pages each) and short-circuits as soon as found.
+    If empty, returns the first matching sport event in the
+    first few pages.
     """
     try:
         client = get_client()
-        events: List[Dict[str, Any]] = []
-        cursor = None
-        # Pull multiple pages because the first page is usually
-        # dominated by political / longshot markets; sport events
-        # come later in the unfiltered listing.
-        for _ in range(6):
-            kw = {"limit": 200, "status": status, "with_nested_markets": True}
-            if cursor:
-                kw["cursor"] = cursor
-            resp = client.get_events(**kw).to_dict()
-            events.extend(resp.get("events", []) or [])
-            cursor = resp.get("cursor") or resp.get("next_cursor")
-            if not cursor:
-                break
-            if ticker is None:
-                break
-        if not events:
-            return {"error": "no events returned", "status": status}
-
         picked = None
-        if ticker:
-            for ev in events:
-                if ev.get("event_ticker") == ticker:
-                    picked = ev
+        statuses_to_try = [status] if status else ["open", "closed"]
+        all_seen = 0
+        for s in statuses_to_try:
+            events: List[Dict[str, Any]] = []
+            cursor = None
+            max_pages = 15 if ticker else 6
+            for _ in range(max_pages):
+                kw = {"limit": 200, "status": s, "with_nested_markets": True}
+                if cursor:
+                    kw["cursor"] = cursor
+                try:
+                    resp = client.get_events(**kw).to_dict()
+                except Exception as e:
+                    return {"error": f"get_events error on status={s}: {e}"}
+                page = resp.get("events", []) or []
+                events.extend(page)
+                all_seen += len(page)
+                cursor = resp.get("cursor") or resp.get("next_cursor")
+                if ticker:
+                    for ev in page:
+                        if ev.get("event_ticker") == ticker:
+                            picked = ev
+                            break
+                    if picked:
+                        break
+                if not cursor:
                     break
-            if picked is None:
+            if picked:
+                break
+            if not ticker and events:
+                if prefer == "sport":
+                    for ev in events:
+                        series = str(ev.get("series_ticker") or "").upper()
+                        if get_sport(series):
+                            picked = ev
+                            break
+                if picked is None:
+                    picked = events[0]
+                break
+
+        if not picked:
+            if ticker:
                 return {
-                    "error": f"ticker {ticker!r} not in first {len(events)} {status} events",
-                    "hint": "call without ?ticker= to get a sample sport event",
+                    "error": f"ticker {ticker!r} not found in {all_seen} open+closed events",
+                    "hint": "event may be too deep in pagination or in an unusual state",
                 }
-        elif prefer == "sport":
-            for ev in events:
-                series = str(ev.get("series_ticker") or "").upper()
-                if get_sport(series):
-                    picked = ev
-                    break
-            if picked is None:
-                picked = events[0]
-        else:
-            picked = events[0]
+            return {"error": "no events returned"}
 
         markets = picked.get("markets") or []
         first_market = markets[0] if markets else {}
         all_market_fields = set()
+        status_counts: Dict[str, int] = {}
+        result_counts: Dict[str, int] = {}
+        sample_settled = None
+        sample_active = None
         for mk in markets:
             if isinstance(mk, dict):
                 all_market_fields.update(mk.keys())
+                s_val = str(mk.get("status") or "")
+                r_val = str(mk.get("result") or "")
+                status_counts[s_val] = status_counts.get(s_val, 0) + 1
+                result_counts[r_val] = result_counts.get(r_val, 0) + 1
+                if sample_settled is None and (r_val or s_val not in ("active", "")):
+                    sample_settled = mk
+                if sample_active is None and s_val == "active" and not r_val:
+                    sample_active = mk
         return {
             "event_ticker": picked.get("event_ticker"),
             "series_ticker": picked.get("series_ticker"),
             "derived_sport": get_sport(str(picked.get("series_ticker") or "").upper()),
             "event_fields": sorted(list(picked.keys())),
-            "event": picked,
+            "event_top_level_only": {k: v for k, v in picked.items() if k != "markets"},
             "market_count": len(markets),
+            "market_status_counts": status_counts,
+            "market_result_counts": result_counts,
             "first_market_fields": sorted(list(first_market.keys())) if isinstance(first_market, dict) else None,
             "union_of_all_market_fields": sorted(list(all_market_fields)),
-            "first_market": first_market,
+            "sample_active_market": sample_active,
+            "sample_settled_market": sample_settled,
         }
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
