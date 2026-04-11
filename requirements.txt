@@ -3,3 +3,5 @@ uvicorn[standard]
 pandas
 kalshi-python-sync
 python-dotenv
+websockets
+cryptography

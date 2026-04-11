@@ -2,16 +2,43 @@ from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
-import os, time, tempfile, functools
+import os, time, tempfile, functools, asyncio, threading, logging
 from datetime import date, timedelta, timezone
 from typing import Optional
 
+logging.basicConfig(level=logging.INFO)
+
 app = FastAPI(title="OddsIQ API")
+
+
+def _all_market_tickers():
+    """Return every market ticker from the current REST snapshot, used
+    by the Kalshi WebSocket client to know what to subscribe to."""
+    records = _cache.get("data") or []
+    seen = set()
+    out = []
+    for r in records:
+        for o in r.get("outcomes", []):
+            tk = o.get("ticker")
+            if tk and tk not in seen:
+                seen.add(tk)
+                out.append(tk)
+    return out
+
 
 @app.on_event("startup")
 async def startup_event():
     global _cache
     _cache = {"data": None, "ts": 0}
+    # Build the REST snapshot eagerly in a thread so the WS client has
+    # tickers to subscribe to without waiting for a first user request.
+    threading.Thread(target=get_data, daemon=True).start()
+    # Launch the Kalshi WebSocket client as an asyncio background task.
+    try:
+        from kalshi_ws import run_ws_client
+        asyncio.create_task(run_ws_client(_all_market_tickers))
+    except Exception as e:
+        logging.getLogger("oddsiq").warning("failed to start ws client: %s", e)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 UTC = timezone.utc
@@ -325,6 +352,79 @@ def paginate(with_markets=False, max_pages=30):
                 else: break
     return events
 
+# ── Price helpers ──────────────────────────────────────────────────────────────
+def _cents_from(mk, dollars_key, cents_key):
+    """Read a Kalshi market-dict price into integer cents, accepting
+    either the *_dollars decimal or the raw cents field."""
+    v = mk.get(dollars_key)
+    if v is not None:
+        try: return float(v) * 100
+        except: pass
+    v = mk.get(cents_key)
+    if v is not None:
+        try: return float(v)
+        except: pass
+    return None
+
+
+def _midprice_and_ask(yb, ya, nb, na):
+    """Given bid/ask in cents for YES and NO, return (chance, yes, no)
+    cents. Chance is the midprice between yes bid and yes ask (what
+    Kalshi displays as the implied chance %). YES/NO prices are the
+    asks (what you'd pay to buy), falling back to bids if no ask is
+    quoted. Any side may be None."""
+    if yb is not None and ya is not None:
+        chance_c = (yb + ya) / 2
+    elif yb is not None and nb is not None:
+        chance_c = (yb + (100 - nb)) / 2
+    elif ya is not None and na is not None:
+        chance_c = ((100 - na) + ya) / 2
+    elif ya is not None:
+        chance_c = ya
+    elif yb is not None:
+        chance_c = yb
+    elif nb is not None:
+        chance_c = 100 - nb
+    elif na is not None:
+        chance_c = 100 - na
+    else:
+        chance_c = None
+    yes_c = ya if ya is not None else yb
+    no_c  = na if na is not None else nb
+    return chance_c, yes_c, no_c
+
+
+def _format_outcomes(stored_outcomes):
+    """Turn stored raw-cents outcomes into display-ready outcomes,
+    overlaying live WebSocket prices from LIVE_PRICES where available."""
+    try:
+        from kalshi_ws import LIVE_PRICES
+    except Exception:
+        LIVE_PRICES = {}
+    out = []
+    for o in stored_outcomes:
+        tk = o.get("ticker", "")
+        yb = o.get("_yb")
+        ya = o.get("_ya")
+        nb = o.get("_nb")
+        na = o.get("_na")
+        live = LIVE_PRICES.get(tk) if tk else None
+        if live:
+            if live.get("yes_bid") is not None: yb = live["yes_bid"]
+            if live.get("yes_ask") is not None: ya = live["yes_ask"]
+            if live.get("no_bid")  is not None: nb = live["no_bid"]
+            if live.get("no_ask")  is not None: na = live["no_ask"]
+        chance_c, yes_c, no_c = _midprice_and_ask(yb, ya, nb, na)
+        out.append({
+            "label":  o.get("label", ""),
+            "ticker": tk,
+            "chance": f"{int(round(chance_c))}%" if chance_c is not None else "—",
+            "yes":    f"{int(round(yes_c))}¢"    if yes_c    is not None else "—",
+            "no":     f"{int(round(no_c))}¢"     if no_c     is not None else "—",
+        })
+    return out
+
+
 # ── Cache with TTL ─────────────────────────────────────────────────────────────
 _cache = {"data": None, "ts": 0}  # cache cleared on startup
 CACHE_TTL = 1800
@@ -392,54 +492,25 @@ def get_data():
         else:
             sort_ts_dt = None
         outcomes = []
-        def _cents(mk, dollars_key, cents_key):
-            v = mk.get(dollars_key)
-            if v is not None:
-                try: return float(v) * 100
-                except: pass
-            v = mk.get(cents_key)
-            if v is not None:
-                try: return float(v)
-                except: pass
-            return None
         for mk in mkts:
             label = str(mk.get("yes_sub_title") or "").strip()
             if not label:
                 t = str(mk.get("ticker") or "")
                 parts = t.rsplit("-", 1)
                 label = parts[-1] if len(parts) > 1 else t
-            yb = _cents(mk, "yes_bid_dollars", "yes_bid")
-            ya = _cents(mk, "yes_ask_dollars", "yes_ask")
-            nb = _cents(mk, "no_bid_dollars",  "no_bid")
-            na = _cents(mk, "no_ask_dollars",  "no_ask")
-            # Implied chance = midprice between yes bid and yes ask.
-            # In a two-sided market, yes_ask ≈ 100 - no_bid, so we can
-            # derive a fair mid even if only one side quotes an ask.
-            if yb is not None and ya is not None:
-                chance_c = (yb + ya) / 2
-            elif yb is not None and nb is not None:
-                chance_c = (yb + (100 - nb)) / 2
-            elif ya is not None and na is not None:
-                chance_c = ((100 - na) + ya) / 2
-            elif ya is not None:
-                chance_c = ya
-            elif yb is not None:
-                chance_c = yb
-            elif nb is not None:
-                chance_c = 100 - nb
-            elif na is not None:
-                chance_c = 100 - na
-            else:
-                chance_c = None
-            # YES/NO boxes show the ask (what you'd pay to buy), matching
-            # how Kalshi displays its order book prices. Fall back to bid
-            # if ask isn't quoted.
-            yes_c = ya if ya is not None else yb
-            no_c  = na if na is not None else nb
-            chance = f"{int(round(chance_c))}%" if chance_c is not None else "—"
-            yes    = f"{int(round(yes_c))}¢"    if yes_c    is not None else "—"
-            no     = f"{int(round(no_c))}¢"     if no_c     is not None else "—"
-            outcomes.append({"label":label[:35],"chance":chance,"yes":yes,"no":no})
+            yb = _cents_from(mk, "yes_bid_dollars", "yes_bid")
+            ya = _cents_from(mk, "yes_ask_dollars", "yes_ask")
+            nb = _cents_from(mk, "no_bid_dollars",  "no_bid")
+            na = _cents_from(mk, "no_ask_dollars",  "no_ask")
+            # Store raw cents + market ticker. The chance/yes/no display
+            # strings are computed per-request by _format_outcomes() so
+            # live WebSocket updates flow through without rebuilding the
+            # REST snapshot cache.
+            outcomes.append({
+                "label":  label[:35],
+                "ticker": str(mk.get("ticker","")),
+                "_yb": yb, "_ya": ya, "_nb": nb, "_na": na,
+            })
         # Show date+time if we have kickoff, otherwise just date
         if kickoff_dt and game_date:
             try:
@@ -633,7 +704,14 @@ def get_events(
 
     total = len(results)
     page  = results[offset:offset+limit]
-    return {"total": total, "offset": offset, "limit": limit, "events": page}
+    # Overlay live WebSocket prices on the paginated page. We only copy
+    # the outcomes field so the cached records stay untouched.
+    formatted = []
+    for r in page:
+        rc = dict(r)
+        rc["outcomes"] = _format_outcomes(r.get("outcomes", []))
+        formatted.append(rc)
+    return {"total": total, "offset": offset, "limit": limit, "events": formatted}
 
 @app.get("/api/sports")
 def get_sports():
@@ -712,6 +790,16 @@ def refresh():
     global _cache
     _cache = {"data": None, "ts": 0}  # cache cleared on startup
     return {"ok": True}
+
+@app.get("/api/ws_status")
+def ws_status():
+    """Debug endpoint: reports the Kalshi WebSocket connection state
+    and how many markets have received at least one live price tick."""
+    try:
+        from kalshi_ws import STATUS, LIVE_PRICES
+        return {"status": dict(STATUS), "live_count": len(LIVE_PRICES)}
+    except Exception as e:
+        return {"status": None, "error": str(e)}
 
 # ── Serve frontend ─────────────────────────────────────────────────────────────
 import os as _os

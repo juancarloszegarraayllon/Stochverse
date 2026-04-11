@@ -364,7 +364,7 @@ function buildCard(ev) {
   var url = series ? "https://kalshi.com/markets/" + series.toLowerCase() + "/" + series.toLowerCase().replace("kx", "") + "/" + ticker.toLowerCase() : "";
   var outcomes = ev.outcomes || [];
 
-  var h = "<div class=\"market-card\">";
+  var h = "<div class=\"market-card\" data-event-ticker=\"" + (ticker || "") + "\">";
   var subcat = ev._subcat || "";
   h += "<div class=\"card-top\">";
   h += "<div style=\"display:flex;gap:6px;align-items:center;flex-wrap:wrap\">";
@@ -475,6 +475,45 @@ document.getElementById("layout-toggle").addEventListener("click", function() {
     btn.textContent = "⊞";
   }
 });
+
+// Live refresh: every 5s, re-fetch the currently visible cards and
+// update their odds numbers in place. Backend overlays WebSocket
+// prices on top of the REST snapshot, so the numbers are near real
+// time without rebuilding the full DOM.
+async function refreshVisible() {
+  if (state.category === null || state.loading || state.offset === 0) return;
+  var url = "/api/events?offset=0&limit=" + state.offset + "&date_filter=" + state.dateFilter + "&sort=" + state.sort;
+  if (state.dateFilter === "custom" && state.dateFrom) url += "&date_from=" + state.dateFrom;
+  if (state.dateFilter === "custom" && state.dateTo) url += "&date_to=" + state.dateTo;
+  if (state.category && state.category !== "All") url += "&category=" + encodeURIComponent(state.category);
+  if (state.sport) url += "&sport=" + encodeURIComponent(state.sport);
+  if (state.soccerComp) url += "&soccer_comp=" + encodeURIComponent(state.soccerComp);
+  if (state.search) url += "&search=" + encodeURIComponent(state.search);
+  try {
+    var r = await fetch(url);
+    var d = await r.json();
+    var evs = d.events || [];
+    var grid = document.getElementById("cards-grid");
+    for (var i = 0; i < evs.length; i++) {
+      var ev = evs[i];
+      var sel = '[data-event-ticker="' + (ev.event_ticker || "").replace(/"/g, '\\"') + '"]';
+      var card = grid.querySelector(sel);
+      if (!card) continue;
+      var rows = card.querySelectorAll(".outcome-row");
+      var outs = ev.outcomes || [];
+      for (var j = 0; j < rows.length && j < outs.length; j++) {
+        var row = rows[j];
+        var o = outs[j];
+        var chanceEl = row.querySelector(".outcome-chance");
+        if (chanceEl && chanceEl.textContent !== o.chance) chanceEl.textContent = o.chance;
+        var odds = row.querySelectorAll(".odds-price");
+        if (odds[0] && odds[0].textContent !== o.yes) odds[0].textContent = o.yes;
+        if (odds[1] && odds[1].textContent !== o.no) odds[1].textContent = o.no;
+      }
+    }
+  } catch (e) { /* swallow: next tick will try again */ }
+}
+setInterval(refreshVisible, 5000);
 
 boot();
 </script>
