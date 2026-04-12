@@ -1262,7 +1262,20 @@ def get_events(
                 except Exception:
                     pass
             return 1  # pre-match / upcoming
-        dated.sort(key=lambda r: (_live_rank(r), r.get("_sort_ts", "")))
+        # Sort by live rank first (in-progress → top), then by time
+        # respecting the user's earliest/latest preference.
+        rev = (sort == "latest")
+        dated.sort(key=lambda r: (
+            _live_rank(r),
+            r.get("_sort_ts", "") if not rev else "",
+        ))
+        if rev:
+            # Stable sort: live group reversed, pre-match group reversed
+            live_group = [r for r in dated if _live_rank(r) == 0]
+            pre_group = [r for r in dated if _live_rank(r) != 0]
+            live_group.sort(key=lambda r: r.get("_sort_ts", ""), reverse=True)
+            pre_group.sort(key=lambda r: r.get("_sort_ts", ""), reverse=True)
+            dated = live_group + pre_group
     results = dated + undated
 
     # (match_game imports moved above the filter loop)
