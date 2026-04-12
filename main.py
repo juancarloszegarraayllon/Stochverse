@@ -253,29 +253,51 @@ def get_sport(series_ticker):
 
 # ── Game-market grouping ──────────────────────────────────────────────────────
 # Kalshi publishes a single game's different market types as
-# separate events that all share the same game-suffix. Example for
-# Washington at Pittsburgh on Apr 11:
-#   KXNHLGAME-26APR11WSHPIT    (moneyline — parent/primary card)
-#   KXNHLSPREAD-26APR11WSHPIT  (puck line)
-#   KXNHLTOTAL-26APR11WSHPIT   (over/under goals)
+# separate events that all share the same game-suffix in the
+# event_ticker. Examples:
+#   KXNHLGAME-26APR11WSHPIT    →  moneyline (parent)
+#   KXNHLSPREAD-26APR11WSHPIT  →  puck line
+#   KXNHLTOTAL-26APR11WSHPIT   →  over/under
 # Kalshi's own UI merges these into one card with tabs. We do the
-# same: the moneyline becomes the parent, the siblings become
-# additional market_groups on that parent, and the sibling events
-# are dropped from the top-level records list so they don't also
-# render as independent cards.
+# same: the moneyline becomes the parent, siblings become tabs,
+# and sibling events are dropped from the records list.
 #
-# First pass: NHL only. Once we've eyeballed the UX on a real
-# Washington vs Pittsburgh card we can extend this map to NBA /
-# MLB / NFL / EPL / La Liga / UCL etc. — the pattern is identical
-# across leagues, only the prefix changes. NHL doesn't appear to
-# publish a BTTS or first-period sibling series, so this first
-# pass is three tabs: Winner / Puck Line / Totals.
-GAME_MARKET_PREFIXES = {
-    # series_ticker prefix → (type_code, display_label, tab priority, is_primary)
-    "KXNHLGAME":   ("moneyline", "Winner",    0, True),
-    "KXNHLSPREAD": ("spread",    "Puck Line", 1, False),
-    "KXNHLTOTAL":  ("total",     "Totals",    2, False),
-}
+# Auto-detect: scan _SPORT_SERIES for every series ending with
+# "GAME" as a primary parent, then check which sibling suffixes
+# (SPREAD, TOTAL, BTTS, 1H, etc.) also exist. This covers every
+# league without a manually-maintained per-league map.
+_SIBLING_SUFFIXES = [
+    # (suffix, type_code, fallback_label, tab_priority)
+    ("SPREAD",    "spread",    "Spread",     1),
+    ("TOTAL",     "total",     "Totals",     2),
+    ("BTTS",      "btts",      "Both Score", 3),
+    ("TEAMTOTAL", "teamtotal", "Team Total", 4),
+    ("1H",        "firsthalf", "1st Half",   5),
+    ("1HWINNER",  "1hwinner",  "1st Half",   5),
+    ("1HSPREAD",  "1hspread",  "1H Spread",  6),
+    ("1HTOTAL",   "1htotal",   "1H Totals",  7),
+    ("2HWINNER",  "2hwinner",  "2nd Half",   8),
+    ("RFI",       "rfi",       "RFI",        9),
+    ("F5",        "f5",        "First 5",   10),
+    ("F5SPREAD",  "f5spread",  "F5 Spread", 11),
+    ("F5TOTAL",   "f5total",   "F5 Totals", 12),
+]
+
+# Build map automatically from _SPORT_SERIES.
+_all_series = set()
+for _sl in _SPORT_SERIES.values():
+    _all_series.update(s.upper() for s in _sl)
+GAME_MARKET_PREFIXES = {}
+for _s in sorted(_all_series):
+    if _s.endswith("GAME"):
+        _prefix = _s[:-4]  # strip "GAME"
+        if not _prefix:
+            continue
+        GAME_MARKET_PREFIXES[_s] = ("moneyline", "Winner", 0, True)
+        for _suffix, _tc, _lbl, _pri in _SIBLING_SUFFIXES:
+            _sibling = _prefix + _suffix
+            if _sibling in _all_series:
+                GAME_MARKET_PREFIXES[_sibling] = (_tc, _lbl, _pri, False)
 
 
 def _game_suffix(event_ticker: str) -> str:
