@@ -539,7 +539,10 @@ function isLive(ev) {
     var now = Date.now();
     var k = new Date(ev._kickoff_dt).getTime();
     var g = new Date(ev._game_end_dt).getTime();
-    return k <= now && now < g;
+    // Add 2h buffer for matches that run longer than the estimated
+    // DURATION (tennis 3-setters, soccer extra time, overtime, etc.)
+    var buffer = 2 * 60 * 60 * 1000;
+    return k <= now && now < (g + buffer);
   } catch (e) { return false; }
 }
 
