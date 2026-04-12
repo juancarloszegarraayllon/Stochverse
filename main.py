@@ -1150,6 +1150,27 @@ def get_events(
                 g = sdb_match_game(title, sport)
             if g is None and sofa_match_game is not None:
                 g = sofa_match_game(title, sport)
+        # Guard against back-to-back series (same teams on
+        # consecutive days, e.g. PIT at WSH Apr 11 + WSH at PIT
+        # Apr 12). The team-name matcher can't distinguish these
+        # because the titles are identical — only the dates differ.
+        # Compare the matched game's scheduled start against the
+        # Kalshi event's estimated kickoff. If they're more than
+        # 18 hours apart, this is a different day's game; drop the
+        # match so the wrong event doesn't show live state / scores.
+        if g and g.get("scheduled_kickoff_ms"):
+            kdt_str = r.get("_kickoff_dt") or r.get("_sort_ts")
+            if kdt_str:
+                try:
+                    from datetime import datetime as _datetime
+                    espn_dt = _datetime.fromtimestamp(
+                        g["scheduled_kickoff_ms"] / 1000, tz=timezone.utc
+                    )
+                    kalshi_dt = _datetime.fromisoformat(kdt_str)
+                    if abs((espn_dt - kalshi_dt).total_seconds()) > 18 * 3600:
+                        g = None
+                except Exception:
+                    pass
         if g:
             # Base compact label from the feed. For tennis we flip
             # the per-set pairs to match the Kalshi title order so
