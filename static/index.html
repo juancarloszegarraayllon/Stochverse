@@ -43,6 +43,7 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 .market-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0;overflow:hidden}
 .market-card:hover{border-color:#333}
 .card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:6px;flex-wrap:wrap;min-width:0}
+.card-live-row{margin:4px 0 2px}
 .card-pills{display:flex;flex-direction:column;gap:2px}
 .cat-pill{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text)}
 .subcat-pill{font-size:11px;color:#888;letter-spacing:0.3px}
@@ -856,15 +857,17 @@ function buildCard(ev) {
 
   var h = "<div class=\"market-card\" data-event-ticker=\"" + (ticker || "") + "\">";
   var subcat = ev._subcat || "";
-  h += "<div class=\"card-top\">";
+  // Row 1: icon + category + subcategory
   h += "<div style=\"display:flex;gap:6px;align-items:center;flex-wrap:wrap\">";
   if (icon) h += "<span class=\"cat-icon\">" + icon + "</span>";
   h += "<span class=\"cat-pill\">" + label + "</span>";
   if (subcat) h += "<span class=\"sub-pill\">" + subcat + "</span>";
   h += "</div>";
-  h += '<span class="card-time-slot">' + renderTimeSlot(ev) + '</span>';
-  h += "</div>";
+  // Row 2: event title
   h += "<div class=\"card-title\">" + ev.title + "</div>";
+  // Row 3: live badge / date + ticker link
+  var timeSlot = renderTimeSlot(ev);
+  if (timeSlot) h += "<div class=\"card-live-row\">" + timeSlot + "</div>";
   h += "<div class=\"card-ticker\">";
   if (url) h += "<a href=\"" + url + "\" target=\"_blank\">" + ticker + "</a>";
   else h += "<span>" + ticker + "</span>";
@@ -1106,7 +1109,7 @@ async function refreshVisible() {
       if (!card) continue;
       // Keep the LIVE badge / date in sync so games that cross kickoff
       // while the tab is open flip to live automatically.
-      var slot = card.querySelector(".card-time-slot");
+      var slot = card.querySelector(".card-live-row");
       if (slot) {
         var fresh = renderTimeSlot(ev);
         if (slot.innerHTML !== fresh) slot.innerHTML = fresh;
