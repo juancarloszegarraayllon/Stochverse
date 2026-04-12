@@ -16,8 +16,13 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 #search-input::placeholder{color:var(--text-muted)}
 #date-sel{background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:13px;font-family:inherit;outline:none;cursor:pointer}
 #sort-sel{background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:13px;font-family:inherit;outline:none;cursor:pointer}
-#view-toggle{background:var(--bg2);border:1px solid var(--border);color:var(--text-dim);padding:6px 12px;border-radius:6px;font-size:11px;font-family:inherit;cursor:pointer;white-space:nowrap;transition:color 0.12s,border-color 0.12s}
-#view-toggle:hover{color:var(--text);border-color:var(--text-muted)}
+.control-group{display:flex;flex-direction:column;align-items:center;gap:2px}
+.control-label{font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;color:var(--text-muted)}
+.btn-pair{display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.pair-btn{background:var(--bg2);border:none;color:var(--text-dim);padding:5px 10px;font-size:11px;font-family:inherit;cursor:pointer;transition:background 0.12s,color 0.12s}
+.pair-btn:not(:last-child){border-right:1px solid var(--border)}
+.pair-btn:hover{color:var(--text)}
+.pair-btn.active{background:var(--green);color:#000;font-weight:700}
 #cat-tabs{display:flex;gap:0;border-bottom:1px solid var(--green-line);overflow-x:auto;scrollbar-width:none}
 #cat-tabs::-webkit-scrollbar{display:none}
 .cat-tab{padding:10px 18px;font-size:15px;font-weight:600;color:var(--text);cursor:pointer;border:none;background:transparent;font-family:inherit;white-space:nowrap;border-bottom:2px solid transparent;transition:color 0.2s;margin-bottom:-1px}
@@ -34,8 +39,7 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 #content{flex:1;padding:20px 20px;min-width:0}
 #cards-grid{display:none;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
 #cards-grid.list-view{grid-template-columns:1fr;gap:14px;max-width:600px}
-#layout-toggle{background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:7px 10px;border-radius:6px;font-size:13px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:5px;flex-shrink:0}
-#layout-toggle:hover{border-color:var(--green);color:var(--green)}
+/* control-group styles handle the view and layout button pairs */
 .market-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0;overflow:hidden}
 .market-card:hover{border-color:#333}
 .card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:6px;flex-wrap:wrap;min-width:0}
@@ -119,7 +123,7 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
   #header{padding:10px 16px 0}
   #controls{flex-wrap:wrap;gap:8px}
   #logo{font-size:1.4rem;order:1}
-  #layout-toggle{order:2;margin-left:auto}
+  .control-group{order:2}
   #search-input{order:3;flex:1 1 100%;min-width:0}
   #date-sel{order:4}
   #sort-sel{order:5}
@@ -136,7 +140,7 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
   #logo{font-size:1.2rem;order:1;flex:0 0 auto}
   #controls{gap:6px;padding-bottom:8px}
   /* Row 1: Logo + Date + Sort. Row 2: full-width search. */
-  #layout-toggle{display:none}
+  .control-group:last-child{display:none}
   #date-sel{order:2;flex:0 1 auto;min-width:0;font-size:12px;padding:7px 8px}
   #sort-sel{order:3;flex:0 1 auto;min-width:0;font-size:12px;padding:7px 8px}
   #search-input{order:4;flex:1 1 100%;min-width:0;font-size:13px;padding:7px 12px}
@@ -196,8 +200,20 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
       <option value="earliest">Earliest first</option>
       <option value="latest">Latest first</option>
     </select>
-    <button id="view-toggle" title="Switch between Game View and All Markets"></button>
-    <button id="layout-toggle" title="Toggle layout" style="font-size:16px;line-height:1">⊞</button>
+    <div class="control-group">
+      <span class="control-label">Market View</span>
+      <div class="btn-pair">
+        <button id="view-game" class="pair-btn active">Game</button>
+        <button id="view-all" class="pair-btn">All</button>
+      </div>
+    </div>
+    <div class="control-group">
+      <span class="control-label">Grid/List</span>
+      <div class="btn-pair">
+        <button id="layout-grid" class="pair-btn active">⊞</button>
+        <button id="layout-list" class="pair-btn">☰</button>
+      </div>
+    </div>
   </div>
   <div id="cat-tabs"></div>
 </div>
@@ -953,38 +969,33 @@ document.getElementById("sort-sel").addEventListener("change", function(e) {
   loadMore();
 });
 
-// View toggle: Game View (tabbed, default) vs All Markets (flat)
-function updateViewToggle() {
-  var btn = document.getElementById("view-toggle");
-  if (state.viewMode === "all") {
-    btn.textContent = "All Markets";
-  } else {
-    btn.textContent = "Game View";
-  }
-}
-updateViewToggle();
-document.getElementById("view-toggle").addEventListener("click", function() {
-  state.viewMode = state.viewMode === "game" ? "all" : "game";
-  updateViewToggle();
+// Market View: Game (tabbed, default) vs All (flat)
+function setViewMode(mode) {
+  state.viewMode = mode;
+  document.getElementById("view-game").classList.toggle("active", mode === "game");
+  document.getElementById("view-all").classList.toggle("active", mode === "all");
   state.offset = 0;
   state.allLoaded = false;
   document.getElementById("cards-grid").innerHTML = "";
   loadMore();
-});
+}
+document.getElementById("view-game").addEventListener("click", function() { setViewMode("game"); });
+document.getElementById("view-all").addEventListener("click", function() { setViewMode("all"); });
 
-document.getElementById("layout-toggle").addEventListener("click", function() {
+// Grid/List layout
+function setLayout(mode) {
+  state.layout = mode;
   var grid = document.getElementById("cards-grid");
-  var btn = document.getElementById("layout-toggle");
-  if (state.layout === "grid") {
-    state.layout = "list";
+  document.getElementById("layout-grid").classList.toggle("active", mode === "grid");
+  document.getElementById("layout-list").classList.toggle("active", mode === "list");
+  if (mode === "list") {
     grid.classList.add("list-view");
-    btn.textContent = "☰";
   } else {
-    state.layout = "grid";
     grid.classList.remove("list-view");
-    btn.textContent = "⊞";
   }
-});
+}
+document.getElementById("layout-grid").addEventListener("click", function() { setLayout("grid"); });
+document.getElementById("layout-list").addEventListener("click", function() { setLayout("list"); });
 
 // Live refresh: every 5s, re-fetch the currently visible cards and
 // update their odds numbers in place. Backend overlays WebSocket
