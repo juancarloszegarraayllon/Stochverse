@@ -1191,11 +1191,26 @@ def get_events(
     dated = [r for r in results if r.get("_sort_ts")]
     undated = [r for r in results if not r.get("_sort_ts")]
     dated.sort(key=lambda r: r["_sort_ts"], reverse=(sort == "latest"))
-    # When viewing Live, float confirmed-live events (ESPN state=in)
-    # above today's pre-match events so in-progress games show first.
+    # When viewing Live, float in-progress events above today's
+    # pre-match events so active games show first. Check both
+    # _is_live (ESPN-confirmed) and the kickoff window (for events
+    # ESPN didn't match but are in progress by time).
     if category == "Live":
-        dated.sort(key=lambda r: (0 if r.get("_is_live") else 1, r.get("_sort_ts", "")),
-                   reverse=False)
+        def _live_rank(r):
+            if r.get("_is_live"):
+                return 0  # ESPN-confirmed live
+            kdt = r.get("_kickoff_dt")
+            gdt = r.get("_game_end_dt")
+            if kdt and gdt:
+                try:
+                    k = _dt.fromisoformat(kdt)
+                    g = _dt.fromisoformat(gdt)
+                    if k <= now_utc < g:
+                        return 0  # in kickoff window
+                except Exception:
+                    pass
+            return 1  # pre-match / upcoming
+        dated.sort(key=lambda r: (_live_rank(r), r.get("_sort_ts", "")))
     results = dated + undated
 
     # (match_game imports moved above the filter loop)
