@@ -140,15 +140,19 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
   #header{padding:8px 12px 0}
   #logo{font-size:1.2rem;order:1;flex:0 0 auto}
   #controls{gap:6px;padding-bottom:8px}
-  /* Row 1: Logo + Search. Row 2: Date + Sort + toggles (right). */
+  /* Row 1: Logo + Search. Row 2: Date + Sort + Market View + Grid/List. */
   .control-label{display:none}
   .pair-btn{padding:4px 7px;font-size:10px}
+  #controls{flex-wrap:wrap;gap:6px;padding-bottom:6px}
   #logo{order:1;flex:0 0 auto}
   #search-input{order:2;flex:1 1 auto;min-width:0;font-size:13px;padding:7px 12px}
-  #date-sel{order:3;flex:0 1 auto;min-width:0;font-size:12px;padding:7px 8px}
-  #sort-sel{order:4;flex:0 1 auto;min-width:0;font-size:12px;padding:7px 8px}
-  .control-group{display:flex;order:5}
+  #date-sel{order:3;flex:0 0 auto;min-width:0;font-size:11px;padding:6px 8px}
+  #sort-sel{order:4;flex:0 0 auto;min-width:0;font-size:11px;padding:6px 8px}
+  .control-group{display:flex;order:5;gap:1px}
   .control-group:last-child{order:6}
+  /* Force row break after search */
+  #search-input{flex-basis:calc(100% - 80px)}
+  /* No row break between date/sort/toggles — all on row 2 */
   .cat-tab{padding:8px 12px;font-size:13px}
   #main{margin-top:130px;display:block}
   /* Sidebar on phone becomes a horizontal scroll strip above the cards */
