@@ -716,7 +716,7 @@ def get_data():
     if _cache["data"] is not None and now - _cache["ts"] < CACHE_TTL:
         return _cache["data"]
 
-    all_ev = paginate(with_markets=True, max_pages=30)
+    all_ev = paginate(with_markets=True, max_pages=50)
     if not all_ev:
         return []
 
