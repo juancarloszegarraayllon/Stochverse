@@ -947,6 +947,21 @@ def get_data():
         if mg is None and _fm_cache:
             mg = _fm_cache(_ti, _sp)
         if mg and mg.get("state") == "in":
+            # Date guard: reject matches where the ESPN game's
+            # scheduled start is >18h from the Kalshi event's
+            # kickoff. Prevents "Chelsea vs Man City (today)"
+            # from marking "Chelsea vs Man Utd (next week)" live.
+            sched_ms = mg.get("scheduled_kickoff_ms")
+            kdt_str = r.get("_kickoff_dt") or r.get("_sort_ts")
+            if sched_ms and kdt_str:
+                try:
+                    from datetime import datetime as _dtc
+                    espn_dt = _dtc.fromtimestamp(sched_ms / 1000, tz=timezone.utc)
+                    kalshi_dt = _dtc.fromisoformat(kdt_str)
+                    if abs((espn_dt - kalshi_dt).total_seconds()) > 18 * 3600:
+                        continue  # wrong day's game
+                except Exception:
+                    pass
             r["_is_live"] = True
             live_count += 1
     sport_count = sum(1 for r in records if r.get("_is_sport"))
