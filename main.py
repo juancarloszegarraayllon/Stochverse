@@ -1038,24 +1038,32 @@ def get_events(
                     continue  # sport but NOT confirmed live — skip
                 else:
                     # Non-sport event (crypto, politics, etc.).
-                    # "Live" = event resolves today. Include if
-                    # exp_dt is same UTC date as now, or within
-                    # 18h (handles timezone edge cases like a 9PM
-                    # EDT event = 1AM UTC next day). Matches how
-                    # Kalshi shows same-day resolving markets as
-                    # live — elections, crypto, weather, etc.
+                    # "Live" = event is happening today. Three ways
+                    # to qualify:
+                    #   1. Ticker date matches today (e.g. APR12 in
+                    #      KXHUNGARYMOV-26APR12 = election today)
+                    #   2. exp_dt is same UTC date as now
+                    #   3. exp_dt within 18h (timezone edge cases)
+                    # This handles cases where Kalshi's exp_dt is
+                    # days/weeks after the actual event (elections
+                    # settle later than they happen).
                     edt = r.get("_exp_dt")
-                    if not edt:
-                        continue
-                    try:
-                        e = _dt.fromisoformat(edt)
-                        if now_utc >= e:
-                            continue  # already settled
-                        same_day = e.date() == now_utc.date()
-                        within_18h = (e - now_utc).total_seconds() <= 18 * 3600
-                        if not (same_day or within_18h):
+                    ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
+                    today_date = now_utc.date()
+                    if ticker_date and ticker_date == today_date:
+                        pass  # event happening today — include
+                    elif edt:
+                        try:
+                            e = _dt.fromisoformat(edt)
+                            if now_utc >= e:
+                                continue  # already settled
+                            same_day = e.date() == today_date
+                            within_18h = (e - now_utc).total_seconds() <= 18 * 3600
+                            if not (same_day or within_18h):
+                                continue
+                        except Exception:
                             continue
-                    except Exception:
+                    else:
                         continue
             elif category == "Sports":
                 if not r["_is_sport"]: continue
@@ -1381,19 +1389,21 @@ def get_sports(live: bool = False):
                 continue  # sport but not confirmed live
             else:
                 edt = r.get("_exp_dt")
-                if not edt:
-                    continue
-                try:
-                    e = _dt.fromisoformat(edt)
-                    if now_utc >= e:
-                        continue
-                    same_day = e.date() == now_utc.date()
-                    within_18h = (e - now_utc).total_seconds() <= 18 * 3600
-                    if not (same_day or within_18h):
-                        continue
+                ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
+                today_date = now_utc.date()
+                if ticker_date and ticker_date == today_date:
                     filtered.append(r)
-                except Exception:
-                    pass
+                elif edt:
+                    try:
+                        e = _dt.fromisoformat(edt)
+                        if now_utc >= e:
+                            continue
+                        same_day = e.date() == today_date
+                        within_18h = (e - now_utc).total_seconds() <= 18 * 3600
+                        if same_day or within_18h:
+                            filtered.append(r)
+                    except Exception:
+                        pass
         records = filtered
     sport_counts = {}
     soccer_comps = set()
