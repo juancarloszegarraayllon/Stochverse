@@ -942,6 +942,30 @@ def get_events(
     from datetime import datetime as _dt
     now_utc = _dt.now(timezone.utc)
 
+    # When category=Live, pre-build a set of event tickers that
+    # ESPN/SofaScore confirm as currently in progress. This makes
+    # the Live filter match what the frontend's isLive() shows: if
+    # a feed says state="in", include it regardless of whether the
+    # estimated kickoff window is slightly off.
+    _confirmed_live = set()
+    if category == "Live":
+        for r in records:
+            if not r.get("_is_sport"):
+                continue
+            _sp = r.get("_sport", "")
+            _ti = r.get("title", "")
+            if not (_sp and _ti):
+                continue
+            mg = None
+            if match_game is not None:
+                mg = match_game(_ti, _sp)
+            if mg is None and sdb_match_game is not None:
+                mg = sdb_match_game(_ti, _sp)
+            if mg is None and sofa_match_game is not None:
+                mg = sofa_match_game(_ti, _sp)
+            if mg and mg.get("state") == "in":
+                _confirmed_live.add(r.get("event_ticker"))
+
     # Filter
     results = []
     for r in records:
@@ -1102,30 +1126,6 @@ def get_events(
         from sofascore_feed import match_game as sofa_match_game
     except Exception:
         sofa_match_game = None
-
-    # When category=Live, pre-build a set of event tickers that
-    # ESPN/SofaScore confirm as currently in progress. This makes
-    # the Live filter match what the frontend's isLive() shows: if
-    # a feed says state="in", include it regardless of whether the
-    # estimated kickoff window is slightly off.
-    _confirmed_live = set()
-    if category == "Live":
-        for r in records:
-            if not r.get("_is_sport"):
-                continue
-            sport = r.get("_sport", "")
-            title = r.get("title", "")
-            if not (sport and title):
-                continue
-            mg = None
-            if match_game is not None:
-                mg = match_game(title, sport)
-            if mg is None and sdb_match_game is not None:
-                mg = sdb_match_game(title, sport)
-            if mg is None and sofa_match_game is not None:
-                mg = sofa_match_game(title, sport)
-            if mg and mg.get("state") == "in":
-                _confirmed_live.add(r.get("event_ticker"))
 
     total = len(results)
     page  = results[offset:offset+limit]
