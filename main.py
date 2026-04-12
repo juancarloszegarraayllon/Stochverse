@@ -1038,12 +1038,12 @@ def get_events(
                     continue  # sport but NOT confirmed live — skip
                 else:
                     # Non-sport event (crypto, politics, etc.).
-                    # "Live" = outcome actively being determined and
-                    # resolves soon. Include if exp_dt is within the
-                    # next 6h and hasn't settled yet. This matches
-                    # Kalshi's behavior for BTC daily / weather /
-                    # politics markets that trade all day and resolve
-                    # at a specific time.
+                    # "Live" = event resolves today. Include if
+                    # exp_dt is same UTC date as now, or within
+                    # 18h (handles timezone edge cases like a 9PM
+                    # EDT event = 1AM UTC next day). Matches how
+                    # Kalshi shows same-day resolving markets as
+                    # live — elections, crypto, weather, etc.
                     edt = r.get("_exp_dt")
                     if not edt:
                         continue
@@ -1051,8 +1051,10 @@ def get_events(
                         e = _dt.fromisoformat(edt)
                         if now_utc >= e:
                             continue  # already settled
-                        if (e - now_utc).total_seconds() > 6 * 3600:
-                            continue  # resolves in >6h, not live yet
+                        same_day = e.date() == now_utc.date()
+                        within_18h = (e - now_utc).total_seconds() <= 18 * 3600
+                        if not (same_day or within_18h):
+                            continue
                     except Exception:
                         continue
             elif category == "Sports":
@@ -1385,7 +1387,9 @@ def get_sports(live: bool = False):
                     e = _dt.fromisoformat(edt)
                     if now_utc >= e:
                         continue
-                    if (e - now_utc).total_seconds() > 6 * 3600:
+                    same_day = e.date() == now_utc.date()
+                    within_18h = (e - now_utc).total_seconds() <= 18 * 3600
+                    if not (same_day or within_18h):
                         continue
                     filtered.append(r)
                 except Exception:
