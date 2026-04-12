@@ -84,6 +84,8 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 .outcome-expand-btn{margin-top:6px;padding:6px 10px;background:transparent;border:1px solid var(--border);border-radius:5px;color:var(--text-dim);font-family:inherit;font-size:11px;cursor:pointer;width:100%;text-align:center;transition:color 0.15s,border-color 0.15s}
 .outcome-expand-btn:hover{color:var(--text);border-color:var(--text-muted)}
 .outcome-label{flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.outcome-score{min-width:24px;text-align:center;font-size:13px;font-weight:700;color:var(--text);flex-shrink:0}
+.header-score{min-width:24px;text-align:center;font-size:8px;font-weight:700;letter-spacing:0.4px;color:var(--text-muted);text-transform:uppercase;flex-shrink:0}
 .outcome-chance{min-width:58px;text-align:center;font-size:11px;color:var(--text-dim);flex-shrink:0;border-radius:4px}
 .outcome-odds{display:flex;gap:4px;flex-shrink:0}
 .odds-box{padding:4px 8px;border-radius:4px;min-width:36px;text-align:center;font-size:11px;font-weight:700}
@@ -752,15 +754,39 @@ function buildTennisScore(ev) {
   return '<div class="tennis-score">' + renderRow(1) + renderRow(2) + '</div>';
 }
 
+// Build a map of lowercase team-keyword → score from _live_state,
+// used to show scores next to outcome labels on moneyline cards.
+function buildScoreMap(ev) {
+  if (!ev || !ev._live_state) return null;
+  var ls = ev._live_state;
+  var hs = ls.home_score, as_ = ls.away_score;
+  if (hs === "" || hs === undefined || as_ === "" || as_ === undefined) return null;
+  if (ls.state !== "in" && ls.state !== "post") return null;
+  var map = {};
+  // Map by abbreviation (e.g. "COM" → "0", "INT" → "2")
+  if (ls.home_abbr) map[ls.home_abbr.toLowerCase()] = String(hs);
+  if (ls.away_abbr) map[ls.away_abbr.toLowerCase()] = String(as_);
+  return map;
+}
+function matchScore(label, scoreMap) {
+  if (!scoreMap) return "";
+  var ll = label.toLowerCase();
+  for (var key in scoreMap) {
+    if (ll.indexOf(key) >= 0) return scoreMap[key];
+  }
+  return "";
+}
+
 // Render one outcome table (header row + outcome rows + optional
 // expand button). Shared by both the flat single-market card and
 // each market_group tab inside a multi-market card.
-function buildOutcomeTable(outcomes, groupCode) {
+function buildOutcomeTable(outcomes, groupCode, scoreMap) {
   var h = "";
   var total = outcomes.length;
   if (total === 0) return h;
   h += "<div class=\"outcome-header\">";
   h += "<div class=\"outcome-label\"></div>";
+  if (scoreMap) h += "<div class=\"header-score\">Score</div>";
   h += "<div class=\"header-chance\">Probability</div>";
   h += "<div class=\"header-odds\">";
   h += "<div class=\"header-odds-box header-yes\">Yes</div>";
@@ -776,6 +802,10 @@ function buildOutcomeTable(outcomes, groupCode) {
     if (groupCode) h += " data-group=\"" + groupCode + "\"";
     h += ">";
     h += "<div class=\"outcome-label\">" + o.label + "</div>";
+    if (scoreMap) {
+      var sc = matchScore(o.label, scoreMap);
+      h += "<div class=\"outcome-score\">" + sc + "</div>";
+    }
     h += "<div class=\"outcome-chance\">" + o.chance + "</div>";
     h += "<div class=\"outcome-odds\">";
     h += "<div class=\"odds-box odds-yes\">" + o.yes + "</div>";
@@ -824,6 +854,9 @@ function buildCard(ev) {
   h += "</div>";
   // Tennis scoreboard (2 rows per player) when available.
   h += buildTennisScore(ev);
+  // Score map for showing live scores next to team names in
+  // moneyline outcome rows.
+  var scoreMap = buildScoreMap(ev);
 
   if (hasGroups) {
     // Tab strip. First group is active by default (backend orders
@@ -851,11 +884,13 @@ function buildCard(ev) {
       var g2 = groups[t2];
       var activeCls2 = t2 === 0 ? " active" : "";
       h += '<div class="market-group' + activeCls2 + '" data-group="' + g2.type_code + '">';
-      h += buildOutcomeTable(g2.outcomes || [], g2.type_code);
+      // Only show scores on the moneyline (Winner) tab
+      var gScore = (t2 === 0) ? scoreMap : null;
+      h += buildOutcomeTable(g2.outcomes || [], g2.type_code, gScore);
       h += "</div>";
     }
   } else {
-    h += buildOutcomeTable(outcomes, "");
+    h += buildOutcomeTable(outcomes, "", scoreMap);
   }
   h += "</div>";
   return h;
