@@ -1035,7 +1035,14 @@ def get_events(
                 if r.get("_is_live"):
                     pass  # confirmed live by ESPN/SofaScore
                 elif r.get("_is_sport"):
-                    continue  # sport but NOT confirmed live — skip
+                    # Sport but not confirmed live by feed. Still
+                    # include if the ticker date is today — catches
+                    # games scheduled for today that haven't kicked
+                    # off yet (Kalshi shows these as live because
+                    # trading is active).
+                    ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
+                    if not (ticker_date and ticker_date == now_utc.date()):
+                        continue
                 else:
                     # Non-sport event (crypto, politics, etc.).
                     # "Live" = event is happening today. Three ways
@@ -1386,7 +1393,10 @@ def get_sports(live: bool = False):
             if r.get("_is_live"):
                 filtered.append(r)
             elif r.get("_is_sport"):
-                continue  # sport but not confirmed live
+                ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
+                if ticker_date and ticker_date == now_utc.date():
+                    filtered.append(r)
+                continue
             else:
                 edt = r.get("_exp_dt")
                 ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
