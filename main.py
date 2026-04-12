@@ -1191,6 +1191,11 @@ def get_events(
     dated = [r for r in results if r.get("_sort_ts")]
     undated = [r for r in results if not r.get("_sort_ts")]
     dated.sort(key=lambda r: r["_sort_ts"], reverse=(sort == "latest"))
+    # When viewing Live, float confirmed-live events (ESPN state=in)
+    # above today's pre-match events so in-progress games show first.
+    if category == "Live":
+        dated.sort(key=lambda r: (0 if r.get("_is_live") else 1, r.get("_sort_ts", "")),
+                   reverse=False)
     results = dated + undated
 
     # (match_game imports moved above the filter loop)
