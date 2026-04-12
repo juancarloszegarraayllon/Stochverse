@@ -1035,13 +1035,25 @@ def get_events(
                 if r.get("_is_live"):
                     pass  # confirmed live by ESPN/SofaScore
                 elif r.get("_is_sport"):
-                    # Sport but not confirmed live by feed. Still
-                    # include if the ticker date is today — catches
-                    # games scheduled for today that haven't kicked
-                    # off yet (Kalshi shows these as live because
-                    # trading is active).
+                    # Sport but not confirmed live by feed. Include if:
+                    #   - Ticker date is today (game scheduled today)
+                    #   - OR currently within the kickoff-to-end window
+                    #     (catches late-night games from yesterday that
+                    #     are still in progress, e.g. Brazil 9PM local
+                    #     = APR11 ticker but now APR12 UTC)
                     ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
-                    if not (ticker_date and ticker_date == now_utc.date()):
+                    in_window = False
+                    kdt = r.get("_kickoff_dt")
+                    gdt = r.get("_game_end_dt")
+                    if kdt and gdt:
+                        try:
+                            k = _dt.fromisoformat(kdt)
+                            g = _dt.fromisoformat(gdt)
+                            in_window = k <= now_utc < g
+                        except Exception:
+                            pass
+                    is_today = ticker_date and ticker_date == now_utc.date()
+                    if not (is_today or in_window):
                         continue
                 else:
                     # Non-sport event (crypto, politics, etc.).
@@ -1424,7 +1436,18 @@ def get_sports(live: bool = False):
                 filtered.append(r)
             elif r.get("_is_sport"):
                 ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
-                if ticker_date and ticker_date == now_utc.date():
+                in_window = False
+                kdt = r.get("_kickoff_dt")
+                gdt = r.get("_game_end_dt")
+                if kdt and gdt:
+                    try:
+                        k = _dt.fromisoformat(kdt)
+                        g = _dt.fromisoformat(gdt)
+                        in_window = k <= now_utc < g
+                    except Exception:
+                        pass
+                is_today = ticker_date and ticker_date == now_utc.date()
+                if is_today or in_window:
                     filtered.append(r)
                 continue
             else:
