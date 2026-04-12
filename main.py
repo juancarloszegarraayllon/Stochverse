@@ -942,6 +942,22 @@ def get_events(
     from datetime import datetime as _dt
     now_utc = _dt.now(timezone.utc)
 
+    # Import live-score feeds early so both the Live category filter
+    # and the formatting loop can use match_game.
+    try:
+        from espn_feed import match_game, compact_label
+    except Exception:
+        match_game = None
+        compact_label = None
+    try:
+        from sportsdb_feed import match_game as sdb_match_game
+    except Exception:
+        sdb_match_game = None
+    try:
+        from sofascore_feed import match_game as sofa_match_game
+    except Exception:
+        sofa_match_game = None
+
     # When category=Live, pre-build a set of event tickers that
     # ESPN/SofaScore confirm as currently in progress. This makes
     # the Live filter match what the frontend's isLive() shows: if
@@ -1110,22 +1126,7 @@ def get_events(
     dated.sort(key=lambda r: r["_sort_ts"], reverse=(sort == "latest"))
     results = dated + undated
 
-    # Import live-score feeds before filtering so the Live category
-    # can use ESPN/SofaScore state directly instead of relying solely
-    # on the estimated time window from Kalshi's expiration time.
-    try:
-        from espn_feed import match_game, compact_label
-    except Exception:
-        match_game = None
-        compact_label = None
-    try:
-        from sportsdb_feed import match_game as sdb_match_game
-    except Exception:
-        sdb_match_game = None
-    try:
-        from sofascore_feed import match_game as sofa_match_game
-    except Exception:
-        sofa_match_game = None
+    # (match_game imports moved above the filter loop)
 
     total = len(results)
     page  = results[offset:offset+limit]
