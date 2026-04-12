@@ -951,17 +951,29 @@ def get_events(
         elif category and category != "All":
             if category == "Live":
                 # Keep only sport events currently in progress.
-                kdt = r.get("_kickoff_dt")
-                gdt = r.get("_game_end_dt")
-                if not (kdt and gdt):
-                    continue
-                try:
-                    k = _dt.fromisoformat(kdt)
-                    g = _dt.fromisoformat(gdt)
-                    if not (k <= now_utc < g):
+                # Two paths to qualify:
+                #   1. ESPN/SofaScore confirmed the game as "in"
+                #      (pre-computed in _confirmed_live above).
+                #   2. The estimated kickoff window (from Kalshi's
+                #      expiration time minus DURATION) covers now,
+                #      with a 1h buffer on each side to absorb
+                #      scheduling drift and overtime.
+                et = r.get("event_ticker")
+                if et in _confirmed_live:
+                    pass  # feed says live — include unconditionally
+                else:
+                    kdt = r.get("_kickoff_dt")
+                    gdt = r.get("_game_end_dt")
+                    if not (kdt and gdt):
                         continue
-                except Exception:
-                    continue
+                    try:
+                        k = _dt.fromisoformat(kdt)
+                        g = _dt.fromisoformat(gdt)
+                        _buf = timedelta(hours=1)
+                        if not ((k - _buf) <= now_utc < (g + _buf)):
+                            continue
+                    except Exception:
+                        continue
             elif category == "Sports":
                 if not r["_is_sport"]: continue
             else:
@@ -1074,11 +1086,9 @@ def get_events(
     dated.sort(key=lambda r: r["_sort_ts"], reverse=(sort == "latest"))
     results = dated + undated
 
-    total = len(results)
-    page  = results[offset:offset+limit]
-    # Overlay live WebSocket prices on the paginated page, and attach
-    # live game state from ESPN first, falling back to TheSportsDB
-    # for leagues ESPN doesn't cover (J2, K League, etc.).
+    # Import live-score feeds before filtering so the Live category
+    # can use ESPN/SofaScore state directly instead of relying solely
+    # on the estimated time window from Kalshi's expiration time.
     try:
         from espn_feed import match_game, compact_label
     except Exception:
@@ -1092,6 +1102,33 @@ def get_events(
         from sofascore_feed import match_game as sofa_match_game
     except Exception:
         sofa_match_game = None
+
+    # When category=Live, pre-build a set of event tickers that
+    # ESPN/SofaScore confirm as currently in progress. This makes
+    # the Live filter match what the frontend's isLive() shows: if
+    # a feed says state="in", include it regardless of whether the
+    # estimated kickoff window is slightly off.
+    _confirmed_live = set()
+    if category == "Live":
+        for r in records:
+            if not r.get("_is_sport"):
+                continue
+            sport = r.get("_sport", "")
+            title = r.get("title", "")
+            if not (sport and title):
+                continue
+            mg = None
+            if match_game is not None:
+                mg = match_game(title, sport)
+            if mg is None and sdb_match_game is not None:
+                mg = sdb_match_game(title, sport)
+            if mg is None and sofa_match_game is not None:
+                mg = sofa_match_game(title, sport)
+            if mg and mg.get("state") == "in":
+                _confirmed_live.add(r.get("event_ticker"))
+
+    total = len(results)
+    page  = results[offset:offset+limit]
 
     def _needs_flip(title: str, g: dict) -> bool:
         """Returns True if the home/away orientation should be flipped
@@ -1281,8 +1318,40 @@ def get_sports(live: bool = False):
     if live:
         from datetime import datetime as _dt
         now_utc = _dt.now(timezone.utc)
+        # Check ESPN/SofaScore for confirmed live games, same as
+        # the Live category filter in get_events.
+        try:
+            from espn_feed import match_game as _em
+        except Exception:
+            _em = None
+        try:
+            from sportsdb_feed import match_game as _sm
+        except Exception:
+            _sm = None
+        try:
+            from sofascore_feed import match_game as _fm
+        except Exception:
+            _fm = None
+        confirmed = set()
+        for r in records:
+            if not r.get("_is_sport"):
+                continue
+            sp = r.get("_sport", "")
+            ti = r.get("title", "")
+            if not (sp and ti):
+                continue
+            mg = None
+            if _em: mg = _em(ti, sp)
+            if mg is None and _sm: mg = _sm(ti, sp)
+            if mg is None and _fm: mg = _fm(ti, sp)
+            if mg and mg.get("state") == "in":
+                confirmed.add(r.get("event_ticker"))
         filtered = []
         for r in records:
+            et = r.get("event_ticker")
+            if et in confirmed:
+                filtered.append(r)
+                continue
             kdt = r.get("_kickoff_dt")
             gdt = r.get("_game_end_dt")
             if not (kdt and gdt):
@@ -1290,7 +1359,8 @@ def get_sports(live: bool = False):
             try:
                 k = _dt.fromisoformat(kdt)
                 g = _dt.fromisoformat(gdt)
-                if k <= now_utc < g:
+                _buf = timedelta(hours=1)
+                if (k - _buf) <= now_utc < (g + _buf):
                     filtered.append(r)
             except Exception:
                 pass
