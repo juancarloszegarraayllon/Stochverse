@@ -907,13 +907,6 @@ def get_data():
     # Free the raw events list explicitly so GC can reclaim the big
     # Kalshi payloads before we return.
     del all_ev
-    # Collapse La Liga game-market siblings (SPREAD / TOTAL / BTTS /
-    # 1H) into the moneyline parent so one Sevilla vs Atletico card
-    # shows all five market types via tabs instead of rendering 5
-    # separate cards. See GAME_MARKET_PREFIXES.
-    before_group = len(records)
-    records = _group_game_markets(records)
-    grouped_into = before_group - len(records)
     # Pre-compute which sport events are confirmed live by ESPN /
     # SofaScore / SportsDB. This runs once per cache rebuild (~30min)
     # so the per-request Live filter can just check a flag instead of
@@ -964,15 +957,23 @@ def get_data():
                     pass
             r["_is_live"] = True
             live_count += 1
-    sport_count = sum(1 for r in records if r.get("_is_sport"))
-    kickoff_count = sum(1 for r in records if r.get("_kickoff_dt"))
+    # Store ungrouped records (for "All Markets" view) — _is_live
+    # is already set on each record so both views respect it.
+    ungrouped = records
+    # Group siblings into tabbed cards (for "Game View", the default).
+    before_group = len(records)
+    grouped = _group_game_markets(records)
+    grouped_into = before_group - len(grouped)
+    sport_count = sum(1 for r in grouped if r.get("_is_sport"))
+    kickoff_count = sum(1 for r in grouped if r.get("_kickoff_dt"))
     logging.getLogger("oddsiq").info(
         "get_data: raw=%d records=%d sport=%d kickoff=%d grouped=%d live=%d",
-        raw_count, len(records), sport_count, kickoff_count, grouped_into, live_count,
+        raw_count, len(grouped), sport_count, kickoff_count, grouped_into, live_count,
     )
-    _cache["data"] = records
+    _cache["data"] = grouped
+    _cache["data_all"] = ungrouped
     _cache["ts"] = now
-    return records
+    return grouped
 
 # ── API routes ─────────────────────────────────────────────────────────────────
 @app.get("/api/events")
@@ -981,6 +982,7 @@ def get_events(
     sport: Optional[str] = None,
     soccer_comp: Optional[str] = None,
     live_cat: Optional[str] = None,
+    view: Optional[str] = "game",
     search: Optional[str] = None,
     date_filter: Optional[str] = "all",
     sort: Optional[str] = "earliest",
@@ -990,7 +992,15 @@ def get_events(
     limit: int = 24,
 ):
     from datetime import date as _date
-    records = get_data()
+    # "game" view = tabbed cards (grouped siblings, default).
+    # "all" view  = every market type as its own card (ungrouped).
+    # Calling get_data() ensures the cache is populated (both grouped
+    # and ungrouped versions are stored during cache build).
+    get_data()
+    if view == "all" and _cache.get("data_all") is not None:
+        records = _cache["data_all"]
+    else:
+        records = _cache.get("data") or []
     today = _date.today()
     from datetime import datetime as _dt
     now_utc = _dt.now(timezone.utc)

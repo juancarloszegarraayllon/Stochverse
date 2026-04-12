@@ -16,6 +16,8 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 #search-input::placeholder{color:var(--text-muted)}
 #date-sel{background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:13px;font-family:inherit;outline:none;cursor:pointer}
 #sort-sel{background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:13px;font-family:inherit;outline:none;cursor:pointer}
+#view-toggle{background:var(--bg2);border:1px solid var(--border);color:var(--text-dim);padding:6px 12px;border-radius:6px;font-size:11px;font-family:inherit;cursor:pointer;white-space:nowrap;transition:color 0.12s,border-color 0.12s}
+#view-toggle:hover{color:var(--text);border-color:var(--text-muted)}
 #cat-tabs{display:flex;gap:0;border-bottom:1px solid var(--green-line);overflow-x:auto;scrollbar-width:none}
 #cat-tabs::-webkit-scrollbar{display:none}
 .cat-tab{padding:10px 18px;font-size:15px;font-weight:600;color:var(--text);cursor:pointer;border:none;background:transparent;font-family:inherit;white-space:nowrap;border-bottom:2px solid transparent;transition:color 0.2s;margin-bottom:-1px}
@@ -194,6 +196,7 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
       <option value="earliest">Earliest first</option>
       <option value="latest">Latest first</option>
     </select>
+    <button id="view-toggle" title="Switch between Game View and All Markets"></button>
     <button id="layout-toggle" title="Toggle layout" style="font-size:16px;line-height:1">⊞</button>
   </div>
   <div id="cat-tabs"></div>
@@ -215,7 +218,7 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 var state = {
   category: null, sport: null, soccerComp: null,
   search: "", dateFilter: "all", dateFrom: "", dateTo: "",
-  sort: "earliest", layout: "grid",
+  sort: "earliest", layout: "grid", viewMode: "game",
   offset: 0, total: 0, loading: false, allLoaded: false,
   categories: [], sports: [], soccerComps: [],
   liveSports: [], liveSportSubtabs: {}, liveCategories: []
@@ -469,6 +472,7 @@ async function loadMore() {
   if (state.sport) url += "&sport=" + encodeURIComponent(state.sport);
   if (state.soccerComp) url += "&soccer_comp=" + encodeURIComponent(state.soccerComp);
   if (state._liveCat) url += "&live_cat=" + encodeURIComponent(state._liveCat);
+  if (state.viewMode === "all") url += "&view=all";
   if (state.search) url += "&search=" + encodeURIComponent(state.search);
   try {
     var r = await fetch(url);
@@ -949,6 +953,25 @@ document.getElementById("sort-sel").addEventListener("change", function(e) {
   loadMore();
 });
 
+// View toggle: Game View (tabbed, default) vs All Markets (flat)
+function updateViewToggle() {
+  var btn = document.getElementById("view-toggle");
+  if (state.viewMode === "all") {
+    btn.textContent = "All Markets";
+  } else {
+    btn.textContent = "Game View";
+  }
+}
+updateViewToggle();
+document.getElementById("view-toggle").addEventListener("click", function() {
+  state.viewMode = state.viewMode === "game" ? "all" : "game";
+  updateViewToggle();
+  state.offset = 0;
+  state.allLoaded = false;
+  document.getElementById("cards-grid").innerHTML = "";
+  loadMore();
+});
+
 document.getElementById("layout-toggle").addEventListener("click", function() {
   var grid = document.getElementById("cards-grid");
   var btn = document.getElementById("layout-toggle");
@@ -997,6 +1020,7 @@ async function refreshVisible() {
   if (state.sport) url += "&sport=" + encodeURIComponent(state.sport);
   if (state.soccerComp) url += "&soccer_comp=" + encodeURIComponent(state.soccerComp);
   if (state._liveCat) url += "&live_cat=" + encodeURIComponent(state._liveCat);
+  if (state.viewMode === "all") url += "&view=all";
   if (state.search) url += "&search=" + encodeURIComponent(state.search);
   try {
     var r = await fetch(url);
