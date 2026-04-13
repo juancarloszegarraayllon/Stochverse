@@ -1035,24 +1035,20 @@ def get_data():
         if mg and mg.get("state") == "in":
             # Date guard: reject matches where ESPN's scheduled
             # kickoff is >18h from Kalshi's estimated kickoff.
-            # Prevents "Chelsea vs Man City (today)" from marking
-            # "Chelsea vs Man Utd (next week)" live. BUT: skip the
-            # guard when state="in" — if a game is actively in
-            # progress right now, trust it unconditionally. This
-            # handles rescheduled games where Kalshi's ticker date
-            # is wrong but ESPN confirms it's live.
-            if mg.get("state") != "in":
-                sched_ms = mg.get("scheduled_kickoff_ms")
-                kdt_str = r.get("_kickoff_dt") or r.get("_sort_ts")
-                if sched_ms and kdt_str:
-                    try:
-                        from datetime import datetime as _dtc
-                        espn_dt = _dtc.fromtimestamp(sched_ms / 1000, tz=timezone.utc)
-                        kalshi_dt = _dtc.fromisoformat(kdt_str)
-                        if abs((espn_dt - kalshi_dt).total_seconds()) > 18 * 3600:
-                            continue  # wrong day's game
-                    except Exception:
-                        pass
+            # Prevents "Man Utd vs Leeds (today)" from marking
+            # "Leeds vs Wolves (next week)" as live just because
+            # both titles contain "Leeds United".
+            sched_ms = mg.get("scheduled_kickoff_ms")
+            kdt_str = r.get("_kickoff_dt") or r.get("_sort_ts")
+            if sched_ms and kdt_str:
+                try:
+                    from datetime import datetime as _dtc
+                    espn_dt = _dtc.fromtimestamp(sched_ms / 1000, tz=timezone.utc)
+                    kalshi_dt = _dtc.fromisoformat(kdt_str)
+                    if abs((espn_dt - kalshi_dt).total_seconds()) > 18 * 3600:
+                        continue  # wrong day's game
+                except Exception:
+                    pass
             r["_is_live"] = True
             live_count += 1
     # Store ungrouped records (for "All Markets" view) — _is_live

@@ -792,22 +792,23 @@ function stripAccents(s) {
 function matchScore(label, scoreMap) {
   if (!scoreMap) return "";
   var ll = stripAccents(label);
-  // Score each side by its longest matching keyword. Return the side
-  // with the longer match — prevents "united" (6 chars, shared) from
-  // beating "leeds united" (12 chars, specific) on a Leeds label.
-  var bestSide = -1, bestLen = 0;
+  // Sum total length of all matching keywords per side. The side with
+  // the higher total wins. This handles shared words like "united":
+  //   "Leeds United" → home["mun":0,"manchester":0,"united":6]=6
+  //                   → away["lee":3,"leeds":5,"united":6]=14 → away wins
   var sides = [scoreMap.home, scoreMap.away];
+  var totals = [0, 0];
   for (var s = 0; s < sides.length; s++) {
     var keys = sides[s].keys;
     for (var k = 0; k < keys.length; k++) {
       var kw = stripAccents(keys[k]);
-      if (kw.length > bestLen && ll.indexOf(kw) >= 0) {
-        bestLen = kw.length;
-        bestSide = s;
-      }
+      if (ll.indexOf(kw) >= 0) totals[s] += kw.length;
     }
   }
-  return bestSide >= 0 ? sides[bestSide].score : "";
+  if (totals[0] === 0 && totals[1] === 0) return "";
+  if (totals[0] > totals[1]) return sides[0].score;
+  if (totals[1] > totals[0]) return sides[1].score;
+  return ""; // true tie
 }
 
 // Render one outcome table (header row + outcome rows + optional
