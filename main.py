@@ -66,7 +66,37 @@ async def startup_event():
         asyncio.create_task(run_sofascore_feed())
     except Exception as e:
         logging.getLogger("oddsiq").warning("failed to start sofascore feed: %s", e)
+    # Phase 4: periodically flush live scores from all feeds to the DB.
+    asyncio.create_task(_score_flush_loop())
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+async def _score_flush_loop():
+    """Every 30s, snapshot the in-memory game lists from ESPN,
+    SportsDB, and SofaScore into the game_scores table."""
+    _log = logging.getLogger("score_flush")
+    await asyncio.sleep(15)  # let feeds warm up before first flush
+    while True:
+        try:
+            from db import sync_scores_to_db
+            try:
+                from espn_feed import ESPN_GAMES
+                await sync_scores_to_db("espn", list(ESPN_GAMES))
+            except Exception as e:
+                _log.error("espn score flush: %s", e)
+            try:
+                from sportsdb_feed import SPORTSDB_GAMES
+                await sync_scores_to_db("sportsdb", list(SPORTSDB_GAMES))
+            except Exception as e:
+                _log.error("sportsdb score flush: %s", e)
+            try:
+                from sofascore_feed import SOFASCORE_GAMES
+                await sync_scores_to_db("sofascore", list(SOFASCORE_GAMES))
+            except Exception as e:
+                _log.error("sofascore score flush: %s", e)
+        except Exception as e:
+            _log.error("score flush loop error: %s", e)
+        await asyncio.sleep(30)
 
 UTC = timezone.utc
 

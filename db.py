@@ -174,6 +174,52 @@ async def sync_events_to_db(records):
             pass
 
 
+async def sync_scores_to_db(source, games):
+    """Replace all game_scores rows for a given source with the current
+    live snapshot.  Called after each feed poll cycle (~10-30s).
+
+    Each game dict should have: sport, league, home_display, away_display,
+    home_score, away_score, state, period, display_clock, short_detail,
+    clock_running, scheduled_kickoff_ms.
+    """
+    if not DATABASE_URL or async_session is None:
+        return
+    try:
+        from models import GameScore
+        from sqlalchemy import delete
+        from datetime import datetime, timezone as tz
+
+        async with async_session() as session:
+            async with session.begin():
+                # Wipe previous snapshot for this source
+                await session.execute(
+                    delete(GameScore).where(GameScore.source == source)
+                )
+                if games:
+                    session.add_all([
+                        GameScore(
+                            source=source,
+                            sport=g.get("sport", ""),
+                            league=g.get("league"),
+                            home_name=g.get("home_display"),
+                            away_name=g.get("away_display"),
+                            home_score=str(g.get("home_score", "")) if g.get("home_score") is not None else None,
+                            away_score=str(g.get("away_score", "")) if g.get("away_score") is not None else None,
+                            state=g.get("state"),
+                            period=g.get("period"),
+                            display_clock=g.get("display_clock"),
+                            detail=g.get("short_detail"),
+                            clock_running=bool(g.get("clock_running")),
+                            scheduled_kickoff_ms=g.get("scheduled_kickoff_ms"),
+                            captured_at=datetime.now(tz.utc),
+                        )
+                        for g in games
+                    ])
+        log.info("score sync [%s]: %d games written", source, len(games))
+    except Exception as e:
+        log.error("score sync [%s] failed: %s", source, e)
+
+
 async def batch_insert_prices(rows):
     """Insert a batch of price snapshots into the prices table.
 
