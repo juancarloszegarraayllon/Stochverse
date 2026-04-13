@@ -85,11 +85,11 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 .outcome-expand-btn{margin-top:6px;padding:6px 10px;background:transparent;border:1px solid var(--border);border-radius:5px;color:var(--text-dim);font-family:inherit;font-size:11px;cursor:pointer;width:100%;text-align:center;transition:color 0.15s,border-color 0.15s}
 .outcome-expand-btn:hover{color:var(--text);border-color:var(--text-muted)}
 .outcome-label{flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.outcome-score{flex:0 0 32px;display:flex;justify-content:center;align-items:center;font-size:13px;font-weight:700;color:var(--text);font-family:'Courier New',monospace}
+.outcome-score{flex:0 0 32px;text-align:center;font-size:13px;font-weight:700;color:var(--text)}
 .header-score{flex:0 0 32px;text-align:center;font-size:8px;font-weight:700;letter-spacing:0.4px;color:var(--text-muted);text-transform:uppercase}
-.outcome-chance{min-width:58px;text-align:center;font-size:11px;color:var(--text-dim);flex-shrink:0;border-radius:4px}
+.outcome-chance{flex:0 0 58px;text-align:center;font-size:11px;color:var(--text-dim);border-radius:4px}
 .outcome-odds{display:flex;gap:4px;flex-shrink:0}
-.odds-box{padding:4px 8px;border-radius:4px;min-width:36px;text-align:center;font-size:11px;font-weight:700}
+.odds-box{padding:4px 0;border-radius:4px;width:44px;text-align:center;font-size:11px;font-weight:700}
 .odds-yes{background:#001a00;border:1px solid #003300;color:var(--green)}
 .odds-no{background:#1a0000;border:1px solid #330000;color:var(--red)}
 #home-screen{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;gap:12px}
@@ -170,8 +170,8 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
   .market-card{padding:12px}
   .card-title{font-size:13px}
   .outcome-label{font-size:11px}
-  .outcome-chance{min-width:52px;font-size:11px}
-  .odds-box{padding:4px 6px;min-width:34px;font-size:11px}
+  .outcome-chance{flex:0 0 52px;font-size:11px}
+  .odds-box{padding:4px 0;width:38px;font-size:11px}
   .header-chance{min-width:52px}
   .header-odds-box{padding:0 6px;min-width:34px}
   .live-badge{font-size:10px;letter-spacing:0.5px}
@@ -185,8 +185,8 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
   #logo{font-size:1.1rem}
   #date-sel,#sort-sel{flex:1}
   .cat-tab{padding:7px 10px;font-size:12px}
-  .outcome-chance{min-width:46px}
-  .odds-box{min-width:30px;padding:4px 5px}
+  .outcome-chance{flex:0 0 46px}
+  .odds-box{width:34px;padding:4px 0}
   .header-chance{min-width:46px}
   .header-odds-box{min-width:30px;padding:0 4px}
 }
