@@ -29,6 +29,12 @@ def _all_market_tickers():
 async def startup_event():
     global _cache
     _cache = {"data": None, "ts": 0}
+    # Initialize database tables (no-op if DATABASE_URL is not set).
+    try:
+        from db import init_db
+        await init_db()
+    except Exception as e:
+        logging.getLogger("oddsiq").warning("db init skipped: %s", e)
     # Build the REST snapshot eagerly in a thread so the WS client has
     # tickers to subscribe to without waiting for a first user request.
     threading.Thread(target=get_data, daemon=True).start()
@@ -159,7 +165,7 @@ _SPORT_SERIES = {
 "Golf":["KXPGATOUR","KXPGAH2H","KXPGA3BALL","KXPGA5BALL","KXPGAR1LEAD","KXPGAR1TOP5","KXPGAR1TOP10","KXPGAR1TOP20","KXPGAR2LEAD","KXPGAR2TOP5","KXPGAR2TOP10","KXPGAR3LEAD","KXPGAR3TOP5","KXPGAR3TOP10","KXPGATOP5","KXPGATOP10","KXPGATOP20","KXPGATOP40","KXPGAPLAYOFF","KXPGACUTLINE","KXPGAMAKECUT","KXPGAAGECUT","KXPGAWINNERREGION","KXPGALOWSCORE","KXPGASTROKEMARGIN","KXPGAWINNINGSCORE","KXPGAPLAYERCAT","KXPGABIRDIES","KXPGAROUNDSCORE","KXPGAEAGLE","KXPGAHOLEINONE","KXPGABOGEYFREE","KXPGAMAJORTOP10","KXPGAMAJORWIN","KXPGAMASTERS","KXGOLFMAJORS","KXGOLFTENNISMAJORS","KXPGARYDER","KXPGASOLHEIM","KXRYDERCUPCAPTAIN","KXPGACURRY","KXPGATIGER","KXBRYSONCOURSERECORDS","KXSCOTTIESLAM"],
 "MMA":["KXUFCFIGHT","KXUFCHEAVYWEIGHTTITLE","KXUFCLHEAVYWEIGHTTITLE","KXUFCMIDDLEWEIGHTTITLE","KXUFCWELTERWEIGHTTITLE","KXUFCLIGHTWEIGHTTITLE","KXUFCFEATHERWEIGHTTITLE","KXUFCBANTAMWEIGHTTITLE","KXUFCFLYWEIGHTTITLE","KXMCGREGORFIGHTNEXT","KXCARDPRESENCEUFCWH","KXUFCWHITEHOUSE"],
 "Cricket":["KXIPLGAME","KXIPL","KXIPLFOUR","KXIPLSIX","KXIPLTEAMTOTAL","KXPSLGAME","KXPSL","KXT20MATCH"],
-"Esports":["KXVALORANTMAP","KXVALORANTGAME","KXLOLGAME","KXLOLMAP","KXLOLTOTALMAPS","KXR6GAME","KXCS2GAME","KXCS2MAP","KXCS2TOTALMAPS","KXDOTA2GAME","KXDOTA2MAP","KXOWGAME"],
+"Esports":["KXVALORANTMAP","KXVALORANTGAME","KXLOLGAME","KXLOLMAP","KXLOLTOTALMAPS","KXR6GAME","KXR6MAP","KXCS2GAME","KXCS2MAP","KXCS2TOTALMAPS","KXDOTA2GAME","KXDOTA2MAP","KXOWGAME"],
 "Motorsport":["KXF1RACE","KXF1RACEPODIUM","KXF1TOP5","KXF1TOP10","KXF1FASTLAP","KXF1CONSTRUCTORS","KXF1RETIRE","KXF1","KXF1OCCUR","KXF1CHINA","KXNASCARCUPSERIES","KXNASCARRACE","KXNASCARTOP3","KXNASCARTOP5","KXNASCARTOP10","KXNASCARTOP20","KXNASCARTRUCKSERIES","KXNASCARAUTOPARTSSERIES","KXMOTOGP","KXMOTOGPTEAMS","KXINDYCARSERIES"],
 "Boxing":["KXBOXING","KXFLOYDTYSONFIGHT","KXWBCHEAVYWEIGHTTITLE","KXWBCCRUISERWEIGHTTITLE","KXWBCMIDDLEWEIGHTTITLE","KXWBCWELTERWEIGHTTITLE","KXWBCLIGHTWEIGHTTITLE","KXWBCFEATHERWEIGHTTITLE","KXWBCBANTAMWEIGHTTITLE","KXWBCFLYWEIGHTTITLE"],
 "Rugby":["KXRUGBYNRLMATCH","KXNRLCHAMP","KXPREMCHAMP","KXSLRCHAMP","KXFRA14CHAMP"],
@@ -250,6 +256,191 @@ for sport, series_list in _SPORT_SERIES.items():
 def get_sport(series_ticker):
     return SERIES_SPORT.get(str(series_ticker).upper(), "")
 
+
+# ── Game-market grouping ──────────────────────────────────────────────────────
+# Kalshi publishes a single game's different market types as
+# separate events that all share the same game-suffix in the
+# event_ticker. Examples:
+#   KXNHLGAME-26APR11WSHPIT    →  moneyline (parent)
+#   KXNHLSPREAD-26APR11WSHPIT  →  puck line
+#   KXNHLTOTAL-26APR11WSHPIT   →  over/under
+# Kalshi's own UI merges these into one card with tabs. We do the
+# same: the moneyline becomes the parent, siblings become tabs,
+# and sibling events are dropped from the records list.
+#
+# Auto-detect: scan _SPORT_SERIES for every series ending with
+# "GAME" as a primary parent, then check which sibling suffixes
+# (SPREAD, TOTAL, BTTS, 1H, etc.) also exist. This covers every
+# league without a manually-maintained per-league map.
+_SIBLING_SUFFIXES = [
+    # (suffix, type_code, fallback_label, tab_priority)
+    ("SPREAD",    "spread",    "Spread",     1),
+    ("TOTAL",     "total",     "Totals",     2),
+    ("BTTS",      "btts",      "Both Score", 3),
+    ("TEAMTOTAL", "teamtotal", "Team Total", 4),
+    ("1H",        "firsthalf", "1st Half",   5),
+    ("1HWINNER",  "1hwinner",  "1st Half",   5),
+    ("1HSPREAD",  "1hspread",  "1H Spread",  6),
+    ("1HTOTAL",   "1htotal",   "1H Totals",  7),
+    ("2HWINNER",  "2hwinner",  "2nd Half",   8),
+    ("RFI",       "rfi",       "RFI",        9),
+    ("F5",        "f5",        "First 5",   10),
+    ("F5SPREAD",  "f5spread",  "F5 Spread", 11),
+    ("F5TOTAL",   "f5total",   "F5 Totals", 12),
+    ("SETWINNER", "setwinner", "Set Winner", 13),
+    ("MAP",       "map",       "Map",        14),
+    ("TOTALMAPS", "totalmaps", "Total Maps", 15),
+]
+
+# Build map automatically from _SPORT_SERIES.
+_all_series = set()
+for _sl in _SPORT_SERIES.values():
+    _all_series.update(s.upper() for s in _sl)
+GAME_MARKET_PREFIXES = {}
+# Detect both "GAME" and "MATCH" as primary parents.
+# Soccer/NBA/MLB/NHL use *GAME, Tennis uses *MATCH.
+for _s in sorted(_all_series):
+    for _primary_suffix, _strip_len in [("GAME", 4), ("MATCH", 5)]:
+        if _s.endswith(_primary_suffix):
+            _prefix = _s[:-_strip_len]
+            if not _prefix:
+                continue
+            GAME_MARKET_PREFIXES[_s] = ("moneyline", "Winner", 0, True)
+            for _suffix, _tc, _lbl, _pri in _SIBLING_SUFFIXES:
+                _sibling = _prefix + _suffix
+                if _sibling in _all_series:
+                    GAME_MARKET_PREFIXES[_sibling] = (_tc, _lbl, _pri, False)
+            break  # don't check MATCH if GAME already matched
+
+# Series whose event tickers have a trailing set/map number
+# (e.g. KXATPSETWINNER-26APR12BUSMOU-1). The "-1" must be
+# stripped so the suffix matches the parent (26APR12BUSMOU).
+# Series whose tickers have a trailing set/map number
+# (e.g. KXATPSETWINNER-...-1, KXCS2MAP-...-2). The "-N"
+# must be stripped so the suffix matches the parent.
+_SUFFIXED_SERIES = {s for s in GAME_MARKET_PREFIXES
+                    if s.endswith("SETWINNER") or
+                       (s.endswith("MAP") and not s.endswith("TOTALMAPS"))}
+
+
+def _game_suffix(event_ticker: str) -> str:
+    """KXLALIGAGAME-26APR11SEVATM → '26APR11SEVATM'.
+    Returns the part after the first '-', which Kalshi uses as the
+    shared per-game identifier across sibling market events."""
+    parts = (event_ticker or "").split("-", 1)
+    return parts[1] if len(parts) == 2 else ""
+
+
+def _group_game_markets(records):
+    """Collapse sibling game-market events into a parent card.
+
+    Walks records once, buckets any record whose series_ticker is in
+    GAME_MARKET_PREFIXES by its game suffix, and for each suffix that
+    has a primary (moneyline) record attaches the siblings as
+    `_market_groups` on the primary. Siblings are dropped from the
+    top-level list so they don't double-render as standalone cards.
+    Orphan siblings (no moneyline parent) are left in place.
+    """
+    by_suffix = {}  # suffix → {type_code: record}
+    for r in records:
+        series = (r.get("series_ticker") or "").upper()
+        mt = GAME_MARKET_PREFIXES.get(series)
+        if not mt:
+            continue
+        suffix = _game_suffix(r.get("event_ticker", ""))
+        if not suffix:
+            continue
+        # For series like KXATPSETWINNER, strip the trailing set/map
+        # number ("-1", "-2") so the suffix matches the parent match.
+        # KXATPSETWINNER-26APR12BUSMOU-1 → suffix "26APR12BUSMOU"
+        if series in _SUFFIXED_SERIES:
+            import re as _re
+            # Extract the set/map number for a unique type_code
+            # (setwinner_1, setwinner_2, etc.)
+            num_match = _re.search(r'-(\d+)$', suffix)
+            suffix = _re.sub(r'-\d+$', '', suffix)
+            if num_match:
+                tc = mt[0] + "_" + num_match.group(1)
+            else:
+                tc = mt[0]
+            by_suffix.setdefault(suffix, {})[tc] = r
+        else:
+            by_suffix.setdefault(suffix, {})[mt[0]] = r
+
+    to_drop = set()  # event_tickers of siblings to remove from list
+    for suffix, type_map in by_suffix.items():
+        primary = type_map.get("moneyline")
+        if not primary:
+            # Orphan — no parent GAME event. Leave siblings alone so
+            # they still surface as individual cards.
+            continue
+        # Iterate only the type_codes present for THIS game, sorted
+        # by their tab priority. (The old code iterated all 77
+        # entries in GAME_MARKET_PREFIXES, causing duplicate tabs
+        # because many entries share the same type_code — e.g.
+        # every league's GAME prefix maps to "moneyline".)
+        def _prio(tc):
+            rec = type_map[tc]
+            mt = GAME_MARKET_PREFIXES.get(
+                (rec.get("series_ticker") or "").upper(), ("", "", 99, False)
+            )
+            return mt[2]  # tab priority
+        groups = []
+        for type_code in sorted(type_map.keys(), key=_prio):
+            rec = type_map[type_code]
+            series_up = (rec.get("series_ticker") or "").upper()
+            mt = GAME_MARKET_PREFIXES.get(series_up)
+            if not mt:
+                continue
+            _tc, fallback_label, _priority, is_primary = mt
+            # Use Kalshi's own label from the event title so the tab
+            # strip matches what Kalshi shows. Sibling titles look
+            # like "Washington at Pittsburgh: Puck Line" — everything
+            # after the last ": " is the market-type label Kalshi
+            # publishes. Moneyline events have no ": " suffix, so we
+            # fall back to the map default for those.
+            title = str(rec.get("title") or "")
+            if ": " in title and not is_primary:
+                label = title.rsplit(": ", 1)[-1].strip() or fallback_label
+            else:
+                label = fallback_label
+            # Build the Kalshi URL for this specific sibling so the
+            # card's ticker link can update to point at the market
+            # type that's currently shown on the active tab.
+            sib_ticker = str(rec.get("event_ticker", ""))
+            sib_series = str(rec.get("series_ticker", ""))
+            if sib_series:
+                _s = sib_series.lower()
+                sib_url = (
+                    f"https://kalshi.com/markets/{_s}/"
+                    f"{_s.replace('kx', '')}/{sib_ticker.lower()}"
+                )
+            else:
+                sib_url = ""
+            groups.append({
+                "type_code": type_code,
+                "label":     label,
+                # Store raw stored-outcomes here; _format_outcomes is
+                # applied per-request by the /api/events formatter so
+                # live WebSocket prices flow through without needing
+                # to rebuild the get_data() cache.
+                "_outcomes":     rec.get("outcomes", []),
+                "event_ticker":  sib_ticker,
+                "series_ticker": sib_series,
+                "url":           sib_url,
+            })
+            if not is_primary:
+                to_drop.add(rec.get("event_ticker"))
+        # Only attach market_groups when there's more than just the
+        # moneyline — otherwise there's nothing to tab between and
+        # the frontend should render the card the normal way.
+        if len(groups) > 1:
+            primary["_market_groups"] = groups
+
+    if not to_drop:
+        return records
+    return [r for r in records if r.get("event_ticker") not in to_drop]
+
 # ── Sport sub-tabs ─────────────────────────────────────────────────────────────
 SPORT_SUBTABS = {
 "Basketball":[("NBA Games",["KXNBAGAME","KXNBASPREAD","KXNBATOTAL","KXNBATEAMTOTAL","KXNBA1HWINNER","KXNBA1HSPREAD","KXNBA1HTOTAL","KXNBA2HWINNER","KXNBA2D","KXNBA3D","KXNBA3PT","KXNBAPTS","KXNBAREB","KXNBAAST","KXNBABLK","KXNBASTL"]),("NBA Season",["KXNBA","KXNBAEAST","KXNBAWEST","KXNBAPLAYOFF","KXNBAPLAYIN","KXNBAATLANTIC","KXNBACENTRAL","KXNBASOUTHEAST","KXNBANORTHWEST","KXNBAPACIFIC","KXNBASOUTHWEST","KXNBAEAST1SEED","KXNBAWEST1SEED","KXTEAMSINNBAF","KXTEAMSINNBAEF","KXTEAMSINNBAWF","KXNBAMATCHUP","KXNBAWINS","KXRECORDNBABEST"]),("NBA Awards",["KXNBAMVP","KXNBAROY","KXNBACOY","KXNBADPOY","KXNBASIXTH","KXNBAMIMP","KXNBACLUTCH","KXNBAFINMVP","KXNBAWFINMVP","KXNBAEFINMVP","KXNBA1STTEAM","KXNBA2NDTEAM","KXNBA3RDTEAM","KXNBA1STTEAMDEF","KXNBA2NDTEAMDEF"]),("NBA Stats",["KXLEADERNBAPTS","KXLEADERNBAREB","KXLEADERNBAAST","KXLEADERNBABLK","KXLEADERNBASTL","KXLEADERNBA3PT"]),("NBA Draft",["KXNBADRAFT1","KXNBADRAFTPICK","KXNBADRAFTTOP","KXNBADRAFTCAT","KXNBADRAFTCOMP","KXNBATOPPICK","KXNBALOTTERYODDS","KXNBATOP5ROTY"]),("NBA Other",["KXNBATEAM","KXNBASEATTLE","KXCITYNBAEXPAND","KXSONICS","KXNEXTTEAMNBA","KXLBJRETIRE","KXSPORTSOWNERLBJ","KXSTEPHDEAL","KXQUADRUPLEDOUBLE","KXSHAI20PTREC","KXNBA2KCOVER"]),("WNBA",["KXWNBADRAFT1","KXWNBADRAFTTOP3","KXWNBADELAY","KXWNBAGAMESPLAYED"]),("NCAAB",["KXMARMAD","KXNCAAMBNEXTCOACH"]),("International",["KXEUROLEAGUEGAME","KXBSLGAME","KXBBLGAME","KXACBGAME","KXISLGAME","KXABAGAME","KXCBAGAME","KXBBSERIEAGAME","KXJBLEAGUEGAME","KXLNBELITEGAME","KXARGLNBGAME","KXVTBGAME"]),],
@@ -260,7 +451,7 @@ SPORT_SUBTABS = {
 "Golf":[("Tour Events",["KXPGATOUR","KXPGAH2H","KXPGA3BALL","KXPGA5BALL","KXPGAR1LEAD","KXPGAR1TOP5","KXPGAR1TOP10","KXPGAR1TOP20","KXPGAR2LEAD","KXPGAR2TOP5","KXPGAR2TOP10","KXPGAR3LEAD","KXPGAR3TOP5","KXPGAR3TOP10","KXPGATOP5","KXPGATOP10","KXPGATOP20","KXPGATOP40","KXPGAPLAYOFF","KXPGACUTLINE","KXPGAMAKECUT","KXPGAAGECUT","KXPGAWINNERREGION","KXPGALOWSCORE","KXPGASTROKEMARGIN","KXPGAWINNINGSCORE","KXPGAPLAYERCAT","KXPGABIRDIES","KXPGAROUNDSCORE","KXPGAEAGLE","KXPGAHOLEINONE","KXPGABOGEYFREE","KXPGAMASTERS"]),("Majors",["KXPGAMAJORTOP10","KXPGAMAJORWIN","KXGOLFMAJORS"]),("Ryder Cup",["KXPGARYDER","KXPGASOLHEIM","KXRYDERCUPCAPTAIN"]),("Player Props",["KXPGACURRY","KXPGATIGER","KXBRYSONCOURSERECORDS","KXSCOTTIESLAM","KXGOLFTENNISMAJORS"]),],
 "MMA":[("UFC Fights",["KXUFCFIGHT"]),("UFC Titles",["KXUFCHEAVYWEIGHTTITLE","KXUFCLHEAVYWEIGHTTITLE","KXUFCMIDDLEWEIGHTTITLE","KXUFCWELTERWEIGHTTITLE","KXUFCLIGHTWEIGHTTITLE","KXUFCFEATHERWEIGHTTITLE","KXUFCBANTAMWEIGHTTITLE","KXUFCFLYWEIGHTTITLE"]),("UFC Other",["KXMCGREGORFIGHTNEXT","KXCARDPRESENCEUFCWH","KXUFCWHITEHOUSE"]),],
 "Cricket":[("IPL",["KXIPLGAME","KXIPL","KXIPLFOUR","KXIPLSIX","KXIPLTEAMTOTAL"]),("PSL",["KXPSLGAME","KXPSL"]),("Other",["KXT20MATCH"]),],
-"Esports":[("Valorant",["KXVALORANTMAP","KXVALORANTGAME"]),("League of Legends",["KXLOLGAME","KXLOLMAP","KXLOLTOTALMAPS"]),("CS2",["KXCS2GAME","KXCS2MAP","KXCS2TOTALMAPS"]),("Rainbow Six",["KXR6GAME"]),("Dota 2",["KXDOTA2GAME","KXDOTA2MAP"]),("Overwatch",["KXOWGAME"]),],
+"Esports":[("Valorant",["KXVALORANTMAP","KXVALORANTGAME"]),("League of Legends",["KXLOLGAME","KXLOLMAP","KXLOLTOTALMAPS"]),("CS2",["KXCS2GAME","KXCS2MAP","KXCS2TOTALMAPS"]),("Rainbow Six",["KXR6GAME","KXR6MAP"]),("Dota 2",["KXDOTA2GAME","KXDOTA2MAP"]),("Overwatch",["KXOWGAME"]),],
 "Motorsport":[("F1",["KXF1RACE","KXF1RACEPODIUM","KXF1TOP5","KXF1TOP10","KXF1FASTLAP","KXF1CONSTRUCTORS","KXF1RETIRE","KXF1","KXF1OCCUR","KXF1CHINA"]),("NASCAR",["KXNASCARCUPSERIES","KXNASCARRACE","KXNASCARTOP3","KXNASCARTOP5","KXNASCARTOP10","KXNASCARTOP20","KXNASCARTRUCKSERIES","KXNASCARAUTOPARTSSERIES"]),("MotoGP",["KXMOTOGP","KXMOTOGPTEAMS"]),("IndyCar",["KXINDYCARSERIES"]),],
 "Boxing":[("Fights",["KXBOXING","KXFLOYDTYSONFIGHT"]),("WBC Titles",["KXWBCHEAVYWEIGHTTITLE","KXWBCCRUISERWEIGHTTITLE","KXWBCMIDDLEWEIGHTTITLE","KXWBCWELTERWEIGHTTITLE","KXWBCLIGHTWEIGHTTITLE","KXWBCFEATHERWEIGHTTITLE","KXWBCBANTAMWEIGHTTITLE","KXWBCFLYWEIGHTTITLE"]),],
 "Rugby":[("NRL",["KXRUGBYNRLMATCH","KXNRLCHAMP"]),("Premiership",["KXPREMCHAMP"]),("Super League",["KXSLRCHAMP"]),("Top 14",["KXFRA14CHAMP"]),],
@@ -563,7 +754,7 @@ def get_data():
     if _cache["data"] is not None and now - _cache["ts"] < CACHE_TTL:
         return _cache["data"]
 
-    all_ev = paginate(with_markets=True, max_pages=30)
+    all_ev = paginate(with_markets=True, max_pages=50)
     if not all_ev:
         return []
 
@@ -694,7 +885,7 @@ def get_data():
             display = game_date.strftime("%b %-d")
         else:
             display = ""
-        return sort_dt, sort_ts_dt, game_date, kickoff_dt, exp_dt, display, outcomes
+        return sort_dt, sort_ts_dt, game_date, kickoff_dt, exp_dt, close_dt, display, outcomes
 
     records = []
     for ev in all_ev:
@@ -720,7 +911,7 @@ def get_data():
             ev["_soccer_comp"] = _soccer_comp
             ev["markets"] = mkts
 
-            sort_dt, sort_ts_dt, game_date, kickoff_dt, game_end_dt, display_dt, outcomes = extract(ev)
+            sort_dt, sort_ts_dt, game_date, kickoff_dt, game_end_dt, close_dt, display_dt, outcomes = extract(ev)
 
             if _sport == "Soccer" and _soccer_comp and _soccer_comp not in ("Other", ""):
                 _subcat = _soccer_comp
@@ -741,6 +932,8 @@ def get_data():
                 "_display_dt": display_dt,
                 "_kickoff_dt": kickoff_dt.isoformat() if kickoff_dt else None,
                 "_game_end_dt": game_end_dt.isoformat() if (kickoff_dt and game_end_dt) else None,
+                "_close_dt": close_dt.isoformat() if close_dt else None,
+                "_exp_dt": game_end_dt.isoformat() if game_end_dt else None,
                 "_sort_ts": sort_ts_dt.isoformat() if sort_ts_dt else None,
                 "outcomes": outcomes,
             }
@@ -752,15 +945,88 @@ def get_data():
     # Free the raw events list explicitly so GC can reclaim the big
     # Kalshi payloads before we return.
     del all_ev
-    sport_count = sum(1 for r in records if r.get("_is_sport"))
-    kickoff_count = sum(1 for r in records if r.get("_kickoff_dt"))
+    # Pre-compute which sport events are confirmed live by ESPN /
+    # SofaScore / SportsDB. This runs once per cache rebuild (~30min)
+    # so the per-request Live filter can just check a flag instead of
+    # running expensive match_game calls on every request. Non-sport
+    # events are handled separately via close_dt/exp_dt in the filter.
+    try:
+        from espn_feed import match_game as _em_cache
+    except Exception:
+        _em_cache = None
+    try:
+        from sportsdb_feed import match_game as _sm_cache
+    except Exception:
+        _sm_cache = None
+    try:
+        from sofascore_feed import match_game as _fm_cache
+    except Exception:
+        _fm_cache = None
+    live_count = 0
+    for r in records:
+        if not r.get("_is_sport"):
+            continue
+        _sp = r.get("_sport", "")
+        _ti = r.get("title", "")
+        if not (_sp and _ti):
+            continue
+        mg = None
+        if _em_cache:
+            mg = _em_cache(_ti, _sp)
+        if mg is None and _sm_cache:
+            mg = _sm_cache(_ti, _sp)
+        if mg is None and _fm_cache:
+            mg = _fm_cache(_ti, _sp)
+        if mg and mg.get("state") == "in":
+            # Date guard: reject matches where ESPN's scheduled
+            # kickoff is >18h from Kalshi's estimated kickoff.
+            # Prevents "Chelsea vs Man City (today)" from marking
+            # "Chelsea vs Man Utd (next week)" live. BUT: skip the
+            # guard when state="in" — if a game is actively in
+            # progress right now, trust it unconditionally. This
+            # handles rescheduled games where Kalshi's ticker date
+            # is wrong but ESPN confirms it's live.
+            if mg.get("state") != "in":
+                sched_ms = mg.get("scheduled_kickoff_ms")
+                kdt_str = r.get("_kickoff_dt") or r.get("_sort_ts")
+                if sched_ms and kdt_str:
+                    try:
+                        from datetime import datetime as _dtc
+                        espn_dt = _dtc.fromtimestamp(sched_ms / 1000, tz=timezone.utc)
+                        kalshi_dt = _dtc.fromisoformat(kdt_str)
+                        if abs((espn_dt - kalshi_dt).total_seconds()) > 18 * 3600:
+                            continue  # wrong day's game
+                    except Exception:
+                        pass
+            r["_is_live"] = True
+            live_count += 1
+    # Store ungrouped records (for "All Markets" view) — _is_live
+    # is already set on each record so both views respect it.
+    ungrouped = records
+    # Group siblings into tabbed cards (for "Game View", the default).
+    before_group = len(records)
+    grouped = _group_game_markets(records)
+    grouped_into = before_group - len(grouped)
+    sport_count = sum(1 for r in grouped if r.get("_is_sport"))
+    kickoff_count = sum(1 for r in grouped if r.get("_kickoff_dt"))
     logging.getLogger("oddsiq").info(
-        "get_data: raw=%d records=%d sport=%d kickoff=%d",
-        raw_count, len(records), sport_count, kickoff_count,
+        "get_data: raw=%d records=%d sport=%d kickoff=%d grouped=%d live=%d",
+        raw_count, len(grouped), sport_count, kickoff_count, grouped_into, live_count,
     )
-    _cache["data"] = records
+    _cache["data"] = grouped
+    _cache["data_all"] = ungrouped
     _cache["ts"] = now
-    return records
+    # Write-through: upsert events/markets to PostgreSQL in the
+    # background. Uses the ungrouped list so every event (including
+    # siblings) gets a row. Non-blocking — if it fails, the
+    # in-memory cache still serves.
+    try:
+        import asyncio
+        from db import sync_events_to_db
+        asyncio.run(sync_events_to_db(ungrouped))
+    except Exception as e:
+        logging.getLogger("oddsiq").warning("db write-through skipped: %s", e)
+    return grouped
 
 # ── API routes ─────────────────────────────────────────────────────────────────
 @app.get("/api/events")
@@ -768,6 +1034,8 @@ def get_events(
     category: Optional[str] = None,
     sport: Optional[str] = None,
     soccer_comp: Optional[str] = None,
+    live_cat: Optional[str] = None,
+    view: Optional[str] = "game",
     search: Optional[str] = None,
     date_filter: Optional[str] = "all",
     sort: Optional[str] = "earliest",
@@ -777,10 +1045,33 @@ def get_events(
     limit: int = 24,
 ):
     from datetime import date as _date
-    records = get_data()
+    # "game" view = tabbed cards (grouped siblings, default).
+    # "all" view  = every market type as its own card (ungrouped).
+    # Calling get_data() ensures the cache is populated (both grouped
+    # and ungrouped versions are stored during cache build).
+    get_data()
+    if view == "all" and _cache.get("data_all") is not None:
+        records = _cache["data_all"]
+    else:
+        records = _cache.get("data") or []
     today = _date.today()
     from datetime import datetime as _dt
     now_utc = _dt.now(timezone.utc)
+
+    # Import live-score feeds for the formatting loop.
+    try:
+        from espn_feed import match_game, compact_label
+    except Exception:
+        match_game = None
+        compact_label = None
+    try:
+        from sportsdb_feed import match_game as sdb_match_game
+    except Exception:
+        sdb_match_game = None
+    try:
+        from sofascore_feed import match_game as sofa_match_game
+    except Exception:
+        sofa_match_game = None
 
     # Filter
     results = []
@@ -790,18 +1081,62 @@ def get_events(
             pass  # when searching, show all categories
         elif category and category != "All":
             if category == "Live":
-                # Keep only sport events currently in progress.
-                kdt = r.get("_kickoff_dt")
-                gdt = r.get("_game_end_dt")
-                if not (kdt and gdt):
-                    continue
-                try:
-                    k = _dt.fromisoformat(kdt)
-                    g = _dt.fromisoformat(gdt)
-                    if not (k <= now_utc < g):
+                # Sport events: trust the _is_live flag pre-computed
+                # during cache build from ESPN/SofaScore feeds (runs
+                # once per 30min rebuild, not per request).
+                # Non-sport events: check close/exp time window.
+                if r.get("_is_live"):
+                    pass  # confirmed live by ESPN/SofaScore
+                elif r.get("_is_sport"):
+                    # Sport but not confirmed live by feed. Include if:
+                    #   - Ticker date is today (game scheduled today)
+                    #   - OR currently within the kickoff-to-end window
+                    #     (catches late-night games from yesterday that
+                    #     are still in progress, e.g. Brazil 9PM local
+                    #     = APR11 ticker but now APR12 UTC)
+                    ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
+                    in_window = False
+                    kdt = r.get("_kickoff_dt")
+                    gdt = r.get("_game_end_dt")
+                    if kdt and gdt:
+                        try:
+                            k = _dt.fromisoformat(kdt)
+                            g = _dt.fromisoformat(gdt)
+                            in_window = k <= now_utc < g
+                        except Exception:
+                            pass
+                    is_today = ticker_date and ticker_date == now_utc.date()
+                    if not (is_today or in_window):
                         continue
-                except Exception:
-                    continue
+                else:
+                    # Non-sport event (crypto, politics, etc.).
+                    # "Live" = event is happening today. Three ways
+                    # to qualify:
+                    #   1. Ticker date matches today (e.g. APR12 in
+                    #      KXHUNGARYMOV-26APR12 = election today)
+                    #   2. exp_dt is same UTC date as now
+                    #   3. exp_dt within 18h (timezone edge cases)
+                    # This handles cases where Kalshi's exp_dt is
+                    # days/weeks after the actual event (elections
+                    # settle later than they happen).
+                    edt = r.get("_exp_dt")
+                    ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
+                    today_date = now_utc.date()
+                    if ticker_date and ticker_date == today_date:
+                        pass  # event happening today — include
+                    elif edt:
+                        try:
+                            e = _dt.fromisoformat(edt)
+                            if now_utc >= e:
+                                continue  # already settled
+                            same_day = e.date() == today_date
+                            within_18h = (e - now_utc).total_seconds() <= 18 * 3600
+                            if not (same_day or within_18h):
+                                continue
+                        except Exception:
+                            continue
+                    else:
+                        continue
             elif category == "Sports":
                 if not r["_is_sport"]: continue
             else:
@@ -877,6 +1212,15 @@ def get_events(
                 if not any(kw in title_lower for kw in keywords):
                     continue
 
+        # Live category filter (Crypto, Climate, etc. in Live sidebar)
+        if live_cat:
+            if r.get("_is_sport"):
+                continue  # non-sport filter active, skip sports
+            c = r.get("category", "Other")
+            disp = CAT_DISPLAY.get(c, c)
+            if disp != live_cat:
+                continue
+
         # Search — match all whitespace-separated tokens in any order
         # against title or event_ticker (case-insensitive).
         if search:
@@ -912,26 +1256,48 @@ def get_events(
     dated = [r for r in results if r.get("_sort_ts")]
     undated = [r for r in results if not r.get("_sort_ts")]
     dated.sort(key=lambda r: r["_sort_ts"], reverse=(sort == "latest"))
+    # When viewing Live, float in-progress events above today's
+    # pre-match events so active games show first. Check both
+    # _is_live (ESPN-confirmed) and the kickoff window (for events
+    # ESPN didn't match but are in progress by time).
+    if category == "Live":
+        def _live_rank(r):
+            if r.get("_is_live"):
+                return 0  # ESPN-confirmed live
+            kdt = r.get("_kickoff_dt")
+            gdt = r.get("_game_end_dt")
+            if kdt and gdt:
+                try:
+                    k = _dt.fromisoformat(kdt)
+                    g = _dt.fromisoformat(gdt)
+                    # 2h buffer for long-running matches (tennis
+                    # 3-setters, soccer extra time, overtime, etc.)
+                    buf = timedelta(hours=2)
+                    if k <= now_utc < (g + buf):
+                        return 0  # in kickoff window
+                except Exception:
+                    pass
+            return 1  # pre-match / upcoming
+        # Sort by live rank first (in-progress → top), then by time
+        # respecting the user's earliest/latest preference.
+        rev = (sort == "latest")
+        dated.sort(key=lambda r: (
+            _live_rank(r),
+            r.get("_sort_ts", "") if not rev else "",
+        ))
+        if rev:
+            # Stable sort: live group reversed, pre-match group reversed
+            live_group = [r for r in dated if _live_rank(r) == 0]
+            pre_group = [r for r in dated if _live_rank(r) != 0]
+            live_group.sort(key=lambda r: r.get("_sort_ts", ""), reverse=True)
+            pre_group.sort(key=lambda r: r.get("_sort_ts", ""), reverse=True)
+            dated = live_group + pre_group
     results = dated + undated
+
+    # (match_game imports moved above the filter loop)
 
     total = len(results)
     page  = results[offset:offset+limit]
-    # Overlay live WebSocket prices on the paginated page, and attach
-    # live game state from ESPN first, falling back to TheSportsDB
-    # for leagues ESPN doesn't cover (J2, K League, etc.).
-    try:
-        from espn_feed import match_game, compact_label
-    except Exception:
-        match_game = None
-        compact_label = None
-    try:
-        from sportsdb_feed import match_game as sdb_match_game
-    except Exception:
-        sdb_match_game = None
-    try:
-        from sofascore_feed import match_game as sofa_match_game
-    except Exception:
-        sofa_match_game = None
 
     def _needs_flip(title: str, g: dict) -> bool:
         """Returns True if the home/away orientation should be flipped
@@ -992,8 +1358,38 @@ def get_events(
 
     formatted = []
     for r in page:
+        # Defense-in-depth: in Game View, skip any record whose
+        # series_ticker is a non-primary sibling type (SPREAD/TOTAL/
+        # BTTS/1H). These should have been removed by
+        # _group_game_markets, but can leak through if the parent
+        # GAME event wasn't fetched in the same pagination cycle.
+        if view != "all":
+            series_up = (r.get("series_ticker") or "").upper()
+            mt = GAME_MARKET_PREFIXES.get(series_up)
+            if mt and not mt[3]:  # mt[3] = is_primary
+                continue
         rc = dict(r)
         rc["outcomes"] = _format_outcomes(r.get("outcomes", []))
+        # When this record has sibling market groups (La Liga
+        # spread / total / BTTS / 1H collapsed under the moneyline
+        # parent by _group_game_markets), format each group's
+        # outcomes the same way so live WebSocket prices flow into
+        # every tab, not just the default Winner tab.
+        mg = r.get("_market_groups") if view != "all" else None
+        if mg:
+            rc["market_groups"] = [
+                {
+                    "type_code":     g.get("type_code", ""),
+                    "label":         g.get("label", ""),
+                    "event_ticker":  g.get("event_ticker", ""),
+                    "series_ticker": g.get("series_ticker", ""),
+                    "url":           g.get("url", ""),
+                    "outcomes":      _format_outcomes(g.get("_outcomes", [])),
+                }
+                for g in mg
+            ]
+            # Don't leak the private `_market_groups` key to clients.
+            rc.pop("_market_groups", None)
         sport = r.get("_sport", "")
         title = r.get("title", "")
         g = None
@@ -1004,6 +1400,33 @@ def get_events(
                 g = sdb_match_game(title, sport)
             if g is None and sofa_match_game is not None:
                 g = sofa_match_game(title, sport)
+        # Guard against back-to-back series (same teams on
+        # consecutive days, e.g. PIT at WSH Apr 11 + WSH at PIT
+        # Apr 12). The team-name matcher can't distinguish these
+        # because the titles are identical — only the dates differ.
+        # Compare the matched game's scheduled start against the
+        # Kalshi event's estimated kickoff. If they're more than
+        # 18 hours apart, this is a different day's game; drop the
+        # match so the wrong event doesn't show live state / scores.
+        # Date guard: reject ESPN matches where dates differ by >18h
+        # UNLESS the game is state="in" (actively in progress).
+        # A game that's live right now can't be a false match for
+        # a different day — trust it for scores and live state.
+        # This handles rescheduled games where Kalshi's ticker date
+        # is stale but ESPN confirms the game is happening now.
+        if g and g.get("state") != "in" and g.get("scheduled_kickoff_ms"):
+            kdt_str = r.get("_kickoff_dt") or r.get("_sort_ts")
+            if kdt_str:
+                try:
+                    from datetime import datetime as _datetime
+                    espn_dt = _datetime.fromtimestamp(
+                        g["scheduled_kickoff_ms"] / 1000, tz=timezone.utc
+                    )
+                    kalshi_dt = _datetime.fromisoformat(kdt_str)
+                    if abs((espn_dt - kalshi_dt).total_seconds()) > 18 * 3600:
+                        g = None
+                except Exception:
+                    pass
         if g:
             # Base compact label from the feed. For tennis we flip
             # the per-set pairs to match the Kalshi title order so
@@ -1023,6 +1446,8 @@ def get_events(
                 "clock_running":  g.get("clock_running", True),
                 "home_abbr":      g.get("home_abbr", ""),
                 "away_abbr":      g.get("away_abbr", ""),
+                "home_display":   g.get("home_display", ""),
+                "away_display":   g.get("away_display", ""),
                 "home_score":     g.get("home_score", ""),
                 "away_score":     g.get("away_score", ""),
                 "score_display":  _score_display(title, g),
@@ -1082,17 +1507,41 @@ def get_sports(live: bool = False):
         now_utc = _dt.now(timezone.utc)
         filtered = []
         for r in records:
-            kdt = r.get("_kickoff_dt")
-            gdt = r.get("_game_end_dt")
-            if not (kdt and gdt):
-                continue
-            try:
-                k = _dt.fromisoformat(kdt)
-                g = _dt.fromisoformat(gdt)
-                if k <= now_utc < g:
+            if r.get("_is_live"):
+                filtered.append(r)
+            elif r.get("_is_sport"):
+                ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
+                in_window = False
+                kdt = r.get("_kickoff_dt")
+                gdt = r.get("_game_end_dt")
+                if kdt and gdt:
+                    try:
+                        k = _dt.fromisoformat(kdt)
+                        g = _dt.fromisoformat(gdt)
+                        in_window = k <= now_utc < g
+                    except Exception:
+                        pass
+                is_today = ticker_date and ticker_date == now_utc.date()
+                if is_today or in_window:
                     filtered.append(r)
-            except Exception:
-                pass
+                continue
+            else:
+                edt = r.get("_exp_dt")
+                ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
+                today_date = now_utc.date()
+                if ticker_date and ticker_date == today_date:
+                    filtered.append(r)
+                elif edt:
+                    try:
+                        e = _dt.fromisoformat(edt)
+                        if now_utc >= e:
+                            continue
+                        same_day = e.date() == today_date
+                        within_18h = (e - now_utc).total_seconds() <= 18 * 3600
+                        if same_day or within_18h:
+                            filtered.append(r)
+                    except Exception:
+                        pass
         records = filtered
     sport_counts = {}
     soccer_comps = set()
@@ -1131,7 +1580,24 @@ def get_sports(live: bool = False):
         })
 
     sports.sort(key=lambda x: list(_SPORT_SERIES.keys()).index(x["name"]) if x["name"] in _SPORT_SERIES else 99)
-    return {"sports": sports, "soccer_comps": sorted(soccer_comps)}
+    # When live=true, also count non-sport categories (Crypto,
+    # Climate, etc.) so the Live sidebar can show them too.
+    live_cats = []
+    if live:
+        cat_counts = {}
+        for r in records:
+            if r.get("_is_sport"):
+                continue
+            c = r.get("category", "Other")
+            disp = CAT_DISPLAY.get(c, c)
+            cat_counts[disp] = cat_counts.get(disp, 0) + 1
+        for c in TOP_CATS:
+            if c == "Sports":
+                continue
+            cnt = cat_counts.get(c, 0)
+            if cnt > 0:
+                live_cats.append({"name": c, "count": cnt})
+    return {"sports": sports, "soccer_comps": sorted(soccer_comps), "live_categories": live_cats}
 
 @app.get("/api/meta")
 def get_meta():

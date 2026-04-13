@@ -43,6 +43,12 @@ SUB_BATCH_SIZE = 500  # market tickers per subscribe message
 # floats) plus ts_ms of the last update we saw.
 LIVE_PRICES: dict = {}
 
+# Buffer for price snapshots that get flushed to the database
+# every PRICE_FLUSH_INTERVAL seconds. Keeps the WS message loop
+# fast (just appends to a list) while writing to DB in batches.
+_price_buffer: list = []
+PRICE_FLUSH_INTERVAL = 10  # seconds between DB flushes
+
 # Status info exposed via /api/ws_status for debugging.
 STATUS = {
     "connected": False,
@@ -183,6 +189,28 @@ async def _refresh_loop(ws, get_tickers, subscribed, next_id_box):
             return
 
 
+async def _price_flush_loop():
+    """Flush buffered price updates to the database every N seconds.
+    Runs as an asyncio task alongside the WS message loop."""
+    while True:
+        try:
+            await asyncio.sleep(PRICE_FLUSH_INTERVAL)
+            if not _price_buffer:
+                continue
+            # Swap the buffer so the WS loop can keep appending
+            batch = _price_buffer[:]
+            _price_buffer.clear()
+            try:
+                from db import batch_insert_prices
+                await batch_insert_prices(batch)
+            except Exception as e:
+                log.error("price flush error: %s", e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error("price flush loop error: %s", e)
+
+
 async def run_ws_client(get_tickers):
     """Main background task. `get_tickers` is a zero-arg callable that
     returns the current list of market tickers we want live prices for.
@@ -235,6 +263,7 @@ async def run_ws_client(get_tickers):
                 refresh_task = asyncio.create_task(
                     _refresh_loop(ws, get_tickers, subscribed, next_id_box)
                 )
+                price_flush_task = asyncio.create_task(_price_flush_loop())
                 try:
                     async for raw in ws:
                         STATUS["messages"] += 1
@@ -255,10 +284,24 @@ async def run_ws_client(get_tickers):
                             else:
                                 cur.update(upd)
                             STATUS["updates"] += 1
+                            # Buffer for DB price history
+                            _price_buffer.append({
+                                "market_ticker": tk,
+                                "yes_bid": upd.get("yes_bid"),
+                                "yes_ask": upd.get("yes_ask"),
+                                "no_bid": upd.get("no_bid"),
+                                "no_ask": upd.get("no_ask"),
+                                "last_price": upd.get("last_price"),
+                            })
                 finally:
                     refresh_task.cancel()
+                    price_flush_task.cancel()
                     try:
                         await refresh_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    try:
+                        await price_flush_task
                     except (asyncio.CancelledError, Exception):
                         pass
         except Exception as e:

@@ -1,0 +1,207 @@
+"""Database connection and session factory.
+
+Reads DATABASE_URL from the environment (auto-injected by Railway
+when the PostgreSQL plugin is linked to the service). Falls back
+gracefully: if DATABASE_URL is missing, the app runs in pure
+in-memory mode exactly as before.
+"""
+import os
+import logging
+
+log = logging.getLogger("db")
+
+# Railway injects postgres:// but asyncpg needs postgresql+asyncpg://
+_raw_url = os.environ.get("DATABASE_URL", "")
+if _raw_url.startswith("postgres://"):
+    DATABASE_URL = _raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif _raw_url.startswith("postgresql://"):
+    DATABASE_URL = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+else:
+    DATABASE_URL = _raw_url
+
+engine = None
+async_session = None
+
+if DATABASE_URL:
+    try:
+        from sqlalchemy.ext.asyncio import (
+            create_async_engine,
+            async_sessionmaker,
+        )
+        # Railway starter PostgreSQL has a 20-connection limit.
+        # Keep pool small: feeds + request handlers should stay
+        # well under 10 total connections.
+        engine = create_async_engine(
+            DATABASE_URL,
+            pool_size=5,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+        async_session = async_sessionmaker(engine, expire_on_commit=False)
+        log.info("database engine created (pool_size=5)")
+    except Exception as e:
+        log.warning("failed to create database engine: %s", e)
+        engine = None
+        async_session = None
+else:
+    log.info("DATABASE_URL not set — running in memory-only mode")
+
+
+async def init_db():
+    """Create all tables if they don't exist. Called once on startup.
+    Safe to call repeatedly — uses CREATE TABLE IF NOT EXISTS."""
+    if engine is None:
+        return
+    try:
+        from models import Base
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        log.info("database tables ensured")
+    except Exception as e:
+        log.error("failed to initialize database tables: %s", e)
+
+
+async def sync_events_to_db(records):
+    """Upsert Kalshi events and their markets into the database.
+
+    Called after each get_data() cache rebuild (~every 30 min).
+    Uses PostgreSQL ON CONFLICT … DO UPDATE for idempotent upserts.
+    Creates its own engine since this runs in a background thread
+    with its own event loop (can't share the main loop's pool).
+    """
+    if not DATABASE_URL:
+        return
+    try:
+        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+        _engine = create_async_engine(DATABASE_URL, pool_size=2)
+        _session = async_sessionmaker(_engine, expire_on_commit=False)
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from models import Event, Market
+        from datetime import datetime, timezone as tz
+
+        async with _session() as session:
+            async with session.begin():
+                ev_count = 0
+                mk_count = 0
+                for r in records:
+                    et = r.get("event_ticker", "")
+                    if not et:
+                        continue
+
+                    # Parse datetime strings back to datetime objects
+                    def _parse_dt(val):
+                        if not val:
+                            return None
+                        try:
+                            from datetime import datetime as _dt
+                            return _dt.fromisoformat(val)
+                        except Exception:
+                            return None
+
+                    # Upsert event
+                    ev_vals = {
+                        "platform": "kalshi",
+                        "event_ticker": et,
+                        "series_ticker": r.get("series_ticker"),
+                        "title": r.get("title", "")[:500],
+                        "category": r.get("category"),
+                        "sport": r.get("_sport") or None,
+                        "subcat": r.get("_subcat") or None,
+                        "kickoff_dt": _parse_dt(r.get("_kickoff_dt")),
+                        "exp_dt": _parse_dt(r.get("_exp_dt")),
+                        "close_dt": _parse_dt(r.get("_close_dt")),
+                        "is_live": bool(r.get("_is_live")),
+                        "updated_at": datetime.now(tz.utc),
+                    }
+                    stmt = pg_insert(Event).values(**ev_vals)
+                    stmt = stmt.on_conflict_do_update(
+                        constraint="uq_platform_event",
+                        set_={
+                            "title": stmt.excluded.title,
+                            "category": stmt.excluded.category,
+                            "sport": stmt.excluded.sport,
+                            "subcat": stmt.excluded.subcat,
+                            "kickoff_dt": stmt.excluded.kickoff_dt,
+                            "exp_dt": stmt.excluded.exp_dt,
+                            "close_dt": stmt.excluded.close_dt,
+                            "is_live": stmt.excluded.is_live,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    await session.execute(stmt)
+                    ev_count += 1
+
+                    # Upsert markets (outcomes)
+                    for o in r.get("outcomes", []):
+                        mk_ticker = o.get("ticker", "")
+                        if not mk_ticker:
+                            continue
+                        mk_vals = {
+                            "ticker": mk_ticker,
+                            "label": o.get("label", "")[:200],
+                            "event_id": None,  # filled by subquery below
+                        }
+                        # Use a subquery to get the event_id from the
+                        # just-upserted event row. This avoids a
+                        # separate SELECT round-trip.
+                        from sqlalchemy import select, text
+                        subq = select(Event.id).where(
+                            Event.platform == "kalshi",
+                            Event.event_ticker == et,
+                        ).scalar_subquery()
+                        mk_stmt = pg_insert(Market).values(
+                            ticker=mk_ticker,
+                            label=o.get("label", "")[:200],
+                            event_id=subq,
+                        )
+                        mk_stmt = mk_stmt.on_conflict_do_update(
+                            index_elements=["ticker"],
+                            set_={
+                                "label": mk_stmt.excluded.label,
+                                "event_id": mk_stmt.excluded.event_id,
+                            },
+                        )
+                        await session.execute(mk_stmt)
+                        mk_count += 1
+
+        await _engine.dispose()
+        log.info("db sync: %d events, %d markets upserted", ev_count, mk_count)
+    except Exception as e:
+        log.error("db sync failed: %s", e)
+        try:
+            await _engine.dispose()
+        except Exception:
+            pass
+
+
+async def batch_insert_prices(rows):
+    """Insert a batch of price snapshots into the prices table.
+
+    Called every ~10s by the WebSocket flush task with accumulated
+    updates. Uses a dedicated engine (same pattern as sync_events)
+    since this runs in the main asyncio loop alongside the WS client.
+
+    Each row is a dict with: market_ticker, yes_bid, yes_ask,
+    no_bid, no_ask, last_price, source ('ws').
+    """
+    if not DATABASE_URL or not rows:
+        return
+    try:
+        from models import Price
+        async with async_session() as session:
+            async with session.begin():
+                session.add_all([
+                    Price(
+                        market_ticker=r.get("market_ticker", ""),
+                        yes_bid=r.get("yes_bid"),
+                        yes_ask=r.get("yes_ask"),
+                        no_bid=r.get("no_bid"),
+                        no_ask=r.get("no_ask"),
+                        last_price=r.get("last_price"),
+                        source="ws",
+                    )
+                    for r in rows
+                ])
+        log.info("price flush: %d rows inserted", len(rows))
+    except Exception as e:
+        log.error("price flush failed: %s", e)
