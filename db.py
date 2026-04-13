@@ -59,3 +59,108 @@ async def init_db():
         log.info("database tables ensured")
     except Exception as e:
         log.error("failed to initialize database tables: %s", e)
+
+
+async def sync_events_to_db(records):
+    """Upsert Kalshi events and their markets into the database.
+
+    Called after each get_data() cache rebuild (~every 30 min).
+    Uses PostgreSQL ON CONFLICT … DO UPDATE for idempotent upserts.
+    Runs in a single transaction. If it fails, the in-memory cache
+    still works — the DB is append-only / best-effort.
+    """
+    if async_session is None:
+        return
+    try:
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from models import Event, Market
+        from datetime import datetime, timezone as tz
+
+        async with async_session() as session:
+            async with session.begin():
+                ev_count = 0
+                mk_count = 0
+                for r in records:
+                    et = r.get("event_ticker", "")
+                    if not et:
+                        continue
+
+                    # Parse datetime strings back to datetime objects
+                    def _parse_dt(val):
+                        if not val:
+                            return None
+                        try:
+                            from datetime import datetime as _dt
+                            return _dt.fromisoformat(val)
+                        except Exception:
+                            return None
+
+                    # Upsert event
+                    ev_vals = {
+                        "platform": "kalshi",
+                        "event_ticker": et,
+                        "series_ticker": r.get("series_ticker"),
+                        "title": r.get("title", "")[:500],
+                        "category": r.get("category"),
+                        "sport": r.get("_sport") or None,
+                        "subcat": r.get("_subcat") or None,
+                        "kickoff_dt": _parse_dt(r.get("_kickoff_dt")),
+                        "exp_dt": _parse_dt(r.get("_exp_dt")),
+                        "close_dt": _parse_dt(r.get("_close_dt")),
+                        "is_live": bool(r.get("_is_live")),
+                        "updated_at": datetime.now(tz.utc),
+                    }
+                    stmt = pg_insert(Event).values(**ev_vals)
+                    stmt = stmt.on_conflict_do_update(
+                        constraint="uq_platform_event",
+                        set_={
+                            "title": stmt.excluded.title,
+                            "category": stmt.excluded.category,
+                            "sport": stmt.excluded.sport,
+                            "subcat": stmt.excluded.subcat,
+                            "kickoff_dt": stmt.excluded.kickoff_dt,
+                            "exp_dt": stmt.excluded.exp_dt,
+                            "close_dt": stmt.excluded.close_dt,
+                            "is_live": stmt.excluded.is_live,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    await session.execute(stmt)
+                    ev_count += 1
+
+                    # Upsert markets (outcomes)
+                    for o in r.get("outcomes", []):
+                        mk_ticker = o.get("ticker", "")
+                        if not mk_ticker:
+                            continue
+                        mk_vals = {
+                            "ticker": mk_ticker,
+                            "label": o.get("label", "")[:200],
+                            "event_id": None,  # filled by subquery below
+                        }
+                        # Use a subquery to get the event_id from the
+                        # just-upserted event row. This avoids a
+                        # separate SELECT round-trip.
+                        from sqlalchemy import select, text
+                        subq = select(Event.id).where(
+                            Event.platform == "kalshi",
+                            Event.event_ticker == et,
+                        ).scalar_subquery()
+                        mk_stmt = pg_insert(Market).values(
+                            ticker=mk_ticker,
+                            label=o.get("label", "")[:200],
+                            event_id=subq,
+                        )
+                        mk_stmt = mk_stmt.on_conflict_do_update(
+                            index_elements=["ticker"],
+                            set_={
+                                "label": mk_stmt.excluded.label,
+                                "event_id": mk_stmt.excluded.event_id,
+                            },
+                        )
+                        await session.execute(mk_stmt)
+                        mk_count += 1
+
+        log.info("db sync: %d events, %d markets upserted", ev_count, mk_count)
+    except Exception as e:
+        log.error("db sync failed: %s", e)

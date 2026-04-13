@@ -1016,6 +1016,20 @@ def get_data():
     _cache["data"] = grouped
     _cache["data_all"] = ungrouped
     _cache["ts"] = now
+    # Write-through: upsert events/markets to PostgreSQL in the
+    # background. Uses the ungrouped list so every event (including
+    # siblings) gets a row. Non-blocking — if it fails, the
+    # in-memory cache still serves.
+    try:
+        import asyncio
+        from db import sync_events_to_db
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(sync_events_to_db(ungrouped))
+        else:
+            loop.run_until_complete(sync_events_to_db(ungrouped))
+    except Exception as e:
+        logging.getLogger("oddsiq").warning("db write-through skipped: %s", e)
     return grouped
 
 # ── API routes ─────────────────────────────────────────────────────────────────
