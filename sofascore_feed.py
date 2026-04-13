@@ -305,6 +305,11 @@ def _parse_event(ev: Dict[str, Any], sport_label: str) -> Optional[Dict[str, Any
                 g["tennis_server"] = "home"
             elif ev.get("homeTeamServing") is False:
                 g["tennis_server"] = "away"
+            # Some tennis responses include server flag inside score objs
+            elif home_score_obj.get("serve") is True or home_score_obj.get("server") is True:
+                g["tennis_server"] = "home"
+            elif away_score_obj.get("serve") is True or away_score_obj.get("server") is True:
+                g["tennis_server"] = "away"
             # Try firstToServe (1=home, 2=away) + game parity
             elif ev.get("firstToServe") in (1, 2):
                 fts = ev["firstToServe"]
