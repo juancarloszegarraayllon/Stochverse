@@ -66,17 +66,20 @@ async def sync_events_to_db(records):
 
     Called after each get_data() cache rebuild (~every 30 min).
     Uses PostgreSQL ON CONFLICT … DO UPDATE for idempotent upserts.
-    Runs in a single transaction. If it fails, the in-memory cache
-    still works — the DB is append-only / best-effort.
+    Creates its own engine since this runs in a background thread
+    with its own event loop (can't share the main loop's pool).
     """
-    if async_session is None:
+    if not DATABASE_URL:
         return
     try:
+        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+        _engine = create_async_engine(DATABASE_URL, pool_size=2)
+        _session = async_sessionmaker(_engine, expire_on_commit=False)
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         from models import Event, Market
         from datetime import datetime, timezone as tz
 
-        async with async_session() as session:
+        async with _session() as session:
             async with session.begin():
                 ev_count = 0
                 mk_count = 0
@@ -161,6 +164,11 @@ async def sync_events_to_db(records):
                         await session.execute(mk_stmt)
                         mk_count += 1
 
+        await _engine.dispose()
         log.info("db sync: %d events, %d markets upserted", ev_count, mk_count)
     except Exception as e:
         log.error("db sync failed: %s", e)
+        try:
+            await _engine.dispose()
+        except Exception:
+            pass
