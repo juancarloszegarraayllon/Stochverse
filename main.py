@@ -1455,21 +1455,16 @@ def get_events(
                 g = sdb_match_game(title, sport)
             if g is None and sofa_match_game is not None:
                 g = sofa_match_game(title, sport)
-        # Guard against back-to-back series (same teams on
-        # consecutive days, e.g. PIT at WSH Apr 11 + WSH at PIT
-        # Apr 12). The team-name matcher can't distinguish these
-        # because the titles are identical — only the dates differ.
-        # Compare the matched game's scheduled start against the
-        # Kalshi event's estimated kickoff. If they're more than
-        # 18 hours apart, this is a different day's game; drop the
-        # match so the wrong event doesn't show live state / scores.
-        # Date guard: reject ESPN matches where dates differ by >18h
-        # UNLESS the game is state="in" (actively in progress).
-        # A game that's live right now can't be a false match for
-        # a different day — trust it for scores and live state.
-        # This handles rescheduled games where Kalshi's ticker date
-        # is stale but ESPN confirms the game is happening now.
-        if g and g.get("state") != "in" and g.get("scheduled_kickoff_ms"):
+        # Guard against wrong-date matches. The team-name matcher
+        # can't distinguish games with overlapping names on different
+        # days (e.g. "Leeds United vs Wolverhampton" Apr 18 matching
+        # a live "Man Utd vs Leeds United" today because both contain
+        # "Leeds United"). Compare the matched game's scheduled start
+        # against the Kalshi event's estimated kickoff. If they're
+        # more than 18 hours apart, drop the match — even if the ESPN
+        # game is currently live ("in"), since the Kalshi event is
+        # clearly for a different day's fixture.
+        if g and g.get("scheduled_kickoff_ms"):
             kdt_str = r.get("_kickoff_dt") or r.get("_sort_ts")
             if kdt_str:
                 try:

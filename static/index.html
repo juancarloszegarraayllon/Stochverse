@@ -792,14 +792,22 @@ function stripAccents(s) {
 function matchScore(label, scoreMap) {
   if (!scoreMap) return "";
   var ll = stripAccents(label);
+  // Score each side by its longest matching keyword. Return the side
+  // with the longer match — prevents "united" (6 chars, shared) from
+  // beating "leeds united" (12 chars, specific) on a Leeds label.
+  var bestSide = -1, bestLen = 0;
   var sides = [scoreMap.home, scoreMap.away];
   for (var s = 0; s < sides.length; s++) {
     var keys = sides[s].keys;
     for (var k = 0; k < keys.length; k++) {
-      if (ll.indexOf(stripAccents(keys[k])) >= 0) return sides[s].score;
+      var kw = stripAccents(keys[k]);
+      if (kw.length > bestLen && ll.indexOf(kw) >= 0) {
+        bestLen = kw.length;
+        bestSide = s;
+      }
     }
   }
-  return "";
+  return bestSide >= 0 ? sides[bestSide].score : "";
 }
 
 // Render one outcome table (header row + outcome rows + optional
