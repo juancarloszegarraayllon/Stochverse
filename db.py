@@ -172,3 +172,36 @@ async def sync_events_to_db(records):
             await _engine.dispose()
         except Exception:
             pass
+
+
+async def batch_insert_prices(rows):
+    """Insert a batch of price snapshots into the prices table.
+
+    Called every ~10s by the WebSocket flush task with accumulated
+    updates. Uses a dedicated engine (same pattern as sync_events)
+    since this runs in the main asyncio loop alongside the WS client.
+
+    Each row is a dict with: market_ticker, yes_bid, yes_ask,
+    no_bid, no_ask, last_price, source ('ws').
+    """
+    if not DATABASE_URL or not rows:
+        return
+    try:
+        from models import Price
+        async with async_session() as session:
+            async with session.begin():
+                session.add_all([
+                    Price(
+                        market_ticker=r.get("market_ticker", ""),
+                        yes_bid=r.get("yes_bid"),
+                        yes_ask=r.get("yes_ask"),
+                        no_bid=r.get("no_bid"),
+                        no_ask=r.get("no_ask"),
+                        last_price=r.get("last_price"),
+                        source="ws",
+                    )
+                    for r in rows
+                ])
+        log.info("price flush: %d rows inserted", len(rows))
+    except Exception as e:
+        log.error("price flush failed: %s", e)
