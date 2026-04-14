@@ -205,11 +205,11 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
 .sf-btn-dim{border-color:var(--border);color:var(--text-muted)}
 .sf-btn-dim:hover{color:var(--text);border-color:var(--text-muted);background:transparent}
 #screener-table-wrap{flex:1;min-width:0;overflow-x:auto}
-#screener-count{font-size:11px;color:var(--text-muted);margin-bottom:8px}
-#screener-table{width:100%;border-collapse:collapse;font-size:11px}
-#screener-table th{position:sticky;top:108px;background:var(--bg);padding:10px 6px;text-align:center;font-size:12px;text-transform:uppercase;letter-spacing:0.4px;color:var(--text-muted);border-bottom:2px solid var(--green-line);cursor:pointer;white-space:nowrap;user-select:none;z-index:10}
-#screener-table th:hover{color:var(--green)}
-#screener-table th .sort-arrow{font-size:10px;margin-left:2px;color:var(--green)}
+#screener-count{font-size:11px;color:var(--text-muted);margin:8px 0;text-align:left;padding:6px 4px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+#screener-table{width:100%;border-collapse:separate;border-spacing:0;font-size:11px}
+#screener-table thead th{position:sticky;top:108px;background:var(--bg);padding:10px 6px;text-align:center;font-size:12px;text-transform:uppercase;letter-spacing:0.4px;color:var(--text-muted);border-bottom:2px solid var(--green-line);cursor:pointer;white-space:nowrap;user-select:none;z-index:20}
+#screener-table thead th:hover{color:var(--green)}
+#screener-table thead th .sort-arrow{font-size:10px;margin-left:2px;color:var(--green)}
 #screener-table td{padding:7px 6px;border-bottom:1px solid var(--border);color:var(--text-dim);white-space:nowrap;text-align:center}
 #screener-table tr:hover td{background:rgba(255,255,255,0.02)}
 #screener-table .s-title{min-width:200px;color:var(--text);white-space:normal;word-break:break-word;text-align:left}
@@ -321,10 +321,10 @@ html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,san
         <input type="text" id="sf-search" placeholder="Event or outcome...">
       </div>
       <button id="sf-apply" class="sf-btn">Apply Filters</button>
+      <div id="screener-count"></div>
       <button id="sf-reset" class="sf-btn sf-btn-dim">Reset</button>
     </div>
     <div id="screener-table-wrap">
-      <div id="screener-count"></div>
       <table id="screener-table">
         <thead><tr id="screener-header"></tr></thead>
         <tbody id="screener-body"></tbody>
