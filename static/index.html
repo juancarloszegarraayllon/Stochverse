@@ -292,6 +292,10 @@ html,body{overscroll-behavior:none}
     <div id="screener-filters">
       <h3>Filters</h3>
       <div class="sf-group">
+        <label>Search</label>
+        <input type="text" id="sf-search" placeholder="Event or outcome...">
+      </div>
+      <div class="sf-group">
         <label>Category</label>
         <select id="sf-category"><option value="">All</option></select>
       </div>
@@ -326,10 +330,6 @@ html,body{overscroll-behavior:none}
       <div class="sf-group">
         <label>Min Total Volume</label>
         <input type="number" id="sf-min-volume" placeholder="e.g. 100" min="0">
-      </div>
-      <div class="sf-group">
-        <label>Search</label>
-        <input type="text" id="sf-search" placeholder="Event or outcome...">
       </div>
       <button id="sf-apply" class="sf-btn">Apply Filters</button>
       <div id="screener-count"></div>
