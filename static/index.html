@@ -9,10 +9,8 @@
 :root{--bg:#000;--bg2:#0a0a0a;--bg3:#111;--border:#1a1a1a;--green:#00ff00;--green-dim:#00aa00;--green-line:#0a3f0a;--green-bg:#001500;--red:#ff3333;--text:#fff;--text-dim:#888;--text-muted:#444}
 html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,sans-serif}
 :root{--header-h:110px}
-#header{position:fixed;top:0;left:0;right:0;z-index:100;background:#000;border-bottom:1px solid var(--border);padding:12px 24px 0;touch-action:pan-x}
-#cat-tabs{touch-action:pan-x}
-html{position:fixed;top:0;left:0;right:0;bottom:0;overflow:hidden}
-body{position:absolute;top:0;left:0;right:0;bottom:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:none;-webkit-overflow-scrolling:touch}
+#header{position:fixed;top:0;left:0;right:0;z-index:100;background:#000;border-bottom:1px solid var(--border);padding:12px 24px 0}
+html,body{overscroll-behavior:none;overflow-x:hidden}
 @media (max-width:900px){:root{--header-h:100px}}
 @media (max-width:600px){:root{--header-h:90px}}
 #logo{font-size:1.6rem;font-weight:900;color:var(--green);white-space:nowrap;flex-shrink:0}
@@ -1511,6 +1509,20 @@ window.addEventListener("popstate", function(e) {
   var cat = (e.state && e.state.category) || new URLSearchParams(location.search).get("cat") || null;
   selectCat(cat, true);
 });
+
+// Measure the real #header height and set it as a CSS variable so
+// sticky elements (screener sidebar/table header, nav) land flush
+// against the bottom of the main app header on every breakpoint.
+function syncHeaderHeight() {
+  var h = document.getElementById("header");
+  if (!h) return;
+  var hh = h.getBoundingClientRect().height;
+  if (hh > 0) document.documentElement.style.setProperty("--header-h", hh + "px");
+}
+window.addEventListener("load", syncHeaderHeight);
+window.addEventListener("resize", syncHeaderHeight);
+setTimeout(syncHeaderHeight, 100);
+setTimeout(syncHeaderHeight, 500);
 
 boot();
 </script>
