@@ -8,7 +8,8 @@
 *{box-sizing:border-box;margin:0;padding:0}
 :root{--bg:#000;--bg2:#0a0a0a;--bg3:#111;--border:#1a1a1a;--green:#00ff00;--green-dim:#00aa00;--green-line:#0a3f0a;--green-bg:#001500;--red:#ff3333;--text:#fff;--text-dim:#888;--text-muted:#444}
 html,body{background:var(--bg);color:var(--text);font-family:Helvetica,Arial,sans-serif}
-#header{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(0,0,0,0.97);border-bottom:1px solid var(--border);padding:12px 24px 0}
+#header{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(0,0,0,0.97);border-bottom:1px solid var(--border);padding:12px 24px 0;-webkit-transform:translate3d(0,0,0);transform:translate3d(0,0,0);will-change:transform;-webkit-backface-visibility:hidden;backface-visibility:hidden}
+html,body{overscroll-behavior-y:none}
 #logo{font-size:1.6rem;font-weight:900;color:var(--green);white-space:nowrap;flex-shrink:0}
 #controls{display:flex;gap:12px;align-items:center;padding-bottom:12px}
 #search-input{flex:1;min-width:0;background:var(--bg2);border:1px solid var(--border);color:var(--text);padding:8px 14px;border-radius:6px;font-size:13px;outline:none;font-family:inherit}
