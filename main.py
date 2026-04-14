@@ -31,8 +31,11 @@ async def startup_event():
     _cache = {"data": None, "ts": 0}
     # Initialize database tables (no-op if DATABASE_URL is not set).
     try:
-        from db import init_db
+        from db import init_db, refresh_alias_sport_cache
         await init_db()
+        # Prime the alias→sport cache so get_data() can classify
+        # unknown Kalshi series via entity matches on first run.
+        await refresh_alias_sport_cache()
     except Exception as e:
         logging.getLogger("oddsiq").warning("db init skipped: %s", e)
     # Build the REST snapshot eagerly in a thread so the WS client has
@@ -107,7 +110,7 @@ async def _score_flush_loop():
                 _seed_counter = 0
                 try:
                     from entity_seeder import extract_teams
-                    from db import upsert_entities
+                    from db import upsert_entities, refresh_alias_sport_cache
                     all_teams = []
                     if espn_snap:
                         all_teams.extend(extract_teams(espn_snap, "espn"))
@@ -117,6 +120,9 @@ async def _score_flush_loop():
                         all_teams.extend(extract_teams(sofascore_snap, "sofascore"))
                     if all_teams:
                         await upsert_entities(all_teams)
+                    # Always refresh the alias→sport cache so new
+                    # entities are classifiable by get_data().
+                    await refresh_alias_sport_cache()
                 except Exception as e:
                     _log.error("entity seed: %s", e)
         except Exception as e:
@@ -963,6 +969,17 @@ def get_data():
             series_ticker_raw = ev.get("series_ticker") or ""
             series = str(series_ticker_raw).upper()
             _sport = get_sport(series)
+            # Fallback: if the hardcoded series_ticker map doesn't
+            # know this prefix, try to infer the sport by matching
+            # team aliases in the event title against our entities
+            # table. Powers automatic classification of new Kalshi
+            # sports/leagues without manual mapping updates.
+            if not _sport and category == "Sports":
+                try:
+                    from db import get_sport_from_entities
+                    _sport = get_sport_from_entities(ev.get("title") or "")
+                except Exception:
+                    pass
             _is_sport = bool(_sport)
             _soccer_comp = SOCCER_COMP.get(series, "Other") if _sport == "Soccer" else ""
             mkts = ev.get("markets")
@@ -2077,6 +2094,70 @@ def kalshi_event_raw(ticker: str = "", status: str = "", prefer: str = "sport"):
         }
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+@app.get("/api/unmapped_series")
+def unmapped_series():
+    """Debug: list all series_tickers in the current Kalshi cache
+    whose sport can't be resolved — neither the hardcoded
+    SERIES_SPORT map nor the entity-alias fallback could classify
+    them. Each unresolved series is reported with a count of events
+    and a few sample titles so we can decide whether to add them
+    to the mapping or wait for the entity cache to pick them up.
+
+    Also reports which previously-unmapped series WERE resolved
+    via the entity fallback, so we can see that system working."""
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    try:
+        from db import get_sport_from_entities, ALIAS_SPORT_CACHE
+    except Exception:
+        get_sport_from_entities = lambda _t: ""  # type: ignore
+        ALIAS_SPORT_CACHE = {}
+
+    unresolved: dict = {}      # series → {count, titles[]}
+    via_entities: dict = {}    # series → {count, sample}
+
+    for r in records:
+        cat = r.get("category", "")
+        if cat != "Sports":
+            continue
+        series = str(r.get("series_ticker") or "").upper()
+        if not series:
+            continue
+        hardcoded = get_sport(series)
+        title = r.get("title", "")
+        if hardcoded:
+            continue
+        # Series not in the hardcoded map — try entity fallback
+        entity_sport = get_sport_from_entities(title) if title else ""
+        if entity_sport:
+            bucket = via_entities.setdefault(series, {
+                "count": 0, "sport": entity_sport, "samples": []
+            })
+            bucket["count"] += 1
+            if len(bucket["samples"]) < 3:
+                bucket["samples"].append(title[:80])
+        else:
+            bucket = unresolved.setdefault(series, {
+                "count": 0, "samples": []
+            })
+            bucket["count"] += 1
+            if len(bucket["samples"]) < 3:
+                bucket["samples"].append(title[:80])
+
+    return {
+        "cache_size": len(ALIAS_SPORT_CACHE),
+        "unresolved_count": sum(v["count"] for v in unresolved.values()),
+        "via_entities_count": sum(v["count"] for v in via_entities.values()),
+        "unresolved": dict(sorted(
+            unresolved.items(), key=lambda kv: -kv[1]["count"]
+        )),
+        "resolved_via_entities": dict(sorted(
+            via_entities.items(), key=lambda kv: -kv[1]["count"]
+        )),
+    }
+
 
 @app.get("/api/kalshi_search")
 def kalshi_search(q: str = "", limit: int = 20):

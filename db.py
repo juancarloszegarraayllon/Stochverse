@@ -323,3 +323,95 @@ async def upsert_entities(teams):
                      new_entities, new_aliases)
     except Exception as e:
         log.error("entity seed failed: %s", e)
+
+
+# ── Entity-based sport classifier ─────────────────────────────────
+# Instead of relying solely on a hardcoded series_ticker → sport
+# mapping in main.py, we auto-classify events by matching team
+# aliases in the event title. Gets updated every entity-seed cycle.
+#
+# Format:  { normalized_alias_string : sport }
+# Example: { "lakers": "Basketball", "arsenal": "Soccer", ... }
+ALIAS_SPORT_CACHE: dict = {}
+
+
+async def refresh_alias_sport_cache():
+    """Load all entity aliases + their sports into ALIAS_SPORT_CACHE.
+    Called after each entity seed cycle so the cache stays current."""
+    if not DATABASE_URL or async_session is None:
+        return
+    try:
+        from models import Entity, EntityAlias
+        from sqlalchemy import select
+        async with async_session() as session:
+            # Join aliases to entities on entity_id, fetching sport
+            # and the already-normalized alias string.
+            stmt = select(
+                EntityAlias.normalized,
+                Entity.sport,
+            ).join(Entity, EntityAlias.entity_id == Entity.id)
+            rows = (await session.execute(stmt)).all()
+            new_cache: dict = {}
+            for norm, sport in rows:
+                if not norm or not sport:
+                    continue
+                # If an alias maps to multiple sports (rare), first
+                # writer wins. Could be improved with voting later.
+                if norm not in new_cache:
+                    new_cache[norm] = sport
+            # Atomic replace so lookups never see a half-built cache.
+            global ALIAS_SPORT_CACHE
+            ALIAS_SPORT_CACHE = new_cache
+            log.info("alias→sport cache refreshed: %d aliases", len(new_cache))
+    except Exception as e:
+        log.error("alias→sport cache refresh failed: %s", e)
+
+
+def _normalize_title(s: str) -> str:
+    """Same normalization as entity_seeder: lowercase + strip accents."""
+    import unicodedata
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFD", str(s).lower())
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s.strip()
+
+
+def get_sport_from_entities(title: str) -> str:
+    """Synchronous lookup — scans a Kalshi event title for any
+    entity alias and returns the matched entity's sport. Falls
+    back to an empty string if no match.
+
+    Intended as a fallback when the hardcoded series_ticker mapping
+    returns nothing. Fast O(n) scan over aliases in the cache.
+    """
+    if not title or not ALIAS_SPORT_CACHE:
+        return ""
+    norm = _normalize_title(title)
+    if not norm:
+        return ""
+    # Prefer longer aliases so "los angeles lakers" wins over "los".
+    # Sorting aliases by length descending on every call would be
+    # expensive — instead we sort once when building the cache, but
+    # we can still do best-effort by checking all matches and
+    # returning the longest hit.
+    best_len = 0
+    best_sport = ""
+    for alias, sport in ALIAS_SPORT_CACHE.items():
+        if len(alias) <= best_len:
+            continue
+        # Whole-word match: alias surrounded by word boundaries.
+        # Fast check: alias must appear + not be inside a longer word.
+        idx = norm.find(alias)
+        if idx < 0:
+            continue
+        # Left boundary
+        if idx > 0 and norm[idx - 1].isalnum():
+            continue
+        # Right boundary
+        end = idx + len(alias)
+        if end < len(norm) and norm[end].isalnum():
+            continue
+        best_len = len(alias)
+        best_sport = sport
+    return best_sport
