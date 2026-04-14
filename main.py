@@ -937,6 +937,7 @@ def get_data():
                 "_rules": str(mk.get("rules_primary") or "")[:300],
                 "_open_time": str(mk.get("open_time") or ""),
                 "_market_close": str(mk.get("close_time") or ""),
+                "_price_ranges": mk.get("price_ranges"),
             })
         # Show date+time if we have kickoff, otherwise just date
         if kickoff_dt and game_date:
@@ -1695,6 +1696,14 @@ async def get_screener(
                 "prob": prob,
                 "yes": round(yb) if yb is not None else None,
                 "no": round(na) if na is not None else None,
+                # Dollar-formatted Kalshi-native prices for screener columns
+                "yes_bid_dollars": (yb / 100.0) if yb is not None else None,
+                "yes_ask_dollars": (ya / 100.0) if ya is not None else None,
+                "no_bid_dollars":  (nb / 100.0) if nb is not None else None,
+                "no_ask_dollars":  (na / 100.0) if na is not None else None,
+                "last_price_dollars": (last / 100.0) if last is not None else None,
+                "price_ranges": o.get("_price_ranges"),
+                "expiration_time": exp_dt,
                 "spread": spread,
                 "volume": round(vol),
                 "volume_24h": round(vol24),
@@ -1714,6 +1723,11 @@ async def get_screener(
         "oi": "open_interest", "spread": "spread", "change": "change",
         "liquidity": "liquidity", "yes": "yes", "no": "no",
         "last_price": "last_price",
+        "last_price_dollars": "last_price_dollars",
+        "yes_ask_dollars": "yes_ask_dollars", "yes_bid_dollars": "yes_bid_dollars",
+        "no_ask_dollars":  "no_ask_dollars",  "no_bid_dollars":  "no_bid_dollars",
+        "open_interest": "open_interest",
+        "expiration_time": "expiration_time",
     }.get(sort_by, "volume_24h")
     rows.sort(key=lambda x: (x.get(sort_key) is None, x.get(sort_key) or 0),
               reverse=desc)

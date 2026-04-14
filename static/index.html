@@ -1337,28 +1337,29 @@ setInterval(refreshVisible, 5000);
 // ── Screener ──────────────────────────────────────────────────────
 var screenerState = { sort: "volume_24h", dir: "desc", offset: 0, total: 0 };
 var SCREENER_COLS = [
-  { key: "is_live",    label: "",          cls: "s-live",  w: 30 },
-  { key: "title",      label: "Event",     cls: "s-title", w: null, fmt: function(v, row) {
+  { key: "title",              label: "Event",             cls: "s-title", w: null, fmt: function(v, row) {
       var link = row && row.url ? ' <a class="s-link" href="' + row.url + '" target="_blank" rel="noopener" title="Open on Kalshi" onclick="event.stopPropagation()">↗</a>' : '';
       return (v || '') + link;
     }},
-  { key: "label",      label: "Outcome",   cls: "s-label", w: null },
-  { key: "prob",       label: "Prob",      cls: "s-num",   w: 50,  fmt: function(v) { return v != null ? v + "%" : "—"; } },
-  { key: "yes",        label: "Yes",       cls: "s-yes",   w: 50,  fmt: function(v) { return v != null ? v + "¢" : "—"; } },
-  { key: "no",         label: "No",        cls: "s-no",    w: 50,  fmt: function(v) { return v != null ? v + "¢" : "—"; } },
-  { key: "spread",     label: "Spread",    cls: "s-num",   w: 50,  fmt: function(v) { return v != null ? v + "¢" : "—"; } },
-  { key: "change",     label: "Chg",       cls: "s-num",   w: 44,  fmt: function(v) {
-      if (v == null) return "—";
-      var c = v > 0 ? "s-pos" : v < 0 ? "s-neg" : "";
-      return '<span class="' + c + '">' + (v > 0 ? "+" : "") + v + "</span>";
+  { key: "event_ticker",       label: "Ticker",            cls: "s-label", w: null },
+  { key: "last_price_dollars", label: "Probability",       cls: "s-num", w: 80,  fmt: function(v) { return v != null ? (v * 100).toFixed(0) + "%" : "—"; } },
+  { key: "yes_ask_dollars",    label: "Yes Ask",           cls: "s-yes", w: 70,  fmt: function(v) { return v != null ? "$" + v.toFixed(2) : "—"; } },
+  { key: "yes_bid_dollars",    label: "Yes Bid",           cls: "s-yes", w: 70,  fmt: function(v) { return v != null ? "$" + v.toFixed(2) : "—"; } },
+  { key: "no_ask_dollars",     label: "No Ask",            cls: "s-no",  w: 70,  fmt: function(v) { return v != null ? "$" + v.toFixed(2) : "—"; } },
+  { key: "no_bid_dollars",     label: "No Bid",            cls: "s-no",  w: 70,  fmt: function(v) { return v != null ? "$" + v.toFixed(2) : "—"; } },
+  { key: "price_ranges",       label: "Price Ranges",      cls: "s-num", w: 100, fmt: function(v) {
+      if (!Array.isArray(v) || !v.length) return "—";
+      var r = v[0];
+      if (!r) return "—";
+      var s = r.start, e = r.end, step = r.step;
+      return "$" + parseFloat(s).toFixed(2) + "–$" + parseFloat(e).toFixed(2);
     }},
-  { key: "volume_24h", label: "Vol 24h",   cls: "s-num",   w: 60,  fmt: function(v) { return v != null ? v.toLocaleString() : "—"; } },
-  { key: "volume",     label: "Volume",    cls: "s-num",   w: 70,  fmt: function(v) { return v != null ? v.toLocaleString() : "—"; } },
-  { key: "open_interest", label: "OI",     cls: "s-num",   w: 55,  fmt: function(v) { return v != null ? v.toLocaleString() : "—"; } },
-  { key: "liquidity",  label: "Liq $",     cls: "s-num",   w: 55,  fmt: function(v) { return v != null ? "$" + v.toFixed(0) : "—"; } },
-  { key: "expires",    label: "Expires",   cls: "",         w: 80,  fmt: function(v) {
+  { key: "volume",             label: "Open/High/Low",     cls: "s-num", w: 90,  fmt: function(v) { return v != null ? v.toLocaleString() : "—"; } },
+  { key: "volume_24h",         label: "Volume Last 24h",   cls: "s-num", w: 90,  fmt: function(v) { return v != null ? v.toLocaleString() : "—"; } },
+  { key: "open_interest",      label: "Open Interest",     cls: "s-num", w: 90,  fmt: function(v) { return v != null ? v.toLocaleString() : "—"; } },
+  { key: "expiration_time",    label: "Expiration Time",   cls: "",      w: 100, fmt: function(v) {
       if (!v) return "—";
-      try { var d = new Date(v); return d.toLocaleDateString("en-US", {month:"short",day:"numeric"}); } catch(e) { return "—"; }
+      try { var d = new Date(v); return d.toLocaleDateString("en-US", {month:"short",day:"numeric",year:"numeric"}); } catch(e) { return "—"; }
     }},
 ];
 function screenerInit() {
