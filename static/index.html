@@ -318,6 +318,9 @@ html,body{overscroll-behavior:none}
 .ed-rule-text{font-size:12px;line-height:1.5;color:var(--text-dim)}
 .ed-chart{margin-top:12px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px}
 .ed-chart-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:10px;flex-wrap:wrap}
+.ed-chart-header-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ed-chart-live{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:var(--text-muted);letter-spacing:0.3px;font-variant-numeric:tabular-nums}
+.ed-chart-live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 4px rgba(0,200,83,0.6);animation:live-pulse 1.4s infinite ease-in-out}
 .ed-chart-tabs{display:flex;gap:3px;padding:2px;background:var(--bg3);border:1px solid var(--border);border-radius:6px}
 .ed-chart-tab{padding:4px 10px;background:transparent;border:0;color:var(--text-muted);font-family:inherit;font-size:10px;font-weight:700;letter-spacing:0.4px;cursor:pointer;border-radius:4px;transition:background 0.12s,color 0.12s}
 .ed-chart-tab:hover{color:var(--text-dim)}
@@ -333,6 +336,13 @@ html,body{overscroll-behavior:none}
 .ed-chart-legend-delta{font-size:10px;font-weight:800;font-variant-numeric:tabular-nums;padding:2px 5px;border-radius:3px;letter-spacing:0.2px}
 .ed-chart-legend-delta.up{background:rgba(0,200,83,0.15);color:#4caf50}
 .ed-chart-legend-delta.down{background:rgba(244,67,54,0.15);color:#f44336}
+.ed-chart{position:relative}
+.ed-chart-tooltip{position:absolute;pointer-events:none;background:#000;border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:11px;color:var(--text);box-shadow:0 4px 12px rgba(0,0,0,0.5);z-index:20;min-width:140px}
+.ed-chart-tooltip .ed-tt-time{font-size:10px;color:var(--text-muted);margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+.ed-chart-tooltip .ed-tt-row{display:flex;align-items:center;gap:6px;padding:2px 0}
+.ed-chart-tooltip .ed-tt-swatch{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+.ed-chart-tooltip .ed-tt-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim);font-size:10px}
+.ed-chart-tooltip .ed-tt-val{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums}
 .ed-tabs{display:flex;gap:4px;flex-wrap:wrap;margin:20px 0 0;padding:0;border-bottom:1px solid var(--border)}
 .ed-tab{padding:8px 14px;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--text-muted);font-family:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;cursor:pointer;transition:color 0.12s,border-color 0.12s}
 .ed-tab:hover{color:var(--text-dim)}
@@ -2326,8 +2336,127 @@ function renderPriceChartSvg(series, hoursWindow) {
   }
   svg += '<text x="' + padL + '" y="' + (H - 6) + '" fill="#666" font-size="10">' + fmtTick(firstDate) + '</text>';
   svg += '<text x="' + (padL + w) + '" y="' + (H - 6) + '" fill="#666" font-size="10" text-anchor="end">' + fmtTick(lastDate) + '</text>';
+  // Hover layer — an invisible rect that catches pointer events
+  // across the entire plot area. Paired with a vertical crosshair
+  // line and per-series dots (all hidden by default, toggled on
+  // mousemove). Tooltip lives outside the SVG for easy positioning.
+  svg += '<g class="ed-chart-hover-group" style="display:none">';
+  svg += '<line class="ed-chart-crosshair" x1="0" x2="0"'
+       + ' y1="' + padT + '" y2="' + (padT + h) + '"'
+       + ' stroke="#666" stroke-width="1" stroke-dasharray="3,3"/>';
+  for (var ci = 0; ci < series.length; ci++) {
+    var ccolor = CHART_COLORS[ci % CHART_COLORS.length];
+    svg += '<circle class="ed-chart-hover-dot" data-idx="' + ci + '"'
+         + ' r="4" fill="' + ccolor + '" stroke="#000" stroke-width="1.5"/>';
+  }
+  svg += '</g>';
+  svg += '<rect class="ed-chart-hover-area"'
+       + ' x="' + padL + '" y="' + padT + '"'
+       + ' width="' + w + '" height="' + h + '"'
+       + ' fill="transparent" pointer-events="all"'
+       + ' style="cursor:crosshair"/>';
   svg += '</svg>';
+  // Stash the scale data as JSON in a sibling script tag so the
+  // hover handler can map mouse X back to a timestamp without
+  // recomputing the scale. Lives outside the SVG so it's parsed
+  // as HTML, not SVG.
+  var meta = {
+    padL: padL, padR: padR, padT: padT, padB: padB, W: W, H: H,
+    tMin: tMin, tMax: tMax,
+    series: series.map(function(s) {
+      return {
+        label: s.label || s.market_ticker,
+        points: s.points,
+      };
+    }),
+  };
+  svg += '<script type="application/json" class="ed-chart-meta">'
+       + JSON.stringify(meta).replace(/</g, "\\u003c")
+       + '</script>';
+  svg += '<div class="ed-chart-tooltip" style="display:none"></div>';
   return svg;
+}
+
+// Attaches the hover handler to every rendered chart. Called after
+// hydratePriceCharts updates body.innerHTML, because innerHTML
+// replacement wipes previous listeners.
+function wireChartHover(chartEl) {
+  var svg = chartEl.querySelector(".ed-chart-svg");
+  var area = chartEl.querySelector(".ed-chart-hover-area");
+  var hoverG = chartEl.querySelector(".ed-chart-hover-group");
+  var crosshair = chartEl.querySelector(".ed-chart-crosshair");
+  var dots = chartEl.querySelectorAll(".ed-chart-hover-dot");
+  var metaEl = chartEl.querySelector(".ed-chart-meta");
+  var tooltip = chartEl.querySelector(".ed-chart-tooltip");
+  if (!svg || !area || !hoverG || !metaEl || !tooltip) return;
+  var meta;
+  try { meta = JSON.parse(metaEl.textContent); } catch (e) { return; }
+  function pickClosestPoint(points, t) {
+    // Binary search could work but these arrays are small (<300).
+    var best = null;
+    var bestDelta = Infinity;
+    for (var i = 0; i < points.length; i++) {
+      var d = Math.abs(points[i].t - t);
+      if (d < bestDelta) {
+        bestDelta = d;
+        best = points[i];
+      }
+    }
+    return best;
+  }
+  area.addEventListener("mousemove", function(ev) {
+    var rect = svg.getBoundingClientRect();
+    // Map DOM pixels back to SVG viewBox coords.
+    var px = (ev.clientX - rect.left) / rect.width * meta.W;
+    var innerX = Math.max(meta.padL, Math.min(meta.W - meta.padR, px));
+    var t = meta.tMin + ((innerX - meta.padL) / (meta.W - meta.padL - meta.padR)) * (meta.tMax - meta.tMin);
+    // Move the vertical crosshair to the mouse x.
+    crosshair.setAttribute("x1", innerX);
+    crosshair.setAttribute("x2", innerX);
+    // Reposition each series dot at the closest point on its line.
+    var h = meta.H - meta.padT - meta.padB;
+    var tooltipBody = '';
+    var d = new Date(t);
+    var hh = d.getHours(), mm = d.getMinutes();
+    var timeStr = (hh < 10 ? "0" + hh : hh) + ":" + (mm < 10 ? "0" + mm : mm);
+    var span = meta.tMax - meta.tMin;
+    if (span > 36 * 3600000) {
+      timeStr = (d.getMonth() + 1) + "/" + d.getDate() + " " + timeStr;
+    }
+    tooltipBody += '<div class="ed-tt-time">' + timeStr + '</div>';
+    for (var si = 0; si < meta.series.length; si++) {
+      var s = meta.series[si];
+      var pts = s.points || [];
+      if (!pts.length || si >= dots.length) continue;
+      var closest = pickClosestPoint(pts, t);
+      if (!closest) { dots[si].setAttribute("r", "0"); continue; }
+      var cx = meta.padL + ((closest.t - meta.tMin) / (meta.tMax - meta.tMin)) * (meta.W - meta.padL - meta.padR);
+      var cy = meta.padT + (1 - (closest.p / 100)) * h;
+      dots[si].setAttribute("cx", cx);
+      dots[si].setAttribute("cy", cy);
+      dots[si].setAttribute("r", "4");
+      var color = CHART_COLORS[si % CHART_COLORS.length];
+      tooltipBody += '<div class="ed-tt-row">'
+                   + '<span class="ed-tt-swatch" style="background:' + color + '"></span>'
+                   + '<span class="ed-tt-label">' + escH(s.label) + '</span>'
+                   + '<span class="ed-tt-val">' + closest.p.toFixed(0) + '¢</span>'
+                   + '</div>';
+    }
+    hoverG.setAttribute("style", "display:inline");
+    tooltip.innerHTML = tooltipBody;
+    tooltip.style.display = "block";
+    // Position tooltip near cursor but clamped to chart bounds.
+    var ttX = ev.clientX - rect.left + 12;
+    var ttY = ev.clientY - rect.top + 12;
+    var maxX = rect.width - 150;
+    if (ttX > maxX) ttX = ev.clientX - rect.left - 150;
+    tooltip.style.left = ttX + "px";
+    tooltip.style.top = ttY + "px";
+  });
+  area.addEventListener("mouseleave", function() {
+    hoverG.setAttribute("style", "display:none");
+    tooltip.style.display = "none";
+  });
 }
 
 // Selectable timeframe windows for the price-history chart.
@@ -2357,7 +2486,11 @@ function renderPriceHistoryPanel(evTicker, outcomeLabels) {
        + ' data-hours="24">'
        + '<div class="ed-chart-header">'
        +   '<div class="ed-section-title" style="margin:0">Price history</div>'
-       +   tabs
+       +   '<div class="ed-chart-header-right">'
+       +     '<span class="ed-chart-live"><span class="ed-chart-live-dot"></span>'
+       +     '<span class="ed-chart-live-text">Live</span></span>'
+       +     tabs
+       +   '</div>'
        + '</div>'
        + '<div class="ed-chart-body"><div class="ed-chart-loading">Loading…</div></div>'
        + '</div>';
@@ -2379,6 +2512,45 @@ window.switchChartTimeframe = function(btn) {
   if (body) body.innerHTML = '<div class="ed-chart-loading">Loading…</div>';
   hydratePriceCharts();
 };
+
+// Tracks the last time each chart (keyed by ticker) finished
+// hydrating. Used by the "Live · updated Xs ago" indicator that
+// ticks every second without triggering re-fetches.
+var _chartLastUpdate = {};
+
+// Auto-refresh every 30 seconds: re-hydrate any chart that's
+// currently in the DOM. Skips when the detail page is hidden to
+// avoid wasting /api/event/.../prices calls while user navigated
+// away.
+setInterval(function() {
+  var ed = document.getElementById("event-detail");
+  if (!ed || ed.style.display === "none") return;
+  var charts = document.querySelectorAll(".ed-chart");
+  if (!charts.length) return;
+  for (var i = 0; i < charts.length; i++) {
+    charts[i].removeAttribute("data-hydrated");
+  }
+  hydratePriceCharts();
+}, 30000);
+
+// Updates every "Live · updated Xs ago" timestamp in place once
+// per second, without re-fetching anything. Keeps the UI feeling
+// alive between auto-refreshes.
+setInterval(function() {
+  var live = document.querySelectorAll(".ed-chart-live-text");
+  for (var i = 0; i < live.length; i++) {
+    var chart = live[i].closest(".ed-chart");
+    if (!chart) continue;
+    var ticker = chart.getAttribute("data-ticker");
+    var last = _chartLastUpdate[ticker];
+    if (!last) {
+      live[i].textContent = "Live";
+      continue;
+    }
+    var age = Math.round((Date.now() - last) / 1000);
+    live[i].textContent = "Live · updated " + age + "s ago";
+  }
+}, 1000);
 
 // Fetch + populate every .ed-chart placeholder currently in the DOM.
 // Called after the detail page renders so the chart appears after
@@ -2463,6 +2635,10 @@ async function hydratePriceCharts() {
       }
       legend += '</div>';
       body.innerHTML = svg + legend;
+      _chartLastUpdate[tkr] = Date.now();
+      // Wire the hover crosshair/tooltip on every fresh render —
+      // innerHTML replacement wiped the previous listeners.
+      wireChartHover(el);
     } catch (ex) {
       var body2 = el.querySelector(".ed-chart-body");
       if (body2) body2.innerHTML = '<div class="ed-chart-empty">Failed to load price history.</div>';
