@@ -1921,10 +1921,14 @@ function renderEventDetail(ev) {
       // Secondary hint line — emphasizes that this is the
       // cumulative score across both legs, not the current match.
       h += '<div class="ed-series-hint">Aggregate score across both legs</div>';
+    } else if (legN === 1) {
+      // We're on Leg 1 — no aggregate to show yet. Set expectations.
+      h += '<div class="ed-series-summary-solo">Aggregate score will show after this leg ends.</div>';
     } else if (legN) {
-      // Known leg but no aggregate yet (usually the 1st leg before
-      // kickoff). Just show a hint line.
-      h += '<div class="ed-series-summary-solo">Aggregate score will show after the 1st leg ends.</div>';
+      // 2nd leg (or later) but our data source hasn't returned the
+      // aggregate yet. Don't make a definitive "will show later"
+      // claim — the 1st leg has clearly already happened.
+      h += '<div class="ed-series-summary-solo">Aggregate score from the 1st leg isn\u2019t available yet — check back shortly.</div>';
     }
     h += '</div>';
   }

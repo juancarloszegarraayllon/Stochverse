@@ -264,6 +264,13 @@ def _parse_event(ev: Dict[str, Any], sport_label: str) -> Optional[Dict[str, Any
                 g["tournament_name"] = league
                 winner_code = ev.get("aggregatedWinnerCode") or ""
                 g["aggregate_winner"] = winner_code  # "home" / "away" / "draw" / ""
+                # Capture the event ID so _fetch_sport can do a
+                # targeted per-event enrichment call for 2nd-leg
+                # games whose compact list response didn't include
+                # the aggregate field yet.
+                ev_id = ev.get("id")
+                if isinstance(ev_id, (int, str)):
+                    g["_sofa_event_id"] = int(ev_id) if isinstance(ev_id, int) else ev_id
         except Exception:
             pass
     # Tennis: build a full scoreboard-style label showing every
@@ -394,6 +401,50 @@ async def _fetch_sport(client, slug: str, label: str):
                 if bad == 1:
                     log.debug("sofascore %s parse err: %s", slug, e)
                 continue
+        # Enrich 2nd-leg games whose compact response was missing
+        # the aggregate. The detail endpoint (/event/{id}) almost
+        # always has homeScore.aggregated populated once the 1st
+        # leg has concluded. We only call it for games that (a)
+        # are tagged as 2-leg and (b) either have leg_number >= 2
+        # OR currently lack aggregate — typically <5 events per
+        # poll cycle across all leagues.
+        if label == "Soccer":
+            enrich_targets = [
+                gm for gm in out
+                if gm.get("is_two_leg")
+                and gm.get("_sofa_event_id")
+                and (gm.get("aggregate_home") is None or gm.get("aggregate_away") is None)
+            ]
+            for gm in enrich_targets:
+                try:
+                    ev_id = gm.get("_sofa_event_id")
+                    detail_url = f"https://api.sofascore.com/api/v1/event/{ev_id}"
+                    dr = await client.get(detail_url, timeout=10.0)
+                    if dr.status_code != 200:
+                        continue
+                    ddata = dr.json() or {}
+                    dev = ddata.get("event") or {}
+                    d_home = dev.get("homeScore") or {}
+                    d_away = dev.get("awayScore") or {}
+                    d_agg_h = d_home.get("aggregated")
+                    d_agg_a = d_away.get("aggregated")
+                    if d_agg_h is None and d_agg_a is None:
+                        dascore = dev.get("aggregatedScore") or {}
+                        d_agg_h = dascore.get("home")
+                        d_agg_a = dascore.get("away")
+                    if d_agg_h is not None:
+                        gm["aggregate_home"] = int(d_agg_h) if isinstance(d_agg_h, (int, float)) else None
+                    if d_agg_a is not None:
+                        gm["aggregate_away"] = int(d_agg_a) if isinstance(d_agg_a, (int, float)) else None
+                    # Prefer the detail endpoint's winner code over
+                    # the list endpoint's (often empty on compact).
+                    dwin = dev.get("aggregatedWinnerCode")
+                    if dwin:
+                        gm["aggregate_winner"] = dwin
+                except Exception as e:
+                    log.debug("sofascore aggregate enrich failed for %s: %s",
+                              gm.get("_sofa_event_id"), e)
+                    continue
         info["count"] = len(out)
         if bad:
             info["bad"] = bad
