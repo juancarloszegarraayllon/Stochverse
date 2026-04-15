@@ -1085,7 +1085,14 @@ def _build_cache():
                 "_vol24h": volume_24h,
                 "_liq": liquidity,
                 "_prev": prev_price,
-                "_rules": str(mk.get("rules_primary") or "")[:300],
+                # Settlement rules — keep the full Kalshi text so the
+                # detail page can render the "How this settles"
+                # section. Cap at 4000 chars as a safety net; typical
+                # rules_primary is ~150-400 chars, rules_secondary
+                # ~300-800 chars.
+                "_rules": str(mk.get("rules_primary") or "")[:4000],
+                "_rules_secondary": str(mk.get("rules_secondary") or "")[:4000],
+                "_early_close_condition": str(mk.get("early_close_condition") or "")[:1000],
                 "_open_time": str(mk.get("open_time") or ""),
                 "_market_close": str(mk.get("close_time") or ""),
                 "_price_ranges": mk.get("price_ranges"),
@@ -1961,7 +1968,9 @@ def get_event_detail(ticker: str):
                 "volume_24h":    round(vol24),
                 "open_interest": round(oi),
                 "liquidity":     round(liq * 100) / 100,
-                "rules":         o.get("_rules", ""),
+                "rules":             o.get("_rules", ""),
+                "rules_secondary":   o.get("_rules_secondary", ""),
+                "early_close_condition": o.get("_early_close_condition", ""),
             })
         # Sort long markets by probability desc so the most likely
         # outcomes are first — same rule the card uses.
