@@ -1,23 +1,62 @@
 """Database connection and session factory.
 
 Reads DATABASE_URL from the environment (auto-injected by Railway
-when the PostgreSQL plugin is linked to the service). Falls back
-gracefully: if DATABASE_URL is missing, the app runs in pure
+when the PostgreSQL plugin is linked to the service). Also works
+with external managed providers like Neon, Supabase, etc. Falls
+back gracefully: if DATABASE_URL is missing, the app runs in pure
 in-memory mode exactly as before.
 """
 import os
 import logging
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 log = logging.getLogger("db")
 
-# Railway injects postgres:// but asyncpg needs postgresql+asyncpg://
+# asyncpg doesn't understand libpq-style query params like
+# `sslmode=require` or `channel_binding=require` that Neon / Supabase
+# append to their connection strings by default. Extract them from
+# the URL and translate into a connect_args dict that asyncpg can
+# consume.
+_connect_args: dict = {}
+
 _raw_url = os.environ.get("DATABASE_URL", "")
+# Normalize scheme — Railway emits postgres://, asyncpg needs
+# postgresql+asyncpg://. Managed providers usually emit
+# postgresql:// which we also rewrite.
 if _raw_url.startswith("postgres://"):
-    DATABASE_URL = _raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    _raw_url = _raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
 elif _raw_url.startswith("postgresql://"):
-    DATABASE_URL = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    _raw_url = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+if _raw_url:
+    # Parse + strip unsupported query params, route them into
+    # connect_args for asyncpg.
+    try:
+        parsed = urlparse(_raw_url)
+        qs = dict(parse_qsl(parsed.query))
+        # sslmode: asyncpg accepts ssl="require" / "allow" /
+        # "disable" etc. via its own "ssl" connect kwarg. Translate
+        # from libpq-style names.
+        sslmode = qs.pop("sslmode", None)
+        if sslmode:
+            # Map libpq "sslmode=require" → asyncpg ssl="require"
+            _connect_args["ssl"] = sslmode if sslmode != "disable" else False
+        # channel_binding: libpq-only param, asyncpg ignores it.
+        qs.pop("channel_binding", None)
+        # If this is a Neon / Supabase hostname with no explicit
+        # sslmode, force SSL on — both providers require it.
+        if "ssl" not in _connect_args and parsed.hostname and any(
+            marker in parsed.hostname
+            for marker in ("neon.tech", "supabase.co", "supabase.com")
+        ):
+            _connect_args["ssl"] = "require"
+        new_query = urlencode(qs)
+        DATABASE_URL = urlunparse(parsed._replace(query=new_query))
+    except Exception as e:
+        log.warning("failed to parse DATABASE_URL (using raw): %s", e)
+        DATABASE_URL = _raw_url
 else:
-    DATABASE_URL = _raw_url
+    DATABASE_URL = ""
 
 engine = None
 async_session = None
@@ -28,9 +67,8 @@ if DATABASE_URL:
             create_async_engine,
             async_sessionmaker,
         )
-        # Railway starter PostgreSQL has a 20-connection limit.
-        # Keep pool small: feeds + request handlers should stay
-        # well under 10 total connections.
+        # Keep pool small so we stay well under providers' connection
+        # limits (Railway: 20, Neon free: 100, Supabase free: 60).
         engine = create_async_engine(
             DATABASE_URL,
             pool_size=5,
@@ -40,14 +78,16 @@ if DATABASE_URL:
             # without a full exception round-trip.
             pool_pre_ping=True,
             # pool_recycle: force-recycle connections older than N
-            # seconds. Defends against Railway Postgres restarts
-            # that invalidate every connection in the pool. Five
-            # minutes is short enough to recover quickly, long
-            # enough to avoid per-request reconnect overhead.
+            # seconds. Defends against provider restarts that
+            # invalidate every connection in the pool.
             pool_recycle=300,
+            connect_args=_connect_args,
         )
         async_session = async_sessionmaker(engine, expire_on_commit=False)
-        log.info("database engine created (pool_size=5, pool_recycle=300)")
+        log.info(
+            "database engine created (pool_size=5, pool_recycle=300, ssl=%s)",
+            _connect_args.get("ssl", "default"),
+        )
     except Exception as e:
         log.warning("failed to create database engine: %s", e)
         engine = None
