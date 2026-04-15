@@ -224,6 +224,8 @@ html,body{overscroll-behavior:none}
 #screener-table td{padding:7px 6px;border-bottom:1px solid var(--border);color:var(--text-dim);white-space:nowrap;text-align:center}
 #screener-table tr:hover td{background:rgba(255,255,255,0.02)}
 #screener-table .s-title{min-width:200px;color:var(--text);white-space:normal;word-break:break-word;text-align:left}
+#screener-table .s-title-link{color:var(--text);text-decoration:none;cursor:pointer}
+#screener-table .s-title-link:hover{color:var(--green);text-decoration:underline}
 #screener-table .s-link{color:var(--text-muted);text-decoration:none;margin-left:6px;font-size:11px;opacity:0.6;transition:opacity 0.15s,color 0.15s}
 #screener-table .s-link:hover{color:var(--green);opacity:1}
 #screener-table .s-ticker-link{color:var(--text-dim);text-decoration:none;transition:color 0.15s}
@@ -1435,7 +1437,19 @@ setInterval(refreshVisible, 5000);
 // ── Screener ──────────────────────────────────────────────────────
 var screenerState = { sort: "volume_24h", dir: "desc", offset: 0, total: 0 };
 var SCREENER_COLS = [
-  { key: "title",              label: "Event",             cls: "s-title", w: null },
+  { key: "title",              label: "Event",             cls: "s-title", w: null, fmt: function(v, row) {
+      if (!v) return "";
+      var tkr = row && row.event_ticker ? row.event_ticker : "";
+      if (!tkr) return v;
+      // Clickable title — opens the dedicated event detail page.
+      // stopPropagation keeps the row-click search handler from
+      // also firing underneath.
+      return '<a class="s-title-link" href="?event=' + encodeURIComponent(tkr)
+        + '" onclick="event.stopPropagation();event.preventDefault();window.showEventDetail(\''
+        + tkr.replace(/'/g, "\\'") + '\')">'
+        + v.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+        + '</a>';
+    }},
   { key: "event_ticker",       label: "Ticker",            cls: "s-label", w: null, fmt: function(v, row) {
       if (!v) return "";
       if (row && row.url) {
@@ -1639,6 +1653,7 @@ document.getElementById("screener-more").addEventListener("click", function() {
 // multiple market groups), and an order-book-style table with every
 // market's yes/no prices, volume, OI, spread, and last price.
 
+window.showEventDetail = showEventDetail;
 function showEventDetail(ticker, skipHistory) {
   if (!ticker) return;
   // Preserve what view the user came from so the back button can
