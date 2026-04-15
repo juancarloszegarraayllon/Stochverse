@@ -327,7 +327,7 @@ html,body{overscroll-behavior:none}
 .ed-chart-tab.active{background:var(--bg2);color:var(--text);border:1px solid var(--border)}
 .ed-chart-body{min-height:120px}
 .ed-chart-loading,.ed-chart-empty{color:var(--text-muted);font-size:12px;padding:32px 16px;text-align:center;font-style:italic}
-.ed-chart-svg{width:100%;height:220px;display:block;background:#050505;border-radius:6px}
+.ed-chart-svg{width:100%;height:auto;display:block;background:#050505;border-radius:6px}
 .ed-chart-legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px}
 .ed-chart-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim)}
 .ed-chart-swatch{width:10px;height:10px;border-radius:2px;display:inline-block;flex-shrink:0}
@@ -2258,7 +2258,7 @@ var CHART_COLORS = [
 // Build a single SVG with all market lines overlaid. Y axis is
 // 0-100% (probability), X axis is 0 to full window width. Returns
 // "" when no series has data.
-function renderPriceChartSvg(series, hoursWindow) {
+function renderPriceChartSvg(series, hoursWindow, volume) {
   if (!series || !series.length) return "";
   // Determine global time bounds so every line shares an X scale.
   var tMin = Infinity, tMax = -Infinity;
@@ -2281,13 +2281,25 @@ function renderPriceChartSvg(series, hoursWindow) {
     var windowMs = (hoursWindow || 24) * 3600000;
     tMin = tMax - windowMs;
   }
-  var W = 900, H = 220;        // viewBox dimensions
+  // Are there any non-zero volume buckets? If yes, reserve a small
+  // panel below the price chart for volume bars; otherwise the
+  // chart uses the full vertical space as before.
+  var hasVolume = Array.isArray(volume) && volume.some(function(b) { return b && b.v > 0; });
+  var volH = hasVolume ? 40 : 0;       // height of volume panel
+  var volGap = hasVolume ? 6 : 0;      // gap between panels
+  var W = 900, H = 220 + volH + volGap; // viewBox dimensions
   var padL = 32, padR = 8, padT = 12, padB = 22;
   var w = W - padL - padR;
-  var h = H - padT - padB;
+  var h = 220 - padT - padB;           // price-panel inner height
   function sx(t) { return padL + ((t - tMin) / (tMax - tMin)) * w; }
   function sy(p) { return padT + (1 - (p / 100)) * h; }
-  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" class="ed-chart-svg" preserveAspectRatio="none">';
+  // preserveAspectRatio="xMidYMid meet" keeps everything square
+  // when the viewBox grows (adding the volume panel makes H
+  // change, so an aspect-preserving scale is what we want).
+  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '"'
+          + ' class="ed-chart-svg"'
+          + ' preserveAspectRatio="xMidYMid meet"'
+          + ' style="width:100%;aspect-ratio:' + W + '/' + H + '">';
   // Horizontal gridlines at 0, 25, 50, 75, 100%
   var grid = [0, 25, 50, 75, 100];
   for (var gi = 0; gi < grid.length; gi++) {
@@ -2334,6 +2346,34 @@ function renderPriceChartSvg(series, hoursWindow) {
     }
     return hhmm;
   }
+  // Volume bars underneath the price panel. Bars share the same X
+  // scale as the price chart. Height is normalized per-chart so
+  // the tallest bar always fills the panel.
+  if (hasVolume) {
+    var volTop = 220 + volGap;
+    var volMax = 0;
+    for (var vi = 0; vi < volume.length; vi++) {
+      if (volume[vi].v > volMax) volMax = volume[vi].v;
+    }
+    // Approximate bar width = 80% of one bucket-span in px.
+    var bucketSpan = (volume.length > 1)
+      ? sx(volume[1].t) - sx(volume[0].t)
+      : 4;
+    var barW = Math.max(1.5, bucketSpan * 0.8);
+    for (var vj = 0; vj < volume.length; vj++) {
+      var b = volume[vj];
+      if (!b.v) continue;
+      var bh = volMax > 0 ? (b.v / volMax) * volH : 0;
+      var bx = sx(b.t) - barW / 2;
+      var by = volTop + (volH - bh);
+      svg += '<rect x="' + bx.toFixed(1) + '" y="' + by.toFixed(1)
+           + '" width="' + barW.toFixed(1) + '" height="' + bh.toFixed(1)
+           + '" fill="#4fc3f7" fill-opacity="0.55"/>';
+    }
+    // Faint label on the volume panel so users know what it is.
+    svg += '<text x="' + padL + '" y="' + (volTop + 10) + '" fill="#444" '
+         + 'font-size="9" letter-spacing="0.3">VOLUME</text>';
+  }
   svg += '<text x="' + padL + '" y="' + (H - 6) + '" fill="#666" font-size="10">' + fmtTick(firstDate) + '</text>';
   svg += '<text x="' + (padL + w) + '" y="' + (H - 6) + '" fill="#666" font-size="10" text-anchor="end">' + fmtTick(lastDate) + '</text>';
   // Hover layer — an invisible rect that catches pointer events
@@ -2361,7 +2401,9 @@ function renderPriceChartSvg(series, hoursWindow) {
   // recomputing the scale. Lives outside the SVG so it's parsed
   // as HTML, not SVG.
   var meta = {
-    padL: padL, padR: padR, padT: padT, padB: padB, W: W, H: H,
+    padL: padL, padR: padR, padT: padT, padB: padB,
+    W: W, H: H,
+    priceH: h,  // inner height of JUST the price panel (excl. volume panel)
     tMin: tMin, tMax: tMax,
     series: series.map(function(s) {
       return {
@@ -2414,7 +2456,9 @@ function wireChartHover(chartEl) {
     crosshair.setAttribute("x1", innerX);
     crosshair.setAttribute("x2", innerX);
     // Reposition each series dot at the closest point on its line.
-    var h = meta.H - meta.padT - meta.padB;
+    // priceH is the inner height of just the price panel (excludes
+    // the optional volume panel below it).
+    var h = meta.priceH != null ? meta.priceH : (meta.H - meta.padT - meta.padB);
     var tooltipBody = '';
     var d = new Date(t);
     var hh = d.getHours(), mm = d.getMinutes();
@@ -2614,7 +2658,7 @@ async function hydratePriceCharts() {
         body.innerHTML = '<div class="ed-chart-empty">' + escH(msg) + '</div>';
         continue;
       }
-      var svg = renderPriceChartSvg(series, hours);
+      var svg = renderPriceChartSvg(series, hours, d.volume);
       if (!svg) {
         body.innerHTML = '<div class="ed-chart-empty">Price history is just starting to record for this event. The chart will fill in over the next few minutes as more snapshots arrive — try again shortly.</div>';
         continue;

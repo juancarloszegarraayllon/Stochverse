@@ -148,6 +148,23 @@ def _extract_update(msg):
         fields["no_ask"] = 100 - fields["yes_bid"]
     if "yes_ask" in fields and "no_bid" not in fields:
         fields["no_bid"] = 100 - fields["yes_ask"]
+    # Volume & open interest — Kalshi's ticker channel sends
+    # cumulative totals (not deltas). Field names vary by channel
+    # version; try the common aliases.
+    for src_key, out_key in (
+        ("volume",             "volume"),
+        ("total_volume",       "volume"),
+        ("dollar_volume",      "dollar_volume"),
+        ("open_interest",      "open_interest"),
+        ("total_open_interest","open_interest"),
+        ("dollar_open_interest","dollar_open_interest"),
+    ):
+        v = body.get(src_key)
+        if v is not None and out_key not in fields:
+            try:
+                fields[out_key] = float(v)
+            except Exception:
+                pass
     fields["ts_ms"] = int(time.time() * 1000)
     return tk, fields
 
@@ -292,6 +309,8 @@ async def run_ws_client(get_tickers):
                                 "no_bid": upd.get("no_bid"),
                                 "no_ask": upd.get("no_ask"),
                                 "last_price": upd.get("last_price"),
+                                "volume": upd.get("volume"),
+                                "open_interest": upd.get("open_interest"),
                             })
                 finally:
                     refresh_task.cancel()

@@ -2129,68 +2129,9 @@ async def get_event_prices(ticker: str, hours: int = 24, max_points: int = 120):
             "market_tickers": market_tickers,
         }
     try:
-        from sqlalchemy import select, func
-        from models import Price
-        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-        since = _dt.now(_tz.utc) - _td(hours=hours)
-        # Bucket size = total window / target points. Round to a
-        # nice integer of seconds so buckets align cleanly.
-        bucket_s = max(30, int((hours * 3600) / max_points))
-        out_series = []
-        async with async_session() as session:
-            for mk in market_tickers:
-                stmt = (
-                    select(Price.captured_at, Price.last_price,
-                           Price.yes_bid, Price.yes_ask)
-                    .where(Price.market_ticker == mk,
-                           Price.captured_at >= since)
-                    .order_by(Price.captured_at.asc())
-                )
-                rows = (await session.execute(stmt)).all()
-                if not rows:
-                    continue
-                # Downsample into fixed time buckets. Each bucket
-                # gets a representative price (average of last_price
-                # when available, else midprice of yes_bid/yes_ask).
-                buckets = {}
-                for captured, last, yb, ya in rows:
-                    try:
-                        ts = captured.timestamp()
-                    except Exception:
-                        continue
-                    key = int(ts // bucket_s) * bucket_s
-                    price_cents = last
-                    if price_cents is None and yb is not None and ya is not None:
-                        price_cents = (yb + ya) / 2.0
-                    if price_cents is None:
-                        continue
-                    b = buckets.setdefault(key, [0.0, 0])
-                    b[0] += float(price_cents)
-                    b[1] += 1
-                points = []
-                for key in sorted(buckets.keys()):
-                    total, count = buckets[key]
-                    if count == 0:
-                        continue
-                    points.append({
-                        "t": key * 1000,  # epoch ms for JS
-                        "p": round(total / count, 2),
-                    })
-                if points:
-                    out_series.append({
-                        "market_ticker": mk,
-                        "points": points,
-                        "min": min(pt["p"] for pt in points),
-                        "max": max(pt["p"] for pt in points),
-                        "first": points[0]["p"],
-                        "last": points[-1]["p"],
-                    })
-        return {
-            "series": out_series,
-            "hours": hours,
-            "bucket_seconds": bucket_s,
-            "market_tickers": market_tickers,
-        }
+        # Delegate to the extracted helper so this endpoint and the
+        # retry path below share exactly one query implementation.
+        return await _query_price_history(market_tickers, hours, max_points)
     except Exception as e:
         # Retry up to 3 times with exponential backoff on transient
         # errors. Each retry disposes the pool so SQLAlchemy opens
@@ -2255,7 +2196,9 @@ def _is_transient_db_error(e) -> bool:
 
 async def _query_price_history(market_tickers, hours, max_points):
     """The actual query loop — extracted so the retry path above
-    can invoke it a second time without duplicating logic."""
+    can invoke it a second time without duplicating logic. Returns
+    per-market price series plus an aggregated volume-per-bucket
+    array for the volume bar chart."""
     from sqlalchemy import select
     from models import Price
     from db import async_session as _session
@@ -2263,11 +2206,18 @@ async def _query_price_history(market_tickers, hours, max_points):
     since = _dt.now(_tz.utc) - _td(hours=hours)
     bucket_s = max(30, int((hours * 3600) / max_points))
     out_series = []
+    # volume_by_bucket[bucket_key] = total cumulative-volume delta
+    # across every market during that bucket. Deltas computed as
+    # (max_vol_in_bucket - min_vol_in_bucket) per market, then
+    # summed. Gives a "total contracts traded in this window"
+    # metric suitable for an aggregate bar chart.
+    volume_by_bucket: Dict[int, float] = {}
     async with _session() as session:
         for mk in market_tickers:
             stmt = (
                 select(Price.captured_at, Price.last_price,
-                       Price.yes_bid, Price.yes_ask)
+                       Price.yes_bid, Price.yes_ask,
+                       Price.volume)
                 .where(Price.market_ticker == mk,
                        Price.captured_at >= since)
                 .order_by(Price.captured_at.asc())
@@ -2275,8 +2225,14 @@ async def _query_price_history(market_tickers, hours, max_points):
             rows = (await session.execute(stmt)).all()
             if not rows:
                 continue
-            buckets = {}
-            for captured, last, yb, ya in rows:
+            # Price bucketing: average the representative price
+            # (last_price ?? midprice) across samples in the bucket.
+            buckets: Dict[int, list] = {}
+            # Volume bucketing: track min + max cumulative volume per
+            # bucket for this market so we can compute the delta.
+            vol_min: Dict[int, float] = {}
+            vol_max: Dict[int, float] = {}
+            for captured, last, yb, ya, vol in rows:
                 try:
                     ts = captured.timestamp()
                 except Exception:
@@ -2285,11 +2241,19 @@ async def _query_price_history(market_tickers, hours, max_points):
                 price_cents = last
                 if price_cents is None and yb is not None and ya is not None:
                     price_cents = (yb + ya) / 2.0
-                if price_cents is None:
-                    continue
-                b = buckets.setdefault(key, [0.0, 0])
-                b[0] += float(price_cents)
-                b[1] += 1
+                if price_cents is not None:
+                    b = buckets.setdefault(key, [0.0, 0])
+                    b[0] += float(price_cents)
+                    b[1] += 1
+                if vol is not None:
+                    try:
+                        v = float(vol)
+                    except Exception:
+                        continue
+                    if key not in vol_min or v < vol_min[key]:
+                        vol_min[key] = v
+                    if key not in vol_max or v > vol_max[key]:
+                        vol_max[key] = v
             points = []
             for key in sorted(buckets.keys()):
                 total, count = buckets[key]
@@ -2308,8 +2272,18 @@ async def _query_price_history(market_tickers, hours, max_points):
                     "first": points[0]["p"],
                     "last": points[-1]["p"],
                 })
+            # Accumulate per-bucket volume deltas across markets.
+            for key in vol_max:
+                delta = max(0.0, vol_max[key] - vol_min.get(key, vol_max[key]))
+                volume_by_bucket[key] = volume_by_bucket.get(key, 0.0) + delta
+    # Shape volume into a sorted array with t+v for the frontend.
+    volume = [
+        {"t": key * 1000, "v": round(volume_by_bucket[key], 2)}
+        for key in sorted(volume_by_bucket.keys())
+    ]
     return {
         "series": out_series,
+        "volume": volume,
         "hours": hours,
         "bucket_seconds": bucket_s,
         "market_tickers": market_tickers,

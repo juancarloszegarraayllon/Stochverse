@@ -293,6 +293,8 @@ async def batch_insert_prices(rows):
                         no_bid=r.get("no_bid"),
                         no_ask=r.get("no_ask"),
                         last_price=r.get("last_price"),
+                        volume=r.get("volume"),
+                        open_interest=r.get("open_interest"),
                         source="ws",
                     )
                     for r in rows
