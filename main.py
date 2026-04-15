@@ -1529,6 +1529,14 @@ def get_events(
                 # than ESPN (e.g. "Junin" vs "Sarmiento de Junín").
                 "title_home":     "",
                 "title_away":     "",
+                # Playoff series metadata (only ESPN games surface
+                # these; SofaScore/SportsDB matches leave them empty).
+                "is_playoff":         bool(g.get("is_playoff")),
+                "series_title":       g.get("series_title", ""),
+                "series_summary":     g.get("series_summary", ""),
+                "series_home_wins":   g.get("series_home_wins"),
+                "series_away_wins":   g.get("series_away_wins"),
+                "series_game_number": g.get("series_game_number"),
             }
             # Parse team names from the Kalshi title ("A vs B")
             # and assign to title_home / title_away using flip.
@@ -1791,6 +1799,13 @@ def get_event_detail(ticker: str):
             "away_display":   g.get("away_display", ""),
             "home_score":     g.get("home_score", "") or ("0" if g.get("state") == "in" else ""),
             "away_score":     g.get("away_score", "") or ("0" if g.get("state") == "in" else ""),
+            # Playoff series metadata — see /api/events for details.
+            "is_playoff":         bool(g.get("is_playoff")),
+            "series_title":       g.get("series_title", ""),
+            "series_summary":     g.get("series_summary", ""),
+            "series_home_wins":   g.get("series_home_wins"),
+            "series_away_wins":   g.get("series_away_wins"),
+            "series_game_number": g.get("series_game_number"),
         }
 
     rc["url"] = _kalshi_url(r.get("series_ticker", ""), r.get("event_ticker", ""))

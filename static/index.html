@@ -261,6 +261,18 @@ html,body{overscroll-behavior:none}
 .ed-scoreboard .ed-sb-score{font-size:28px;font-weight:800;color:var(--text);font-variant-numeric:tabular-nums}
 .ed-scoreboard .ed-sb-sep{font-size:14px;color:var(--text-muted)}
 .ed-scoreboard .ed-sb-clock{font-size:11px;color:var(--red);font-weight:700;letter-spacing:0.4px;text-transform:uppercase}
+.ed-series{margin-top:10px;padding:12px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;gap:8px}
+.ed-series-title{font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;text-align:center}
+.ed-series-row{display:flex;align-items:center;justify-content:space-between;gap:14px}
+.ed-series-team{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.ed-series-team-r{justify-content:flex-end}
+.ed-series-name{font-size:12px;color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.ed-series-wins{font-size:20px;font-weight:800;color:var(--text);font-variant-numeric:tabular-nums;min-width:18px;text-align:center}
+.ed-series-dots{display:flex;gap:3px}
+.ed-sdot{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--text-muted);background:transparent;display:inline-block}
+.ed-sdot-filled{background:var(--green);border-color:var(--green);box-shadow:0 0 4px rgba(0,255,100,0.5)}
+.ed-series-summary{font-size:11px;font-weight:700;color:var(--green);text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap}
+.ed-series-summary-solo{font-size:12px;color:var(--text);font-weight:600;text-align:center}
 .ed-tabs{display:flex;gap:4px;flex-wrap:wrap;margin:20px 0 0;padding:0;border-bottom:1px solid var(--border)}
 .ed-tab{padding:8px 14px;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--text-muted);font-family:inherit;font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;cursor:pointer;transition:color 0.12s,border-color 0.12s}
 .ed-tab:hover{color:var(--text-dim)}
@@ -291,6 +303,10 @@ html,body{overscroll-behavior:none}
   .ed-scoreboard{gap:12px;padding:12px 10px}
   .ed-scoreboard .ed-sb-team{min-width:70px}
   .ed-scoreboard .ed-sb-score{font-size:22px}
+  .ed-series-row{flex-wrap:wrap;row-gap:6px}
+  .ed-series-name{max-width:90px;font-size:11px}
+  .ed-series-wins{font-size:16px}
+  .ed-series-summary{flex:1 1 100%;text-align:center;order:3}
 }
 </style>
 </head>
@@ -1863,6 +1879,59 @@ function renderEventDetail(ev) {
        + '<div class="ed-sb-score">' + escH(live.away_score || "0") + '</div></div>';
     h += '</div>';
   }
+
+  // Playoff-series panel. Only renders when ESPN tagged this game
+  // as a playoff fixture — regular-season games have is_playoff=false.
+  if (live && live.is_playoff) {
+    var hWins = (typeof live.series_home_wins === "number") ? live.series_home_wins : null;
+    var aWins = (typeof live.series_away_wins === "number") ? live.series_away_wins : null;
+    var hasWins = hWins !== null && aWins !== null;
+    var gameN = live.series_game_number;
+    // Header line: either "Game 5 · Western Conference Finals" or
+    // just the series title when game number is unknown.
+    var headerBits = [];
+    if (gameN) headerBits.push("Game " + gameN);
+    if (live.series_title) headerBits.push(live.series_title);
+    var headerLine = headerBits.join(" · ");
+    h += '<div class="ed-series">';
+    if (headerLine) h += '<div class="ed-series-title">' + escH(headerLine) + '</div>';
+    if (hasWins) {
+      // Two-team wins bar: home | total-games bubbles | away.
+      // Each team shows its wins count and a row of circles (filled
+      // for wins, outlined for remaining "possible" games up to 4
+      // since NBA/NHL/MLB LCS/WS are best-of-7 → first to 4 wins).
+      var bestOf = 7;  // safe default for NBA/NHL/MLB LCS; best-of-5
+                       // series (MLB Div, NBA play-in) still render
+                       // correctly — the extra outlined dots just
+                       // represent unreachable games.
+      var target = Math.ceil(bestOf / 2);  // 4 for best-of-7
+      h += '<div class="ed-series-row">';
+      h += '<div class="ed-series-team">';
+      h += '<div class="ed-series-name">' + escH(live.home_display || live.home_abbr || "Home") + '</div>';
+      h += '<div class="ed-series-dots">';
+      for (var di = 0; di < target; di++) {
+        h += '<span class="ed-sdot' + (di < hWins ? ' ed-sdot-filled' : '') + '"></span>';
+      }
+      h += '</div>';
+      h += '<div class="ed-series-wins">' + hWins + '</div>';
+      h += '</div>';
+      h += '<div class="ed-series-summary">' + escH(live.series_summary || (hWins + "-" + aWins)) + '</div>';
+      h += '<div class="ed-series-team ed-series-team-r">';
+      h += '<div class="ed-series-wins">' + aWins + '</div>';
+      h += '<div class="ed-series-dots">';
+      for (var dj = 0; dj < target; dj++) {
+        h += '<span class="ed-sdot' + (dj < aWins ? ' ed-sdot-filled' : '') + '"></span>';
+      }
+      h += '</div>';
+      h += '<div class="ed-series-name">' + escH(live.away_display || live.away_abbr || "Away") + '</div>';
+      h += '</div>';
+      h += '</div>';
+    } else if (live.series_summary) {
+      h += '<div class="ed-series-summary-solo">' + escH(live.series_summary) + '</div>';
+    }
+    h += '</div>';
+  }
+
   h += '</div>'; // /ed-header
 
   // Markets tabs (when the event has sibling market groups) or a

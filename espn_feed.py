@@ -354,6 +354,69 @@ def _parse_event(ev: Dict[str, Any], league: str, sport: str) -> Optional[Dict[s
             sched_ms = int(_dt.fromisoformat(s).timestamp() * 1000)
         except Exception:
             pass
+    # ── Playoff series info ────────────────────────────────────────
+    # ESPN attaches a `series` object to each competition for playoff
+    # games (NBA, NHL, MLB, WNBA). Structure example:
+    #   series: {
+    #     "type": "playoff",
+    #     "title": "Western Conference First Round",
+    #     "summary": "Series tied 1-1",
+    #     "competitors": [
+    #       {"id": "13", "wins": 1, "homeAway": "home"},
+    #       {"id":  "2", "wins": 1, "homeAway": "away"},
+    #     ],
+    #   }
+    # Game number typically lives in `notes[0].headline` as
+    # "Game 3" or similar. Regular-season games have no `series`
+    # key so every field falls through to empty strings / None.
+    series_obj = comp.get("series") or {}
+    series_type = series_obj.get("type") or ""
+    series_title = series_obj.get("title") or ""
+    series_summary = series_obj.get("summary") or ""
+    series_home_wins = None
+    series_away_wins = None
+    for sc in series_obj.get("competitors") or []:
+        ha = sc.get("homeAway")
+        w = sc.get("wins")
+        if ha == "home" and isinstance(w, int):
+            series_home_wins = w
+        elif ha == "away" and isinstance(w, int):
+            series_away_wins = w
+    # Fallback: if competitors[] wasn't keyed by homeAway, match by id
+    # against the top-level home/away team ids.
+    if series_home_wins is None or series_away_wins is None:
+        home_id = str(home_team.get("id") or "")
+        away_id = str(away_team.get("id") or "")
+        for sc in series_obj.get("competitors") or []:
+            sid = str(sc.get("id") or "")
+            w = sc.get("wins")
+            if not isinstance(w, int):
+                continue
+            if sid and sid == home_id and series_home_wins is None:
+                series_home_wins = w
+            elif sid and sid == away_id and series_away_wins is None:
+                series_away_wins = w
+    # Game number — scan notes[] for a "Game N" headline. ESPN uses
+    # either notes[0].headline or the competition's `notes` array.
+    game_number = None
+    for note in (ev.get("notes") or []) + (comp.get("notes") or []):
+        headline = (note.get("headline") if isinstance(note, dict) else "") or ""
+        import re as _re
+        m = _re.search(r"Game\s+(\d+)", headline, _re.IGNORECASE)
+        if m:
+            try:
+                game_number = int(m.group(1))
+                break
+            except Exception:
+                pass
+    # Most North-American playoff series are best-of-7 (NBA, NHL
+    # conference finals; MLB LCS + World Series) with a handful of
+    # best-of-5 (NBA play-in, MLB Division Series). Inferring from
+    # the title is lossy, so we just surface the series_summary
+    # verbatim when we have it and let the frontend render the
+    # "Series X-Y" phrase ESPN already formatted for us.
+    is_playoff = series_type == "playoff" or bool(series_summary)
+
     return {
         "sport": sport,
         "league": league,
@@ -372,6 +435,14 @@ def _parse_event(ev: Dict[str, Any], league: str, sport: str) -> Optional[Dict[s
         "detail": stype.get("detail", ""),
         "description": stype.get("description", ""),
         "scheduled_kickoff_ms": sched_ms,
+        # Playoff series metadata (empty/None for regular-season games).
+        "is_playoff":        is_playoff,
+        "series_type":       series_type,
+        "series_title":      series_title,
+        "series_summary":    series_summary,
+        "series_home_wins":  series_home_wins,
+        "series_away_wins":  series_away_wins,
+        "series_game_number": game_number,
     }
 
 
