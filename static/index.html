@@ -317,7 +317,11 @@ html,body{overscroll-behavior:none}
 .ed-rule-label{font-size:12px;font-weight:700;color:var(--green);margin-bottom:2px}
 .ed-rule-text{font-size:12px;line-height:1.5;color:var(--text-dim)}
 .ed-chart{margin-top:12px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px}
-.ed-chart-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.ed-chart-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:10px;flex-wrap:wrap}
+.ed-chart-tabs{display:flex;gap:3px;padding:2px;background:var(--bg3);border:1px solid var(--border);border-radius:6px}
+.ed-chart-tab{padding:4px 10px;background:transparent;border:0;color:var(--text-muted);font-family:inherit;font-size:10px;font-weight:700;letter-spacing:0.4px;cursor:pointer;border-radius:4px;transition:background 0.12s,color 0.12s}
+.ed-chart-tab:hover{color:var(--text-dim)}
+.ed-chart-tab.active{background:var(--bg2);color:var(--text);border:1px solid var(--border)}
 .ed-chart-body{min-height:120px}
 .ed-chart-loading,.ed-chart-empty{color:var(--text-muted);font-size:12px;padding:32px 16px;text-align:center;font-style:italic}
 .ed-chart-svg{width:100%;height:220px;display:block;background:#050505;border-radius:6px}
@@ -2283,33 +2287,78 @@ function renderPriceChartSvg(series) {
     var color = CHART_COLORS[k % CHART_COLORS.length];
     svg += '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round"/>';
   }
-  // X-axis tick labels: first (oldest) and last (now)
+  // X-axis tick labels: first (oldest) and last (now). Format
+  // depends on the range — HH:MM for intraday, MM/DD HH:MM for
+  // multi-day.
   var firstDate = new Date(tMin);
   var lastDate  = new Date(tMax);
-  function hm(d) {
+  var spanHours = (tMax - tMin) / 3600000;
+  function fmtTick(d) {
     var hh = d.getHours();
     var mm = d.getMinutes();
-    return (hh < 10 ? "0" + hh : hh) + ":" + (mm < 10 ? "0" + mm : mm);
+    var hhmm = (hh < 10 ? "0" + hh : hh) + ":" + (mm < 10 ? "0" + mm : mm);
+    if (spanHours > 36) {
+      var mo = d.getMonth() + 1;
+      var da = d.getDate();
+      return mo + "/" + da + " " + hhmm;
+    }
+    return hhmm;
   }
-  svg += '<text x="' + padL + '" y="' + (H - 6) + '" fill="#666" font-size="10">' + hm(firstDate) + '</text>';
-  svg += '<text x="' + (padL + w) + '" y="' + (H - 6) + '" fill="#666" font-size="10" text-anchor="end">' + hm(lastDate) + '</text>';
+  svg += '<text x="' + padL + '" y="' + (H - 6) + '" fill="#666" font-size="10">' + fmtTick(firstDate) + '</text>';
+  svg += '<text x="' + (padL + w) + '" y="' + (H - 6) + '" fill="#666" font-size="10" text-anchor="end">' + fmtTick(lastDate) + '</text>';
   svg += '</svg>';
   return svg;
 }
 
+// Selectable timeframe windows for the price-history chart.
+var CHART_TIMEFRAMES = [
+  { key: "1h",  hours: 1,   label: "1H"  },
+  { key: "6h",  hours: 6,   label: "6H"  },
+  { key: "24h", hours: 24,  label: "24H" },
+  { key: "7d",  hours: 168, label: "7D"  },
+];
+
 // Build the chart section shown above the markets table.
 // Includes placeholder while the /api/event/{ticker}/prices fetch
 // is in flight, then replaces itself with the rendered chart +
-// legend once data arrives.
+// legend once data arrives. Timeframe toggle re-fires the fetch
+// with a different `hours` param.
 function renderPriceHistoryPanel(evTicker, outcomeLabels) {
+  var tabs = '<div class="ed-chart-tabs">';
+  for (var i = 0; i < CHART_TIMEFRAMES.length; i++) {
+    var t = CHART_TIMEFRAMES[i];
+    var active = t.key === "24h" ? " active" : "";
+    tabs += '<button class="ed-chart-tab' + active + '" data-tf="' + t.key
+         + '" data-hours="' + t.hours + '">' + t.label + '</button>';
+  }
+  tabs += '</div>';
   return '<div class="ed-chart" data-ticker="' + escH(evTicker) + '"'
-       + ' data-labels="' + escH(JSON.stringify(outcomeLabels)) + '">'
+       + ' data-labels="' + escH(JSON.stringify(outcomeLabels)) + '"'
+       + ' data-hours="24">'
        + '<div class="ed-chart-header">'
-       +   '<div class="ed-section-title" style="margin:0">Price history · 24h</div>'
+       +   '<div class="ed-section-title" style="margin:0">Price history</div>'
+       +   tabs
        + '</div>'
        + '<div class="ed-chart-body"><div class="ed-chart-loading">Loading…</div></div>'
        + '</div>';
 }
+
+// Timeframe tab click handler — updates the active button, stamps
+// the new hours onto the chart container, wipes the hydrated flag
+// so hydratePriceCharts() re-fetches with the new window.
+window.switchChartTimeframe = function(btn) {
+  var chart = btn.closest(".ed-chart");
+  if (!chart) return;
+  var tabs = chart.querySelectorAll(".ed-chart-tab");
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].classList.toggle("active", tabs[i] === btn);
+  }
+  chart.setAttribute("data-hours", btn.getAttribute("data-hours"));
+  chart.removeAttribute("data-hydrated");
+  var body = chart.querySelector(".ed-chart-body");
+  if (body) body.innerHTML = '<div class="ed-chart-loading">Loading…</div>';
+  hydratePriceCharts();
+};
 
 // Fetch + populate every .ed-chart placeholder currently in the DOM.
 // Called after the detail page renders so the chart appears after
@@ -2321,10 +2370,21 @@ async function hydratePriceCharts() {
     if (el.dataset.hydrated) continue;
     el.dataset.hydrated = "1";
     var tkr = el.getAttribute("data-ticker");
+    var hours = parseInt(el.getAttribute("data-hours") || "24", 10);
+    // Wire up tab handlers (idempotent — only bind once per tab).
+    var tabs = el.querySelectorAll(".ed-chart-tab");
+    for (var ti = 0; ti < tabs.length; ti++) {
+      if (!tabs[ti].dataset.bound) {
+        tabs[ti].dataset.bound = "1";
+        tabs[ti].addEventListener("click", function() {
+          window.switchChartTimeframe(this);
+        });
+      }
+    }
     var labels = {};
     try { labels = JSON.parse(el.getAttribute("data-labels") || "{}"); } catch (e) {}
     try {
-      var r = await fetch("/api/event/" + encodeURIComponent(tkr) + "/prices?hours=24");
+      var r = await fetch("/api/event/" + encodeURIComponent(tkr) + "/prices?hours=" + hours);
       var d = await r.json();
       var series = d.series || [];
       // Attach labels to each series for the legend.
