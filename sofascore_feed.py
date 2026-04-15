@@ -39,6 +39,10 @@ SPORTS = [
 ]
 
 BASE_URL = "https://api.sofascore.com/api/v1/sport/{slug}/events/live"
+# Today's scheduled events (covers pre-match and finished games).
+# Used for Soccer only so we can surface 2-leg aggregate data on
+# UCL / Europa / Copa Libertadores knockouts before kickoff.
+SCHEDULED_URL = "https://api.sofascore.com/api/v1/sport/{slug}/scheduled-events/{date}"
 POLL_INTERVAL = 30         # normal cycle (seconds)
 MAX_POLL_INTERVAL = 600    # hard cap when backing off (10 minutes)
 BACKOFF_THRESHOLD = 0.5    # back off when ≥50% of sports 403 / error
@@ -158,7 +162,7 @@ def _team_phrases(team: Dict[str, Any]) -> List[str]:
     return sorted(phrases, key=lambda s: -len(s))
 
 
-def _parse_event(ev: Dict[str, Any], sport_label: str) -> Optional[Dict[str, Any]]:
+def _parse_event(ev: Dict[str, Any], sport_label: str, accept_pre: bool = False) -> Optional[Dict[str, Any]]:
     status = ev.get("status") or {}
     stype = status.get("type", "")
     desc = (status.get("description") or "").strip()
@@ -166,6 +170,11 @@ def _parse_event(ev: Dict[str, Any], sport_label: str) -> Optional[Dict[str, Any
         state = "in"
     elif stype == "finished":
         state = "post"
+    elif accept_pre and stype in ("notstarted", "postponed", "delayed"):
+        # Scheduled-events fetch: include pre-match fixtures so
+        # 2-leg knockout ties surface aggregate data before kickoff.
+        # Clock/period are irrelevant for a "pre" game.
+        state = "pre"
     else:
         return None
     home = ev.get("homeTeam") or {}
@@ -385,22 +394,72 @@ async def _fetch_sport(client, slug: str, label: str):
         data = r.json() or {}
         events = data.get("events") or []
         if not isinstance(events, list):
-            info["count"] = 0
-            return [], info
+            events = []
+        # Soccer only: also fetch today's scheduled events. This
+        # covers pre-match and finished fixtures that aren't in the
+        # /events/live list — critical for 2-leg knockout ties (UCL,
+        # Copa Libertadores, etc.) where users want to see the 1st
+        # leg's aggregate before the 2nd leg kicks off.
+        scheduled_events = []
+        scheduled_status = None
+        if label == "Soccer":
+            try:
+                # SofaScore's soccer slug on the scheduled endpoint
+                # is "football" (the live endpoint accepts "football"
+                # too — the BASE_URL maps to the right alias).
+                from datetime import datetime as _dt, timezone as _tz
+                today = _dt.now(_tz.utc).strftime("%Y-%m-%d")
+                s_url = SCHEDULED_URL.format(slug=slug, date=today)
+                sr = await client.get(s_url, timeout=15.0)
+                scheduled_status = sr.status_code
+                if sr.status_code == 200:
+                    sdata = sr.json() or {}
+                    sevs = sdata.get("events") or []
+                    if isinstance(sevs, list):
+                        scheduled_events = sevs
+            except Exception as e:
+                log.debug("sofascore %s scheduled fetch err: %s", slug, e)
         now_ms = int(time.time() * 1000)
         out = []
         bad = 0
+        seen_ids = set()
         for ev in events:
             try:
                 parsed = _parse_event(ev, label)
                 if parsed:
                     parsed["captured_at_ms"] = now_ms
                     out.append(parsed)
+                    eid = parsed.get("_sofa_event_id") or ev.get("id")
+                    if eid is not None:
+                        seen_ids.add(eid)
             except Exception as e:
                 bad += 1
                 if bad == 1:
                     log.debug("sofascore %s parse err: %s", slug, e)
                 continue
+        # Merge scheduled events that didn't appear in the live list.
+        # Pre-match / finished / postponed fixtures typically fall
+        # here. _parse_event normally returns None for state not in
+        # ("in", "post") — we widen that for scheduled fetches.
+        for ev in scheduled_events:
+            eid = ev.get("id")
+            if eid is not None and eid in seen_ids:
+                continue
+            try:
+                parsed = _parse_event(ev, label, accept_pre=True)
+                if parsed:
+                    parsed["captured_at_ms"] = now_ms
+                    out.append(parsed)
+                    if eid is not None:
+                        seen_ids.add(eid)
+            except Exception as e:
+                bad += 1
+                if bad == 1:
+                    log.debug("sofascore %s scheduled parse err: %s", slug, e)
+                continue
+        if scheduled_status is not None:
+            info["scheduled_status"] = scheduled_status
+            info["scheduled_count"] = len(scheduled_events)
         # Enrich 2nd-leg games whose compact response was missing
         # the aggregate. The detail endpoint (/event/{id}) almost
         # always has homeScore.aggregated populated once the 1st

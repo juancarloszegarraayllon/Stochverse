@@ -1478,6 +1478,12 @@ def get_events(
                 g = sdb_match_game(title, sport)
             if g is None and sofa_match_game is not None:
                 g = sofa_match_game(title, sport)
+        # Enrich soccer 2-leg ties with SofaScore aggregate data
+        # when the primary feed (usually ESPN for UCL) didn't
+        # populate it. No-op for non-soccer or when aggregate is
+        # already present.
+        if g and sport == "Soccer":
+            g = _enrich_soccer_aggregate(g, title)
         # Guard against wrong-date matches. The team-name matcher
         # can't distinguish games with overlapping names on different
         # days (e.g. "Leeds United vs Wolverhampton" Apr 18 matching
@@ -1612,6 +1618,52 @@ def _kalshi_url(series_ticker: str, event_ticker: str) -> str:
         return ""
     s = series_ticker.lower()
     return f"https://kalshi.com/markets/{s}/{s.replace('kx', '')}/{event_ticker.lower()}"
+
+
+def _enrich_soccer_aggregate(g, title):
+    """Fill in two-leg aggregate data on a soccer match dict that
+    ESPN matched first but whose ESPN feed didn't include the
+    "Aggregate: X-Y" note. Uses SofaScore's richer knockout data
+    (homeScore.aggregated / awayScore.aggregated + aggregatedWinnerCode)
+    to populate the fields in-place. Harmless if SofaScore doesn't
+    have the match or the aggregate — just returns without side
+    effects. Called from both /api/events and /api/event/{ticker}.
+
+    Only runs for Soccer, and only when the primary match lacks
+    aggregate info, so SofaScore is consulted at most once per
+    knockout-tie card per request.
+    """
+    if not g or g.get("sport") != "Soccer":
+        return g
+    has_agg = g.get("aggregate_home") is not None and g.get("aggregate_away") is not None
+    if has_agg and g.get("is_two_leg"):
+        return g
+    try:
+        from sofascore_feed import match_game as sofa_match
+    except Exception:
+        return g
+    try:
+        sg = sofa_match(title, "Soccer")
+    except Exception:
+        return g
+    if not sg:
+        return g
+    # Prefer SofaScore's aggregate fields when present.
+    if sg.get("is_two_leg"):
+        g["is_two_leg"] = True
+        if sg.get("aggregate_home") is not None:
+            g["aggregate_home"] = sg.get("aggregate_home")
+        if sg.get("aggregate_away") is not None:
+            g["aggregate_away"] = sg.get("aggregate_away")
+        if sg.get("leg_number") and not g.get("leg_number"):
+            g["leg_number"] = sg.get("leg_number")
+        if sg.get("round_name") and not g.get("round_name"):
+            g["round_name"] = sg.get("round_name")
+        if sg.get("tournament_name") and not g.get("tournament_name"):
+            g["tournament_name"] = sg.get("tournament_name")
+        if sg.get("aggregate_winner") and not g.get("aggregate_winner"):
+            g["aggregate_winner"] = sg.get("aggregate_winner")
+    return g
 
 
 @app.get("/api/event/{ticker}")
@@ -1778,6 +1830,9 @@ def get_event_detail(ticker: str):
             g = sdb_match_game(title, sport)
         if g is None and sofa_match_game is not None:
             g = sofa_match_game(title, sport)
+    # Soccer 2-leg aggregate enrichment — see /api/events for details.
+    if g and sport == "Soccer":
+        g = _enrich_soccer_aggregate(g, title)
     # Wrong-date guard — same as /api/events.
     if g and g.get("scheduled_kickoff_ms"):
         kdt_str = r.get("_kickoff_dt") or r.get("_sort_ts")
@@ -2825,6 +2880,15 @@ def debug_live(title: str, sport: str = "Soccer"):
                 "captured_age_seconds": age_s,
                 "home_phrases": g.get("home_phrases"),
                 "away_phrases": g.get("away_phrases"),
+                "is_playoff": g.get("is_playoff"),
+                "series_summary": g.get("series_summary"),
+                "series_home_wins": g.get("series_home_wins"),
+                "series_away_wins": g.get("series_away_wins"),
+                "is_two_leg": g.get("is_two_leg"),
+                "aggregate_home": g.get("aggregate_home"),
+                "aggregate_away": g.get("aggregate_away"),
+                "leg_number": g.get("leg_number"),
+                "round_name": g.get("round_name"),
             }
         else:
             out["espn"] = None
@@ -2852,6 +2916,14 @@ def debug_live(title: str, sport: str = "Soccer"):
                 "captured_age_seconds": age_s,
                 "home_phrases": g.get("home_phrases"),
                 "away_phrases": g.get("away_phrases"),
+                "is_two_leg": g.get("is_two_leg"),
+                "aggregate_home": g.get("aggregate_home"),
+                "aggregate_away": g.get("aggregate_away"),
+                "leg_number": g.get("leg_number"),
+                "round_name": g.get("round_name"),
+                "tournament_name": g.get("tournament_name"),
+                "aggregate_winner": g.get("aggregate_winner"),
+                "sofa_event_id": g.get("_sofa_event_id"),
             }
         else:
             out["sofascore"] = None
