@@ -35,10 +35,19 @@ if DATABASE_URL:
             DATABASE_URL,
             pool_size=5,
             max_overflow=2,
+            # pool_pre_ping: issues a cheap SELECT 1 before handing
+            # out a pooled connection. Catches stale/dead sockets
+            # without a full exception round-trip.
             pool_pre_ping=True,
+            # pool_recycle: force-recycle connections older than N
+            # seconds. Defends against Railway Postgres restarts
+            # that invalidate every connection in the pool. Five
+            # minutes is short enough to recover quickly, long
+            # enough to avoid per-request reconnect overhead.
+            pool_recycle=300,
         )
         async_session = async_sessionmaker(engine, expire_on_commit=False)
-        log.info("database engine created (pool_size=5)")
+        log.info("database engine created (pool_size=5, pool_recycle=300)")
     except Exception as e:
         log.warning("failed to create database engine: %s", e)
         engine = None

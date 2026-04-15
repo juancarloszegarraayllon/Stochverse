@@ -2192,16 +2192,30 @@ async def get_event_prices(ticker: str, hours: int = 24, max_points: int = 120):
             "market_tickers": market_tickers,
         }
     except Exception as e:
+        # If the pooled connection was stale (e.g. just after a
+        # Postgres restart), dispose the pool once and retry. SA
+        # pool_pre_ping catches most of these but the first query
+        # after a restart can still race.
+        if _is_transient_db_error(e):
+            try:
+                from db import engine as _eng
+                if _eng is not None:
+                    await _eng.dispose()
+            except Exception:
+                pass
+            try:
+                # Tiny wait to give the server a chance to accept
+                # the fresh connection.
+                import asyncio as _a
+                await _a.sleep(0.5)
+                result = await _query_price_history(
+                    market_tickers, hours, max_points,
+                )
+                return result
+            except Exception as e2:
+                e = e2  # fall through to error reporting
         msg = str(e)
-        # Recognize transient Postgres states so the frontend can
-        # show a "try again in a moment" hint instead of a scary
-        # stack trace. Railway's starter Postgres occasionally
-        # restarts and goes into recovery mode for 30-90 seconds.
-        transient = any(token in msg for token in (
-            "CannotConnectNowError", "recovery mode",
-            "starting up", "ServerDisconnectedError",
-            "TimeoutError",
-        ))
+        transient = _is_transient_db_error(e)
         if not transient:
             logging.getLogger("oddsiq").warning("prices query failed: %s", e)
         return {
@@ -2209,6 +2223,86 @@ async def get_event_prices(ticker: str, hours: int = 24, max_points: int = 120):
             "error": msg,
             "transient": transient,
         }
+
+
+def _is_transient_db_error(e) -> bool:
+    """Returns True for the specific error classes Railway's
+    Postgres throws when it restarts, fails over, or drops a
+    pooled connection. Frontend auto-retries on transient errors
+    with a friendly "restarting" message instead of the generic
+    "failed to load" one."""
+    msg = str(e)
+    return any(token in msg for token in (
+        "CannotConnectNowError", "recovery mode",
+        "starting up", "ServerDisconnectedError",
+        "TimeoutError", "ConnectionResetError",
+        "Connection reset by peer", "OperationalError",
+        "InterfaceError", "connection was closed",
+        "Broken pipe",
+    ))
+
+
+async def _query_price_history(market_tickers, hours, max_points):
+    """The actual query loop — extracted so the retry path above
+    can invoke it a second time without duplicating logic."""
+    from sqlalchemy import select
+    from models import Price
+    from db import async_session as _session
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    since = _dt.now(_tz.utc) - _td(hours=hours)
+    bucket_s = max(30, int((hours * 3600) / max_points))
+    out_series = []
+    async with _session() as session:
+        for mk in market_tickers:
+            stmt = (
+                select(Price.captured_at, Price.last_price,
+                       Price.yes_bid, Price.yes_ask)
+                .where(Price.market_ticker == mk,
+                       Price.captured_at >= since)
+                .order_by(Price.captured_at.asc())
+            )
+            rows = (await session.execute(stmt)).all()
+            if not rows:
+                continue
+            buckets = {}
+            for captured, last, yb, ya in rows:
+                try:
+                    ts = captured.timestamp()
+                except Exception:
+                    continue
+                key = int(ts // bucket_s) * bucket_s
+                price_cents = last
+                if price_cents is None and yb is not None and ya is not None:
+                    price_cents = (yb + ya) / 2.0
+                if price_cents is None:
+                    continue
+                b = buckets.setdefault(key, [0.0, 0])
+                b[0] += float(price_cents)
+                b[1] += 1
+            points = []
+            for key in sorted(buckets.keys()):
+                total, count = buckets[key]
+                if count == 0:
+                    continue
+                points.append({
+                    "t": key * 1000,
+                    "p": round(total / count, 2),
+                })
+            if points:
+                out_series.append({
+                    "market_ticker": mk,
+                    "points": points,
+                    "min": min(pt["p"] for pt in points),
+                    "max": max(pt["p"] for pt in points),
+                    "first": points[0]["p"],
+                    "last": points[-1]["p"],
+                })
+    return {
+        "series": out_series,
+        "hours": hours,
+        "bucket_seconds": bucket_s,
+        "market_tickers": market_tickers,
+    }
 
 
 @app.get("/api/debug_prices")
@@ -2282,6 +2376,16 @@ async def debug_prices(ticker: str = ""):
                 out["per_market"] = per_market
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
+        out["transient"] = _is_transient_db_error(e)
+        # If transient, dispose the pool so the next call gets a
+        # fresh connection. Caller can just retry the debug URL.
+        if out.get("transient"):
+            try:
+                from db import engine as _eng
+                if _eng is not None:
+                    await _eng.dispose()
+            except Exception:
+                pass
     return out
 
 
