@@ -349,7 +349,7 @@ html,body{overscroll-behavior:none}
 .ed-tab.active{color:var(--text);border-bottom-color:var(--green)}
 .ed-group{display:none}
 .ed-group.active{display:block}
-.ed-section-title{font-size:13px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;color:var(--text-dim);margin:24px 0 10px}
+.ed-section-title{font-size:13px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;color:var(--text-dim);margin:24px 0 10px;display:flex;align-items:center;gap:8px}
 .ed-markets-table{width:100%;border-collapse:collapse;background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden}
 .ed-markets-table th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);font-weight:700;padding:10px 12px;background:var(--bg3);border-bottom:1px solid var(--border)}
 .ed-markets-table td{padding:10px 12px;font-size:12px;color:var(--text-dim);border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
@@ -359,7 +359,9 @@ html,body{overscroll-behavior:none}
 .ed-markets-table .ed-prob{text-align:center;font-weight:700;color:var(--text)}
 .ed-markets-table .ed-yes{text-align:center;background:rgba(0,200,83,0.12);color:#4caf50;font-weight:700}
 .ed-markets-table .ed-no{text-align:center;background:rgba(244,67,54,0.12);color:#f44336;font-weight:700}
-.ed-markets-table .ed-live-dot::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--red);margin-right:5px;vertical-align:middle;box-shadow:0 0 5px rgba(255,51,51,0.8);animation:live-pulse 1.2s infinite ease-in-out}
+.ed-live-pill{display:inline-flex;align-items:center;gap:5px;font-size:9px;font-weight:800;color:var(--red);letter-spacing:0.6px;background:rgba(255,51,51,0.1);border:1px solid rgba(255,51,51,0.35);padding:2px 7px;border-radius:4px;text-transform:uppercase}
+.ed-live-pill-dot{width:6px;height:6px;border-radius:50%;background:var(--red);box-shadow:0 0 5px rgba(255,51,51,0.8);animation:live-pulse 1.2s infinite ease-in-out}
+.ed-final-pill{display:inline-flex;align-items:center;font-size:9px;font-weight:800;color:var(--text-dim);letter-spacing:0.6px;background:var(--bg3);border:1px solid var(--border);padding:2px 7px;border-radius:4px;text-transform:uppercase}
 .ed-summary{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-top:8px}
 .ed-stat{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:2px}
 .ed-stat-label{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-weight:700}
@@ -2696,7 +2698,22 @@ async function hydratePriceCharts() {
   }
 }
 
-function renderMarketsTable(markets, liveBadge) {
+// Markets section title with an optional "LIVE" pill. Surfaces
+// the live-game state at the section level so the table rows
+// themselves stay neutral — previously we put a red dot on row 0
+// which looked like it was singling out a specific outcome.
+function marketsSectionTitle(live) {
+  var pill = "";
+  if (live && live.state === "in") {
+    pill = ' <span class="ed-live-pill">'
+         + '<span class="ed-live-pill-dot"></span>LIVE</span>';
+  } else if (live && live.state === "post") {
+    pill = ' <span class="ed-final-pill">FINAL</span>';
+  }
+  return '<div class="ed-section-title">Markets' + pill + '</div>';
+}
+
+function renderMarketsTable(markets) {
   if (!markets || !markets.length) {
     return '<div style="color:var(--text-muted);padding:20px;text-align:center">No markets.</div>';
   }
@@ -2714,9 +2731,8 @@ function renderMarketsTable(markets, liveBadge) {
   h += '</tr></thead><tbody>';
   for (var i = 0; i < markets.length; i++) {
     var m = markets[i];
-    var liveCls = (liveBadge && i === 0) ? " ed-live-dot" : "";
     h += '<tr>';
-    h += '<td class="ed-mk-label' + liveCls + '">' + escH(m.label) + '</td>';
+    h += '<td class="ed-mk-label">' + escH(m.label) + '</td>';
     h += '<td class="ed-prob">' + escH(m.chance) + '</td>';
     h += '<td class="ed-yes">' + escH(m.yes) + '</td>';
     h += '<td class="ed-no">' + escH(m.no) + '</td>';
@@ -2926,8 +2942,8 @@ function renderEventDetail(ev) {
       h += '<div class="ed-section-title">Overview</div>';
       h += summaryStats(g2.outcomes || []);
       h += renderPriceHistoryPanel(g2.event_ticker || ticker, _outcomeLabels(g2.outcomes || []));
-      h += '<div class="ed-section-title">Markets</div>';
-      h += renderMarketsTable(g2.outcomes || [], false);
+      h += marketsSectionTitle(live);
+      h += renderMarketsTable(g2.outcomes || []);
       h += renderSettlementRules(g2.outcomes || []);
       h += '</div>';
     }
@@ -2935,8 +2951,8 @@ function renderEventDetail(ev) {
     h += '<div class="ed-section-title">Overview</div>';
     h += summaryStats(ev.outcomes || []);
     h += renderPriceHistoryPanel(ticker, _outcomeLabels(ev.outcomes || []));
-    h += '<div class="ed-section-title">Markets</div>';
-    h += renderMarketsTable(ev.outcomes || [], !!(live && live.state === "in"));
+    h += marketsSectionTitle(live);
+    h += renderMarketsTable(ev.outcomes || []);
     h += renderSettlementRules(ev.outcomes || []);
   }
 
