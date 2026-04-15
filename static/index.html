@@ -1682,10 +1682,20 @@ var SCREENER_COLS = [
       if (!exp) return "—";
       try {
         var d = new Date(exp);
-        var ms = d.getTime() - Date.now();
-        var days = Math.ceil(ms / 86400000);
-        if (days < 0) return "Expired";
-        return days + (days === 1 ? " day" : " days");
+        var hoursDelta = (d.getTime() - Date.now()) / 3600000;
+        // Past > 24h — market should have settled already.
+        if (hoursDelta < -24) return "Expired";
+        // Past < 24h — Kalshi's estimated end time has passed but
+        // the market is still trading (common for tennis, where
+        // match duration is unpredictable).
+        if (hoursDelta < 0) return "0 days";
+        // Future — use hours for sub-day resolutions so users see
+        // "4h" instead of the ambiguous "1 day" for events that
+        // settle later the same day.
+        if (hoursDelta < 1) return "<1h";
+        if (hoursDelta < 24) return Math.floor(hoursDelta) + "h";
+        if (hoursDelta < 48) return "1 day";
+        return Math.floor(hoursDelta / 24) + " days";
       } catch(e) { return "—"; }
     }},
   { key: "expiration_time",    label: "Expiration Time",   cls: "",      w: 100, fmt: function(v) {
