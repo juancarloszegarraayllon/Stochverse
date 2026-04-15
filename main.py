@@ -2192,35 +2192,46 @@ async def get_event_prices(ticker: str, hours: int = 24, max_points: int = 120):
             "market_tickers": market_tickers,
         }
     except Exception as e:
-        # If the pooled connection was stale (e.g. just after a
-        # Postgres restart), dispose the pool once and retry. SA
-        # pool_pre_ping catches most of these but the first query
-        # after a restart can still race.
+        # Retry up to 3 times with exponential backoff on transient
+        # errors. Each retry disposes the pool so SQLAlchemy opens
+        # fresh TCP connections.
+        last_err = e
         if _is_transient_db_error(e):
-            try:
-                from db import engine as _eng
-                if _eng is not None:
-                    await _eng.dispose()
-            except Exception:
-                pass
-            try:
-                # Tiny wait to give the server a chance to accept
-                # the fresh connection.
-                import asyncio as _a
-                await _a.sleep(0.5)
-                result = await _query_price_history(
-                    market_tickers, hours, max_points,
-                )
-                return result
-            except Exception as e2:
-                e = e2  # fall through to error reporting
-        msg = str(e)
-        transient = _is_transient_db_error(e)
-        if not transient:
-            logging.getLogger("oddsiq").warning("prices query failed: %s", e)
+            import asyncio as _a
+            for attempt in range(3):
+                try:
+                    from db import engine as _eng
+                    if _eng is not None:
+                        await _eng.dispose()
+                except Exception:
+                    pass
+                await _a.sleep(0.5 * (2 ** attempt))  # 0.5, 1.0, 2.0s
+                try:
+                    result = await _query_price_history(
+                        market_tickers, hours, max_points,
+                    )
+                    logging.getLogger("oddsiq").info(
+                        "prices query recovered after %d retry(ies)",
+                        attempt + 1,
+                    )
+                    return result
+                except Exception as e2:
+                    last_err = e2
+                    if not _is_transient_db_error(e2):
+                        break
+        msg = str(last_err)
+        transient = _is_transient_db_error(last_err)
+        # Always log the final error so Railway logs capture the
+        # exact failure after all retries — helps identify whether
+        # Postgres is genuinely down vs a flaky connection.
+        logging.getLogger("oddsiq").warning(
+            "prices query failed after retries: %s: %s",
+            type(last_err).__name__, last_err,
+        )
         return {
             "series": [],
             "error": msg,
+            "error_type": type(last_err).__name__,
             "transient": transient,
         }
 
@@ -3815,6 +3826,50 @@ def _analytics_snippet() -> str:
         f'<script defer data-domain="{domain}" '
         f'src="{script_url}"></script>'
     )
+
+
+@app.get("/api/db_health")
+async def db_health():
+    """Dedicated DB probe — runs SELECT 1 against Postgres and
+    reports latency + any error. Use this to tell whether a
+    price-history failure is the DB itself or our connection pool.
+
+    The endpoint also disposes + retries once, so just running it
+    tends to heal a stale pool as a side effect."""
+    from db import DATABASE_URL, async_session, engine as _eng
+    out = {"database_url_set": bool(DATABASE_URL)}
+    if not DATABASE_URL or async_session is None:
+        out["ok"] = False
+        out["error"] = "database not configured"
+        return out
+    async def _probe():
+        from sqlalchemy import text
+        async with async_session() as session:
+            await session.execute(text("SELECT 1"))
+    t0 = time.time()
+    last_err = None
+    for attempt in range(3):
+        try:
+            await _probe()
+            out["ok"] = True
+            out["latency_ms"] = int((time.time() - t0) * 1000)
+            out["attempts"] = attempt + 1
+            return out
+        except Exception as e:
+            last_err = e
+            try:
+                if _eng is not None:
+                    await _eng.dispose()
+            except Exception:
+                pass
+            import asyncio as _a
+            await _a.sleep(0.3 * (2 ** attempt))
+    out["ok"] = False
+    out["error"] = str(last_err)
+    out["error_type"] = type(last_err).__name__ if last_err else None
+    out["transient"] = _is_transient_db_error(last_err) if last_err else False
+    out["latency_ms"] = int((time.time() - t0) * 1000)
+    return out
 
 
 @app.get("/healthz")
