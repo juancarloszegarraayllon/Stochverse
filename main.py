@@ -35,7 +35,10 @@ app = FastAPI(title="OddsIQ API")
 
 def _all_market_tickers():
     """Return every market ticker from the current REST snapshot, used
-    by the Kalshi WebSocket client to know what to subscribe to."""
+    by the Kalshi WebSocket client to know what to subscribe to.
+    Includes sibling market tickers from grouped cards (Spread,
+    Total, BTTS, To Advance, etc.) so their prices get recorded
+    and their charts work on the detail page."""
     records = _cache.get("data") or []
     seen = set()
     out = []
@@ -45,6 +48,12 @@ def _all_market_tickers():
             if tk and tk not in seen:
                 seen.add(tk)
                 out.append(tk)
+        for g in r.get("_market_groups", []) or []:
+            for o in g.get("_outcomes", []):
+                tk = o.get("ticker")
+                if tk and tk not in seen:
+                    seen.add(tk)
+                    out.append(tk)
     return out
 
 
