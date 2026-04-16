@@ -233,6 +233,26 @@ async def _price_flush_loop():
                 if tk:
                     deduped[tk] = row
             batch = list(deduped.values())
+            # The Kalshi WS ticker channel doesn't include volume
+            # or open-interest fields. Enrich from the REST cache
+            # (rebuilt every 30 min by get_data) so the price-
+            # history chart can render volume bars.
+            try:
+                from main import _cache
+                vol_map = {}
+                for rec in (_cache.get("data_all") or []):
+                    for o in rec.get("outcomes", []):
+                        tk2 = o.get("ticker")
+                        if tk2:
+                            vol_map[tk2] = (
+                                o.get("_vol24h") or o.get("_vol") or 0
+                            )
+                for row in batch:
+                    if row.get("volume") is None:
+                        row["volume"] = vol_map.get(
+                            row.get("market_ticker"))
+            except Exception:
+                pass  # non-critical enrichment
             try:
                 from db import batch_insert_prices
                 await batch_insert_prices(batch)
