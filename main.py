@@ -990,6 +990,57 @@ def _build_cache():
     if not all_ev:
         return
 
+    # ── Auto-discover sibling series ────────────────────────────
+    # Scan the live Kalshi data for series tickers that match a
+    # known {prefix}{SUFFIX} pattern (e.g. KXEUROLEAGUESPREAD)
+    # where the parent GAME/MATCH is already registered. Register
+    # any new siblings in GAME_MARKET_PREFIXES dynamically so
+    # _group_game_markets can collapse them into tabbed cards.
+    # Also inherit the parent's sport classification so they show
+    # the correct sport label instead of falling back to entity
+    # matching (which can misclassify basketball as soccer when
+    # team names overlap).
+    _suffix_map = {s[0]: (s[1], s[2], s[3]) for s in _SIBLING_SUFFIXES}
+    _live_series = set()
+    for ev in all_ev:
+        s = str(ev.get("series_ticker") or "").upper()
+        if s:
+            _live_series.add(s)
+    # Build a reverse map: prefix → (parent_series, sport_name).
+    _prefix_to_parent = {}
+    for parent_series, meta in GAME_MARKET_PREFIXES.items():
+        if meta[3]:  # is_primary
+            for _psuffix in ("GAME", "MATCH"):
+                if parent_series.endswith(_psuffix):
+                    pfx = parent_series[:-len(_psuffix)]
+                    sport = get_sport(parent_series)
+                    _prefix_to_parent[pfx] = (parent_series, sport)
+                    break
+    _auto_registered = 0
+    for series in _live_series:
+        if series in GAME_MARKET_PREFIXES:
+            continue
+        for suffix, (tc, lbl, pri) in _suffix_map.items():
+            if series.endswith(suffix):
+                pfx = series[:-len(suffix)]
+                parent_info = _prefix_to_parent.get(pfx)
+                if parent_info:
+                    GAME_MARKET_PREFIXES[series] = (tc, lbl, pri, False)
+                    # Inherit sport from parent so classification
+                    # doesn't fall through to entity matching.
+                    if parent_info[1] and series not in _all_series:
+                        _all_series.add(series)
+                        sport_name = parent_info[1]
+                        if sport_name in _SPORT_SERIES:
+                            _SPORT_SERIES[sport_name].append(series)
+                        _auto_registered += 1
+                    break
+    if _auto_registered:
+        logging.getLogger("oddsiq").info(
+            "auto-registered %d sibling series from live data",
+            _auto_registered,
+        )
+
     # Rough "exp_dt − kickoff" window per sport. Kalshi's
     # expected_expiration_time is set to the final-whistle + some
     # settlement buffer, so these values are slightly longer than
