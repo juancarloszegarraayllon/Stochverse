@@ -2409,9 +2409,15 @@ function _formatDataValue(val, key) {
       });
     } catch (e) { return escH(val); }
   }
+  // Probability → show as percentage, not dollars.
+  if (key === "last_price_dollars") {
+    var pNum = parseFloat(val);
+    if (isNaN(pNum)) return escH(String(val));
+    return (pNum * 100).toFixed(1).replace(/\.0$/, "") + "%";
+  }
   // Dollar-priced fields → prefix $ and cap at 4 decimals.
   var dollarKeys = {
-    "last_price_dollars": 1, "yes_bid_dollars": 1, "yes_ask_dollars": 1,
+    "yes_bid_dollars": 1, "yes_ask_dollars": 1,
     "no_bid_dollars": 1, "no_ask_dollars": 1, "previous_price_dollars": 1,
     "previous_yes_bid_dollars": 1, "previous_yes_ask_dollars": 1,
     "notional_value_dollars": 1, "liquidity_dollars": 1,
