@@ -3831,7 +3831,7 @@ def _analytics_snippet() -> str:
 
 
 @app.get("/api/event/{ticker}/history")
-def get_event_history(ticker: str, hours: int = 24, period: int = 60):
+def get_event_history(ticker: str, hours: int = 24, period: int = 60, debug: bool = False):
     """Fetch historical candlestick data from Kalshi's REST API
     for every market under an event. Returns the same {series}
     shape as /api/event/{ticker}/prices so the frontend can use
@@ -3894,8 +3894,9 @@ def get_event_history(ticker: str, hours: int = 24, period: int = 60):
         end_ts = int(now.timestamp())
         api_base = "https://api.elections.kalshi.com/trade-api/v2"
         out_series = []
+        debug_info = [] if debug else None
         with _httpx.Client(timeout=15.0) as client:
-            for mk in market_tickers:
+            for idx, mk in enumerate(market_tickers[:5]):
                 # Sign the request.
                 ts_ms = str(int(time.time() * 1000))
                 path = f"/trade-api/v2/markets/{mk}/candlesticks"
@@ -3921,10 +3922,18 @@ def get_event_history(ticker: str, hours: int = 24, period: int = 60):
                 }
                 url = f"{api_base}/markets/{mk}/candlesticks"
                 r = client.get(url, headers=headers, params=params)
+                if debug and debug_info is not None:
+                    debug_info.append({
+                        "ticker": mk,
+                        "url": url,
+                        "params": params,
+                        "status": r.status_code,
+                        "body_preview": r.text[:500],
+                    })
                 if r.status_code != 200:
-                    logging.getLogger("oddsiq").debug(
+                    logging.getLogger("oddsiq").warning(
                         "candlestick %s: HTTP %d — %s",
-                        mk, r.status_code, r.text[:200],
+                        mk, r.status_code, r.text[:300],
                     )
                     continue
                 data = r.json() or {}
@@ -3974,12 +3983,16 @@ def get_event_history(ticker: str, hours: int = 24, period: int = 60):
                         "first": points[0]["p"],
                         "last": points[-1]["p"],
                     })
-        return {
+        result = {
             "series": out_series,
             "hours": hours,
             "period_minutes": period,
             "source": "kalshi_api",
+            "market_tickers_checked": market_tickers[:5],
         }
+        if debug and debug_info:
+            result["debug"] = debug_info
+        return result
     except Exception as e:
         logging.getLogger("oddsiq").warning("history fetch failed: %s", e)
         return {"series": [], "error": str(e)}
