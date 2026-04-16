@@ -468,6 +468,7 @@ _SIBLING_SUFFIXES = [
     ("SETWINNER", "setwinner", "Set Winner", 13),
     ("MAP",       "map",       "Map",        14),
     ("TOTALMAPS", "totalmaps", "Total Maps", 15),
+    ("ADVANCE",   "advance",   "To Advance", 16),
 ]
 
 # Build map automatically from _SPORT_SERIES.
