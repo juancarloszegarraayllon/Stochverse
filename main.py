@@ -3892,49 +3892,103 @@ def get_event_history(ticker: str, hours: int = 24, period: int = 60, debug: boo
         now = _dt.now(_tz.utc)
         start_ts = int((now - _td(hours=hours)).timestamp())
         end_ts = int(now.timestamp())
-        api_base = "https://api.elections.kalshi.com/trade-api/v2"
+        api_base = "https://api.elections.kalshi.com"
         out_series = []
         debug_info = [] if debug else None
+        # Try the first market ticker to find the correct API path.
+        # Kalshi's API version/path may differ from what we expect.
+        # Common patterns: /trade-api/v2, /v1, /v2, etc.
+        _CANDIDATE_PATHS = [
+            "/trade-api/v2/series/{series}/markets/{mk}/candlesticks",
+            "/trade-api/v2/markets/{mk}/candlesticks",
+            "/trade-api/v2/markets/{mk}/history",
+        ]
+        def _sign_get(path_str):
+            ts_ms = str(int(time.time() * 1000))
+            msg = (ts_ms + "GET" + path_str).encode()
+            sig = private_key.sign(
+                msg,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.DIGEST_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
+            return {
+                "KALSHI-ACCESS-KEY": key_id,
+                "KALSHI-ACCESS-TIMESTAMP": ts_ms,
+                "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+                "Accept": "application/json",
+            }
+        # Detect the event's series_ticker for paths that need it.
+        series_ticker = ""
+        for r_cache in records_all:
+            if r_cache.get("event_ticker") == ticker:
+                series_ticker = r_cache.get("series_ticker", "")
+                break
         with _httpx.Client(timeout=15.0) as client:
-            for idx, mk in enumerate(market_tickers[:5]):
-                # Sign the request.
-                ts_ms = str(int(time.time() * 1000))
-                path = f"/trade-api/v2/markets/{mk}/candlesticks"
-                msg = (ts_ms + "GET" + path).encode()
-                sig = private_key.sign(
-                    msg,
-                    padding.PSS(
-                        mgf=padding.MGF1(hashes.SHA256()),
-                        salt_length=padding.PSS.DIGEST_LENGTH,
-                    ),
-                    hashes.SHA256(),
-                )
-                headers = {
-                    "KALSHI-ACCESS-KEY": key_id,
-                    "KALSHI-ACCESS-TIMESTAMP": ts_ms,
-                    "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
-                    "Accept": "application/json",
+            # In debug mode, try all candidate paths on the first
+            # ticker so we can see which ones Kalshi actually serves.
+            if debug:
+                mk0 = market_tickers[0]
+                for path_tpl in _CANDIDATE_PATHS:
+                    p = path_tpl.format(mk=mk0, series=series_ticker)
+                    h = _sign_get(p)
+                    u = api_base + p
+                    rr = client.get(u, headers=h, params={
+                        "start_ts": start_ts,
+                        "end_ts": end_ts,
+                        "period_interval": period,
+                    })
+                    debug_info.append({
+                        "path_template": path_tpl,
+                        "url": u,
+                        "status": rr.status_code,
+                        "body_preview": rr.text[:800],
+                    })
+                # Also try the SDK's method if available.
+                try:
+                    sdk_client = get_client()
+                    sdk_methods = [m for m in dir(sdk_client) if any(
+                        k in m.lower() for k in ('candle', 'history', 'trade', 'series')
+                    ) and not m.startswith('_')]
+                    debug_info.append({"sdk_methods": sdk_methods})
+                except Exception as e:
+                    debug_info.append({"sdk_error": str(e)})
+            # Find the working path — try each until one returns 200.
+            working_path_tpl = None
+            mk_test = market_tickers[0]
+            for path_tpl in _CANDIDATE_PATHS:
+                p = path_tpl.format(mk=mk_test, series=series_ticker)
+                h = _sign_get(p)
+                u = api_base + p
+                rr = client.get(u, headers=h, params={
+                    "start_ts": start_ts,
+                    "end_ts": end_ts,
+                    "period_interval": period,
+                })
+                if rr.status_code == 200:
+                    working_path_tpl = path_tpl
+                    break
+            if not working_path_tpl:
+                return {
+                    "series": [],
+                    "hours": hours,
+                    "error": "no working Kalshi candlestick API path found",
+                    "debug": debug_info,
+                    "market_tickers_checked": market_tickers[:5],
                 }
+            for mk in market_tickers:
+                p = working_path_tpl.format(mk=mk, series=series_ticker)
+                hdrs = _sign_get(p)
                 params = {
                     "start_ts": start_ts,
                     "end_ts": end_ts,
                     "period_interval": period,
                 }
-                url = f"{api_base}/markets/{mk}/candlesticks"
-                r = client.get(url, headers=headers, params=params)
-                if debug and debug_info is not None:
-                    debug_info.append({
-                        "ticker": mk,
-                        "url": url,
-                        "params": params,
-                        "status": r.status_code,
-                        "body_preview": r.text[:500],
-                    })
+                url = api_base + p
+                r = client.get(url, headers=hdrs, params=params)
                 if r.status_code != 200:
-                    logging.getLogger("oddsiq").warning(
-                        "candlestick %s: HTTP %d — %s",
-                        mk, r.status_code, r.text[:300],
-                    )
                     continue
                 data = r.json() or {}
                 candles = data.get("candlesticks") or []
