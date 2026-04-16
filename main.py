@@ -3830,6 +3830,161 @@ def _analytics_snippet() -> str:
     )
 
 
+@app.get("/api/event/{ticker}/history")
+def get_event_history(ticker: str, hours: int = 24, period: int = 60):
+    """Fetch historical candlestick data from Kalshi's REST API
+    for every market under an event. Returns the same {series}
+    shape as /api/event/{ticker}/prices so the frontend can use
+    either endpoint interchangeably.
+
+    Used for longer timeframes (24H, 7D, 30D) where our DB has
+    no data (6h retention on Neon free tier). Short timeframes
+    (1H, 6H) still use the /prices endpoint for real-time WS
+    data.
+
+    Params:
+      hours   lookback window (default 24, max 8760 / 1 year)
+      period  candle interval in minutes (default 60)
+    """
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return {"error": "ticker required", "series": []}
+    hours = max(1, min(int(hours), 8760))
+    period = max(1, min(int(period), 1440))
+    # Find market tickers from the cache.
+    get_data()
+    records_all = _cache.get("data_all") or []
+    records_grouped = _cache.get("data") or []
+    market_tickers = []
+    market_labels = {}
+    for r in records_all:
+        if r.get("event_ticker") == ticker:
+            for o in r.get("outcomes", []):
+                tk = o.get("ticker")
+                if tk:
+                    market_tickers.append(tk)
+                    market_labels[tk] = o.get("label", tk)
+            break
+    if not market_tickers:
+        for r in records_grouped:
+            if r.get("event_ticker") == ticker:
+                for o in r.get("outcomes", []):
+                    tk = o.get("ticker")
+                    if tk:
+                        market_tickers.append(tk)
+                        market_labels[tk] = o.get("label", tk)
+                break
+    if not market_tickers:
+        return {"error": f"event {ticker!r} not found in cache", "series": []}
+    # Build Kalshi API auth headers (same signing as WS).
+    try:
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+        import base64, httpx as _httpx
+        key_str = os.environ.get("KALSHI_PRIVATE_KEY", "")
+        key_id = os.environ.get("KALSHI_API_KEY_ID", "")
+        if not key_str or not key_id:
+            return {"error": "KALSHI credentials not configured", "series": []}
+        private_key = serialization.load_pem_private_key(
+            key_str.encode(), password=None
+        )
+        now = _dt.now(_tz.utc)
+        start_ts = int((now - _td(hours=hours)).timestamp())
+        end_ts = int(now.timestamp())
+        api_base = "https://api.elections.kalshi.com/trade-api/v2"
+        out_series = []
+        with _httpx.Client(timeout=15.0) as client:
+            for mk in market_tickers:
+                # Sign the request.
+                ts_ms = str(int(time.time() * 1000))
+                path = f"/trade-api/v2/markets/{mk}/candlesticks"
+                msg = (ts_ms + "GET" + path).encode()
+                sig = private_key.sign(
+                    msg,
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.DIGEST_LENGTH,
+                    ),
+                    hashes.SHA256(),
+                )
+                headers = {
+                    "KALSHI-ACCESS-KEY": key_id,
+                    "KALSHI-ACCESS-TIMESTAMP": ts_ms,
+                    "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+                    "Accept": "application/json",
+                }
+                params = {
+                    "start_ts": start_ts,
+                    "end_ts": end_ts,
+                    "period_interval": period,
+                }
+                url = f"{api_base}/markets/{mk}/candlesticks"
+                r = client.get(url, headers=headers, params=params)
+                if r.status_code != 200:
+                    logging.getLogger("oddsiq").debug(
+                        "candlestick %s: HTTP %d — %s",
+                        mk, r.status_code, r.text[:200],
+                    )
+                    continue
+                data = r.json() or {}
+                candles = data.get("candlesticks") or []
+                if not candles:
+                    continue
+                points = []
+                for c in candles:
+                    # Kalshi returns timestamps as ISO strings or
+                    # unix seconds — handle both.
+                    ts_raw = c.get("end_period_ts") or c.get("ts")
+                    try:
+                        if isinstance(ts_raw, (int, float)):
+                            t_ms = int(ts_raw * 1000)
+                        else:
+                            t_ms = int(_dt.fromisoformat(
+                                str(ts_raw).replace("Z", "+00:00")
+                            ).timestamp() * 1000)
+                    except Exception:
+                        continue
+                    # Extract close price from the yes_price object
+                    # or fall back to a flat price field. Kalshi
+                    # returns cents (integers).
+                    price_obj = c.get("yes_price") or {}
+                    price = price_obj.get("close")
+                    if price is None:
+                        price = c.get("price") or c.get("close")
+                    if price is None:
+                        continue
+                    try:
+                        p = float(price)
+                    except Exception:
+                        continue
+                    vol = c.get("volume")
+                    points.append({
+                        "t": t_ms,
+                        "p": round(p, 2),
+                    })
+                if points:
+                    points.sort(key=lambda x: x["t"])
+                    out_series.append({
+                        "market_ticker": mk,
+                        "label": market_labels.get(mk, mk),
+                        "points": points,
+                        "min": min(pt["p"] for pt in points),
+                        "max": max(pt["p"] for pt in points),
+                        "first": points[0]["p"],
+                        "last": points[-1]["p"],
+                    })
+        return {
+            "series": out_series,
+            "hours": hours,
+            "period_minutes": period,
+            "source": "kalshi_api",
+        }
+    except Exception as e:
+        logging.getLogger("oddsiq").warning("history fetch failed: %s", e)
+        return {"series": [], "error": str(e)}
+
+
 @app.get("/api/prune")
 async def prune_prices():
     """Manually trigger pruning of old price rows. Returns the

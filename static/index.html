@@ -2531,10 +2531,11 @@ function wireChartHover(chartEl) {
 
 // Selectable timeframe windows for the price-history chart.
 var CHART_TIMEFRAMES = [
-  { key: "1h",  hours: 1,   label: "1H"  },
-  { key: "6h",  hours: 6,   label: "6H"  },
-  { key: "24h", hours: 24,  label: "24H" },
-  { key: "7d",  hours: 168, label: "7D"  },
+  { key: "1h",  hours: 1,   label: "1H",  src: "db",    period: null },
+  { key: "6h",  hours: 6,   label: "6H",  src: "db",    period: null },
+  { key: "24h", hours: 24,  label: "24H", src: "kalshi", period: 15   },
+  { key: "7d",  hours: 168, label: "7D",  src: "kalshi", period: 60   },
+  { key: "30d", hours: 720, label: "30D", src: "kalshi", period: 360  },
 ];
 
 // Build the chart section shown above the markets table.
@@ -2548,12 +2549,15 @@ function renderPriceHistoryPanel(evTicker, outcomeLabels) {
     var t = CHART_TIMEFRAMES[i];
     var active = t.key === "1h" ? " active" : "";
     tabs += '<button class="ed-chart-tab' + active + '" data-tf="' + t.key
-         + '" data-hours="' + t.hours + '">' + t.label + '</button>';
+         + '" data-hours="' + t.hours + '"'
+         + ' data-src="' + (t.src || "db") + '"'
+         + (t.period ? ' data-period="' + t.period + '"' : '')
+         + '>' + t.label + '</button>';
   }
   tabs += '</div>';
   return '<div class="ed-chart" data-ticker="' + escH(evTicker) + '"'
        + ' data-labels="' + escH(JSON.stringify(outcomeLabels)) + '"'
-       + ' data-hours="1">'
+       + ' data-hours="1" data-src="db">'
        + '<div class="ed-chart-header">'
        +   '<div class="ed-section-title" style="margin:0">Price history</div>'
        +   '<div class="ed-chart-header-right">'
@@ -2577,6 +2581,12 @@ window.switchChartTimeframe = function(btn) {
     tabs[i].classList.toggle("active", tabs[i] === btn);
   }
   chart.setAttribute("data-hours", btn.getAttribute("data-hours"));
+  chart.setAttribute("data-src", btn.getAttribute("data-src") || "db");
+  if (btn.getAttribute("data-period")) {
+    chart.setAttribute("data-period", btn.getAttribute("data-period"));
+  } else {
+    chart.removeAttribute("data-period");
+  }
   chart.removeAttribute("data-hydrated");
   var body = chart.querySelector(".ed-chart-body");
   if (body) body.innerHTML = '<div class="ed-chart-loading">Loading…</div>';
@@ -2632,7 +2642,9 @@ async function hydratePriceCharts() {
     if (el.dataset.hydrated) continue;
     el.dataset.hydrated = "1";
     var tkr = el.getAttribute("data-ticker");
-    var hours = parseInt(el.getAttribute("data-hours") || "24", 10);
+    var hours = parseInt(el.getAttribute("data-hours") || "1", 10);
+    var src = el.getAttribute("data-src") || "db";
+    var period = el.getAttribute("data-period");
     // Wire up tab handlers (idempotent — only bind once per tab).
     var tabs = el.querySelectorAll(".ed-chart-tab");
     for (var ti = 0; ti < tabs.length; ti++) {
@@ -2646,12 +2658,28 @@ async function hydratePriceCharts() {
     var labels = {};
     try { labels = JSON.parse(el.getAttribute("data-labels") || "{}"); } catch (e) {}
     try {
-      var r = await fetch("/api/event/" + encodeURIComponent(tkr) + "/prices?hours=" + hours);
+      // Pick the right endpoint: real-time DB data for short
+      // windows (1H, 6H), Kalshi historical API for long ones
+      // (24H, 7D, 30D) where our DB has no data.
+      var fetchUrl;
+      if (src === "kalshi") {
+        fetchUrl = "/api/event/" + encodeURIComponent(tkr)
+                 + "/history?hours=" + hours
+                 + (period ? "&period=" + period : "");
+      } else {
+        fetchUrl = "/api/event/" + encodeURIComponent(tkr)
+                 + "/prices?hours=" + hours;
+      }
+      var r = await fetch(fetchUrl);
       var d = await r.json();
       var series = d.series || [];
-      // Attach labels to each series for the legend.
+      // Attach labels to each series for the legend. The Kalshi
+      // history endpoint already includes labels from the cache;
+      // the DB prices endpoint doesn't — use the stashed map.
       for (var j = 0; j < series.length; j++) {
-        series[j].label = labels[series[j].market_ticker] || series[j].market_ticker;
+        if (!series[j].label) {
+          series[j].label = labels[series[j].market_ticker] || series[j].market_ticker;
+        }
       }
       var body = el.querySelector(".ed-chart-body");
       if (!series.length) {
