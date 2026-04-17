@@ -2716,7 +2716,6 @@ function renderPriceChartSvg(series, hoursWindow, volume) {
     if (tx < padL + 30 || tx > padL + w - 30) continue;
     var tickLabel = spanHours > 36 ? fmtTickLong(new Date(tt)) : fmtTick(new Date(tt));
     svg += '<text x="' + tx.toFixed(1) + '" y="' + (H - 6) + '" fill="#555" font-size="9" text-anchor="middle">' + tickLabel + '</text>';
-    svg += '<line x1="' + tx.toFixed(1) + '" y1="' + padT + '" x2="' + tx.toFixed(1) + '" y2="' + (padT + h) + '" stroke="#111" stroke-width="0.5"/>';
   }
   // Hover layer — an invisible rect that catches pointer events
   // across the entire plot area. Paired with a vertical crosshair
