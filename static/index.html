@@ -322,7 +322,9 @@ html,body{overscroll-behavior:none}
 .ed-data-grid-toggle .ed-dg-chevron{color:var(--text-muted);font-size:11px;transition:transform 0.2s}
 .ed-data-grid-toggle.open .ed-dg-chevron{transform:rotate(180deg)}
 .ed-data-grid-body{border-top:1px solid var(--border);padding:14px 18px}
-.ed-dg-picker{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:0 20px;align-items:start}
+.ed-dg-picker{display:grid;grid-template-columns:repeat(6,1fr);gap:0 20px;align-items:start}
+@media(max-width:900px){.ed-dg-picker{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:600px){.ed-dg-picker{grid-template-columns:repeat(2,1fr)}}
 .ed-dg-col{}
 .ed-dg-group-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--green);margin:0 0 6px;padding-bottom:4px;border-bottom:1px solid var(--border)}
 .ed-dg-fields{display:flex;flex-direction:column;gap:2px;margin-bottom:14px}
