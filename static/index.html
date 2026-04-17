@@ -517,7 +517,7 @@ html,body{overscroll-behavior:none}
         <input type="number" id="sf-max-days" placeholder="e.g. 30" min="0">
       </div>
       <div class="sf-group">
-        <label>Expiration Time</label>
+        <label>Expected Expiration</label>
         <input type="date" id="sf-expires-before">
       </div>
       <button id="sf-apply" class="sf-btn">Apply Filters</button>
@@ -1930,7 +1930,7 @@ var SCREENER_COLS = [
         return Math.floor(hoursDelta / 24) + " days";
       } catch(e) { return "—"; }
     }},
-  { key: "expiration_time",    label: "Expiration Time",   cls: "",      w: 100, fmt: function(v) {
+  { key: "expiration_time",    label: "Expected Expiration", cls: "",    w: 100, fmt: function(v) {
       if (!v) return "—";
       try { var d = new Date(v); return d.toLocaleDateString("en-US", {month:"short",day:"numeric",year:"numeric"}); } catch(e) { return "—"; }
     }},
