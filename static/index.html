@@ -2519,6 +2519,17 @@ async function hydrateMarketDataGrid(el) {
   }
 }
 
+// Map market_ticker to human-readable label for chart legend use.
+function _outcomeLabels(outcomes) {
+  var m = {};
+  for (var i = 0; i < outcomes.length; i++) {
+    if (outcomes[i] && outcomes[i].ticker) {
+      m[outcomes[i].ticker] = outcomes[i].label || outcomes[i].ticker;
+    }
+  }
+  return m;
+}
+
 // Build a single SVG with all market lines overlaid. Y axis is
 // 0-100% (probability), X axis is 0 to full window width. Returns
 // "" when no series has data.
