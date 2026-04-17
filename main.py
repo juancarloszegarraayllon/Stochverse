@@ -4123,6 +4123,121 @@ def get_event_history(ticker: str, hours: int = 24, period: int = 60, debug: boo
         return {"series": [], "error": str(e)}
 
 
+@app.get("/api/event/{ticker}/stats")
+def get_event_stats(ticker: str):
+    """Fetch live game statistics (shots, possession, cards, etc.)
+    from SofaScore for the matched game. Returns a symmetric
+    home/away structure suitable for rendering a stats panel.
+
+    On-demand — only called when a user opens the event detail
+    page. Doesn't poll or cache beyond the request lifecycle.
+    """
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return {"error": "ticker required"}
+    # Find the event in our cache to get sport + title.
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = None
+    for r in records:
+        if r.get("event_ticker") == ticker:
+            found = r
+            break
+    if not found:
+        return {"error": f"event {ticker!r} not found in cache"}
+    sport = found.get("_sport", "")
+    title = found.get("title", "")
+    if not sport or not title:
+        return {"error": "event has no sport or title"}
+    # Find the matched game — try SofaScore first (richest stats).
+    sofa_id = None
+    home_name = ""
+    away_name = ""
+    try:
+        from sofascore_feed import match_game as sofa_match, SOFASCORE_GAMES
+        sg = sofa_match(title, sport)
+        if sg:
+            sofa_id = sg.get("_sofa_event_id")
+            home_name = sg.get("home_display", "")
+            away_name = sg.get("away_display", "")
+    except Exception:
+        pass
+    # If SofaScore didn't match or no ID, try searching.
+    if not sofa_id:
+        try:
+            import re as _re
+            parts = _re.split(r'\s+(?:vs\.?|v|at)\s+', title, maxsplit=1, flags=_re.IGNORECASE)
+            if len(parts) == 2:
+                from sofascore_feed import lookup_aggregate_sync
+                agg = lookup_aggregate_sync(parts[0].strip(), parts[1].strip())
+                if agg and agg.get("_sofa_event_id"):
+                    sofa_id = agg["_sofa_event_id"]
+                    if not home_name:
+                        home_name = parts[0].strip()
+                    if not away_name:
+                        away_name = parts[1].strip()
+        except Exception:
+            pass
+    if not sofa_id:
+        return {"error": "no SofaScore match found for this event", "sport": sport}
+    # Fetch statistics from SofaScore.
+    try:
+        import httpx as _httpx
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.sofascore.com/",
+            "Origin": "https://www.sofascore.com",
+        }
+        stats_url = f"https://api.sofascore.com/api/v1/event/{sofa_id}/statistics"
+        with _httpx.Client(headers=headers, timeout=10.0) as client:
+            r = client.get(stats_url)
+            if r.status_code != 200:
+                return {
+                    "error": f"SofaScore statistics returned HTTP {r.status_code}",
+                    "sofa_event_id": sofa_id,
+                }
+            data = r.json() or {}
+            raw_stats = data.get("statistics") or []
+            # Find the "ALL" period (full match stats).
+            all_period = None
+            for period in raw_stats:
+                if period.get("period") == "ALL":
+                    all_period = period
+                    break
+            if not all_period and raw_stats:
+                all_period = raw_stats[0]
+            if not all_period:
+                return {
+                    "error": "no statistics available yet",
+                    "sofa_event_id": sofa_id,
+                    "home": home_name,
+                    "away": away_name,
+                }
+            # Flatten the grouped stats into a simple list of
+            # {name, home, away} objects.
+            stats = []
+            for group in all_period.get("groups") or []:
+                for item in group.get("statisticsItems") or []:
+                    stats.append({
+                        "name":  item.get("name", ""),
+                        "home":  str(item.get("home", "")),
+                        "away":  str(item.get("away", "")),
+                        "group": group.get("groupName", ""),
+                    })
+            return {
+                "stats": stats,
+                "home": home_name,
+                "away": away_name,
+                "sofa_event_id": sofa_id,
+                "sport": sport,
+            }
+    except Exception as e:
+        return {"error": str(e), "sofa_event_id": sofa_id}
+
+
 @app.get("/api/prune")
 async def prune_prices():
     """Manually trigger pruning of old price rows. Returns the

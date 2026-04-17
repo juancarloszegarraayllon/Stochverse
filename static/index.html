@@ -275,7 +275,24 @@ html,body{overscroll-behavior:none}
 }
 
 /* ── Event detail page ──────────────────────────────────────────── */
-#event-detail{display:none;max-width:1100px;margin:0 auto;padding:0 4px}
+#event-detail{display:none;max-width:1300px;margin:0 auto;padding:0 4px}
+.ed-layout{display:flex;gap:16px;align-items:flex-start}
+.ed-main{flex:1;min-width:0}
+.ed-sidebar{width:320px;flex-shrink:0;position:sticky;top:calc(var(--header-h) + 16px);max-height:calc(100vh - var(--header-h) - 32px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+@media(max-width:900px){.ed-layout{flex-direction:column}.ed-sidebar{width:100%;position:static;max-height:none}}
+.ed-stats-panel{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px}
+.ed-stats-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--green);text-align:center;margin-bottom:12px}
+.ed-stats-teams{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.ed-stats-team{font-size:11px;font-weight:700;color:var(--text);max-width:120px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-stats-row{display:flex;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)}
+.ed-stats-row:last-child{border-bottom:0}
+.ed-stats-home{flex:1;text-align:left;font-size:12px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+.ed-stats-name{flex:1.2;text-align:center;font-size:11px;color:var(--text-dim);white-space:nowrap}
+.ed-stats-away{flex:1;text-align:right;font-size:12px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+.ed-stats-loading{text-align:center;font-size:11px;color:var(--text-muted);font-style:italic;padding:20px 0}
+.ed-stats-bar{display:flex;height:4px;border-radius:2px;overflow:hidden;margin-top:3px}
+.ed-stats-bar-home{background:var(--green);height:100%}
+.ed-stats-bar-away{background:var(--red);height:100%}
 .ed-header{display:flex;flex-direction:column;gap:10px;padding:18px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:12px}
 .ed-pills{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .ed-title{font-size:20px;font-weight:700;line-height:1.3;color:var(--text);margin:0}
@@ -2145,6 +2162,10 @@ function showEventDetail(ticker, skipHistory) {
       // event detail page shows a loading placeholder until this
       // fetch completes.
       hydratePriceCharts();
+      // Hydrate the game stats sidebar if present.
+      if (d.event && d.event.event_ticker) {
+        hydrateGameStats(d.event.event_ticker);
+      }
     })
     .catch(function(ex) {
       document.getElementById("loader").style.display = "none";
@@ -3226,6 +3247,61 @@ function summaryStats(markets) {
   return h;
 }
 
+// Render the stats sidebar placeholder.
+function renderStatsSidebar(evTicker) {
+  return '<div class="ed-sidebar">'
+       + '<div class="ed-stats-panel" data-stats-ticker="' + escH(evTicker) + '">'
+       + '<div class="ed-stats-loading">Loading game stats\u2026</div>'
+       + '</div></div>';
+}
+
+// Fetch SofaScore stats and populate the sidebar panel.
+async function hydrateGameStats(evTicker) {
+  var panel = document.querySelector('[data-stats-ticker="' + evTicker + '"]');
+  if (!panel) return;
+  try {
+    var r = await fetch("/api/event/" + encodeURIComponent(evTicker) + "/stats");
+    var d = await r.json();
+    if (d.error || !d.stats || !d.stats.length) {
+      panel.innerHTML = '<div class="ed-stats-loading">'
+        + (d.error === "no SofaScore match found for this event"
+          ? 'Game stats not available for this event.'
+          : (d.error || 'No stats available yet.'))
+        + '</div>';
+      return;
+    }
+    var home = d.home || "Home";
+    var away = d.away || "Away";
+    var h = '<div class="ed-stats-title">Team Stats</div>';
+    h += '<div class="ed-stats-teams">';
+    h += '<div class="ed-stats-team">' + escH(home) + '</div>';
+    h += '<div class="ed-stats-team">' + escH(away) + '</div>';
+    h += '</div>';
+    for (var i = 0; i < d.stats.length; i++) {
+      var s = d.stats[i];
+      h += '<div class="ed-stats-row">';
+      h += '<div class="ed-stats-home">' + escH(s.home) + '</div>';
+      h += '<div class="ed-stats-name">' + escH(s.name) + '</div>';
+      h += '<div class="ed-stats-away">' + escH(s.away) + '</div>';
+      h += '</div>';
+      // Add a visual bar for percentage-like stats.
+      var hNum = parseFloat(s.home);
+      var aNum = parseFloat(s.away);
+      if (!isNaN(hNum) && !isNaN(aNum) && (hNum + aNum) > 0) {
+        var hPct = hNum / (hNum + aNum) * 100;
+        h += '<div class="ed-stats-bar">';
+        h += '<div class="ed-stats-bar-home" style="width:' + hPct.toFixed(1) + '%"></div>';
+        h += '<div class="ed-stats-bar-away" style="width:' + (100 - hPct).toFixed(1) + '%"></div>';
+        h += '</div>';
+      }
+    }
+    panel.innerHTML = h;
+  } catch (ex) {
+    panel.innerHTML = '<div class="ed-stats-loading">Failed to load game stats.</div>';
+    console.error("hydrateGameStats error", ex);
+  }
+}
+
 function renderEventDetail(ev) {
   var sport = ev._sport || "";
   var cat = ev.category || "Other";
@@ -3379,6 +3455,12 @@ function renderEventDetail(ev) {
 
   h += '</div>'; // /ed-header
 
+  // Two-column layout: main content left, stats sidebar right.
+  // The sidebar only renders for sport events.
+  var isSport = !!sport;
+  h += '<div class="ed-layout">';
+  h += '<div class="ed-main">';
+
   // Markets tabs (when the event has sibling market groups) or a
   // single flat table.
   if (hasGroups) {
@@ -3412,6 +3494,13 @@ function renderEventDetail(ev) {
     h += renderMarketDataGrid(ticker);
     h += renderSettlementRules(ev.outcomes || []);
   }
+
+  h += '</div>'; // /ed-main
+  // Stats sidebar (sport events only).
+  if (isSport) {
+    h += renderStatsSidebar(ticker);
+  }
+  h += '</div>'; // /ed-layout
 
   return h;
 }

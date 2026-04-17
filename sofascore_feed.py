@@ -200,6 +200,7 @@ def _parse_event(ev: Dict[str, Any], sport_label: str, accept_pre: bool = False)
         "sport": sport_label,
         "league": league,
         "scheduled_kickoff_ms": sched_ms,
+        "_sofa_event_id": ev.get("id"),
         "home_display": home_name,
         "away_display": away_name,
         "home_phrases": _team_phrases(home),
