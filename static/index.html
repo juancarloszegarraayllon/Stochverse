@@ -331,6 +331,10 @@ html,body{overscroll-behavior:none}
 .ed-dg-field{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-dim);cursor:pointer;padding:2px 0;user-select:none}
 .ed-dg-field input[type="checkbox"]{accent-color:var(--green);cursor:pointer;margin:0}
 .ed-dg-field:hover{color:var(--text)}
+.ed-dg-actions{display:flex;gap:8px;margin-top:10px}
+.ed-dg-btn{padding:5px 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:10px;font-weight:700;letter-spacing:0.4px;text-transform:uppercase;border-radius:5px;cursor:pointer;transition:background 0.12s,border-color 0.12s}
+.ed-dg-btn:hover{background:var(--bg2);border-color:var(--text-muted)}
+.ed-dg-btn-dim{color:var(--text-muted)}
 .ed-dg-result{margin-top:16px}
 .ed-dg-result-empty{font-size:11px;color:var(--text-muted);font-style:italic;padding:12px 0}
 .ed-data-table{width:100%;border-collapse:collapse;background:var(--bg3);border:1px solid var(--border);border-radius:8px;overflow:hidden}
@@ -2458,6 +2462,10 @@ async function hydrateMarketDataGrid(el) {
       html += '</div></div>';
     }
     html += '</div>';
+    html += '<div class="ed-dg-actions">'
+         + '<button class="ed-dg-btn" onclick="window._dgSelectAll(this)">Select All</button>'
+         + '<button class="ed-dg-btn ed-dg-btn-dim" onclick="window._dgReset(this)">Reset</button>'
+         + '</div>';
     html += '<div class="ed-dg-result"></div>';
     body.innerHTML = html;
     // Rebuild comparison table on checkbox change.
@@ -2523,6 +2531,21 @@ async function hydrateMarketDataGrid(el) {
     for (var cb = 0; cb < allBoxes.length; cb++) {
       allBoxes[cb].addEventListener("change", rebuildTable);
     }
+    // Select All / Reset handlers — scoped to THIS grid's body.
+    window._dgSelectAll = function(btn) {
+      var b = btn.closest(".ed-data-grid-body");
+      if (!b) return;
+      var boxes = b.querySelectorAll('input[type="checkbox"]');
+      for (var i = 0; i < boxes.length; i++) boxes[i].checked = true;
+      rebuildTable();
+    };
+    window._dgReset = function(btn) {
+      var b = btn.closest(".ed-data-grid-body");
+      if (!b) return;
+      var boxes = b.querySelectorAll('input[type="checkbox"]');
+      for (var i = 0; i < boxes.length; i++) boxes[i].checked = false;
+      rebuildTable();
+    };
     rebuildTable();
   } catch (ex) {
     body.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:11px">Failed to load market data.</div>';
@@ -2622,22 +2645,22 @@ function renderPriceChartSvg(series, hoursWindow, volume) {
     }
     svg += '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round"/>';
   }
-  // X-axis tick labels: first (oldest) and last (now). Format
-  // depends on the range — HH:MM for intraday, MM/DD HH:MM for
-  // multi-day.
+  // X-axis tick labels in AM/PM format at regular intervals.
   var firstDate = new Date(tMin);
   var lastDate  = new Date(tMax);
   var spanHours = (tMax - tMin) / 3600000;
   function fmtTick(d) {
-    var hh = d.getHours();
-    var mm = d.getMinutes();
-    var hhmm = (hh < 10 ? "0" + hh : hh) + ":" + (mm < 10 ? "0" + mm : mm);
-    if (spanHours > 36) {
-      var mo = d.getMonth() + 1;
-      var da = d.getDate();
-      return mo + "/" + da + " " + hhmm;
-    }
-    return hhmm;
+    return d.toLocaleTimeString("en-US", {
+      hour: "numeric", minute: "2-digit",
+      timeZone: "America/New_York",
+    });
+  }
+  function fmtTickLong(d) {
+    return d.toLocaleDateString("en-US", {
+      month: "short", day: "numeric",
+      hour: "numeric", minute: "2-digit",
+      timeZone: "America/New_York",
+    });
   }
   // Volume bars underneath the price panel. Bars share the same X
   // scale as the price chart. Height is normalized per-chart so
@@ -2667,8 +2690,21 @@ function renderPriceChartSvg(series, hoursWindow, volume) {
     svg += '<text x="' + padL + '" y="' + (volTop + 10) + '" fill="#444" '
          + 'font-size="9" letter-spacing="0.3">VOLUME</text>';
   }
-  svg += '<text x="' + padL + '" y="' + (H - 6) + '" fill="#666" font-size="10">' + fmtTick(firstDate) + '</text>';
-  svg += '<text x="' + (padL + w) + '" y="' + (H - 6) + '" fill="#666" font-size="10" text-anchor="end">' + fmtTick(lastDate) + '</text>';
+  // Render time ticks at regular intervals. For intraday charts
+  // (<=6h) use 10-minute intervals; for longer use hourly or daily.
+  var tickIntervalMs;
+  if (spanHours <= 2) tickIntervalMs = 10 * 60000;        // 10 min
+  else if (spanHours <= 8) tickIntervalMs = 30 * 60000;   // 30 min
+  else if (spanHours <= 48) tickIntervalMs = 3600000;     // 1 hour
+  else tickIntervalMs = 86400000;                          // 1 day
+  var tickStart = Math.ceil(tMin / tickIntervalMs) * tickIntervalMs;
+  for (var tt = tickStart; tt <= tMax; tt += tickIntervalMs) {
+    var tx = sx(tt);
+    if (tx < padL + 30 || tx > padL + w - 30) continue;
+    var tickLabel = spanHours > 36 ? fmtTickLong(new Date(tt)) : fmtTick(new Date(tt));
+    svg += '<text x="' + tx.toFixed(1) + '" y="' + (H - 6) + '" fill="#555" font-size="9" text-anchor="middle">' + tickLabel + '</text>';
+    svg += '<line x1="' + tx.toFixed(1) + '" y1="' + padT + '" x2="' + tx.toFixed(1) + '" y2="' + (padT + h) + '" stroke="#111" stroke-width="0.5"/>';
+  }
   // Hover layer — an invisible rect that catches pointer events
   // across the entire plot area. Paired with a vertical crosshair
   // line and per-series dots (all hidden by default, toggled on
@@ -3134,11 +3170,9 @@ function renderMarketsTable(markets, live) {
   h += '<th style="text-align:center">Yes</th>';
   h += '<th style="text-align:center">No</th>';
   h += '<th style="text-align:center">Last</th>';
-  h += '<th style="text-align:center">Spread</th>';
   h += '<th style="text-align:center">24h Vol</th>';
   h += '<th style="text-align:center">Volume</th>';
   h += '<th style="text-align:center">OI</th>';
-  h += '<th style="text-align:center">Liquidity</th>';
   h += '</tr></thead><tbody>';
   for (var i = 0; i < markets.length; i++) {
     var m = markets[i];
@@ -3150,11 +3184,9 @@ function renderMarketsTable(markets, live) {
     h += '<td class="ed-yes">' + escH(m.yes) + '</td>';
     h += '<td class="ed-no">' + escH(m.no) + '</td>';
     h += '<td class="ed-num">' + (m.last_price != null ? (m.last_price + "¢") : "—") + '</td>';
-    h += '<td class="ed-num">' + (m.spread != null ? (m.spread + "¢") : "—") + '</td>';
     h += '<td class="ed-num">' + fmtNum(m.volume_24h) + '</td>';
     h += '<td class="ed-num">' + fmtNum(m.volume) + '</td>';
     h += '<td class="ed-num">' + fmtNum(m.open_interest) + '</td>';
-    h += '<td class="ed-num">' + fmtMoney(m.liquidity) + '</td>';
     h += '</tr>';
   }
   h += '</tbody></table>';
@@ -3165,13 +3197,12 @@ function summaryStats(markets) {
   // Aggregate volume / OI / liquidity across every market in the
   // current group so the top-line "event level" stats give users
   // a quick read on overall activity.
-  var totVol = 0, tot24 = 0, totOI = 0, totLiq = 0, nMarkets = 0;
+  var totVol = 0, tot24 = 0, totOI = 0, nMarkets = 0;
   for (var i = 0; i < markets.length; i++) {
     var m = markets[i];
     if (m.volume != null) totVol += m.volume;
     if (m.volume_24h != null) tot24 += m.volume_24h;
     if (m.open_interest != null) totOI += m.open_interest;
-    if (m.liquidity != null) totLiq += m.liquidity;
     nMarkets += 1;
   }
   var h = '<div class="ed-summary">';
@@ -3179,7 +3210,6 @@ function summaryStats(markets) {
   h += '<div class="ed-stat"><div class="ed-stat-label">24h Volume</div><div class="ed-stat-val">' + fmtNum(tot24) + '</div></div>';
   h += '<div class="ed-stat"><div class="ed-stat-label">Total Volume</div><div class="ed-stat-val">' + fmtNum(totVol) + '</div></div>';
   h += '<div class="ed-stat"><div class="ed-stat-label">Open Interest</div><div class="ed-stat-val">' + fmtNum(totOI) + '</div></div>';
-  h += '<div class="ed-stat"><div class="ed-stat-label">Liquidity</div><div class="ed-stat-val">' + fmtMoney(totLiq) + '</div></div>';
   h += '</div>';
   return h;
 }
@@ -3357,8 +3387,8 @@ function renderEventDetail(ev) {
       h += renderPriceHistoryPanel(g2.event_ticker || ticker, _outcomeLabels(g2.outcomes || []));
       h += marketsSectionTitle(live);
       h += renderMarketsTable(g2.outcomes || [], live);
-      h += renderSettlementRules(g2.outcomes || []);
       h += renderMarketDataGrid(g2.event_ticker || ticker);
+      h += renderSettlementRules(g2.outcomes || []);
       h += '</div>';
     }
   } else {
@@ -3367,8 +3397,8 @@ function renderEventDetail(ev) {
     h += renderPriceHistoryPanel(ticker, _outcomeLabels(ev.outcomes || []));
     h += marketsSectionTitle(live);
     h += renderMarketsTable(ev.outcomes || [], live);
-    h += renderSettlementRules(ev.outcomes || []);
     h += renderMarketDataGrid(ticker);
+    h += renderSettlementRules(ev.outcomes || []);
   }
 
   return h;
