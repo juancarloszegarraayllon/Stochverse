@@ -4255,6 +4255,8 @@ def get_event_stats(ticker: str):
                         # Score after goal.
                         entry["homeScore"] = inc.get("homeScore")
                         entry["awayScore"] = inc.get("awayScore")
+                        # Injury time length (minutes added).
+                        entry["length"] = inc.get("length")
                         incidents.append(entry)
             except Exception:
                 pass

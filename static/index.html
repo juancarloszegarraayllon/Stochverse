@@ -2194,16 +2194,20 @@ function showEventDetail(ticker, skipHistory) {
       if (d.event && d.event.event_ticker) {
         hydrateGameStats(d.event.event_ticker);
         // Align sidebar: top matches ed-main top, left edge
-        // sits right of ed-main's right edge.
+        // sits right of ed-main's right edge. Compute max-height
+        // from the top so the entire sidebar fits in the viewport
+        // and the inner content scrolls when it overflows.
         setTimeout(function() {
           var main = document.querySelector(".ed-main");
           var sidebar = document.querySelector(".ed-sidebar");
           if (main && sidebar && window.innerWidth > 1200) {
             var rect = main.getBoundingClientRect();
-            sidebar.style.top = rect.top + "px";
+            var topPx = Math.max(8, rect.top);
+            sidebar.style.top = topPx + "px";
             sidebar.style.left = (rect.right + 20) + "px";
             sidebar.style.right = "auto";
             sidebar.style.transform = "none";
+            sidebar.style.maxHeight = "calc(100vh - " + topPx + "px - 16px)";
           }
         }, 100);
       }
@@ -3387,13 +3391,23 @@ async function hydrateGameStats(evTicker) {
           icon = "\u23F1";
           detail = '<span class="ed-tl-player">' + escH(inc.text || "Period") + '</span>';
           sideCls = " ed-tl-neutral";
+        } else if (itype === "injuryTime") {
+          icon = "\u23F3";
+          detail = '<span class="ed-tl-assist">+' + escH(String(inc.length || inc.text || "")) + ' min added</span>';
+          sideCls = " ed-tl-neutral";
         } else if (itype === "varDecision") {
           icon = "\uD83D\uDCFA";
           detail = '<span class="ed-tl-player">VAR: ' + escH(inc.text || inc.incidentClass || "") + '</span>';
+        } else if (itype === "inGamePenalty") {
+          icon = "\u26BD";
+          detail = '<span class="ed-tl-player">' + escH(inc.player || "Penalty") + '</span>';
+          if (inc.text) detail += '<br><span class="ed-tl-assist">' + escH(inc.text) + '</span>';
         } else {
-          if (!inc.player && !inc.text) continue;
+          // Unknown type — still surface it rather than dropping it.
           icon = "\u2022";
-          detail = escH(inc.player || inc.text || itype);
+          var fallback = inc.player || inc.text || inc.incidentClass || itype;
+          if (!fallback) continue;
+          detail = '<span class="ed-tl-player">' + escH(fallback) + '</span>';
         }
         h += '<div class="ed-tl-item' + sideCls + '">';
         h += '<div class="ed-tl-time">' + minute + '</div>';
