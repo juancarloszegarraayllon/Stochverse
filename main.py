@@ -4124,7 +4124,7 @@ def get_event_history(ticker: str, hours: int = 24, period: int = 60, debug: boo
 
 
 @app.get("/api/event/{ticker}/stats")
-def get_event_stats(ticker: str):
+def get_event_stats(ticker: str, debug: bool = False):
     """Fetch live game statistics (shots, possession, cards, etc.)
     from SofaScore for the matched game. Returns a symmetric
     home/away structure suitable for rendering a stats panel.
@@ -4228,7 +4228,45 @@ def get_event_stats(ticker: str):
         except Exception:
             pass
     if not sofa_id:
-        return {"error": "no SofaScore match found for this event", "sport": sport}
+        out_err = {"error": "no SofaScore match found for this event", "sport": sport, "title": title}
+        if debug:
+            try:
+                import re as _re3
+                import httpx as _httpx3
+                parts3 = _re3.split(r'\s+(?:vs\.?|v|at)\s+', title, maxsplit=1, flags=_re3.IGNORECASE)
+                out_err["title_parts"] = parts3
+                if len(parts3) == 2:
+                    dbg_headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                      "Chrome/125.0.0.0 Safari/537.36",
+                        "Accept": "application/json, text/plain, */*",
+                        "Referer": "https://www.sofascore.com/",
+                        "Origin": "https://www.sofascore.com",
+                    }
+                    q3 = (parts3[0].strip() + " " + parts3[1].strip()).strip()
+                    with _httpx3.Client(headers=dbg_headers, timeout=10.0,
+                                        follow_redirects=True) as sc3:
+                        sr3 = sc3.get("https://api.sofascore.com/api/v1/search/events",
+                                      params={"q": q3, "page": 0})
+                        out_err["search_status"] = sr3.status_code
+                        out_err["search_query"] = q3
+                        if sr3.status_code == 200:
+                            srd3 = sr3.json() or {}
+                            out_err["search_results"] = [
+                                {
+                                    "type": it.get("type"),
+                                    "home": (it.get("entity") or {}).get("homeTeam", {}).get("name"),
+                                    "away": (it.get("entity") or {}).get("awayTeam", {}).get("name"),
+                                    "id":   (it.get("entity") or {}).get("id"),
+                                }
+                                for it in (srd3.get("results") or [])[:10]
+                            ]
+                        else:
+                            out_err["search_body"] = sr3.text[:400]
+            except Exception as _e3:
+                out_err["debug_err"] = str(_e3)
+        return out_err
     # Fetch statistics from SofaScore.
     try:
         import httpx as _httpx
