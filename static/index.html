@@ -3367,7 +3367,9 @@ async function hydrateGameStats(evTicker) {
         var inc = incidents[ti];
         var itype = inc.type || "";
         var minute = inc.time != null ? inc.time + "'" : "";
-        if (inc.addedTime) minute += "+" + inc.addedTime;
+        // SofaScore uses addedTime=999 as a sentinel for "end of
+        // period" (not actual added time). Only show real values.
+        if (inc.addedTime && inc.addedTime !== 999) minute += "+" + inc.addedTime;
         var sideCls = inc.isHome === true ? " ed-tl-home" : (inc.isHome === false ? " ed-tl-away" : " ed-tl-neutral");
         var icon = "";
         var detail = "";
