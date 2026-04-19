@@ -4185,15 +4185,24 @@ def get_market_trades(ticker: str, limit: int = 1000, min_amount: float = 1000, 
         total_all_trades_volume = 0.0
         total_all_trades_count = len(trades_raw)
         for t in trades_raw:
-            count = t.get("count", 1) or 0
-            yes_price = t.get("yes_price", 0)
-            no_price = t.get("no_price", 0)
+            # Kalshi newer API: count_fp (string), *_dollars (strings).
+            # Older API: count (int), yes_price/no_price (cents int).
+            count = t.get("count_fp") or t.get("count") or 0
+            if isinstance(count, str):
+                count = float(count)
+            yes_price = t.get("yes_price_dollars")
+            if yes_price is None:
+                yes_price = t.get("yes_price", 0)
+            no_price = t.get("no_price_dollars")
+            if no_price is None:
+                no_price = t.get("no_price", 0)
             taker_side = t.get("taker_side", "")
             created = t.get("created_time", "")
             if isinstance(yes_price, str):
                 yes_price = float(yes_price)
             if isinstance(no_price, str):
                 no_price = float(no_price)
+            # If the price looks like cents (integer > 1), convert.
             if yes_price > 1:
                 yes_price = yes_price / 100.0
             if no_price > 1:
