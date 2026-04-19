@@ -3343,6 +3343,7 @@ function marketsSectionTitle(live) {
            + '<span class="snap-ts" hidden></span>'
            + '<button class="snap-export" onclick="window.exportSnap(this,\'csv\')" hidden>CSV</button>'
            + '<button class="snap-export" onclick="window.exportSnap(this,\'json\')" hidden>JSON</button>'
+           + '<button class="snap-export" onclick="window.copySnap(this)" hidden>Copy</button>'
            + '</span>';
   return '<div class="ed-section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
        + '<span>Markets' + pill + '</span>'
@@ -3649,6 +3650,7 @@ function renderOrderbookSection(outcomes) {
      + '<span class="snap-ts" hidden></span>'
      + '<button class="snap-export" onclick="window.exportSnap(this,\'csv\')" hidden>CSV</button>'
      + '<button class="snap-export" onclick="window.exportSnap(this,\'json\')" hidden>JSON</button>'
+     + '<button class="snap-export" onclick="window.copySnap(this)" hidden>Copy</button>'
      + '</div>';
   h += '<div class="ob-outcomes">';
   for (var i = 0; i < outcomes.length; i++) {
@@ -3851,6 +3853,7 @@ function renderWhaleSentimentSection(outcomes) {
      + '<span class="snap-ts" hidden></span>'
      + '<button class="snap-export" onclick="window.exportSnap(this,\'csv\')" hidden>CSV</button>'
      + '<button class="snap-export" onclick="window.exportSnap(this,\'json\')" hidden>JSON</button>'
+     + '<button class="snap-export" onclick="window.copySnap(this)" hidden>Copy</button>'
      + '</div>';
   h += '<div class="ws-outcomes">';
   for (var i = 0; i < outcomes.length; i++) {
@@ -4590,6 +4593,38 @@ window.exportSnap = function(btn, format) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, 100);
+};
+
+window.copySnap = function(btn) {
+  var wrap = btn.closest(".snap-controls");
+  if (!wrap) return;
+  var section = wrap.getAttribute("data-snap-section");
+  var snap = _snapState[section];
+  if (!snap) return;
+  // Copy CSV by default — pastes directly into Excel / Sheets /
+  // Notion as a parseable table.
+  var text = _toCSV(section, snap);
+  var origLabel = btn.textContent;
+  var done = function(ok) {
+    btn.textContent = ok ? "Copied!" : "Failed";
+    setTimeout(function() { btn.textContent = origLabel; }, 1200);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      function() { done(true); },
+      function() { done(false); }
+    );
+  } else {
+    // Fallback for older browsers / non-secure contexts.
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); done(true); }
+    catch (e) { done(false); }
+    document.body.removeChild(ta);
+  }
 };
 
 boot();
