@@ -348,10 +348,11 @@ PRICE_RETENTION_HOURS = int(os.environ.get("PRICE_RETENTION_HOURS", "6"))
 
 async def create_snapshot(section: str, data: dict, event_ticker: str = "",
                           ttl_days: int = 30):
-    """Persist a snapshot and return its short id. id is a URL-safe
-    random slug the user can share."""
+    """Persist a snapshot and return (slug, None) on success or
+    (None, error_message) on failure so the caller can surface the
+    real error instead of swallowing it."""
     if not DATABASE_URL or async_session is None:
-        return None
+        return None, "database not configured (DATABASE_URL missing)"
     try:
         import secrets
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
@@ -367,10 +368,10 @@ async def create_snapshot(section: str, data: dict, event_ticker: str = "",
                     data=data,
                     expires_at=expires,
                 ))
-        return slug
+        return slug, None
     except Exception as e:
         log.error("create_snapshot failed: %s", e)
-        return None
+        return None, str(e)[:400]
 
 
 async def get_snapshot(slug: str):

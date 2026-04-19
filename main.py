@@ -3000,10 +3000,12 @@ async def create_snapshot_endpoint(request: Request):
     except Exception:
         return JSONResponse({"error": "snapshot storage unavailable"},
                             status_code=503)
-    slug = await _db_create(section, data, event_ticker=event_ticker)
+    slug, err = await _db_create(section, data, event_ticker=event_ticker)
     if not slug:
-        return JSONResponse({"error": "failed to persist snapshot"},
-                            status_code=500)
+        return JSONResponse(
+            {"error": err or "failed to persist snapshot"},
+            status_code=500,
+        )
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
     expires = (_dt.now(_tz.utc) + _td(days=30)).isoformat()
     return {"id": slug, "url": f"/s/{slug}", "expires_at": expires}
