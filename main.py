@@ -2967,6 +2967,94 @@ def get_sports(live: bool = False):
                 live_cats.append({"name": c, "count": cnt})
     return {"sports": sports, "soccer_comps": sorted(soccer_comps), "live_categories": live_cats}
 
+# ── Shareable snapshots ──────────────────────────────────────────
+@app.post("/api/snapshot")
+async def create_snapshot_endpoint(request: Request):
+    """Persist a Snap/Pause freeze so the user can share a URL.
+    Body: { section: "markets" | "orderbook" | "capflow",
+            event_ticker: "KX...",  (optional, for context)
+            data: {...}            (the snapshot object built
+                                    client-side by _captureSnapshot) }
+    Returns: { id, url, expires_at }."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    section = (body.get("section") or "").strip()
+    data = body.get("data")
+    event_ticker = (body.get("event_ticker") or "").strip()
+    if section not in ("markets", "orderbook", "capflow"):
+        return JSONResponse({"error": "section must be markets|orderbook|capflow"},
+                            status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "data must be an object"}, status_code=400)
+    # Guard against oversized payloads (pathological trade floods).
+    try:
+        if len(json.dumps(data)) > 512_000:
+            return JSONResponse({"error": "snapshot too large (>512 KB)"},
+                                status_code=413)
+    except Exception:
+        pass
+    try:
+        from db import create_snapshot as _db_create
+    except Exception:
+        return JSONResponse({"error": "snapshot storage unavailable"},
+                            status_code=503)
+    slug = await _db_create(section, data, event_ticker=event_ticker)
+    if not slug:
+        return JSONResponse({"error": "failed to persist snapshot"},
+                            status_code=500)
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    expires = (_dt.now(_tz.utc) + _td(days=30)).isoformat()
+    return {"id": slug, "url": f"/s/{slug}", "expires_at": expires}
+
+
+@app.get("/api/snapshot/{slug}")
+async def get_snapshot_endpoint(slug: str):
+    """Fetch a shared snapshot by id. Returns 404 if not found or
+    expired."""
+    slug = (slug or "").strip()
+    if not slug:
+        return JSONResponse({"error": "id required"}, status_code=400)
+    try:
+        from db import get_snapshot as _db_get
+    except Exception:
+        return JSONResponse({"error": "snapshot storage unavailable"},
+                            status_code=503)
+    snap = await _db_get(slug)
+    if not snap:
+        return JSONResponse({"error": "snapshot not found or expired"},
+                            status_code=404)
+    return snap
+
+
+@app.get("/s/{slug}", response_class=HTMLResponse)
+def snapshot_page(slug: str):
+    """Pretty share URL. Serves the same HTML shell as /, with a
+    <meta name='oddsiq-snapshot' content='{slug}'> hint so the JS
+    knows to render in read-only snapshot mode on boot."""
+    slug = (slug or "").strip()
+    p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "static", "index.html")
+    if not _os.path.exists(p):
+        return HTMLResponse("<h1>snapshot page missing</h1>")
+    global _INDEX_HTML_CACHE
+    mtime = _os.path.getmtime(p)
+    if _INDEX_HTML_CACHE.get("mtime") != mtime:
+        with open(p, "r", encoding="utf-8") as f:
+            html = f.read()
+        html = html.replace("<!--__ANALYTICS__-->", _analytics_snippet())
+        _INDEX_HTML_CACHE["html"] = html
+        _INDEX_HTML_CACHE["mtime"] = mtime
+    html = _INDEX_HTML_CACHE["html"].replace(
+        "</head>",
+        f'<meta name="oddsiq-snapshot" content="{slug}"></head>',
+        1,
+    )
+    return HTMLResponse(html, headers={
+        "Cache-Control": "public, max-age=60, must-revalidate",
+    })
+
+
 @app.get("/api/health")
 def get_health():
     """Liveness / readiness probe for Railway and uptime monitors.

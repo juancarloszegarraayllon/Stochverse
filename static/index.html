@@ -445,6 +445,15 @@ html,body{overscroll-behavior:none}
 .snap-ts{font-size:10px;color:var(--text-muted);font-family:monospace}
 .snap-hint{font-size:10px;color:var(--text-muted);font-style:italic;font-weight:400;text-transform:none;letter-spacing:normal}
 .snap-controls.snapped .snap-hint{display:none}
+.snap-share{background:rgba(66,133,244,0.12)!important;border-color:rgba(66,133,244,0.4)!important;color:#64b5f6!important}
+.snap-share:hover{background:rgba(66,133,244,0.22)!important}
+/* Shared-snapshot banner */
+.shared-banner{position:sticky;top:0;left:0;right:0;z-index:9999;background:linear-gradient(90deg,rgba(66,133,244,0.18),rgba(66,133,244,0.08));border-bottom:1px solid rgba(66,133,244,0.4);padding:10px 18px;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--text)}
+.shared-banner-dot{width:8px;height:8px;border-radius:50%;background:#64b5f6;animation:live-dot-pulse 1.6s infinite ease-in-out}
+.shared-banner-exit{margin-left:auto;color:#64b5f6;text-decoration:underline;font-weight:600}
+.shared-banner-exit:hover{color:#90caf9}
+body.has-shared-banner #header{top:40px}
+.shared-standalone{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px;color:var(--text-dim);font-size:11px;font-family:monospace;white-space:pre-wrap;word-break:break-all;margin:20px}
 .snap-export{padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text-dim);font-family:inherit;font-size:10px;font-weight:700;border-radius:4px;cursor:pointer}
 .snap-export:hover{color:var(--text);border-color:var(--text-muted)}
 .ob-section{margin-top:20px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden}
@@ -3439,6 +3448,7 @@ function marketsSectionTitle(live) {
            + '<button class="snap-export" onclick="window.exportSnap(this,\'csv\')" hidden>CSV</button>'
            + '<button class="snap-export" onclick="window.exportSnap(this,\'json\')" hidden>JSON</button>'
            + '<button class="snap-export" onclick="window.copySnap(this)" hidden>Copy</button>'
+           + '<button class="snap-export snap-share" onclick="window.shareSnap(this)" hidden>Share</button>'
            + '</span>';
   return '<div class="ed-section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
        + '<span>Markets' + pill + '</span>'
@@ -3747,6 +3757,7 @@ function renderOrderbookSection(outcomes) {
      + '<button class="snap-export" onclick="window.exportSnap(this,\'csv\')" hidden>CSV</button>'
      + '<button class="snap-export" onclick="window.exportSnap(this,\'json\')" hidden>JSON</button>'
      + '<button class="snap-export" onclick="window.copySnap(this)" hidden>Copy</button>'
+     + '<button class="snap-export snap-share" onclick="window.shareSnap(this)" hidden>Share</button>'
      + '</div>';
   h += '<div class="ob-outcomes">';
   for (var i = 0; i < outcomes.length; i++) {
@@ -3951,6 +3962,7 @@ function renderWhaleSentimentSection(outcomes) {
      + '<button class="snap-export" onclick="window.exportSnap(this,\'csv\')" hidden>CSV</button>'
      + '<button class="snap-export" onclick="window.exportSnap(this,\'json\')" hidden>JSON</button>'
      + '<button class="snap-export" onclick="window.copySnap(this)" hidden>Copy</button>'
+     + '<button class="snap-export snap-share" onclick="window.shareSnap(this)" hidden>Share</button>'
      + '</div>';
   h += '<div class="ws-outcomes">';
   for (var i = 0; i < outcomes.length; i++) {
@@ -4736,6 +4748,215 @@ window.copySnap = function(btn) {
     document.body.removeChild(ta);
   }
 };
+
+// Share a snapshot: upload to the server and copy the resulting URL
+// to the user's clipboard. Creates a permanent URL (30-day TTL) that
+// renders this exact frozen state to anyone who opens it.
+window.shareSnap = async function(btn) {
+  var wrap = btn.closest(".snap-controls");
+  if (!wrap) return;
+  var section = wrap.getAttribute("data-snap-section");
+  var snap = _snapState[section];
+  if (!snap) return;
+  var origLabel = btn.textContent;
+  btn.textContent = "Sharing\u2026";
+  btn.disabled = true;
+  try {
+    var payload = {
+      section: section,
+      event_ticker: (state && state._eventTicker) || "",
+      data: snap,
+    };
+    var r = await fetch("/api/snapshot", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    var d = await r.json();
+    if (!r.ok || !d.url) {
+      btn.textContent = "Failed";
+      setTimeout(function() { btn.textContent = origLabel; btn.disabled = false; }, 1500);
+      return;
+    }
+    var fullUrl = location.origin + d.url;
+    // Copy the URL to clipboard so user can paste into Slack/email.
+    var copyDone = function(ok) {
+      btn.textContent = ok ? "Link copied!" : fullUrl;
+      setTimeout(function() { btn.textContent = origLabel; btn.disabled = false; }, 2000);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(fullUrl).then(
+        function() { copyDone(true); },
+        function() { copyDone(false); }
+      );
+    } else {
+      copyDone(false);
+    }
+  } catch (ex) {
+    btn.textContent = "Failed";
+    setTimeout(function() { btn.textContent = origLabel; btn.disabled = false; }, 1500);
+  }
+};
+
+// ── Read-only snapshot mode ─────────────────────────────────────
+// When the page loads via /s/{slug}, the server injects a
+// <meta name="oddsiq-snapshot" content="SLUG"> tag. Fetch the
+// snapshot, render a banner, and populate the relevant section
+// in read-only mode (live updates disabled).
+(function _maybeLoadSharedSnapshot() {
+  var meta = document.querySelector('meta[name="oddsiq-snapshot"]');
+  if (!meta) return;
+  var slug = meta.getAttribute("content");
+  if (!slug) return;
+  fetch("/api/snapshot/" + encodeURIComponent(slug))
+    .then(function(r) { return r.json().then(function(d){ return {ok: r.ok, d: d}; }); })
+    .then(function(wrap) {
+      if (!wrap.ok || wrap.d.error) {
+        _renderSharedBanner("Snapshot not found or expired.", null);
+        return;
+      }
+      var d = wrap.d;
+      _renderSharedBanner(
+        "Viewing a shared " + _sectionLabel(d.section) + " snapshot from "
+          + _fmtSnapDate(d.created_at) + ".",
+        d.expires_at
+      );
+      // If the snapshot references an event, navigate there first
+      // so the regular event-detail DOM renders; then overlay the
+      // frozen snapshot data.
+      if (d.event_ticker) {
+        loadEventDetail(d.event_ticker, true);
+        // Apply snapshot once the event has rendered. Poll briefly
+        // until the relevant DOM node is present.
+        _applySnapshotWhenReady(d);
+      } else if (d.section === "markets" && d.data && d.data.rows) {
+        // No event context — render a standalone frozen markets
+        // table in the main content area.
+        _renderStandaloneSnapshot(d);
+      } else {
+        _renderStandaloneSnapshot(d);
+      }
+    })
+    .catch(function() {
+      _renderSharedBanner("Snapshot failed to load.", null);
+    });
+})();
+
+function _sectionLabel(s) {
+  if (s === "markets") return "Markets";
+  if (s === "orderbook") return "Order Book";
+  if (s === "capflow") return "Large Capital Flow";
+  return s || "";
+}
+
+function _fmtSnapDate(iso) {
+  if (!iso) return "";
+  try {
+    var d = new Date(iso);
+    return d.toLocaleString();
+  } catch (e) { return iso; }
+}
+
+function _renderSharedBanner(msg, expires) {
+  var b = document.createElement("div");
+  b.className = "shared-banner";
+  var exp = "";
+  if (expires) {
+    exp = ' · expires ' + _fmtSnapDate(expires);
+  }
+  b.innerHTML = '<span class="shared-banner-dot"></span>'
+              + '<span>' + msg + exp + '</span>'
+              + '<a href="/" class="shared-banner-exit">exit snapshot view</a>';
+  document.body.insertBefore(b, document.body.firstChild);
+  document.body.classList.add("has-shared-banner");
+}
+
+function _applySnapshotWhenReady(d, attempt) {
+  attempt = attempt || 0;
+  if (attempt > 30) return;
+  setTimeout(function() {
+    var ready = false;
+    if (d.section === "markets") {
+      ready = document.querySelector(".ed-markets-table") != null;
+    } else if (d.section === "orderbook") {
+      ready = document.getElementById("ob-body") != null;
+    } else if (d.section === "capflow") {
+      ready = document.getElementById("ws-body") != null;
+    }
+    if (!ready) return _applySnapshotWhenReady(d, attempt + 1);
+    _overlaySnapshot(d);
+  }, 400);
+}
+
+function _overlaySnapshot(d) {
+  // Freeze the appropriate section in the UI and paint the snapshot
+  // data on top, so what the user sees matches what was shared.
+  var section = d.section;
+  var data = d.data || {};
+  var selector = '.snap-controls[data-snap-section="' + section + '"]';
+  var wrap = document.querySelector(selector);
+  if (wrap) {
+    var btn = wrap.querySelector(".snap-btn");
+    if (btn && !btn.classList.contains("snapped")) {
+      // Programmatically snap so live updates stop flowing.
+      _snapState[section] = data;
+      btn.classList.add("snapped");
+      wrap.classList.add("snapped");
+      var lbl = btn.querySelector(".snap-label");
+      if (lbl) lbl.textContent = "Snapped";
+      var ts = wrap.querySelector(".snap-ts");
+      if (ts) { ts.textContent = data.taken_at || ""; ts.hidden = false; }
+      var exports = wrap.querySelectorAll(".snap-export");
+      for (var i = 0; i < exports.length; i++) exports[i].hidden = false;
+      _setSectionPaused(section, true);
+    }
+  }
+  if (section === "markets" && data.rows) {
+    for (var r = 0; r < data.rows.length; r++) {
+      var row = data.rows[r];
+      var rowEl = document.querySelector('tr[data-mk-row="' + row.ticker + '"]');
+      if (!rowEl) continue;
+      var setField = function(field, val) {
+        var el = rowEl.querySelector('[data-mk-field="' + field + '"]');
+        if (el && val != null) el.textContent = val;
+      };
+      setField("chance", row.probability);
+      setField("yes", row.yes);
+      setField("no", row.no);
+      setField("last", row.last);
+      setField("vol24", row.volume_24h);
+      setField("vol", row.volume);
+      setField("oi", row.open_interest);
+    }
+  } else if (section === "orderbook" && data.data) {
+    // Hydrate the order book panel from the frozen payload.
+    _obData = data.data;
+    _obActiveSide = data.side || "yes";
+    _obActiveOutcome = data.ticker;
+    // Expand the section so the snapshot is visible.
+    var obToggle = document.querySelector(".ob-toggle");
+    if (obToggle && !obToggle.classList.contains("open")) obToggle.click();
+    setTimeout(function() { renderOrderbook(); }, 50);
+  } else if (section === "capflow" && data.data) {
+    _wsData = data.data;
+    _wsActiveOutcome = data.ticker;
+    _wsMinAmount = data.min_amount || _wsMinAmount;
+    _wsHours = data.hours || _wsHours;
+    var wsToggle = document.querySelector(".ws-toggle");
+    if (wsToggle && !wsToggle.classList.contains("open")) wsToggle.click();
+    setTimeout(function() { renderWhaleSentiment(); }, 50);
+  }
+}
+
+function _renderStandaloneSnapshot(d) {
+  // Fallback: no event context. Drop a simple preview into the
+  // main content area.
+  var el = document.getElementById("cards-grid") || document.body;
+  var pre = document.createElement("pre");
+  pre.className = "shared-standalone";
+  pre.textContent = JSON.stringify(d, null, 2);
+  if (el) el.appendChild(pre);
+}
 
 boot();
 </script>

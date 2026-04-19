@@ -346,6 +346,63 @@ _flush_health: dict = {
 PRICE_RETENTION_HOURS = int(os.environ.get("PRICE_RETENTION_HOURS", "6"))
 
 
+async def create_snapshot(section: str, data: dict, event_ticker: str = "",
+                          ttl_days: int = 30):
+    """Persist a snapshot and return its short id. id is a URL-safe
+    random slug the user can share."""
+    if not DATABASE_URL or async_session is None:
+        return None
+    try:
+        import secrets
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from models import Snapshot
+        slug = secrets.token_urlsafe(8)[:12]
+        expires = _dt.now(_tz.utc) + _td(days=ttl_days)
+        async with async_session() as session:
+            async with session.begin():
+                session.add(Snapshot(
+                    id=slug,
+                    section=section,
+                    event_ticker=event_ticker or None,
+                    data=data,
+                    expires_at=expires,
+                ))
+        return slug
+    except Exception as e:
+        log.error("create_snapshot failed: %s", e)
+        return None
+
+
+async def get_snapshot(slug: str):
+    """Return snapshot dict {section, data, created_at, expires_at,
+    event_ticker} or None if not found / expired."""
+    if not DATABASE_URL or async_session is None:
+        return None
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        from models import Snapshot
+        from sqlalchemy import select
+        async with async_session() as session:
+            stmt = select(Snapshot).where(Snapshot.id == slug)
+            result = await session.execute(stmt)
+            snap = result.scalar_one_or_none()
+            if snap is None:
+                return None
+            if snap.expires_at and snap.expires_at < _dt.now(_tz.utc):
+                return None
+            return {
+                "id": snap.id,
+                "section": snap.section,
+                "event_ticker": snap.event_ticker,
+                "data": snap.data,
+                "created_at": snap.created_at.isoformat() if snap.created_at else None,
+                "expires_at": snap.expires_at.isoformat() if snap.expires_at else None,
+            }
+    except Exception as e:
+        log.error("get_snapshot failed: %s", e)
+        return None
+
+
 async def prune_old_prices():
     """Delete price rows older than PRICE_RETENTION_HOURS. Called
     by the periodic pruning task and exposed via /api/prune."""

@@ -151,3 +151,19 @@ class GameScore(Base):
     clock_running = Column(Boolean, default=False)
     scheduled_kickoff_ms = Column(BigInteger)
     captured_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+# ── Shareable snapshots (Bloomberg-style frozen views) ────────────────
+
+class Snapshot(Base):
+    """A frozen view of a Markets / Order Book / Large Capital Flow
+    section, uploaded by a user so they can share a URL that renders
+    the exact same state to anyone who opens it. Auto-expires."""
+    __tablename__ = "snapshots"
+
+    id = Column(String(16), primary_key=True)  # short random slug
+    section = Column(Text, nullable=False)      # 'markets' | 'orderbook' | 'capflow'
+    event_ticker = Column(Text)                 # optional, helps attribution
+    data = Column(JSONB, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    expires_at = Column(DateTime(timezone=True), nullable=False)
