@@ -350,20 +350,34 @@ _snapshots_table_ensured = False
 
 
 async def _ensure_snapshots_table():
-    """Idempotently create the snapshots table. Self-heals when a
-    container started up before models.py was updated to include
-    Snapshot, so init_db() ran without it."""
+    """Idempotently create the snapshots table via raw DDL. Self-heals
+    when a container started up before models.py was updated to include
+    Snapshot, so init_db() ran without it. Uses CREATE TABLE IF NOT
+    EXISTS so it's safe to call on every request (we cache after the
+    first success)."""
     global _snapshots_table_ensured
     if _snapshots_table_ensured or engine is None:
-        return
+        return None
+    ddl = """
+    CREATE TABLE IF NOT EXISTS snapshots (
+        id VARCHAR(16) PRIMARY KEY,
+        section TEXT NOT NULL,
+        event_ticker TEXT,
+        data JSONB NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+    );
+    """
     try:
-        from models import Snapshot
+        from sqlalchemy import text as _text
         async with engine.begin() as conn:
-            await conn.run_sync(Snapshot.__table__.create, checkfirst=True)
+            await conn.execute(_text(ddl))
         _snapshots_table_ensured = True
-        log.info("snapshots table ensured")
+        log.info("snapshots table ensured (raw DDL)")
+        return None
     except Exception as e:
         log.warning("ensure snapshots table failed: %s", e)
+        return str(e)[:400]
 
 
 async def create_snapshot(section: str, data: dict, event_ticker: str = "",
@@ -373,7 +387,9 @@ async def create_snapshot(section: str, data: dict, event_ticker: str = "",
     real error instead of swallowing it."""
     if not DATABASE_URL or async_session is None:
         return None, "database not configured (DATABASE_URL missing)"
-    await _ensure_snapshots_table()
+    ensure_err = await _ensure_snapshots_table()
+    if ensure_err:
+        return None, f"failed to create snapshots table: {ensure_err}"
     try:
         import secrets
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td

@@ -2968,6 +2968,23 @@ def get_sports(live: bool = False):
     return {"sports": sports, "soccer_comps": sorted(soccer_comps), "live_categories": live_cats}
 
 # ── Shareable snapshots ──────────────────────────────────────────
+@app.get("/api/admin/ensure_snapshots_table")
+async def ensure_snapshots_table_endpoint():
+    """Force-create the snapshots table. Call once after a deploy
+    that added the Snapshot model if `init_db()` didn't pick it up.
+    Idempotent — CREATE TABLE IF NOT EXISTS."""
+    try:
+        from db import _ensure_snapshots_table, _snapshots_table_ensured
+        import db as _db
+        _db._snapshots_table_ensured = False  # force a retry
+        err = await _ensure_snapshots_table()
+        if err:
+            return JSONResponse({"error": err}, status_code=500)
+        return {"status": "ok", "ensured": _db._snapshots_table_ensured}
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:400]}, status_code=500)
+
+
 @app.post("/api/snapshot")
 async def create_snapshot_endpoint(request: Request):
     """Persist a Snap/Pause freeze so the user can share a URL.
