@@ -4825,7 +4825,7 @@ window.shareSnap = async function(btn) {
       // so the regular event-detail DOM renders; then overlay the
       // frozen snapshot data.
       if (d.event_ticker) {
-        loadEventDetail(d.event_ticker, true);
+        showEventDetail(d.event_ticker, true);
         // Apply snapshot once the event has rendered. Poll briefly
         // until the relevant DOM node is present.
         _applySnapshotWhenReady(d);
@@ -4858,6 +4858,10 @@ function _fmtSnapDate(iso) {
 }
 
 function _renderSharedBanner(msg, expires) {
+  // Idempotent — replace any existing banner so a later render
+  // (e.g. an error after a success) doesn't stack two stripes.
+  var existing = document.querySelector(".shared-banner");
+  if (existing) existing.remove();
   var b = document.createElement("div");
   b.className = "shared-banner";
   var exp = "";
