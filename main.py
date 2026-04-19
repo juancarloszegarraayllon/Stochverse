@@ -4030,18 +4030,28 @@ def get_market_orderbook(ticker: str, depth: int = 10, debug: bool = False):
                     "raw_keys": list(data.keys()),
                     "raw_preview": str(data)[:1500],
                 }
-            ob = data.get("orderbook") or {}
-            yes_raw = ob.get("yes") or []
-            no_raw = ob.get("no") or []
-            # Parse into [price, quantity] pairs, dropping any
-            # malformed entries.
+            # Kalshi responses use orderbook_fp with *_dollars arrays
+            # on newer API versions, and orderbook with yes/no arrays
+            # on older. Accept both.
+            ob = data.get("orderbook_fp") or data.get("orderbook") or {}
+            yes_raw = ob.get("yes_dollars") or ob.get("yes") or []
+            no_raw = ob.get("no_dollars") or ob.get("no") or []
+            # Parse into [price, quantity] pairs in cents.
+            # Dollar-format rows look like ["0.88", "337.25"] — convert
+            # price to cents (int) and qty to float. Cent-format rows
+            # (older API) look like [88, 337] — pass through.
             def _parse(levels):
                 out = []
                 for lv in levels or []:
                     if not isinstance(lv, (list, tuple)) or len(lv) < 2:
                         continue
                     try:
-                        p = int(lv[0])
+                        raw_p = lv[0]
+                        if isinstance(raw_p, str):
+                            # Dollar string → cents
+                            p = int(round(float(raw_p) * 100))
+                        else:
+                            p = int(raw_p)
                         q = float(lv[1])
                     except Exception:
                         continue
