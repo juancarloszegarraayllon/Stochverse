@@ -2968,6 +2968,65 @@ def get_sports(live: bool = False):
     return {"sports": sports, "soccer_comps": sorted(soccer_comps), "live_categories": live_cats}
 
 # ── Shareable snapshots ──────────────────────────────────────────
+@app.get("/api/admin/vacuum_prices")
+async def vacuum_prices_endpoint():
+    """Run VACUUM on the prices table to reclaim disk space after a
+    prune. Postgres marks deleted rows as dead until VACUUM lets
+    other tables reuse those pages — without this, a freshly-pruned
+    DB can still report itself as full."""
+    try:
+        from db import engine
+        from sqlalchemy import text as _text
+        if engine is None:
+            return {"error": "database not configured"}
+        # VACUUM cannot run inside a transaction.
+        async with engine.connect() as conn:
+            await conn.execute(_text("COMMIT"))
+            await conn.execute(_text("VACUUM (ANALYZE) prices"))
+        return {"status": "ok", "message": "VACUUM (ANALYZE) prices completed"}
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:400]}, status_code=500)
+
+
+@app.get("/api/admin/db_size")
+async def db_size_endpoint():
+    """Report per-table disk usage so we can see what's eating the
+    Neon free-tier budget."""
+    try:
+        from db import engine
+        from sqlalchemy import text as _text
+        if engine is None:
+            return {"error": "database not configured"}
+        async with engine.connect() as conn:
+            r = await conn.execute(_text("""
+                SELECT
+                    relname AS table,
+                    pg_size_pretty(pg_total_relation_size(C.oid)) AS total_size,
+                    pg_total_relation_size(C.oid) AS bytes
+                FROM pg_class C
+                LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
+                WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND C.relkind = 'r'
+                ORDER BY pg_total_relation_size(C.oid) DESC
+                LIMIT 20
+            """))
+            tables = [{"table": row[0], "size": row[1], "bytes": row[2]}
+                      for row in r.fetchall()]
+            r2 = await conn.execute(_text(
+                "SELECT pg_size_pretty(pg_database_size(current_database())), "
+                "pg_database_size(current_database())"
+            ))
+            row = r2.fetchone()
+            total_pretty, total_bytes = row[0], row[1]
+        return {
+            "total_size": total_pretty,
+            "total_bytes": total_bytes,
+            "tables": tables,
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:400]}, status_code=500)
+
+
 @app.get("/api/admin/ensure_snapshots_table")
 async def ensure_snapshots_table_endpoint():
     """Force-create the snapshots table. Call once after a deploy
