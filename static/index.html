@@ -203,7 +203,7 @@ html,body{overscroll-behavior:none}
   #main{margin-top:var(--header-h);display:block}
   /* Subtab strip on phone: fixed below the header, always visible. */
   /* #main reserves extra space via body.has-subnav rule below. */
-  #nav{position:fixed;top:var(--header-h);left:0;right:0;z-index:101;background:#000;width:auto;min-width:0;height:auto;max-height:none;border-right:none;border-bottom:1px solid var(--border);padding:8px 12px;display:none;overflow-x:auto;overflow-y:hidden;white-space:nowrap;scrollbar-width:none}
+  #nav{position:fixed !important;top:var(--header-h) !important;left:0 !important;right:0 !important;z-index:101 !important;background:#000 !important;width:auto !important;min-width:0 !important;height:auto !important;max-height:none !important;border-right:none !important;border-bottom:1px solid var(--border) !important;padding:8px 12px !important;overflow-x:auto !important;overflow-y:hidden !important;white-space:nowrap !important;scrollbar-width:none !important;outline:2px solid magenta !important}
   body.has-subnav #main{padding-top:var(--nav-h,48px)}
   #nav::-webkit-scrollbar{display:none}
   #nav .nav-item{display:inline-block;width:auto;padding:6px 10px;margin-right:4px;font-size:12px;border:1px solid var(--border);border-radius:16px}
