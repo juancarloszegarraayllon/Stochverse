@@ -200,15 +200,17 @@ html,body{overscroll-behavior:none}
   #search-input{flex-basis:calc(100% - 80px)}
   /* No row break between date/sort/toggles — all on row 2 */
   .cat-tab{padding:8px 12px;font-size:13px}
-  #main{margin-top:var(--header-h);display:block}
-  /* Hide the 16px header curtain on phones — the sticky nav's own
-     opaque background handles what the curtain was doing, and the
-     curtain was clipping the top of nav pills. */
+  /* #main's top margin reserves space for header + fixed nav. The
+     --nav-h variable is updated by JS whenever the nav's visibility
+     or content changes. */
+  #main{margin-top:calc(var(--header-h) + var(--nav-h, 0px));display:block}
+  /* Hide the 16px header curtain on phones — the fixed nav below
+     has its own opaque background so the curtain isn't needed. */
   #header::after{display:none}
   /* Sidebar on phone becomes a horizontal scroll strip that sticks
      just below the fixed header when the user scrolls. Opaque
      background + z-index above the screener sticky thead. */
-  #nav{position:sticky;top:var(--header-h);z-index:50;background:#000;width:auto;min-width:0;height:auto;max-height:none;border-right:none;border-bottom:1px solid var(--border);padding:8px 12px;display:none;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;white-space:nowrap;scrollbar-width:none}
+  #nav{position:fixed;top:var(--header-h);left:0;right:0;z-index:50;background:#000;width:auto;min-width:0;height:auto;max-height:none;border-right:none;border-bottom:1px solid var(--border);padding:8px 12px;display:none;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;white-space:nowrap;scrollbar-width:none}
   #nav::-webkit-scrollbar{display:none}
   #nav .nav-item{display:inline-block;width:auto;padding:6px 10px;margin-right:4px;font-size:12px;border:1px solid var(--border);border-radius:16px}
   #nav .nav-item.active{border-color:var(--green);background:rgba(0,170,0,0.1)}
@@ -4400,11 +4402,29 @@ function syncHeaderHeight() {
   if (!h) return;
   var hh = h.getBoundingClientRect().height;
   if (hh > 0) document.documentElement.style.setProperty("--header-h", hh + "px");
+  // Also measure the mobile nav so #main can reserve space for it
+  // below the fixed header. When nav is hidden, --nav-h = 0.
+  var n = document.getElementById("nav");
+  var nh = 0;
+  if (n && window.getComputedStyle(n).display !== "none") {
+    nh = n.getBoundingClientRect().height;
+  }
+  document.documentElement.style.setProperty("--nav-h", nh + "px");
 }
 window.addEventListener("load", syncHeaderHeight);
 window.addEventListener("resize", syncHeaderHeight);
 setTimeout(syncHeaderHeight, 100);
 setTimeout(syncHeaderHeight, 500);
+// Re-measure whenever the nav's display/content changes (e.g. user
+// picks a different category or sport).
+(function(){
+  var n = document.getElementById("nav");
+  if (!n) return;
+  new MutationObserver(syncHeaderHeight).observe(n, {
+    attributes: true, attributeFilter: ["style", "class"],
+    childList: true, subtree: true,
+  });
+})();
 
 // ── Browser ↔ server price WebSocket ───────────────────────────────
 // A single persistent connection replaces the 5s polling loop. The
