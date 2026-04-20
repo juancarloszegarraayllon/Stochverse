@@ -141,6 +141,20 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # the screener table.
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
+
+# ── Cloudflare cache-safety headers ──────────────────────────────
+class CloudflareCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith("/api/") and "Cache-Control" not in response.headers:
+            response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+
+app.add_middleware(CloudflareCacheMiddleware)
+
+
 # ── Request timing + slow-request logging ──────────────────────────
 # Logs every request that takes longer than SLOW_REQUEST_MS so we can
 # spot regressions. Also sets X-Response-Time-Ms on the response.
