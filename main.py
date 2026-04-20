@@ -26,11 +26,11 @@ if _SENTRY_DSN:
             # user accounts yet.
             send_default_pii=False,
         )
-        logging.getLogger("oddsiq").info("sentry enabled")
+        logging.getLogger("stochverse").info("sentry enabled")
     except Exception as e:
-        logging.getLogger("oddsiq").warning("sentry init failed: %s", e)
+        logging.getLogger("stochverse").warning("sentry init failed: %s", e)
 
-app = FastAPI(title="OddsIQ API")
+app = FastAPI(title="Stochverse API")
 
 
 def _all_market_tickers():
@@ -69,7 +69,7 @@ async def startup_event():
         # unknown Kalshi series via entity matches on first run.
         await refresh_alias_sport_cache()
     except Exception as e:
-        logging.getLogger("oddsiq").warning("db init skipped: %s", e)
+        logging.getLogger("stochverse").warning("db init skipped: %s", e)
     # Build the REST snapshot eagerly in a thread so the WS client has
     # tickers to subscribe to without waiting for a first user request.
     threading.Thread(target=get_data, daemon=True).start()
@@ -78,17 +78,17 @@ async def startup_event():
         from kalshi_ws import run_ws_client
         asyncio.create_task(run_ws_client(_all_market_tickers))
     except Exception as e:
-        logging.getLogger("oddsiq").warning("failed to start ws client: %s", e)
+        logging.getLogger("stochverse").warning("failed to start ws client: %s", e)
     try:
         from espn_feed import run_espn_feed
         asyncio.create_task(run_espn_feed())
     except Exception as e:
-        logging.getLogger("oddsiq").warning("failed to start espn feed: %s", e)
+        logging.getLogger("stochverse").warning("failed to start espn feed: %s", e)
     try:
         from sportsdb_feed import run_sportsdb_feed
         asyncio.create_task(run_sportsdb_feed())
     except Exception as e:
-        logging.getLogger("oddsiq").warning("failed to start sportsdb feed: %s", e)
+        logging.getLogger("stochverse").warning("failed to start sportsdb feed: %s", e)
     # SofaScore feed with a built-in exponential-backoff circuit
     # breaker. When Cloudflare / Varnish blocks ≥50% of sports with
     # 403s, the poll interval doubles up to a 10-minute cap until we
@@ -100,7 +100,7 @@ async def startup_event():
         from sofascore_feed import run_sofascore_feed
         asyncio.create_task(run_sofascore_feed())
     except Exception as e:
-        logging.getLogger("oddsiq").warning("failed to start sofascore feed: %s", e)
+        logging.getLogger("stochverse").warning("failed to start sofascore feed: %s", e)
     # Phase 4: periodically flush live scores from all feeds to the DB.
     asyncio.create_task(_score_flush_loop())
     # Phase 5: periodically prune old price rows to stay within
@@ -114,7 +114,7 @@ async def shutdown_event():
     waits up to 30 s for the process to exit cleanly. We flush any
     pending DB buffers so in-flight WS price updates aren't lost,
     and log so we can confirm clean exits in the Railway logs."""
-    log = logging.getLogger("oddsiq")
+    log = logging.getLogger("stochverse")
     log.info("shutdown: starting graceful cleanup")
     # Flush any buffered prices to the DB one last time so the
     # final seconds of ticks aren't dropped on deploy.
@@ -1050,7 +1050,7 @@ def _rebuild_cache_async():
             _rebuilding["active"] = True
             _build_cache()
         except Exception as e:
-            logging.getLogger("oddsiq").error("cache rebuild failed: %s", e)
+            logging.getLogger("stochverse").error("cache rebuild failed: %s", e)
         finally:
             _rebuilding["active"] = False
             try:
@@ -1161,7 +1161,7 @@ def _build_cache():
                         _auto_registered += 1
                     break
     if _auto_registered:
-        logging.getLogger("oddsiq").info(
+        logging.getLogger("stochverse").info(
             "auto-registered %d sibling series from live data",
             _auto_registered,
         )
@@ -1219,7 +1219,7 @@ def _build_cache():
                         SOCCER_COMP[up] = SOCCER_COMP[candidate]
                     break
     if _inferred_primary:
-        logging.getLogger("oddsiq").info(
+        logging.getLogger("stochverse").info(
             "auto-inferred %d primary series from live data",
             _inferred_primary,
         )
@@ -1499,7 +1499,7 @@ def _build_cache():
     grouped_into = before_group - len(grouped)
     sport_count = sum(1 for r in grouped if r.get("_is_sport"))
     kickoff_count = sum(1 for r in grouped if r.get("_kickoff_dt"))
-    logging.getLogger("oddsiq").info(
+    logging.getLogger("stochverse").info(
         "get_data: raw=%d records=%d sport=%d kickoff=%d grouped=%d live=%d",
         raw_count, len(grouped), sport_count, kickoff_count, grouped_into, live_count,
     )
@@ -1515,7 +1515,7 @@ def _build_cache():
         from db import sync_events_to_db
         asyncio.run(sync_events_to_db(ungrouped))
     except Exception as e:
-        logging.getLogger("oddsiq").warning("db write-through skipped: %s", e)
+        logging.getLogger("stochverse").warning("db write-through skipped: %s", e)
 
 # ── API routes ─────────────────────────────────────────────────────────────────
 @app.get("/api/events")
@@ -2405,7 +2405,7 @@ async def get_event_prices(ticker: str, hours: int = 24, max_points: int = 120):
                     result = await _query_price_history(
                         market_tickers, hours, max_points,
                     )
-                    logging.getLogger("oddsiq").info(
+                    logging.getLogger("stochverse").info(
                         "prices query recovered after %d retry(ies)",
                         attempt + 1,
                     )
@@ -2419,7 +2419,7 @@ async def get_event_prices(ticker: str, hours: int = 24, max_points: int = 120):
         # Always log the final error so Railway logs capture the
         # exact failure after all retries — helps identify whether
         # Postgres is genuinely down vs a flaky connection.
-        logging.getLogger("oddsiq").warning(
+        logging.getLogger("stochverse").warning(
             "prices query failed after retries: %s: %s",
             type(last_err).__name__, last_err,
         )
@@ -3129,7 +3129,7 @@ async def get_snapshot_endpoint(slug: str):
 @app.get("/s/{slug}", response_class=HTMLResponse)
 def snapshot_page(slug: str):
     """Pretty share URL. Serves the same HTML shell as /, with a
-    <meta name='oddsiq-snapshot' content='{slug}'> hint so the JS
+    <meta name='stochverse-snapshot' content='{slug}'> hint so the JS
     knows to render in read-only snapshot mode on boot."""
     slug = (slug or "").strip()
     p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "static", "index.html")
@@ -3145,7 +3145,7 @@ def snapshot_page(slug: str):
         _INDEX_HTML_CACHE["mtime"] = mtime
     html = _INDEX_HTML_CACHE["html"].replace(
         "</head>",
-        f'<meta name="oddsiq-snapshot" content="{slug}"></head>',
+        f'<meta name="stochverse-snapshot" content="{slug}"></head>',
         1,
     )
     return HTMLResponse(html, headers={
@@ -3266,7 +3266,7 @@ async def sportsdb_day_probe(sport: str = "Basketball", d: str = ""):
             d = date.today().isoformat()
         sport_enc = sport.replace(" ", "%20")
         url = f"https://www.thesportsdb.com/api/v1/json/3/eventsday.php?d={d}&s={sport_enc}"
-        async with httpx.AsyncClient(headers={"User-Agent": "oddsiq/1.0"}) as client:
+        async with httpx.AsyncClient(headers={"User-Agent": "stochverse/1.0"}) as client:
             r = await client.get(url, timeout=15.0)
             out = {"sport": sport, "date": d, "status_code": r.status_code, "url": url}
             if r.status_code != 200:
@@ -3566,7 +3566,7 @@ def kalshi_data_audit(
     suspicious_only: bool = True,
 ):
     """Diagnostic: walk the cached REST snapshot and flag events
-    whose outcomes render blank ("—") in the OddsIQ UI. For each
+    whose outcomes render blank ("—") in the Stochverse UI. For each
     outcome we re-run the exact same dead-market rules as
     _format_outcomes (two-sided book + last_price override), then
     classify each dead row as one of:
@@ -3589,7 +3589,7 @@ def kalshi_data_audit(
 
     Typical usage: hit /api/kalshi_data_audit?sport=Soccer to find
     every soccer card where one or more rows are blank, so we can
-    tell at a glance whether OddsIQ is hiding data that Kalshi
+    tell at a glance whether Stochverse is hiding data that Kalshi
     itself shows.
     """
     records = get_data()
@@ -3707,7 +3707,7 @@ async def espn_probe(slug: str):
     try:
         import httpx
         url = f"https://site.api.espn.com/apis/site/v2/sports/{slug}/scoreboard"
-        async with httpx.AsyncClient(headers={"User-Agent": "oddsiq/1.0"}) as client:
+        async with httpx.AsyncClient(headers={"User-Agent": "stochverse/1.0"}) as client:
             r = await client.get(url, timeout=15.0)
             out = {"slug": slug, "status_code": r.status_code}
             if r.status_code != 200:
@@ -4354,7 +4354,7 @@ def _analytics_snippet() -> str:
     privacy-friendly, GDPR-compliant without cookie banners).
 
     Set ANALYTICS_DOMAIN to your Plausible site domain (e.g.
-    "oddsiq.com") to enable. Self-hosted Plausible instances can
+    "stochverse.com") to enable. Self-hosted Plausible instances can
     point ANALYTICS_SCRIPT_URL at a custom script URL.
     """
     domain = os.environ.get("ANALYTICS_DOMAIN", "").strip()
@@ -4938,7 +4938,7 @@ def get_event_history(ticker: str, hours: int = 24, period: int = 60, debug: boo
             result["debug"] = debug_info
         return result
     except Exception as e:
-        logging.getLogger("oddsiq").warning("history fetch failed: %s", e)
+        logging.getLogger("stochverse").warning("history fetch failed: %s", e)
         return {"series": [], "error": str(e)}
 
 

@@ -30,7 +30,7 @@ log = logging.getLogger("sportsdb_feed")
 API_KEY = "3"
 BASE_URL = f"https://www.thesportsdb.com/api/v1/json/{API_KEY}"
 
-# (SportsDB sport name, OddsIQ sport name). Names on the right must
+# (SportsDB sport name, Stochverse sport name). Names on the right must
 # match the Kalshi-derived `_sport` values so match_game can filter.
 SPORTS = [
     ("Soccer", "Soccer"),
@@ -173,7 +173,7 @@ async def run_sportsdb_feed():
         log.warning("httpx not installed — sportsdb feed disabled")
         return
     STATUS["running"] = True
-    headers = {"User-Agent": "oddsiq/1.0"}
+    headers = {"User-Agent": "stochverse/1.0"}
     async with httpx.AsyncClient(headers=headers) as client:
         while True:
             try:

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OddsIQ</title>
+<title>Stochverse</title>
 <!--__ANALYTICS__-->
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -580,7 +580,7 @@ body.has-shared-banner #header{top:40px}
 <body>
 <div id="header">
   <div id="controls">
-    <div id="logo">OddsIQ</div>
+    <div id="logo">Stochverse</div>
     <input id="search-input" type="text" placeholder="Search markets">
     <select id="date-sel">
       <option value="all">All dates</option>
@@ -619,7 +619,7 @@ body.has-shared-banner #header{top:40px}
   <div id="content">
     <div id="home-screen">
       <div id="home-hero">
-        <h2>Welcome to OddsIQ</h2>
+        <h2>Welcome to Stochverse</h2>
         <p>Select a category above to browse markets, or see what's moving right now.</p>
       </div>
       <div id="movers-section">
@@ -4638,7 +4638,7 @@ function _captureSnapshot(section) {
 function _toCSV(section, snap) {
   if (!snap) return "";
   var lines = [];
-  lines.push("# OddsIQ snapshot - " + section);
+  lines.push("# Stochverse snapshot - " + section);
   lines.push("# Taken at: " + snap.taken_at);
   lines.push("");
   if (section === "markets") {
@@ -4700,10 +4700,10 @@ window.exportSnap = function(btn, format) {
   var tsPart = (snap.taken_at || _snapTs()).replace(/[: ]/g, "-");
   if (format === "csv") {
     blob = new Blob([_toCSV(section, snap)], {type: "text/csv;charset=utf-8"});
-    filename = "oddsiq-" + section + "-" + tsPart + ".csv";
+    filename = "stochverse-" + section + "-" + tsPart + ".csv";
   } else {
     blob = new Blob([JSON.stringify(snap, null, 2)], {type: "application/json"});
-    filename = "oddsiq-" + section + "-" + tsPart + ".json";
+    filename = "stochverse-" + section + "-" + tsPart + ".json";
   }
   var url = URL.createObjectURL(blob);
   var a = document.createElement("a");
@@ -4800,11 +4800,11 @@ window.shareSnap = async function(btn) {
 
 // ── Read-only snapshot mode ─────────────────────────────────────
 // When the page loads via /s/{slug}, the server injects a
-// <meta name="oddsiq-snapshot" content="SLUG"> tag. Fetch the
+// <meta name="stochverse-snapshot" content="SLUG"> tag. Fetch the
 // snapshot, render a banner, and populate the relevant section
 // in read-only mode (live updates disabled).
 (function _maybeLoadSharedSnapshot() {
-  var meta = document.querySelector('meta[name="oddsiq-snapshot"]');
+  var meta = document.querySelector('meta[name="stochverse-snapshot"]');
   if (!meta) return;
   var slug = meta.getAttribute("content");
   if (!slug) return;

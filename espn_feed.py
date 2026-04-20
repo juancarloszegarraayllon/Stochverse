@@ -25,7 +25,7 @@ except ImportError:
 
 log = logging.getLogger("espn_feed")
 
-# (slug, league label, OddsIQ sport name)
+# (slug, league label, Stochverse sport name)
 # Sport names must match the Kalshi-derived `_sport` values so the
 # Kalshi→ESPN matcher can filter by sport first.
 LEAGUES = [
@@ -510,7 +510,7 @@ async def run_espn_feed():
         log.warning("httpx not installed — ESPN feed disabled")
         return
     STATUS["running"] = True
-    headers = {"User-Agent": "oddsiq/1.0"}
+    headers = {"User-Agent": "stochverse/1.0"}
     async with httpx.AsyncClient(headers=headers) as client:
         while True:
             try:

@@ -1,4 +1,4 @@
-"""SQLAlchemy models for the OddsIQ database.
+"""SQLAlchemy models for the Stochverse database.
 
 Six tables designed for cross-platform prediction market comparison:
   - entities / entity_aliases  → canonical team/player names + aliases

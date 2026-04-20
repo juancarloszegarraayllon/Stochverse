@@ -1,4 +1,4 @@
-# OddsIQ - FastAPI + Vanilla JS
+# Stochverse - FastAPI + Vanilla JS
 
 ## Local development
 
@@ -73,7 +73,7 @@ Optional:
 - `SENTRY_DSN` — enables Sentry error tracking
 - `SENTRY_TRACES_SAMPLE_RATE` — `0.0`–`1.0`, Sentry performance sampling (default `0.0`)
 - `SENTRY_ENVIRONMENT` — Sentry env tag (default `production`)
-- `ANALYTICS_DOMAIN` — Plausible domain (e.g. `oddsiq.com`) to enable analytics
+- `ANALYTICS_DOMAIN` — Plausible domain (e.g. `stochverse.com`) to enable analytics
 - `ANALYTICS_SCRIPT_URL` — override Plausible script URL for self-hosted instances
 - `SLOW_REQUEST_MS` — log requests slower than this many ms (default `1000`)
 

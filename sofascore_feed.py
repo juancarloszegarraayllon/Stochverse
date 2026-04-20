@@ -26,7 +26,7 @@ except ImportError:
 
 log = logging.getLogger("sofascore_feed")
 
-# (SofaScore slug, OddsIQ sport name)
+# (SofaScore slug, Stochverse sport name)
 SPORTS = [
     ("football",           "Soccer"),
     ("basketball",         "Basketball"),
