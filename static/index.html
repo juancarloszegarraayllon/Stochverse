@@ -562,6 +562,7 @@ body.has-shared-banner #header{top:40px}
 .ob-last-price{color:var(--text-dim);font-weight:500;font-size:11px}
 .ob-empty{padding:20px;text-align:center;color:var(--text-muted);font-size:11px;font-style:italic}
 .ob-loading{padding:40px;text-align:center;color:var(--text-muted);font-size:12px;font-style:italic}
+#ob-body{max-height:500px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
 .ed-mk-indicator{display:inline-block;width:8px;color:var(--green);font-size:8px;margin-right:6px;vertical-align:middle;line-height:1;animation:live-pulse 1.6s infinite ease-in-out}
 .ed-markets-table .ed-num{text-align:center}
 .ed-markets-table .ed-prob{text-align:center;font-weight:700;color:var(--text)}
@@ -3908,7 +3909,7 @@ async function fetchOrderbook(ticker) {
     if (_obActiveOutcome !== ticker) { _obRefreshTimer = null; return; }
     if (!document.getElementById("ob-body")) { _obRefreshTimer = null; return; }
     fetchOrderbook(ticker);
-  }, 3000);
+  }, 2000);
 }
 
 function renderOrderbook() {
@@ -3919,9 +3920,8 @@ function renderOrderbook() {
   var asks = data.asks || [];
   var bids = data.bids || [];
   // Show the top N levels closest to the spread.
-  var N = 10;
-  var asksShown = asks.slice(0, N).reverse();  // bottom = best ask
-  var bidsShown = bids.slice(0, N);             // top = best bid
+  var asksShown = asks.slice().reverse();  // bottom = best ask
+  var bidsShown = bids.slice();             // top = best bid
   // Max quantity across both sides for depth-bar normalization.
   var maxQty = 0;
   for (var i = 0; i < asksShown.length; i++) maxQty = Math.max(maxQty, asksShown[i].qty);

@@ -4490,7 +4490,7 @@ def _analytics_snippet() -> str:
 
 
 @app.get("/api/market/{ticker}/orderbook")
-def get_market_orderbook(ticker: str, depth: int = 20, debug: bool = False):
+def get_market_orderbook(ticker: str, depth: int = 100, debug: bool = False):
     """Fetch the full order book for a single market (outcome) ticker
     from Kalshi's /markets/{ticker}/orderbook endpoint. Returns
     structured asks + bids for both Trade Yes and Trade No views.
@@ -4630,7 +4630,7 @@ def get_market_orderbook(ticker: str, depth: int = 20, debug: bool = False):
                         "bids": _add_totals(no_bids),
                     },
                 }
-                _mk_cache_set(cache_key, result, ttl_seconds=3)
+                _mk_cache_set(cache_key, result, ttl_seconds=1)
                 return result
         except Exception as e:
             return {"error": str(e)}
