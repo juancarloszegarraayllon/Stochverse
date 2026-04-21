@@ -1031,16 +1031,15 @@ def _format_outcomes(stored_outcomes):
         has_last = last is not None and last > 0
         if two_sided:
             chance_c, yes_c, no_c = _midprice_and_ask(yb, ya, nb, na)
-            # Prefer last-traded price as the "chance" when the
-            # market has actually been traded. Kalshi's UI does the
-            # same: for an illiquid market like Barcelona in Women's
-            # CL Champion where the spread is 3¢ / 84¢ (midprice
-            # 43.5%) but the most recent trade hit at 84¢, the
-            # chance should read 84% not 43%. YES/NO price boxes
-            # still show the live bid/ask since those are the
-            # actual "pay to buy" prices right now.
-            if has_last:
-                chance_c = last
+            # For WIDE spreads (e.g., 3¢/84¢ → midpoint 43%), the
+            # last-traded price is more informative than the midpoint.
+            # For tight spreads (e.g., 78¢/79¢), the midpoint IS the
+            # market price and overriding with a stale last-trade would
+            # cause visible bouncing. Only override when spread > 10¢.
+            if has_last and chance_c is not None:
+                spread_width = abs((ya or 0) - (yb or 0))
+                if spread_width > 10:
+                    chance_c = last
         elif has_last:
             # One-sided book but we have a historical trade price —
             # show last_price as the chance (what Kalshi's card
