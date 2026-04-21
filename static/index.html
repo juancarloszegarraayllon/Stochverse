@@ -3919,7 +3919,7 @@ function renderOrderbook() {
   var asks = data.asks || [];
   var bids = data.bids || [];
   // Show the top N levels closest to the spread.
-  var N = 5;
+  var N = 10;
   var asksShown = asks.slice(0, N).reverse();  // bottom = best ask
   var bidsShown = bids.slice(0, N);             // top = best bid
   // Max quantity across both sides for depth-bar normalization.
