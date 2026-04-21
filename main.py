@@ -3264,6 +3264,10 @@ def get_health():
         info["live_prices"] = len(_lp)
     except Exception:
         info["ws_connected"] = False
+    # Sentry + Analytics status so we can verify they're wired up
+    # without shelling into Railway logs.
+    info["sentry_enabled"] = bool(_SENTRY_DSN)
+    info["analytics_enabled"] = bool(os.environ.get("ANALYTICS_DOMAIN", "").strip())
     return info
 
 
