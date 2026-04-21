@@ -4661,17 +4661,17 @@ PriceStream.onUpdate(function(ticker, data) {
     }
   }
   if (data.last_price != null) {
-    var lastCell = row.querySelector('[data-mk-field="last"]');
-    if (lastCell) {
-      _flash(lastCell, lastCell.textContent, String(data.last_price));
-      lastCell.textContent = data.last_price + '¢';
-    }
+    // Don't update Last cell from WS — the WS last_price can be
+    // a stale snapshot from subscription time. Let _fetchLivePrices
+    // (REST, on page load) and _overlay_live (via refreshVisible,
+    // every 5s) be the authoritative source for Last + Probability.
   }
-  // ONLY use bid/ask midpoint for probability. Never fall back to
-  // last_price — a single stale trade can be wildly different from
-  // the current market level and causes visible bouncing.
-  if (data.yes_bid != null && data.yes_ask != null) {
-    var wsProb = Math.round((data.yes_bid + data.yes_ask) / 2);
+  // Probability and Last are updated by _fetchLivePrices (REST, on
+  // page load) and _overlay_live (via refreshVisible, every 5s) — not
+  // from WS ticks, which can carry stale snapshot values.
+  // Only update YES/NO bid/ask cells from WS (those are reliable).
+  if (false) {  // disabled — probability handled by REST
+    var wsProb = 0;
     var probCell = row.querySelector('[data-mk-field="chance"]');
     if (probCell) {
       var newProb = wsProb + '%';

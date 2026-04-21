@@ -2126,7 +2126,8 @@ def get_events(
 
 def _overlay_live(outcomes, lp):
     """Re-compute chance/yes/no strings from LIVE_PRICES for a list
-    of outcome dicts. Mutates in place."""
+    of outcome dicts. Uses last_price for probability (matching
+    Kalshi's own display). Mutates in place."""
     for o in outcomes:
         tk = o.get("ticker", "")
         live = lp.get(tk)
@@ -2134,15 +2135,13 @@ def _overlay_live(outcomes, lp):
             continue
         yb = live.get("yes_bid")
         ya = live.get("yes_ask")
-        nb = live.get("no_bid")
         na = live.get("no_ask")
+        nb = live.get("no_bid")
         last = live.get("last_price")
-        if yb is not None and ya is not None and yb > 0 and ya > 0:
-            prob = round((yb + ya) / 2)
-            o["chance"] = f"{prob}%"
-            o["yes"] = f"{round(yb)}¢"
-        elif last is not None and last > 0:
+        if last is not None and last > 0:
             o["chance"] = f"{round(last)}%"
+        if yb is not None:
+            o["yes"] = f"{round(yb)}¢"
         if na is not None:
             o["no"] = f"{round(na)}¢"
         elif nb is not None:
