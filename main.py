@@ -2386,14 +2386,19 @@ def get_event_detail(ticker: str):
             oi    = o.get("_oi", 0) or 0
             liq   = o.get("_liq", 0) or 0
             prev  = o.get("_prev")
-            # Use bid/ask midpoint for probability — always from
-            # the YES perspective, never ambiguous.
-            if yb is not None and ya is not None and yb > 0 and ya > 0:
+            # Normalize last to YES side before using for probability.
+            if last is not None and yb is not None:
+                flipped = 100 - last
+                if abs(flipped - yb) < abs(last - yb):
+                    last = flipped
+            # Use last_price for probability (matches Kalshi display).
+            # Fall back to bid/ask midpoint when no last_price.
+            if last is not None and last > 0:
+                prob = round(last)
+                spread = round(ya - yb) if (yb is not None and ya is not None) else None
+            elif yb is not None and ya is not None and yb > 0 and ya > 0:
                 prob = round((yb + ya) / 2)
                 spread = round(ya - yb)
-            elif last is not None and last > 0:
-                prob = round(last)
-                spread = None
             else:
                 prob = None
                 spread = None

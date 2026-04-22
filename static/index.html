@@ -4693,12 +4693,26 @@ PriceStream.onUpdate(function(ticker, data) {
       noCell.textContent = newNo;
     }
   }
-  // Use bid/ask MIDPOINT for probability — always from the YES
-  // perspective, never ambiguous, never bounces. last_price from
-  // Kalshi is inherently ambiguous (can be YES or NO side trade)
-  // and no normalization can fix every case reliably.
-  if (data.yes_bid != null && data.yes_ask != null) {
-    var wsProb = Math.round((data.yes_bid + data.yes_ask) / 2);
+  // Probability uses last_price (matching Kalshi's display).
+  // Bid/ask midpoint is used only as fallback when no last_price.
+  if (data.last_price != null || (data.yes_bid != null && data.yes_ask != null)) {
+    var wsProb;
+    if (data.last_price != null) {
+      // Normalize last_price to YES perspective
+      var lp = data.last_price;
+      var refBid = data.yes_bid;
+      if (refBid == null) {
+        var yc = row.querySelector('[data-mk-field="yes"]');
+        if (yc) { var p = parseInt(yc.textContent.split('/').pop()); if (!isNaN(p)) refBid = p; }
+      }
+      if (refBid != null) {
+        var fl = 100 - lp;
+        if (Math.abs(fl - refBid) < Math.abs(lp - refBid)) lp = fl;
+      }
+      wsProb = Math.round(lp);
+    } else {
+      wsProb = Math.round((data.yes_bid + data.yes_ask) / 2);
+    }
     var probCell = row.querySelector('[data-mk-field="chance"]');
     if (probCell) {
       var newProb = wsProb + '%';
@@ -4764,12 +4778,27 @@ PriceStream.onUpdate(_liveChartOnTick);
 PriceStream.onUpdate(function(ticker, data) {
   var row = document.querySelector('[data-card-ticker="' + ticker + '"]');
   if (!row) return;
-  // Card probability uses bid/ask midpoint (same as Markets table).
-  if (data.yes_bid != null && data.yes_ask != null) {
-    var cardProb = Math.round((data.yes_bid + data.yes_ask) / 2);
+  // Card probability uses last_price (matching Kalshi), with
+  // client-side normalization + midpoint fallback.
+  if (data.last_price != null || (data.yes_bid != null && data.yes_ask != null)) {
+    var cardLp;
+    if (data.last_price != null) {
+      cardLp = data.last_price;
+      var cRef = data.yes_bid;
+      if (cRef == null) {
+        var yBox2 = row.querySelector(".odds-box.odds-yes");
+        if (yBox2) { var pp = parseInt(yBox2.textContent); if (!isNaN(pp)) cRef = pp; }
+      }
+      if (cRef != null) {
+        var cfl = 100 - cardLp;
+        if (Math.abs(cfl - cRef) < Math.abs(cardLp - cRef)) cardLp = cfl;
+      }
+    } else {
+      cardLp = Math.round((data.yes_bid + data.yes_ask) / 2);
+    }
     var chanceEl = row.querySelector(".outcome-chance");
     if (chanceEl) {
-      var newChance = cardProb + '%';
+      var newChance = Math.round(cardLp) + '%';
       _flash(chanceEl, chanceEl.textContent, newChance);
       chanceEl.textContent = newChance;
     }
