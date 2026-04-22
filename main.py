@@ -1519,29 +1519,43 @@ def _build_cache():
 
             sort_dt, sort_ts_dt, game_date, kickoff_dt, game_end_dt, close_dt, display_dt, outcomes = extract(ev)
 
+            def _auto_label(s):
+                """Humanize a Kalshi series ticker into a nav label.
+                Strip KX prefix + GAME/MATCH/etc suffix, Title Case."""
+                if not s:
+                    return ""
+                b = s
+                for sfx in ("GAME", "MATCH", "1H", "SPREAD", "TOTAL", "BTTS"):
+                    if b.endswith(sfx):
+                        b = b[:-len(sfx)]
+                        break
+                if b.startswith("KX"):
+                    b = b[2:]
+                return b.replace("_", " ").title() if b else ""
+
             if _sport == "Soccer" and _soccer_comp and _soccer_comp not in ("Other", ""):
                 _subcat = _soccer_comp
             elif _sport and _sport != "Soccer":
                 _subcat = SERIES_TO_SUBTAB.get(_sport, {}).get(series, "")
                 if not _subcat and series:
-                    # Auto-generate a subtab for unknown series in any
-                    # sport, matching how Soccer auto-generates league
-                    # labels above. Strip KX prefix + GAME/MATCH/etc
-                    # suffix, then Title Case. Register it so the nav
-                    # subtab appears and future events inherit it.
-                    base = series
-                    for sfx in ("GAME", "MATCH", "1H", "SPREAD", "TOTAL", "BTTS"):
-                        if base.endswith(sfx):
-                            base = base[:-len(sfx)]
-                            break
-                    if base.startswith("KX"):
-                        base = base[2:]
-                    if base:
-                        _subcat = base.replace("_", " ").title()
-                        _sub_map = SERIES_TO_SUBTAB.setdefault(_sport, {})
-                        _sub_map[series] = _subcat
+                    _subcat = _auto_label(series)
+                    if _subcat:
+                        SERIES_TO_SUBTAB.setdefault(_sport, {})[series] = _subcat
             else:
+                # Non-sport event (Politics, Crypto, Weather, etc.).
+                # Check hardcoded CAT_TAGS first; if no match, auto-
+                # generate a subtab from the series ticker so every
+                # event gets a label and can be grouped.
                 _subcat = ""
+                cat_key = category
+                _series_to_cat_sub = _cache.setdefault("_series_to_cat_sub", {})
+                _cat_bucket = _series_to_cat_sub.setdefault(cat_key, {})
+                if series in _cat_bucket:
+                    _subcat = _cat_bucket[series]
+                elif series:
+                    _subcat = _auto_label(series)
+                    if _subcat:
+                        _cat_bucket[series] = _subcat
 
             r = {
                 "event_ticker": str(ev.get("event_ticker", "")),
