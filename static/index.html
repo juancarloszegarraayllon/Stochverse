@@ -4512,15 +4512,13 @@ async function _fetchLivePrices(eventTicker) {
         }
       }
       if (m.last_price != null) {
-        // Apply the same stale-price filter the WS uses: if
-        // last_price is far from yes_bid, it's a NO-side trade.
-        // Flip to the YES equivalent.
+        // Normalize to YES perspective: pick whichever of
+        // (last_price, 100-last_price) is closest to yes_bid.
         var lp = m.last_price;
-        if (m.yes_bid != null && Math.abs(lp - m.yes_bid) > 25) {
-          if (Math.abs(lp - (100 - m.yes_bid)) <= 5) {
-            lp = 100 - lp;
-          } else {
-            lp = null;
+        if (m.yes_bid != null) {
+          var flipped = 100 - lp;
+          if (Math.abs(flipped - m.yes_bid) < Math.abs(lp - m.yes_bid)) {
+            lp = flipped;
           }
         }
         if (lp != null) {

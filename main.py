@@ -2205,13 +2205,12 @@ def _overlay_live(outcomes, lp):
         na = live.get("no_ask")
         nb = live.get("no_bid")
         last = live.get("last_price")
-        # Stale filter: if last_price is far from yes_bid, it's a
-        # NO-side trade — flip to the YES equivalent.
-        if last is not None and yb is not None and abs(last - yb) > 25:
-            if abs(last - (100 - yb)) <= 5:
-                last = 100 - last
-            else:
-                last = None
+        # Normalize last_price to YES perspective: pick whichever
+        # of (last_price, 100-last_price) is closest to yes_bid.
+        if last is not None and yb is not None:
+            flipped = 100 - last
+            if abs(flipped - yb) < abs(last - yb):
+                last = flipped
         if last is not None and last > 0:
             o["chance"] = f"{round(last)}%"
         if ya is not None:
@@ -2615,15 +2614,13 @@ def get_event_live_prices(ticker: str):
                             "volume_24h": _to_num(vol24),
                             "open_interest": _to_num(oi),
                         }
-                        # Apply stale filter before storing in
-                        # LIVE_PRICES — flip NO-side last_price.
+                        # Normalize last_price to YES perspective.
                         r_lp = results[mk].get("last_price")
                         r_yb = results[mk].get("yes_bid")
-                        if r_lp is not None and r_yb is not None and abs(r_lp - r_yb) > 25:
-                            if abs(r_lp - (100 - r_yb)) <= 5:
-                                results[mk]["last_price"] = 100 - r_lp
-                            else:
-                                results[mk].pop("last_price", None)
+                        if r_lp is not None and r_yb is not None:
+                            flipped = 100 - r_lp
+                            if abs(flipped - r_yb) < abs(r_lp - r_yb):
+                                results[mk]["last_price"] = flipped
                         try:
                             from kalshi_ws import LIVE_PRICES
                             cur = LIVE_PRICES.get(mk)
