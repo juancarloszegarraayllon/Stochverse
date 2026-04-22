@@ -2192,7 +2192,9 @@ def get_events(
 def _overlay_live(outcomes, lp):
     """Re-compute chance/yes/no strings from LIVE_PRICES for a list
     of outcome dicts. Uses last_price for probability (matching
-    Kalshi's own display). YES shows ask, NO shows ask. Mutates in place."""
+    Kalshi's own display). YES shows ask, NO shows ask. Applies the
+    same stale-price filter as the WS parser — flips NO-side
+    last_price to YES equivalent. Mutates in place."""
     for o in outcomes:
         tk = o.get("ticker", "")
         live = lp.get(tk)
@@ -2203,6 +2205,13 @@ def _overlay_live(outcomes, lp):
         na = live.get("no_ask")
         nb = live.get("no_bid")
         last = live.get("last_price")
+        # Stale filter: if last_price is far from yes_bid, it's a
+        # NO-side trade — flip to the YES equivalent.
+        if last is not None and yb is not None and abs(last - yb) > 25:
+            if abs(last - (100 - yb)) <= 5:
+                last = 100 - last
+            else:
+                last = None
         if last is not None and last > 0:
             o["chance"] = f"{round(last)}%"
         if ya is not None:
@@ -2606,8 +2615,15 @@ def get_event_live_prices(ticker: str):
                             "volume_24h": _to_num(vol24),
                             "open_interest": _to_num(oi),
                         }
-                        # Also update LIVE_PRICES so subsequent
-                        # renders don't show stale data.
+                        # Apply stale filter before storing in
+                        # LIVE_PRICES — flip NO-side last_price.
+                        r_lp = results[mk].get("last_price")
+                        r_yb = results[mk].get("yes_bid")
+                        if r_lp is not None and r_yb is not None and abs(r_lp - r_yb) > 25:
+                            if abs(r_lp - (100 - r_yb)) <= 5:
+                                results[mk]["last_price"] = 100 - r_lp
+                            else:
+                                results[mk].pop("last_price", None)
                         try:
                             from kalshi_ws import LIVE_PRICES
                             cur = LIVE_PRICES.get(mk)

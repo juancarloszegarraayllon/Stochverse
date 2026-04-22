@@ -3986,7 +3986,7 @@ function renderOrderbook() {
       h += '<div class="ob-depth ' + depthAsk + '" style="width:' + width + '%"></div>';
       h += labelCell;
       h += '<div class="' + priceClsAsk + '">' + ask.price + '&cent;</div>';
-      h += '<div class="ob-qty">' + fmtNum(ask.qty) + '</div>';
+      h += '<div class="ob-qty">' + Math.round(ask.qty).toLocaleString() + '</div>';
       h += '<div class="ob-total">$' + (ask.total != null ? ask.total.toLocaleString() : '0') + '</div>';
       h += '</div>';
     }
@@ -4014,7 +4014,7 @@ function renderOrderbook() {
       h += '<div class="ob-depth ' + depthBid + '" style="width:' + widthB + '%"></div>';
       h += labelCell2;
       h += '<div class="' + priceCls + '">' + bid.price + '&cent;</div>';
-      h += '<div class="ob-qty">' + fmtNum(bid.qty) + '</div>';
+      h += '<div class="ob-qty">' + Math.round(bid.qty).toLocaleString() + '</div>';
       h += '<div class="ob-total">$' + (bid.total != null ? bid.total.toLocaleString() : '0') + '</div>';
       h += '</div>';
     }
@@ -4512,16 +4512,29 @@ async function _fetchLivePrices(eventTicker) {
         }
       }
       if (m.last_price != null) {
-        var lastCell = row.querySelector('[data-mk-field="last"]');
-        if (lastCell) {
-          _flash(lastCell, lastCell.textContent, String(m.last_price));
-          lastCell.textContent = m.last_price + '¢';
+        // Apply the same stale-price filter the WS uses: if
+        // last_price is far from yes_bid, it's a NO-side trade.
+        // Flip to the YES equivalent.
+        var lp = m.last_price;
+        if (m.yes_bid != null && Math.abs(lp - m.yes_bid) > 25) {
+          if (Math.abs(lp - (100 - m.yes_bid)) <= 5) {
+            lp = 100 - lp;
+          } else {
+            lp = null;
+          }
         }
-        var probCell = row.querySelector('[data-mk-field="chance"]');
-        if (probCell) {
-          var newProb = Math.round(m.last_price) + '%';
-          _flash(probCell, probCell.textContent, newProb);
-          probCell.textContent = newProb;
+        if (lp != null) {
+          var lastCell = row.querySelector('[data-mk-field="last"]');
+          if (lastCell) {
+            _flash(lastCell, lastCell.textContent, String(lp));
+            lastCell.textContent = lp + '¢';
+          }
+          var probCell = row.querySelector('[data-mk-field="chance"]');
+          if (probCell) {
+            var newProb = Math.round(lp) + '%';
+            _flash(probCell, probCell.textContent, newProb);
+            probCell.textContent = newProb;
+          }
         }
       }
       if (m.volume != null) {
