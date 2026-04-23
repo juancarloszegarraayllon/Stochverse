@@ -27,7 +27,17 @@ API_KEY = os.environ.get("FLASHLIVE_API_KEY", "").strip()
 API_HOST = "flashlive-sports.p.rapidapi.com"
 BASE_URL = f"https://{API_HOST}"
 
-POLL_INTERVAL = 30  # seconds between polls
+POLL_INTERVAL = 60  # seconds between polls (conserve API quota)
+
+# Only poll sports that Kalshi actively covers to save requests.
+# Each sport = 1 API call per poll cycle.
+ACTIVE_SPORTS = {
+    "1": "Soccer",
+    "2": "Tennis",
+    "3": "Basketball",
+    "4": "Hockey",
+    "6": "Baseball",
+}
 GAMES: dict = {}    # normalized key → game dict
 
 STATUS = {
@@ -118,7 +128,7 @@ async def _fetch_live_events():
     all_events = []
     raw_samples = []
     async with httpx.AsyncClient(timeout=15.0) as client:
-        for sport_id, sport_name in SPORT_MAP.items():
+        for sport_id, sport_name in ACTIVE_SPORTS.items():
             try:
                 r = await client.get(
                     f"{BASE_URL}/v1/events/list",
