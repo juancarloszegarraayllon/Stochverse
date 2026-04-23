@@ -116,6 +116,7 @@ async def _fetch_live_events():
         "x-rapidapi-host": API_HOST,
     }
     all_events = []
+    raw_samples = []
     async with httpx.AsyncClient(timeout=15.0) as client:
         for sport_id, sport_name in SPORT_MAP.items():
             try:
@@ -130,6 +131,14 @@ async def _fetch_live_events():
                 )
                 if r.status_code == 200:
                     data = r.json()
+                    # Save first raw response for debugging
+                    if len(raw_samples) < 3:
+                        raw_samples.append({
+                            "sport": sport_name,
+                            "type": str(type(data).__name__),
+                            "keys": list(data.keys()) if isinstance(data, dict) else "list",
+                            "preview": str(data)[:500],
+                        })
                     events = data if isinstance(data, list) else data.get("DATA", data.get("data", []))
                     if isinstance(events, list):
                         all_events.extend(events)
@@ -138,6 +147,7 @@ async def _fetch_live_events():
             except Exception as e:
                 log.debug("FlashLive %s fetch error: %s", sport_name, e)
     STATUS["last_error"] = None if all_events else "no events found"
+    STATUS["raw_samples"] = raw_samples
     return all_events
 
 
