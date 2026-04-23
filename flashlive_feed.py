@@ -137,6 +137,7 @@ async def _fetch_live_events():
                     params={
                         "sport_id": sport_id,
                         "indent_days": "0",
+                        "timezone": "-4",
                         "locale": "en_INT",
                     },
                 )
