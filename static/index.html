@@ -3891,7 +3891,8 @@ window.selectObOutcome = function(btn) {
   var ticker = btn.getAttribute("data-ob-ticker");
   // Unsubscribe from previous ticker's orderbook channel.
   if (_obWsPrevTicker && _obWsPrevTicker !== ticker) {
-    PriceStream.unsubscribeChannel("orderbook_delta", [_obWsPrevTicker]);
+    // Removed: orderbook_delta subscription was causing price bouncing.
+    // The 2s REST poll handles OB updates reliably.
   }
   _obActiveOutcome = ticker;
   _obActiveSide = "yes";
@@ -3904,7 +3905,8 @@ window.selectObOutcome = function(btn) {
   if (body) body.innerHTML = '<div class="ob-loading">Loading order book&hellip;</div>';
   // Initial fetch via REST, then subscribe to WS deltas.
   fetchOrderbook(ticker);
-  PriceStream.subscribeChannel("orderbook_delta", [ticker]);
+  // Removed: orderbook_delta WS subscription was causing price bouncing.
+  // The 2s REST poll in fetchOrderbook handles OB depth updates.
 };
 
 // Auto-load first outcome on page render.
@@ -4120,14 +4122,15 @@ window.selectWsOutcome = function(btn) {
   }
   var ticker = btn.getAttribute("data-ws-ticker");
   if (_wsWsPrevTicker && _wsWsPrevTicker !== ticker) {
-    PriceStream.unsubscribeChannel("trade", [_wsWsPrevTicker]);
+    // Removed: trade WS subscription could interfere with price data.
   }
   _wsActiveOutcome = ticker;
   _wsWsPrevTicker = ticker;
   var body = section.querySelector(".ws-body");
   if (body) body.innerHTML = '<div class="ws-empty">Loading whale trades\u2026</div>';
   fetchWhaleTrades(ticker);
-  PriceStream.subscribeChannel("trade", [ticker]);
+  // Removed: trade WS subscription could interfere with price data.
+  // Large Capital Flow uses REST polling (15s) for trade history.
 };
 
 window.applyWsFilter = function() {
