@@ -262,6 +262,8 @@ def _parse_event(ev):
             "home_phrases": home_phrases,
             "away_phrases": away_phrases,
             "captured_at_ms": int(time.time() * 1000),
+            "_raw_keys": list(ev.keys())[:30] if isinstance(ev, dict) else [],
+            "_raw_preview": str(ev)[:600] if isinstance(ev, dict) else "",
         }
     except Exception as e:
         log.debug("parse error: %s", e)

@@ -4154,7 +4154,13 @@ def flashlive_status():
                 "clock": g.get("display_clock"),
                 "league": g.get("league"),
             })
-        return {"status": dict(STATUS), "sample_games": sample}
+        # Include one raw event for field discovery
+        raw_event = None
+        for g in list(GAMES.values()):
+            if g.get("_raw_keys"):
+                raw_event = {"keys": g["_raw_keys"], "preview": g["_raw_preview"]}
+                break
+        return {"status": dict(STATUS), "sample_games": sample, "raw_event": raw_event}
     except Exception as e:
         return {"error": str(e)}
 
