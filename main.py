@@ -5404,7 +5404,16 @@ def _parse_flashlive_stats(fl_data, title, sport):
                                 "away": str(aval),
                             })
         if not stats_list:
-            return None
+            # Return raw data for debugging
+            return {
+                "home": home,
+                "away": away,
+                "sport": sport,
+                "stats": [],
+                "source": "flashlive",
+                "_debug_raw_type": str(type(data)),
+                "_debug_raw_preview": str(data)[:1500],
+            }
         return {
             "home": home,
             "away": away,
