@@ -4239,6 +4239,65 @@ async def get_event_news(ticker: str):
         return {"error": str(e)[:200]}
 
 
+@app.get("/api/event/{ticker}/commentary")
+async def get_event_commentary(ticker: str):
+    """Fetch live commentary from FlashLive for this event."""
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = None
+    for r in records:
+        if r.get("event_ticker") == ticker:
+            found = r
+            break
+    if not found:
+        return {"error": "event not found"}
+    try:
+        from flashlive_feed import match_game as flash_match, fetch_event_commentary
+        g = flash_match(found.get("title", ""), found.get("_sport", ""))
+        if not g:
+            return {"error": "no FlashLive match found"}
+        fl_id = g.get("event_id")
+        if not fl_id:
+            return {"error": "no FlashLive event ID"}
+        data = await fetch_event_commentary(fl_id)
+        if not data:
+            return {"error": "no commentary available"}
+        return {"data": data, "source": "flashlive"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
+@app.get("/api/event/{ticker}/player-stats")
+async def get_event_player_stats(ticker: str):
+    """Fetch player statistics from FlashLive for this event."""
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = None
+    for r in records:
+        if r.get("event_ticker") == ticker:
+            found = r
+            break
+    if not found:
+        return {"error": "event not found"}
+    try:
+        from flashlive_feed import match_game as flash_match
+        g = flash_match(found.get("title", ""), found.get("_sport", ""))
+        if not g:
+            return {"error": "no FlashLive match found"}
+        fl_id = g.get("event_id")
+        if not fl_id:
+            return {"error": "no FlashLive event ID"}
+        from flashlive_feed import _fl_get
+        data = await _fl_get("/v1/events/player-statistics-alt", {"event_id": fl_id})
+        if not data:
+            return {"error": "no player stats available"}
+        return {"data": data, "source": "flashlive"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
 @app.get("/api/flashlive_status")
 def flashlive_status():
     """Debug endpoint: reports the FlashLive feed state."""
