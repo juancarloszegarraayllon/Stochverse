@@ -4347,6 +4347,8 @@ async def debug_flashlive_data(ticker: str):
         result["news_raw"] = await fetch_event_news(fl_id)
         if stage_id:
             result["standings_raw"] = await fetch_standings(stage_id, season_id)
+            result["standings_tabs"] = await _fl_get("/v1/tournaments/standings/tabs", {"tournament_stage_id": stage_id})
+            result["player_stats_raw"] = await _fl_get("/v1/events/player-statistics-alt", {"event_id": fl_id})
         # Show first standings row keys
         st = result.get("standings_raw")
         if st and isinstance(st, dict):
