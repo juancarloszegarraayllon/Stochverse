@@ -2375,6 +2375,10 @@ def get_event_detail(ticker: str):
         from sofascore_feed import match_game as sofa_match_game
     except Exception:
         sofa_match_game = None
+    try:
+        from flashlive_feed import match_game as flash_match_game
+    except Exception:
+        flash_match_game = None
 
     try:
         from kalshi_ws import LIVE_PRICES
@@ -2487,7 +2491,8 @@ def get_event_detail(ticker: str):
             g = sdb_match_game(title, sport)
         if g is None and sofa_match_game is not None:
             g = sofa_match_game(title, sport)
-    # Soccer 2-leg aggregate enrichment — see /api/events for details.
+        if g is None and flash_match_game is not None:
+            g = flash_match_game(title, sport)
     if g and sport == "Soccer":
         g = _enrich_soccer_aggregate(g, title)
     # Wrong-date guard — same as /api/events.
