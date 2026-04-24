@@ -4204,47 +4204,80 @@ function _stVal(row) {
   return "";
 }
 
+// Map of FlashLive field patterns to display column headers
+var _ST_COL_MAP = [
+  {keys: ["RANKING","ranking","rank","RANK"], hdr: "#", align: "left", w: "20px"},
+  {keys: ["TEAM_NAME","team_name","name"], hdr: "Team", align: "left", w: null},
+  {keys: ["MATCHES_PLAYED","MATCHES","matches","played","MP"], hdr: "MP", align: "center"},
+  {keys: ["WINS","wins","W","WON"], hdr: "W", align: "center"},
+  {keys: ["DRAWS","DRAWN","draws","drawn","D","DRAW"], hdr: "D", align: "center"},
+  {keys: ["LOSSES","LOST","losses","lost","L","LOSE"], hdr: "L", align: "center"},
+  {keys: ["GOALS","goals","GF_GA"], hdr: "G", align: "center"},
+  {keys: ["POINTS","points","PTS"], hdr: "PTS", align: "center", bold: true},
+];
+
+function _findKey(row, candidates) {
+  for (var i = 0; i < candidates.length; i++) {
+    if (row[candidates[i]] !== undefined && row[candidates[i]] !== null) return candidates[i];
+  }
+  return null;
+}
+
 function _renderStandingsTable(container, rows, homeName, awayName) {
-  // Auto-detect column names from first row
   var sample = rows[0] || {};
-  var sKeys = Object.keys(sample);
+  // Resolve which actual key maps to each column
+  var cols = [];
+  for (var ci = 0; ci < _ST_COL_MAP.length; ci++) {
+    var col = _ST_COL_MAP[ci];
+    var foundKey = _findKey(sample, col.keys);
+    if (foundKey || col.hdr === "#" || col.hdr === "Team") {
+      cols.push({hdr: col.hdr, key: foundKey, align: col.align || "center", w: col.w, bold: col.bold});
+    }
+  }
+  // Also scan for any numeric keys we missed
+  var usedKeys = {};
+  for (var ci2 = 0; ci2 < cols.length; ci2++) { if (cols[ci2].key) usedKeys[cols[ci2].key] = true; }
+  var extraKeys = Object.keys(sample);
+  for (var ek = 0; ek < extraKeys.length; ek++) {
+    var k = extraKeys[ek];
+    if (usedKeys[k]) continue;
+    if (k.indexOf("IMAGE") >= 0 || k.indexOf("ID") >= 0 || k.indexOf("FLAG") >= 0 || k.indexOf("COUNTRY") >= 0) continue;
+    var v = sample[k];
+    if (typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v))) {
+      cols.push({hdr: k.replace(/_/g," "), key: k, align: "center"});
+    }
+  }
   var h = '<div style="overflow-x:auto">';
   h += '<table style="width:100%;font-size:11px;border-collapse:collapse">';
   h += '<thead><tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">';
-  h += '<th style="text-align:left;padding:4px 2px;width:20px">#</th>';
-  h += '<th style="text-align:left;padding:4px 2px">Team</th>';
-  h += '<th style="text-align:center;padding:4px 2px">MP</th>';
-  h += '<th style="text-align:center;padding:4px 2px">W</th>';
-  h += '<th style="text-align:center;padding:4px 2px">D</th>';
-  h += '<th style="text-align:center;padding:4px 2px">L</th>';
-  h += '<th style="text-align:center;padding:4px 2px">G</th>';
-  h += '<th style="text-align:center;padding:4px 2px;font-weight:700">PTS</th>';
+  for (var hi = 0; hi < cols.length; hi++) {
+    var c = cols[hi];
+    var st = 'text-align:' + c.align + ';padding:4px 2px';
+    if (c.w) st += ';width:' + c.w;
+    if (c.bold) st += ';font-weight:700';
+    h += '<th style="' + st + '">' + escH(c.hdr) + '</th>';
+  }
   h += '</tr></thead><tbody>';
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
-    // Try every plausible key for each column
-    var teamName = row.TEAM_NAME || row.team_name || row.name || "";
-    var rank = row.RANKING || row.ranking || row.rank || row.RANK || (i + 1);
-    // FlashLive uses varied field names — try numeric fields
-    var mp = _stVal(row, "MATCHES_PLAYED", "MATCHES", "matches", "played", "MP", "P");
-    var w = _stVal(row, "WINS", "wins", "W", "WON");
-    var d2 = _stVal(row, "DRAWS", "draws", "D", "DRAW");
-    var l = _stVal(row, "LOSSES", "losses", "L", "LOST");
-    var goals = _stVal(row, "GOALS", "goals");
-    var pts = _stVal(row, "POINTS", "points", "PTS", "P");
-    var isHighlight = (homeName && teamName.toLowerCase().indexOf(homeName) >= 0) ||
-                      (awayName && teamName.toLowerCase().indexOf(awayName) >= 0);
-    var rowStyle = 'border-bottom:1px solid var(--border);' + (isHighlight ? 'background:rgba(74,144,226,0.15);font-weight:600' : '');
-    h += '<tr style="' + rowStyle + '">';
-    h += '<td style="text-align:left;padding:4px 2px;color:var(--text-muted)">' + escH(String(rank)) + '</td>';
-    h += '<td style="text-align:left;padding:4px 2px">' + escH(teamName) + '</td>';
-    h += '<td style="text-align:center;padding:4px 2px">' + escH(String(mp)) + '</td>';
-    h += '<td style="text-align:center;padding:4px 2px">' + escH(String(w)) + '</td>';
-    h += '<td style="text-align:center;padding:4px 2px">' + escH(String(d2)) + '</td>';
-    h += '<td style="text-align:center;padding:4px 2px">' + escH(String(l)) + '</td>';
-    h += '<td style="text-align:center;padding:4px 2px">' + escH(String(goals)) + '</td>';
-    h += '<td style="text-align:center;padding:4px 2px;font-weight:700">' + escH(String(pts)) + '</td>';
+    var teamName = _stVal(row, "TEAM_NAME", "team_name", "name") || "";
+    var isHL = (homeName && teamName.toLowerCase().indexOf(homeName) >= 0) ||
+              (awayName && teamName.toLowerCase().indexOf(awayName) >= 0);
+    var rs = 'border-bottom:1px solid var(--border);' + (isHL ? 'background:rgba(74,144,226,0.15);font-weight:600' : '');
+    h += '<tr style="' + rs + '">';
+    for (var ci3 = 0; ci3 < cols.length; ci3++) {
+      var c2 = cols[ci3];
+      var val = "";
+      if (c2.hdr === "#") val = _stVal(row, "RANKING", "ranking", "rank", "RANK") || String(i + 1);
+      else if (c2.hdr === "Team") val = teamName;
+      else if (c2.key) val = String(row[c2.key] !== undefined && row[c2.key] !== null ? row[c2.key] : "");
+      var st2 = 'text-align:' + c2.align + ';padding:4px 2px';
+      if (c2.bold) st2 += ';font-weight:700';
+      if (c2.hdr === "#") st2 += ';color:var(--text-muted)';
+      h += '<td style="' + st2 + '">' + escH(val) + '</td>';
+    }
     h += '</tr>';
+  }
   }
   h += '</tbody></table></div>';
   // Debug: show first row keys for field name discovery
