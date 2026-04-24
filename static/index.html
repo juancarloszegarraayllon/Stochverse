@@ -4008,10 +4008,49 @@ async function _loadH2H(container, ticker) {
       container.innerHTML = '<div class="ed-stats-loading">' + escH(d.error) + '</div>';
       return;
     }
-    // Render H2H data
     var data = d.data || {};
-    var h = '<div class="ed-stats-title">Head to Head</div>';
-    h += '<pre style="font-size:10px;color:var(--text-dim);overflow-x:auto;white-space:pre-wrap">' + escH(JSON.stringify(data, null, 2)).substring(0, 2000) + '</pre>';
+    var items = [];
+    // FlashLive H2H: DATA → tabs → GROUPS → ITEMS
+    var tabs = data.DATA || data.data || [];
+    if (Array.isArray(tabs)) {
+      for (var ti = 0; ti < tabs.length; ti++) {
+        var groups = tabs[ti].GROUPS || [];
+        for (var gi = 0; gi < groups.length; gi++) {
+          var grp = groups[gi];
+          var grpItems = grp.ITEMS || [];
+          for (var ii = 0; ii < grpItems.length; ii++) {
+            items.push(grpItems[ii]);
+          }
+        }
+      }
+    }
+    if (!items.length) {
+      container.innerHTML = '<div class="ed-stats-loading">No H2H data available.</div>';
+      return;
+    }
+    var h = '<div class="ed-stats-title">Recent Meetings</div>';
+    h += '<div style="font-size:11px">';
+    for (var mi = 0; mi < Math.min(items.length, 15); mi++) {
+      var m = items[mi];
+      var home = m.HOME_PARTICIPANT || m.HOME_PARTICIPANT_NAME_ONE || "";
+      var away = m.AWAY_PARTICIPANT || m.AWAY_PARTICIPANT_NAME_ONE || "";
+      var score = m.CURRENT_RESULT || (m.HOME_SCORE_FULL + ":" + m.AWAY_SCORE_FULL) || "";
+      var result = m.H_RESULT || "";
+      var league = m.EVENT_NAME || "";
+      var date = "";
+      if (m.START_TIME) {
+        try { date = new Date(m.START_TIME * 1000).toLocaleDateString("en-US", {month:"short", day:"numeric", year:"numeric"}); } catch(e) {}
+      }
+      var resultCls = result === "WIN" ? "color:#4caf50" : result === "LOSS" ? "color:#f44336" : "color:var(--text-muted)";
+      h += '<div style="display:flex;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);gap:6px">';
+      h += '<div style="flex:0 0 70px;font-size:10px;color:var(--text-muted)">' + escH(date) + '</div>';
+      h += '<div style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">';
+      h += escH(home) + ' <span style="font-weight:700;' + resultCls + '">' + escH(score) + '</span> ' + escH(away);
+      h += '</div>';
+      h += '<div style="font-size:9px;color:var(--text-muted)">' + escH(league) + '</div>';
+      h += '</div>';
+    }
+    h += '</div>';
     container.innerHTML = h;
   } catch (e) {
     container.innerHTML = '<div class="ed-stats-loading">Failed to load H2H.</div>';

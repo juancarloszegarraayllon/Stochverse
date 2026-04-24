@@ -2050,12 +2050,12 @@ def get_events(
         if sport and title:
             if match_game is not None:
                 g = match_game(title, sport)
+            if g is None and flash_match_game is not None:
+                g = flash_match_game(title, sport)
             if g is None and sdb_match_game is not None:
                 g = sdb_match_game(title, sport)
             if g is None and sofa_match_game is not None:
                 g = sofa_match_game(title, sport)
-            if g is None and flash_match_game is not None:
-                g = flash_match_game(title, sport)
         # Enrich soccer 2-leg ties with SofaScore aggregate data
         # when the primary feed (usually ESPN for UCL) didn't
         # populate it. No-op for non-soccer or when aggregate is
@@ -2493,12 +2493,12 @@ def get_event_detail(ticker: str):
     if sport and title:
         if match_game is not None:
             g = match_game(title, sport)
+        if g is None and flash_match_game is not None:
+            g = flash_match_game(title, sport)
         if g is None and sdb_match_game is not None:
             g = sdb_match_game(title, sport)
         if g is None and sofa_match_game is not None:
             g = sofa_match_game(title, sport)
-        if g is None and flash_match_game is not None:
-            g = flash_match_game(title, sport)
     if g and sport == "Soccer":
         g = _enrich_soccer_aggregate(g, title)
     # Wrong-date guard — same as /api/events.
