@@ -4169,12 +4169,23 @@ async def get_event_standings(ticker: str):
         data = await fetch_standings(stage_id, season_id)
         if not data:
             return {"error": "no standings data available"}
+        # Include first row keys for debugging field names
+        first_row = None
+        raw_groups = (data.get("DATA") or []) if isinstance(data, dict) else []
+        for grp in (raw_groups if isinstance(raw_groups, list) else []):
+            for row in (grp.get("ROWS") or []):
+                if isinstance(row, dict):
+                    first_row = row
+                    break
+            if first_row:
+                break
         return {
             "data": data,
             "tournament_stage_id": stage_id,
             "home_name": g.get("home_name", ""),
             "away_name": g.get("away_name", ""),
             "source": "flashlive",
+            "_debug_first_row": first_row,
         }
     except Exception as e:
         return {"error": str(e)[:200]}

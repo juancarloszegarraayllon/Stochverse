@@ -4247,10 +4247,10 @@ function _renderStandingsTable(container, rows, homeName, awayName) {
     h += '</tr>';
   }
   h += '</tbody></table></div>';
-  // Debug: show first row keys so we can verify field names
+  // Debug: show first row keys for field name discovery
   if (rows[0]) {
-    h += '<details style="margin-top:8px"><summary style="font-size:9px;color:var(--text-muted);cursor:pointer">Debug: row keys</summary>';
-    h += '<pre style="font-size:9px;color:var(--text-muted);overflow-x:auto;white-space:pre-wrap;max-height:200px">' + escH(JSON.stringify(rows[0], null, 2)) + '</pre></details>';
+    h += '<details open style="margin-top:8px"><summary style="font-size:9px;color:var(--green);cursor:pointer">API Row Fields (debug)</summary>';
+    h += '<pre style="font-size:9px;color:var(--text-dim);overflow-x:auto;white-space:pre-wrap;max-height:300px">' + escH(JSON.stringify(rows[0], null, 2)) + '</pre></details>';
   }
   container.innerHTML = h;
 }
