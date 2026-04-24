@@ -2546,6 +2546,32 @@ def get_event_detail(ticker: str):
             "tournament_name":    g.get("tournament_name", "") or g.get("league", ""),
             "aggregate_winner":   g.get("aggregate_winner", ""),
         }
+        # Tennis: per-set scoreboard data
+        if g.get("sport") == "Tennis":
+            fl_tennis = g.get("tennis")
+            if fl_tennis and fl_tennis.get("row1_name"):
+                rc["_live_state"]["tennis"] = fl_tennis
+            elif g.get("tennis_home_name"):
+                flip = _needs_flip(title, g)
+                home_key, away_key = ("away", "home") if flip else ("home", "away")
+                rc["_live_state"]["tennis"] = {
+                    "row1_name":   g.get(f"tennis_{home_key}_name", ""),
+                    "row2_name":   g.get(f"tennis_{away_key}_name", ""),
+                    "row1_sets":   g.get(f"tennis_{home_key}_sets", ""),
+                    "row2_sets":   g.get(f"tennis_{away_key}_sets", ""),
+                    "row1_games":  g.get(f"tennis_{home_key}_games", ""),
+                    "row2_games":  g.get(f"tennis_{away_key}_games", ""),
+                    "row1_point":  g.get(f"tennis_{home_key}_point", ""),
+                    "row2_point":  g.get(f"tennis_{away_key}_point", ""),
+                    "set_history": [
+                        {"set": s.get("set"), "row1": s.get(home_key), "row2": s.get(away_key)}
+                        for s in (g.get("tennis_set_history") or [])
+                    ],
+                    "server": (
+                        "row1" if g.get("tennis_server") == home_key
+                        else ("row2" if g.get("tennis_server") == away_key else "")
+                    ),
+                }
 
     rc["url"] = _kalshi_url(r.get("series_ticker", ""), r.get("event_ticker", ""))
     return {"event": rc}
