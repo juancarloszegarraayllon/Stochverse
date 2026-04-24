@@ -4316,6 +4316,65 @@ async def get_event_player_stats(ticker: str):
         return {"error": str(e)[:200]}
 
 
+@app.get("/api/event/{ticker}/debug_fl")
+async def debug_flashlive_data(ticker: str):
+    """Debug: show raw FlashLive API responses for all endpoints."""
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = None
+    for r in records:
+        if r.get("event_ticker") == ticker:
+            found = r
+            break
+    if not found:
+        return {"error": "event not found"}
+    try:
+        from flashlive_feed import (
+            match_game as flash_match, _fl_get,
+            fetch_event_stats, fetch_event_lineups,
+            fetch_event_summary, fetch_event_commentary, fetch_event_news,
+            fetch_standings,
+        )
+        g = flash_match(found.get("title", ""), found.get("_sport", ""))
+        if not g:
+            return {"error": "no FlashLive match", "title": found.get("title"), "sport": found.get("_sport")}
+        fl_id = g.get("event_id")
+        stage_id = g.get("tournament_stage_id", "")
+        season_id = g.get("tournament_season_id", "")
+        result = {"event_id": fl_id, "stage_id": stage_id, "season_id": season_id, "game": {
+            k: g[k] for k in ("home_name", "away_name", "league", "tournament_id",
+                               "tournament_stage_id", "tournament_season_id") if k in g
+        }}
+        # Fetch all endpoints
+        result["stats_raw"] = await fetch_event_stats(fl_id)
+        result["lineups_raw"] = await fetch_event_lineups(fl_id)
+        result["summary_raw"] = await fetch_event_summary(fl_id)
+        result["commentary_raw"] = await fetch_event_commentary(fl_id)
+        result["news_raw"] = await fetch_event_news(fl_id)
+        if stage_id:
+            result["standings_raw"] = await fetch_standings(stage_id, season_id)
+        # Show first standings row keys
+        st = result.get("standings_raw")
+        if st and isinstance(st, dict):
+            for grp in (st.get("DATA") or []):
+                rows = grp.get("ROWS") or []
+                if rows:
+                    result["standings_first_row_keys"] = list(rows[0].keys()) if isinstance(rows[0], dict) else "not a dict"
+                    result["standings_first_row"] = rows[0]
+                    break
+        # Show first lineups keys
+        lu = result.get("lineups_raw")
+        if lu and isinstance(lu, dict):
+            data_list = lu.get("DATA") or []
+            if data_list and isinstance(data_list, list) and data_list:
+                result["lineups_first_entry_keys"] = list(data_list[0].keys()) if isinstance(data_list[0], dict) else "?"
+        return result
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()[:1000]}
+
+
 @app.get("/api/flashlive_status")
 def flashlive_status():
     """Debug endpoint: reports the FlashLive feed state."""
