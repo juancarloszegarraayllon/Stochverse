@@ -4191,13 +4191,15 @@ def flashlive_status():
                 "clock": g.get("display_clock"),
                 "league": g.get("league"),
             })
-        # Include one raw event for field discovery
-        raw_event = None
+        # Include raw events for field discovery — one soccer, one tennis
+        raw_events = {}
         for g in list(GAMES.values()):
-            if g.get("_raw_keys"):
-                raw_event = {"keys": g["_raw_keys"], "preview": g["_raw_preview"]}
+            sport = g.get("sport", "")
+            if sport and sport not in raw_events:
+                raw_events[sport] = {"keys": g.get("_raw_keys", []), "preview": g.get("_raw_preview", "")}
+            if len(raw_events) >= 3:
                 break
-        return {"status": dict(STATUS), "sample_games": sample, "raw_event": raw_event}
+        return {"status": dict(STATUS), "sample_games": sample, "raw_events": raw_events}
     except Exception as e:
         return {"error": str(e)}
 
