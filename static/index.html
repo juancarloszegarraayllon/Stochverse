@@ -3885,6 +3885,9 @@ async function hydrateGameStats(evTicker) {
     // ── Commentary panel (lazy-loaded) ─────────────────
     h += '<div data-mt="commentary" style="display:none">';
     h += '<div class="ed-sb-lazy" data-lazy="commentary">Loading commentary…</div>';
+    h += '<div data-mt="missing-players" style="display:none">';
+    h += '<div class="ed-sb-lazy" data-lazy="missing-players">Loading missing players…</div>';
+    h += '</div>'; 
     h += '</div>';
     h += '</div>'; // close MATCH main panel
 
