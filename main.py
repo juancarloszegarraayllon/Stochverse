@@ -4376,8 +4376,13 @@ async def debug_flashlive_data(ticker: str):
             # Try multiple endpoint variants to find the right ones
             result["stage_data"] = await _fl_get("/v1/tournaments/stages/data", {"tournament_stage_id": stage_id})
             result["standings_tabs"] = await _fl_get("/v1/tournaments/standings/tabs", {"tournament_stage_id": stage_id, "tournament_season_id": season_id})
-            result["standings_form"] = "has_data" if await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": "form", "tournament_season_id": season_id}) else None
-            result["standings_home"] = "has_data" if await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": "home", "tournament_season_id": season_id}) else None
+            # Try every possible top scorers variant
+            result["ts_top_scorers"] = "has_data" if await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": "top_scorers", "tournament_season_id": season_id}) else None
+            result["ts_TOP_SCORERS"] = "has_data" if await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": "TOP_SCORERS", "tournament_season_id": season_id}) else None
+            result["ts_topscorers"] = "has_data" if await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": "topscorers", "tournament_season_id": season_id}) else None
+            result["ts_top_scores"] = "has_data" if await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": "top_scores", "tournament_season_id": season_id}) else None
+            result["ts_scorers"] = "has_data" if await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": "scorers", "tournament_season_id": season_id}) else None
+            result["ts_goals"] = "has_data" if await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": "goals", "tournament_season_id": season_id}) else None
         # Show first standings row keys
         st = result.get("standings_raw")
         if st and isinstance(st, dict):
