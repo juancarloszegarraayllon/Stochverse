@@ -4412,17 +4412,12 @@ async def debug_top_scorers(stage_id: str, season_id: str):
     if not data:
         return {"error": "no data"}
     # Show structure: top-level keys, first group keys, first row keys
-    result = {"top_keys": list(data.keys()) if isinstance(data, dict) else type(data).__name__}
-    groups = data.get("DATA") or []
-    if groups and isinstance(groups, list) and groups:
-        result["first_group_keys"] = list(groups[0].keys()) if isinstance(groups[0], dict) else "?"
-        rows = groups[0].get("ROWS") or []
-        if rows:
-            result["first_row"] = rows[0]
-            result["row_count"] = len(rows)
-        else:
-            result["group_content"] = str(groups[0])[:500]
-    return result
+    rows = data.get("ROWS") or []
+    return {
+        "top_keys": list(data.keys()) if isinstance(data, dict) else "?",
+        "row_count": len(rows),
+        "first_row": rows[0] if rows else None,
+    }
 
 
 @app.get("/api/flashlive_status")

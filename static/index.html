@@ -4143,14 +4143,18 @@ async function _loadStandings(container, ticker) {
     var data = d.data || {};
     var homeName = (d.home_name || "").toLowerCase();
     var awayName = (d.away_name || "").toLowerCase();
-    var groups = data.DATA || data.data || [];
-    if (!Array.isArray(groups)) groups = [groups];
     var rows = [];
-    for (var gi = 0; gi < groups.length; gi++) {
-      var grp = groups[gi];
-      var grpRows = grp.ROWS || grp.rows || [];
-      if (!Array.isArray(grpRows)) continue;
-      for (var ri = 0; ri < grpRows.length; ri++) rows.push(grpRows[ri]);
+    if (data.ROWS && Array.isArray(data.ROWS)) {
+      rows = data.ROWS;
+    } else {
+      var groups = data.DATA || data.data || [];
+      if (!Array.isArray(groups)) groups = [groups];
+      for (var gi = 0; gi < groups.length; gi++) {
+        var grp = groups[gi];
+        var grpRows = grp.ROWS || grp.rows || [];
+        if (!Array.isArray(grpRows)) continue;
+        for (var ri = 0; ri < grpRows.length; ri++) rows.push(grpRows[ri]);
+      }
     }
     if (!rows.length) {
       // Show raw data for debugging
@@ -4381,14 +4385,18 @@ async function _loadStandingsType(container, ticker, standingType) {
     var d = await r.json();
     if (d.error) { container.innerHTML = '<div class="ed-stats-loading">' + escH(d.error) + '</div>'; return; }
     var data = d.data || {};
-    var groups = data.DATA || data.data || [];
-    if (!Array.isArray(groups)) groups = [groups];
     var rows = [];
-    for (var gi = 0; gi < groups.length; gi++) {
-      var grp = groups[gi];
-      var grpRows = grp.ROWS || grp.rows || [];
-      if (!Array.isArray(grpRows)) continue;
-      for (var ri = 0; ri < grpRows.length; ri++) rows.push(grpRows[ri]);
+    if (data.ROWS && Array.isArray(data.ROWS)) {
+      rows = data.ROWS;
+    } else {
+      var groups = data.DATA || data.data || [];
+      if (!Array.isArray(groups)) groups = [groups];
+      for (var gi = 0; gi < groups.length; gi++) {
+        var grp = groups[gi];
+        var grpRows = grp.ROWS || grp.rows || [];
+        if (!Array.isArray(grpRows)) continue;
+        for (var ri = 0; ri < grpRows.length; ri++) rows.push(grpRows[ri]);
+      }
     }
     if (!rows.length) {
       container.innerHTML = '<div class="ed-stats-loading">No data available.</div>';
