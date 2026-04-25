@@ -4117,6 +4117,17 @@ async def sportsdb_probe():
     except Exception as e:
         return {"error": str(e)}
 
+async def _find_fl_game(found: dict):
+    """Find a FlashLive game for a Kalshi event, with on-demand search fallback."""
+    title = found.get("title", "")
+    sport = found.get("_sport", "")
+    from flashlive_feed import match_game as flash_match, search_flashlive_event
+    g = flash_match(title, sport)
+    if not g:
+        g = await search_flashlive_event(title, sport)
+    return g
+
+
 @app.get("/api/event/{ticker}/h2h")
 async def get_event_h2h(ticker: str):
     """Fetch H2H data from FlashLive for this event."""
@@ -4132,7 +4143,7 @@ async def get_event_h2h(ticker: str):
         return {"error": "event not found"}
     try:
         from flashlive_feed import match_game as flash_match, fetch_event_h2h
-        g = flash_match(found.get("title", ""), found.get("_sport", ""))
+        g = await _find_fl_game(found)
         if not g:
             return {"error": "no FlashLive match found"}
         fl_id = g.get("event_id")
@@ -4167,7 +4178,7 @@ async def get_event_standings(ticker: str, standing_type: str = "overall"):
         return {"error": "event not found"}
     try:
         from flashlive_feed import match_game as flash_match, _fl_get
-        g = flash_match(found.get("title", ""), found.get("_sport", ""))
+        g = await _find_fl_game(found)
         if not g:
             return {"error": "no FlashLive match found"}
         stage_id = g.get("tournament_stage_id", "")
@@ -4206,7 +4217,7 @@ async def get_event_topscorers(ticker: str):
         return {"error": "event not found"}
     try:
         from flashlive_feed import match_game as flash_match, fetch_top_scorers
-        g = flash_match(found.get("title", ""), found.get("_sport", ""))
+        g = await _find_fl_game(found)
         if not g:
             return {"error": "no FlashLive match found"}
         stage_id = g.get("tournament_stage_id", "")
@@ -4236,7 +4247,7 @@ async def get_event_news(ticker: str):
         return {"error": "event not found"}
     try:
         from flashlive_feed import match_game as flash_match, fetch_event_news
-        g = flash_match(found.get("title", ""), found.get("_sport", ""))
+        g = await _find_fl_game(found)
         if not g:
             return {"error": "no FlashLive match found"}
         fl_id = g.get("event_id")
@@ -4265,7 +4276,7 @@ async def get_event_commentary(ticker: str):
         return {"error": "event not found"}
     try:
         from flashlive_feed import match_game as flash_match, fetch_event_commentary
-        g = flash_match(found.get("title", ""), found.get("_sport", ""))
+        g = await _find_fl_game(found)
         if not g:
             return {"error": "no FlashLive match found"}
         fl_id = g.get("event_id")
@@ -4294,7 +4305,7 @@ async def get_event_player_stats(ticker: str):
         return {"error": "event not found"}
     try:
         from flashlive_feed import match_game as flash_match
-        g = flash_match(found.get("title", ""), found.get("_sport", ""))
+        g = await _find_fl_game(found)
         if not g:
             return {"error": "no FlashLive match found"}
         fl_id = g.get("event_id")
@@ -4329,7 +4340,7 @@ async def debug_flashlive_data(ticker: str):
             fetch_event_summary, fetch_event_commentary, fetch_event_news,
             fetch_standings,
         )
-        g = flash_match(found.get("title", ""), found.get("_sport", ""))
+        g = await _find_fl_game(found)
         if not g:
             return {"error": "no FlashLive match", "title": found.get("title"), "sport": found.get("_sport")}
         fl_id = g.get("event_id")

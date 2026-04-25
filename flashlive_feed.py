@@ -27,7 +27,7 @@ API_KEY = os.environ.get("FLASHLIVE_API_KEY", "").strip()
 API_HOST = "flashlive-sports.p.rapidapi.com"
 BASE_URL = f"https://{API_HOST}"
 
-POLL_INTERVAL = 60  # seconds between polls (conserve API quota)
+POLL_INTERVAL = 120  # seconds between polls (conserve API quota)
 
 # Only poll sports that Kalshi actively covers to save requests.
 # Each sport = 1 API call per poll cycle.
@@ -128,19 +128,15 @@ async def _fetch_live_events():
     all_events = []
     raw_samples = []
     errors = []
-    # Fetch 3 days: yesterday (-1), today (0), tomorrow (1)
-    # This ensures pre-match, live, and recently-finished events all appear.
-    days = ["-1", "0", "1"]
     async with httpx.AsyncClient(timeout=15.0) as client:
         for sport_id, sport_name in ACTIVE_SPORTS.items():
-          for day in days:
             try:
                 r = await client.get(
                     f"{BASE_URL}/v1/events/list",
                     headers=headers,
                     params={
                         "sport_id": sport_id,
-                        "indent_days": day,
+                        "indent_days": "0",
                         "timezone": "-4",
                         "locale": "en_INT",
                     },
@@ -180,9 +176,9 @@ async def _fetch_live_events():
                             "first_item_preview": str(first)[:800],
                         })
                 else:
-                    errors.append(f"{sport_name} d{day}: HTTP {r.status_code} - {r.text[:200]}")
+                    errors.append(f"{sport_name}: HTTP {r.status_code} - {r.text[:200]}")
             except Exception as e:
-                errors.append(f"{sport_name} d{day}: {str(e)[:200]}")
+                errors.append(f"{sport_name}: {str(e)[:200]}")
     STATUS["last_error"] = errors[0] if errors else ("no events found" if not all_events else None)
     STATUS["all_errors"] = errors[:5]
     STATUS["raw_samples"] = raw_samples
@@ -434,6 +430,54 @@ def find_flashlive_event_id(title: str, sport: str = ""):
 def find_flashlive_game(title: str, sport: str = ""):
     """Find the full FlashLive game dict matching the title."""
     return match_game(title, sport)
+
+
+async def search_flashlive_event(title: str, sport: str = ""):
+    """On-demand search when the background feed doesn't have the event
+    (e.g. tomorrow's matches). Uses the search endpoint."""
+    # First try the cached GAMES
+    g = match_game(title, sport)
+    if g:
+        return g
+    # Search FlashLive
+    import re
+    parts = re.split(r'\s+(?:vs\.?|v|at)\s+', title, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) < 2:
+        return None
+    query = parts[0].strip() + " " + parts[1].strip()
+    data = await _fl_get("/v1/search/multi-search", {"query": query})
+    if not data:
+        return None
+    results = data.get("DATA") or data.get("data") or []
+    if not isinstance(results, list):
+        return None
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if item.get("TYPE") != "event" and item.get("type") != "event":
+            continue
+        ev = item
+        event_id = ev.get("ID") or ev.get("EVENT_ID") or ""
+        if not event_id:
+            continue
+        # Try to get tournament info from the search result
+        stage_id = ev.get("TOURNAMENT_STAGE_ID") or ""
+        season_id = ev.get("TOURNAMENT_SEASON_ID") or ev.get("TOURNAMENT_ID") or ""
+        home = ev.get("HOME_NAME") or ev.get("PARTICIPANT_HOME") or ""
+        away = ev.get("AWAY_NAME") or ev.get("PARTICIPANT_AWAY") or ""
+        league = ev.get("TOURNAMENT_NAME") or ev.get("LEAGUE") or ""
+        return {
+            "event_id": event_id,
+            "home_name": home,
+            "away_name": away,
+            "sport": sport,
+            "league": league,
+            "tournament_id": season_id,
+            "tournament_stage_id": stage_id,
+            "tournament_season_id": season_id,
+            "state": "pre",
+        }
+    return None
 
 
 async def run_flashlive_feed():
