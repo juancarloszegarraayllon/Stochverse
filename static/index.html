@@ -4498,6 +4498,7 @@ window.switchMatchTab = function(btn) {
       ticker = ticker ? ticker.ticker : '';
       if (target === 'commentary') _loadCommentary(lazy, ticker);
       else if (target === 'player-stats') _loadPlayerStats(lazy, ticker);
+      else if (target === 'missing-players') _loadMissingPlayers(lazy, ticker); 
     }
   }
 };
