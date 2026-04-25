@@ -5642,6 +5642,8 @@ def _parse_flashlive_lineups(fl_data):
             away_players = []
             home_subs = []
             away_subs = []
+            home_formation = ""
+            away_formation = ""
             for entry in items:
                 fname = entry.get("FORMATION_NAME") or ""
                 pgt = entry.get("PLAYER_GROUP_TYPE")
@@ -5655,6 +5657,13 @@ def _parse_flashlive_lineups(fl_data):
                         target_list = away_subs if is_sub else away_players
                     if target_list is None:
                         continue
+                    # Extract formation (e.g. "1-4-4-2") from FORMATION_DISPOSTION
+                    disp = f.get("FORMATION_DISPOSTION") or ""
+                    if disp and not is_sub:
+                        if fline == 1 and not home_formation:
+                            home_formation = disp
+                        elif fline == 2 and not away_formation:
+                            away_formation = disp
                     for p in (f.get("MEMBERS") or []):
                         player_type = p.get("PLAYER_TYPE")
                         pos = ""
@@ -5668,8 +5677,8 @@ def _parse_flashlive_lineups(fl_data):
             if not home_players and not away_players:
                 return None
             return {
-                "home": {"formation": "", "players": home_players, "substitutes": home_subs},
-                "away": {"formation": "", "players": away_players, "substitutes": away_subs},
+                "home": {"formation": home_formation, "players": home_players, "substitutes": home_subs},
+                "away": {"formation": away_formation, "players": away_players, "substitutes": away_subs},
             }
         else:
             # Soccer-style: DATA[0]=home, DATA[1]=away
