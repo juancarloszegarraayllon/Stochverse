@@ -4611,13 +4611,20 @@ window.switchSBTab = function(btn) {
   var panel = btn.closest(".ed-sb-main") || btn.closest(".ed-stats-panel");
   if (!panel) return;
   var target = btn.getAttribute("data-panel");
-  var tabs = panel.querySelectorAll(":scope > .ed-sb-tabs > .ed-sb-tab, :scope > .ed-sb-sub-tabs > .ed-sb-tab");
-  for (var i = 0; i < tabs.length; i++) {
-    tabs[i].classList.toggle("active", tabs[i].getAttribute("data-panel") === target);
+  // Toggle tab buttons
+  var tabRow = btn.closest(".ed-sb-tabs") || btn.closest(".ed-sb-sub-tabs");
+  if (tabRow) {
+    var tabs = tabRow.querySelectorAll(".ed-sb-tab");
+    for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle("active", tabs[i].getAttribute("data-panel") === target);
   }
-  var panels = panel.querySelectorAll(":scope > .ed-sb-panel");
-  for (var j = 0; j < panels.length; j++) {
-    panels[j].classList.toggle("active", panels[j].getAttribute("data-panel") === target);
+  // Toggle panels — find ALL panels in this container, not just direct children
+  var allPanels = panel.querySelectorAll(".ed-sb-panel");
+  for (var j = 0; j < allPanels.length; j++) {
+    var p = allPanels[j];
+    // Only toggle panels at the same level (matching the tab row's sibling panels)
+    if (p.getAttribute("data-panel") && p.parentNode === panel) {
+      p.classList.toggle("active", p.getAttribute("data-panel") === target);
+    }
   }
   var activePanel = panel.querySelector('.ed-sb-panel[data-panel="' + target + '"]');
   if (activePanel) {

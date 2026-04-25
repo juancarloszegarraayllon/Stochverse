@@ -5621,64 +5621,92 @@ def get_event_history(ticker: str, hours: int = 24, period: int = 60, debug: boo
 
 
 def _parse_flashlive_lineups(fl_data):
-    """Parse FlashLive lineups response into our standard format.
-    FlashLive format: DATA = [{FORMATION_NAME, FORMATIONS: [{FORMATION_LINE, MEMBERS}]}]
-    DATA has 2 entries: index 0 = home, index 1 = away."""
+    """Parse FlashLive lineups. Handles both soccer (DATA[0]=home, DATA[1]=away)
+    and NHL (each entry has FORMATIONS with FORMATION_LINE 1=home, 2=away)."""
     try:
         data = fl_data if isinstance(fl_data, dict) else {}
         items = data.get("DATA") or []
-        if not isinstance(items, list) or len(items) < 2:
+        if not isinstance(items, list) or not items:
             return None
-        result = {}
-        for idx, side in enumerate(["home", "away"]):
-            if idx >= len(items):
+        # Check if this is NHL-style (FORMATION_LINE separates teams)
+        # or soccer-style (DATA[0]=home, DATA[1]=away)
+        first = items[0] if items else {}
+        formations = first.get("FORMATIONS") or []
+        is_nhl_style = False
+        for f in formations:
+            if isinstance(f, dict) and f.get("FORMATION_LINE") is not None:
+                is_nhl_style = True
                 break
-            entry = items[idx]
-            if not isinstance(entry, dict):
-                continue
-            formation = entry.get("FORMATION_NAME") or ""
-            formations = entry.get("FORMATIONS") or []
-            starters = []
-            subs = []
-            for line in formations:
-                if not isinstance(line, dict):
-                    continue
-                members = line.get("MEMBERS") or []
-                for p in members:
-                    if not isinstance(p, dict):
+        if is_nhl_style:
+            home_players = []
+            away_players = []
+            home_subs = []
+            away_subs = []
+            for entry in items:
+                fname = entry.get("FORMATION_NAME") or ""
+                pgt = entry.get("PLAYER_GROUP_TYPE")
+                is_sub = "substit" in fname.lower() or "coach" in fname.lower()
+                for f in (entry.get("FORMATIONS") or []):
+                    fline = f.get("FORMATION_LINE", 0)
+                    target_list = None
+                    if fline == 1:
+                        target_list = home_subs if is_sub else home_players
+                    elif fline == 2:
+                        target_list = away_subs if is_sub else away_players
+                    if target_list is None:
                         continue
-                    player = {
-                        "name": p.get("PLAYER_FULL_NAME") or p.get("SHORT_NAME") or "",
-                        "jerseyNumber": p.get("PLAYER_NUMBER"),
-                        "position": "",
-                    }
-                    pos_id = p.get("PLAYER_POSITION_ID")
-                    if pos_id == 1:
-                        player["position"] = "GK"
-                    elif pos_id == 2:
-                        player["position"] = "DEF"
-                    elif pos_id == 3:
-                        player["position"] = "MID"
-                    elif pos_id == 4:
-                        player["position"] = "FWD"
-                    player_type = p.get("PLAYER_TYPE") or p.get("PLAYER_GROUP_TYPE")
-                    if player_type == 2:
-                        subs.append(player)
-                    else:
-                        starters.append(player)
-            # Also check PLAYER_GROUP_TYPE at the top level for subs
-            pgt = entry.get("PLAYER_GROUP_TYPE")
-            if pgt == 2:
-                subs = starters + subs
-                starters = []
-            result[side] = {
-                "formation": formation,
-                "players": starters,
-                "substitutes": subs,
+                    for p in (f.get("MEMBERS") or []):
+                        player_type = p.get("PLAYER_TYPE")
+                        pos = ""
+                        if player_type == 3 or "(G)" in (p.get("PLAYER_FULL_NAME") or ""):
+                            pos = "G"
+                        target_list.append({
+                            "name": p.get("PLAYER_FULL_NAME") or p.get("SHORT_NAME") or "",
+                            "jerseyNumber": p.get("PLAYER_NUMBER"),
+                            "position": pos,
+                        })
+            if not home_players and not away_players:
+                return None
+            return {
+                "home": {"formation": "", "players": home_players, "substitutes": home_subs},
+                "away": {"formation": "", "players": away_players, "substitutes": away_subs},
             }
-        if not result:
-            return None
-        return result
+        else:
+            # Soccer-style: DATA[0]=home, DATA[1]=away
+            result = {}
+            for idx, side in enumerate(["home", "away"]):
+                if idx >= len(items):
+                    break
+                entry = items[idx]
+                if not isinstance(entry, dict):
+                    continue
+                formation = entry.get("FORMATION_NAME") or ""
+                starters = []
+                subs = []
+                for f in (entry.get("FORMATIONS") or []):
+                    for p in (f.get("MEMBERS") or []):
+                        pos = ""
+                        pos_id = p.get("PLAYER_POSITION_ID")
+                        ptype = p.get("PLAYER_TYPE")
+                        if ptype == 3:
+                            pos = "GK"
+                        elif pos_id == 2:
+                            pos = "DEF"
+                        elif pos_id == 3:
+                            pos = "MID"
+                        elif pos_id == 4:
+                            pos = "FWD"
+                        player = {
+                            "name": p.get("PLAYER_FULL_NAME") or p.get("SHORT_NAME") or "",
+                            "jerseyNumber": p.get("PLAYER_NUMBER"),
+                            "position": pos,
+                        }
+                        if p.get("PLAYER_POSITION_ID") == 2:
+                            subs.append(player)
+                        else:
+                            starters.append(player)
+                result[side] = {"formation": formation, "players": starters, "substitutes": subs}
+            return result if result else None
     except Exception:
         return None
 
