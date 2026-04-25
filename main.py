@@ -4406,14 +4406,23 @@ async def debug_flashlive_data(ticker: str):
 
 @app.get("/api/debug_ts/{stage_id}/{season_id}")
 async def debug_top_scorers(stage_id: str, season_id: str):
-    """Try all possible standing_type values for top scorers."""
+    """Show raw top_scores response structure."""
     from flashlive_feed import _fl_get
-    variants = ["top_scorers", "TOP_SCORERS", "topscorers", "top_scores", "scorers", "goals", "top-scorers"]
-    results = {}
-    for v in variants:
-        data = await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": v, "tournament_season_id": season_id})
-        results[v] = "HAS DATA" if data else None
-    return results
+    data = await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": "top_scores", "tournament_season_id": season_id})
+    if not data:
+        return {"error": "no data"}
+    # Show structure: top-level keys, first group keys, first row keys
+    result = {"top_keys": list(data.keys()) if isinstance(data, dict) else type(data).__name__}
+    groups = data.get("DATA") or []
+    if groups and isinstance(groups, list) and groups:
+        result["first_group_keys"] = list(groups[0].keys()) if isinstance(groups[0], dict) else "?"
+        rows = groups[0].get("ROWS") or []
+        if rows:
+            result["first_row"] = rows[0]
+            result["row_count"] = len(rows)
+        else:
+            result["group_content"] = str(groups[0])[:500]
+    return result
 
 
 @app.get("/api/flashlive_status")
