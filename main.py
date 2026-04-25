@@ -4289,7 +4289,35 @@ async def get_event_commentary(ticker: str):
     except Exception as e:
         return {"error": str(e)[:200]}
 
-
+@app.get("/api/event/{ticker}/missing-players")
+async def get_event_missing_players(ticker: str):
+    """Fetch list of injured/suspended/unavailable players from FlashLive."""
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = None
+    for r in records:
+        if r.get("event_ticker") == ticker:
+            found = r
+            break
+    if not found:
+        return {"error": "event not found"}
+    try:
+        from flashlive_feed import match_game as flash_match
+        g = await _find_fl_game(found)
+        if not g:
+            return {"error": "no FlashLive match found"}
+        fl_id = g.get("event_id")
+        if not fl_id:
+            return {"error": "no FlashLive event ID"}
+        from flashlive_feed import _fl_get
+        data = await _fl_get("/v1/events/missing-players", {"event_id": fl_id})
+        if not data:
+            return {"error": "no missing players data available"}
+        return {"data": data, "home_name": g.get("home_name", ""),
+                "away_name": g.get("away_name", ""), "source": "flashlive"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
 @app.get("/api/event/{ticker}/player-stats")
 async def get_event_player_stats(ticker: str):
     """Fetch player statistics from FlashLive for this event."""
