@@ -4404,6 +4404,18 @@ async def debug_flashlive_data(ticker: str):
         return {"error": str(e), "traceback": traceback.format_exc()[:1000]}
 
 
+@app.get("/api/debug_ts/{stage_id}/{season_id}")
+async def debug_top_scorers(stage_id: str, season_id: str):
+    """Try all possible standing_type values for top scorers."""
+    from flashlive_feed import _fl_get
+    variants = ["top_scorers", "TOP_SCORERS", "topscorers", "top_scores", "scorers", "goals", "top-scorers"]
+    results = {}
+    for v in variants:
+        data = await _fl_get("/v1/tournaments/standings", {"tournament_stage_id": stage_id, "standing_type": v, "tournament_season_id": season_id})
+        results[v] = "HAS DATA" if data else None
+    return results
+
+
 @app.get("/api/flashlive_status")
 def flashlive_status():
     """Debug endpoint: reports the FlashLive feed state."""
