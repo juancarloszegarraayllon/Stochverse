@@ -6130,6 +6130,14 @@ def _parse_flashlive_lineups(fl_data):
                             "name": p.get("PLAYER_FULL_NAME") or p.get("SHORT_NAME") or "",
                             "jerseyNumber": p.get("PLAYER_NUMBER"),
                             "position": pos,
+                            # LPR: FlashLive's match rating (string,
+                            # e.g. "7.3"). LRR: man-of-the-match rank
+                            # ("1"/"2"/"3"). INCIDENTS: int codes for
+                            # goals/cards/subs/assists. Pass through
+                            # raw so the frontend renders them.
+                            "rating": p.get("LPR"),
+                            "rrank": p.get("LRR"),
+                            "incidents": p.get("INCIDENTS") or [],
                         })
             if not home_players and not away_players:
                 return None
@@ -6176,6 +6184,12 @@ def _parse_flashlive_lineups(fl_data):
                             "name": p.get("PLAYER_FULL_NAME") or p.get("SHORT_NAME") or "",
                             "jerseyNumber": p.get("PLAYER_NUMBER"),
                             "position": pos,
+                            # See NHL branch above — LPR / LRR /
+                            # INCIDENTS power the inline ratings and
+                            # event icons in the lineup view.
+                            "rating": p.get("LPR"),
+                            "rrank": p.get("LRR"),
+                            "incidents": p.get("INCIDENTS") or [],
                         }
                         if p.get("PLAYER_POSITION_ID") == 2:
                             subs.append(player)
@@ -6274,50 +6288,87 @@ def _parse_flashlive_incidents(fl_data):
 
 def _parse_flashlive_stats(fl_data, title, sport):
     """Parse FlashLive statistics response into our standard stats
-    format for the sidebar panel."""
+    format for the sidebar panel.
+
+    FlashLive's stats endpoint nests data three levels deep:
+      DATA[].STAGE_NAME              (Match / 1st Half / 2nd Half)
+        .GROUPS[].GROUP_LABEL        (Top stats / Shots / Attack / ...)
+          .ITEMS[].INCIDENT_NAME     (Total shots, Ball possession, ...)
+
+    The original parser flattened all three levels into a single
+    deduped list, which is what the existing `stats` field used to
+    feed. We keep that for backward compatibility and add a new
+    `stats_grouped` payload that preserves the full structure so the
+    frontend can render stage sub-tabs and group section headers
+    matching FlashScore's stats view.
+    """
     try:
         import re
         parts = re.split(r'\s+(?:vs\.?|v|at)\s+', title, maxsplit=1, flags=re.IGNORECASE)
         home = parts[0].strip() if len(parts) >= 2 else "Home"
         away = parts[1].strip() if len(parts) >= 2 else "Away"
-        stats_list = []
-        # FlashLive returns DATA array with stat groups
+        flat_list: list = []  # legacy flat shape (Match-stage only)
+        stages: list = []     # nested shape: [{name, groups: [{label, items: [{name, home, away}]}]}]
         data = fl_data if isinstance(fl_data, list) else fl_data.get("DATA", [])
         if isinstance(data, list):
-            for group in data:
-                if not isinstance(group, dict):
+            for stage in data:
+                if not isinstance(stage, dict):
                     continue
-                # Each group has GROUPS with stat rows
-                for sg in (group.get("GROUPS") or [group]):
+                stage_name = stage.get("STAGE_NAME") or stage.get("name") or "Match"
+                stage_groups: list = []
+                groups_iter = stage.get("GROUPS") or [stage]
+                for sg in groups_iter:
                     if not isinstance(sg, dict):
                         continue
+                    group_label = sg.get("GROUP_LABEL") or sg.get("LABEL") or ""
+                    group_items: list = []
                     for item in (sg.get("ITEMS") or sg.get("items") or [sg]):
                         if not isinstance(item, dict):
                             continue
-                        name = item.get("INCIDENT_NAME") or item.get("NAME") or item.get("name") or ""
-                        hval = item.get("HOME") or item.get("home") or item.get("VALUE_HOME") or "0"
-                        aval = item.get("AWAY") or item.get("away") or item.get("VALUE_AWAY") or "0"
-                        if name:
-                            stats_list.append({
-                                "name": str(name),
-                                "home": str(hval),
-                                "away": str(aval),
-                            })
-        # Deduplicate — FlashLive returns match + per-half stats.
-        # Keep only the first occurrence of each stat name.
+                        name = (item.get("INCIDENT_NAME") or item.get("NAME")
+                                or item.get("name") or "")
+                        if not name:
+                            continue
+                        hval = (item.get("VALUE_HOME") or item.get("HOME")
+                                or item.get("home") or "0")
+                        aval = (item.get("VALUE_AWAY") or item.get("AWAY")
+                                or item.get("away") or "0")
+                        row = {
+                            "name": str(name),
+                            "home": str(hval),
+                            "away": str(aval),
+                        }
+                        group_items.append(row)
+                        # Legacy flat list: only the Match stage (avoids
+                        # duplicating stats across halves) and dedup by name.
+                        if stage_name == "Match":
+                            flat_list.append(row)
+                    if group_items:
+                        stage_groups.append({
+                            "label": group_label,
+                            "items": group_items,
+                        })
+                if stage_groups:
+                    stages.append({
+                        "name": str(stage_name),
+                        "groups": stage_groups,
+                    })
+        # Deduplicate the legacy flat list (existing renderer expects
+        # one row per stat name).
         seen = set()
-        deduped = []
-        for s in stats_list:
+        deduped: list = []
+        for s in flat_list:
             if s["name"] not in seen:
                 seen.add(s["name"])
                 deduped.append(s)
-        if not deduped:
+        if not deduped and not stages:
             return None
         return {
             "home": home,
             "away": away,
             "sport": sport,
             "stats": deduped,
+            "stats_grouped": stages,
             "source": "flashlive",
         }
     except Exception:
