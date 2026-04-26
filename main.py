@@ -4368,24 +4368,36 @@ async def get_event_player_stats(ticker: str):
     except Exception as e:
         return {"error": str(e)[:200]}
 
-# Fields FlashLive uses to label sub-tabs inside a single response.
-# H2H uses TAB_NAME ("Overall"/"Home"/"Away"), stats use STAGE_NAME
-# ("Match"/"1st Half"/"2nd Half"), lineups use FORMATION_NAME
-# ("Starting Lineups"/"Substitutes"/"Coaches"), some endpoints group
-# by GROUP_NAME or NAME. The capability scanner looks for any of
-# these on the first item of a DATA array to classify a Pattern-B
-# (nested-array) endpoint and surface the visible sub-labels.
-FL_SUB_LABEL_FIELDS = ("TAB_NAME", "STAGE_NAME", "FORMATION_NAME",
-                       "GROUP_NAME", "NAME")
+# FlashLive uses two distinct kinds of sub-section labels inside a
+# DATA array. We classify them so the frontend can decide what to do
+# with each.
+#
+#   navigation labels   FlashScore actually renders these as tabs.
+#                       TAB_NAME is the canonical (h2h: Overall/Home
+#                       /Away). FORMATION_NAME is the lineups
+#                       sectioning (Starting / Subs / Coaches).
+#
+#   grouping labels     Phase or partition labels embedded in
+#                       responses that are NOT user-facing tabs by
+#                       default. STAGE_NAME ("1st Half", "1st Inning")
+#                       is sometimes a tab (statistics) and sometimes
+#                       a grouping (summary-incidents). NAME and
+#                       GROUP_NAME tend to be data labels (team names
+#                       in predicted-lineups, group buckets in
+#                       standings) — the frontend should NOT blindly
+#                       render them as tabs.
+FL_NAV_LABEL_FIELDS = ("TAB_NAME", "FORMATION_NAME")
+FL_GROUPING_LABEL_FIELDS = ("STAGE_NAME", "GROUP_NAME", "NAME")
 
 
 def _detect_fl_pattern(obj):
     """Classify a FlashLive response for the capability map.
 
     Returns a small dict describing whether the endpoint produced
-    data, and if so what shape it took. The frontend uses this to
-    decide whether to render a single panel or a tab-strip with
-    sub-tabs.
+    data, and if so what shape it took. label_kind distinguishes
+    actual navigation tabs (rendered by FlashScore) from internal
+    groupings the frontend should not turn into tabs without manual
+    review.
     """
     if obj is None:
         return {"available": False}
@@ -4406,7 +4418,8 @@ def _detect_fl_pattern(obj):
     if not isinstance(first, dict):
         return {"available": True, "pattern": "list_of_primitives",
                 "count": len(items)}
-    for f in FL_SUB_LABEL_FIELDS:
+    # Prefer navigation fields; fall back to grouping fields.
+    for f in FL_NAV_LABEL_FIELDS:
         if f in first:
             labels = []
             for it in items:
@@ -4417,6 +4430,23 @@ def _detect_fl_pattern(obj):
             return {
                 "available": True,
                 "pattern": "nested_array",
+                "label_kind": "navigation",
+                "sub_label_field": f,
+                "sub_labels": labels,
+                "count": len(items),
+            }
+    for f in FL_GROUPING_LABEL_FIELDS:
+        if f in first:
+            labels = []
+            for it in items:
+                if isinstance(it, dict):
+                    val = it.get(f)
+                    if val and val not in labels:
+                        labels.append(str(val))
+            return {
+                "available": True,
+                "pattern": "nested_array",
+                "label_kind": "grouping",
                 "sub_label_field": f,
                 "sub_labels": labels,
                 "count": len(items),
@@ -4607,6 +4637,15 @@ async def debug_fl_capabilities(
             continue
         by_sport.setdefault(sp, []).append(g)
 
+    # Sort each sport's games to prefer events that actually have
+    # post-match content. h2h/news/commentary/lineups generally only
+    # populate for in-progress or finished events; sampling pre-game
+    # fixtures was producing 0/2 hit rates across the board on the
+    # first scan. Order: in > post > pre, then keep insertion order.
+    _state_rank = {"in": 0, "post": 1, "pre": 2}
+    for sp, games in by_sport.items():
+        games.sort(key=lambda g: _state_rank.get(g.get("state") or "pre", 9))
+
     EVENT_ENDPOINTS = [
         "/v1/events/data", "/v1/events/details", "/v1/events/brief",
         "/v1/events/summary", "/v1/events/summary-incidents",
@@ -4634,6 +4673,7 @@ async def debug_fl_capabilities(
     for sport, games in sorted(by_sport.items()):
         samples = games[:max(1, samples_per_sport)]
         ep_agg = {ep: {"hits": 0, "samples": 0, "patterns": set(),
+                       "label_kinds": set(),
                        "sub_label_field": None, "sub_labels": []}
                   for ep in EVENT_ENDPOINTS}
         st_hits: set = set()
@@ -4658,6 +4698,9 @@ async def debug_fl_capabilities(
                 pat = detect.get("pattern")
                 if pat:
                     ep_agg[ep]["patterns"].add(pat)
+                kind = detect.get("label_kind")
+                if kind:
+                    ep_agg[ep]["label_kinds"].add(kind)
                 f = detect.get("sub_label_field")
                 if f:
                     ep_agg[ep]["sub_label_field"] = f
@@ -4688,11 +4731,13 @@ async def debug_fl_capabilities(
         sport_caps = {
             "samples_used": len(samples),
             "sample_event_ids": [g.get("event_id") for g in samples],
+            "sample_states": [g.get("state") or "pre" for g in samples],
             "endpoints": {},
             "tournaments": {
                 "/v1/tournaments/standings": {
                     "available": bool(st_hits),
                     "pattern": "query_param_tabs",
+                    "label_kind": "navigation",
                     "param": "standing_type",
                     "values_with_data": sorted(st_hits),
                 },
@@ -4703,6 +4748,7 @@ async def debug_fl_capabilities(
                 "available": agg["hits"] > 0,
                 "hit_rate": f"{agg['hits']}/{agg['samples']}",
                 "patterns": sorted(agg["patterns"]),
+                "label_kinds": sorted(agg["label_kinds"]),
                 "sub_label_field": agg["sub_label_field"],
                 "sub_labels": agg["sub_labels"],
             }
