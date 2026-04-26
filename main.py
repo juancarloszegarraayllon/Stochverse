@@ -4810,6 +4810,13 @@ async def debug_flashlive_data(ticker: str):
         result["summary_raw"] = await fetch_event_summary(fl_id)
         result["commentary_raw"] = await fetch_event_commentary(fl_id)
         result["news_raw"] = await fetch_event_news(fl_id)
+        # Pull h2h + player-stats raw too — needed when a renderer
+        # claim "missing fields" comes in and we want to diff our
+        # frontend against everything FlashLive actually returns.
+        result["h2h_raw"] = await _fl_get("/v1/events/h2h", {"event_id": fl_id})
+        result["player_stats_raw"] = await _fl_get("/v1/events/player-stats", {"event_id": fl_id})
+        result["predicted_lineups_raw"] = await _fl_get("/v1/events/predicted-lineups", {"event_id": fl_id})
+        result["missing_players_raw"] = await _fl_get("/v1/events/missing-players", {"event_id": fl_id})
         if stage_id:
             result["standings_raw"] = await fetch_standings(stage_id, season_id)
             # Try multiple endpoint variants to find the right ones
