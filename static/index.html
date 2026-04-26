@@ -325,20 +325,39 @@ html,body{overscroll-behavior:none}
 .h2h-rows{display:flex;flex-direction:column}
 .h2h-row{display:flex;align-items:center;gap:4px;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px;min-height:28px}
 .h2h-date{flex:0 0 52px;font-size:10px;color:var(--text-muted);font-variant-numeric:tabular-nums}
-.h2h-league{flex:0 0 28px;font-size:9px;font-weight:700;color:var(--text-muted);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.h2h-team{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.h2h-home{text-align:right}
-.h2h-away{text-align:left}
-.h2h-name{color:var(--text-dim)}
+.h2h-league{flex:0 0 32px;font-size:9px;font-weight:700;color:var(--text-muted);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.h2h-team{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;display:flex;align-items:center;gap:4px}
+.h2h-home{justify-content:flex-end}
+.h2h-away{justify-content:flex-start}
+.h2h-crest{width:14px;height:14px;flex-shrink:0;object-fit:contain}
+.h2h-name{color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .h2h-hl .h2h-name{color:var(--text)}
-.h2h-winner{font-weight:700}
-.h2h-score{flex:0 0 38px;text-align:center;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+.h2h-winner{font-weight:700;color:var(--text)}
+.h2h-score{flex:0 0 46px;text-align:center;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+.h2h-stage{font-size:8px;font-weight:600;color:var(--text-muted);margin-left:2px}
 .h2h-badge{flex:0 0 20px;width:20px;height:20px;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff}
 .h2h-win{background:#4caf50}
 .h2h-loss{background:#f44336}
 .h2h-draw{background:#666}
 .h2h-show-more{display:block;width:100%;padding:8px 0;background:transparent;border:none;color:var(--green);font-family:inherit;font-size:11px;font-weight:600;cursor:pointer;text-align:center;text-decoration:underline;text-underline-offset:2px}
 .h2h-show-more:hover{color:var(--text)}
+.ps-cat-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:8px;overflow-x:auto;scrollbar-width:thin}
+.ps-cat-tabs .ed-sb-tab{flex:0 0 auto;padding:6px 8px;font-size:9px}
+.ps-team-header{display:flex;align-items:center;gap:6px;margin:10px 0 4px;padding:4px 0;border-bottom:1px solid var(--border)}
+.ps-team-crest{width:18px;height:18px;object-fit:contain;flex-shrink:0}
+.ps-team-name{font-size:11px;font-weight:700;color:var(--text);flex:1}
+.ps-team-side{font-size:9px;font-weight:700;color:var(--text-muted);letter-spacing:0.5px}
+.ps-table-wrap{overflow-x:auto;margin-bottom:8px}
+.ps-table{width:100%;font-size:10px;border-collapse:collapse}
+.ps-table thead tr{color:var(--text-muted);border-bottom:1px solid var(--border)}
+.ps-table th{padding:4px 4px;text-align:center;font-weight:600;white-space:nowrap}
+.ps-table th.ps-col-name{text-align:left}
+.ps-table tbody tr{border-bottom:1px solid var(--border)}
+.ps-table tbody tr:last-child{border-bottom:0}
+.ps-table td{padding:4px 4px;text-align:center;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ps-table td.ps-col-name{text-align:left;display:flex;align-items:center;gap:6px}
+.ps-pos{font-size:8px;font-weight:700;color:var(--text-muted);background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:2px;flex-shrink:0}
+.ps-pname{color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ed-tl-item{display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px}
 .ed-tl-item:last-child{border-bottom:0}
 .ed-tl-time{min-width:28px;color:var(--text-muted);font-weight:700;font-variant-numeric:tabular-nums;text-align:right;flex-shrink:0}
@@ -4153,13 +4172,27 @@ function _loadH2HSubTab(container, ticker, tabIdx) {
 }
 
 function _renderH2HRow(m, homeName, awayName) {
-  var home = m.HOME_PARTICIPANT || m.HOME_PARTICIPANT_NAME_ONE || "";
-  var away = m.AWAY_PARTICIPANT || m.AWAY_PARTICIPANT_NAME_ONE || "";
+  // Strip the leading "*" FlashLive uses to mark the actual home team —
+  // the field naming already conveys that, so the asterisk is noise.
+  var home = (m.HOME_PARTICIPANT_NAME_ONE || m.HOME_PARTICIPANT || "").replace(/^\*/, "");
+  var away = (m.AWAY_PARTICIPANT_NAME_ONE || m.AWAY_PARTICIPANT || "").replace(/^\*/, "");
   var hs = m.HOME_SCORE_FULL != null ? m.HOME_SCORE_FULL : "";
   var as2 = m.AWAY_SCORE_FULL != null ? m.AWAY_SCORE_FULL : "";
-  var result = m.H_RESULT || "";
+  var result = (m.H_RESULT || "").toUpperCase();
   var league = m.EVENT_NAME || "";
-  var leagueShort = league.length > 20 ? league.substring(0, 18) + "…" : league;
+  // EVENT_ACRONYM is FlashLive's compact tournament code (LPF, COP, CLP,
+  // CF, PN, etc). Render it directly — it's always 2-4 chars and fits
+  // the cell without truncation.
+  var acronym = m.EVENT_ACRONYM || "";
+  var leagueLabel = acronym || (league.length > 6 ? league.substring(0, 5) + "…" : league);
+  // STAGE = AFTER_PENALTIES / AFTER_EXTRA_TIME flags get a (P) / (AET)
+  // suffix on the score; FINISHED has no suffix.
+  var stage = (m.STAGE || "").toUpperCase();
+  var stageSuffix = "";
+  if (stage === "AFTER_PENALTIES" || stage === "AP") stageSuffix = ' <span class="h2h-stage">(P)</span>';
+  else if (stage === "AFTER_EXTRA_TIME" || stage === "AET") stageSuffix = ' <span class="h2h-stage">(AET)</span>';
+  var homeImg = (m.HOME_IMAGES && m.HOME_IMAGES[0]) || "";
+  var awayImg = (m.AWAY_IMAGES && m.AWAY_IMAGES[0]) || "";
   var dateStr = "";
   if (m.START_TIME) {
     try {
@@ -4169,20 +4202,27 @@ function _renderH2HRow(m, homeName, awayName) {
   }
   var homeHL = homeName && home.toLowerCase().indexOf(homeName.toLowerCase()) >= 0;
   var awayHL = awayName && away.toLowerCase().indexOf(awayName.toLowerCase()) >= 0;
-  var homeWon = parseInt(hs) > parseInt(as2);
-  var awayWon = parseInt(as2) > parseInt(hs);
+  var hsNum = parseInt(hs, 10), asNum = parseInt(as2, 10);
+  var homeWon = !isNaN(hsNum) && !isNaN(asNum) && hsNum > asNum;
+  var awayWon = !isNaN(hsNum) && !isNaN(asNum) && asNum > hsNum;
   var badgeHTML = "";
   if (result === "WIN") badgeHTML = '<span class="h2h-badge h2h-win">W</span>';
-  else if (result === "LOSS") badgeHTML = '<span class="h2h-badge h2h-loss">L</span>';
+  else if (result === "LOSS" || result === "LOST") badgeHTML = '<span class="h2h-badge h2h-loss">L</span>';
   else if (result === "DRAW") badgeHTML = '<span class="h2h-badge h2h-draw">D</span>';
   var h = '<div class="h2h-row">';
   h += '<span class="h2h-date">' + escH(dateStr) + '</span>';
-  h += '<span class="h2h-league" title="' + escH(league) + '">' + escH(leagueShort) + '</span>';
+  h += '<span class="h2h-league" title="' + escH(league) + '">' + escH(leagueLabel) + '</span>';
+  // Home side: name (right-aligned), then crest closest to score
   h += '<span class="h2h-team h2h-home' + (homeHL ? ' h2h-hl' : '') + '">';
-  h += '<span class="h2h-name' + (homeWon ? ' h2h-winner' : '') + '">' + escH(home) + '</span></span>';
-  h += '<span class="h2h-score">' + escH(String(hs)) + ' - ' + escH(String(as2)) + '</span>';
+  h += '<span class="h2h-name' + (homeWon ? ' h2h-winner' : '') + '">' + escH(home) + '</span>';
+  if (homeImg) h += '<img class="h2h-crest" src="' + escH(homeImg) + '" alt="" loading="lazy">';
+  h += '</span>';
+  h += '<span class="h2h-score">' + escH(String(hs)) + '-' + escH(String(as2)) + stageSuffix + '</span>';
+  // Away side: crest closest to score, then name
   h += '<span class="h2h-team h2h-away' + (awayHL ? ' h2h-hl' : '') + '">';
-  h += '<span class="h2h-name' + (awayWon ? ' h2h-winner' : '') + '">' + escH(away) + '</span></span>';
+  if (awayImg) h += '<img class="h2h-crest" src="' + escH(awayImg) + '" alt="" loading="lazy">';
+  h += '<span class="h2h-name' + (awayWon ? ' h2h-winner' : '') + '">' + escH(away) + '</span>';
+  h += '</span>';
   h += badgeHTML;
   h += '</div>';
   return h;
@@ -4701,76 +4741,174 @@ async function _loadMissingPlayers(container, ticker) {
     container.innerHTML = '<div class="ed-stats-loading">Failed to load missing players.</div>';
   }
 }
+// Player Stats render: groups players by team and uses FlashLive's
+// own STATS_TYPE_GROUPS + STATS_TYPES catalog to drive the column
+// layout per category (Top stats / Shots / Attack / Passes / Defense
+// / Goalkeeping / General). Mirrors the FlashScore Player Stats tab
+// structure rather than collapsing everything into one fixed table.
 async function _loadPlayerStats(container, ticker) {
   container.innerHTML = '<div class="ed-stats-loading">Loading player stats…</div>';
   try {
     var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/player-stats");
     var d = await r.json();
     if (d.error) { container.innerHTML = '<div class="ed-stats-loading">' + escH(d.error) + '</div>'; return; }
-    var data = d.data || {};
-    var inner = data.DATA || data;
+    var inner = (d.data && d.data.DATA) || d.data || {};
     var players = inner.PLAYERS || [];
     var ratings = inner.RATINGS || [];
     var stats = inner.STATS || [];
     var teams = inner.TEAMS || [];
+    var typeGroups = inner.STATS_TYPE_GROUPS || [];
+    var typesCatalog = inner.STATS_TYPES || [];
     if (!players.length) { container.innerHTML = '<div class="ed-stats-loading">No player stats available.</div>'; return; }
-    // Build lookup: playerId -> {info, rating, statsByType}
+    // Index stat-type metadata for label/format lookups.
+    var typeMeta = {};
+    for (var ti = 0; ti < typesCatalog.length; ti++) {
+      typeMeta[typesCatalog[ti].ID] = typesCatalog[ti];
+    }
+    // Build per-player record: info + rating + stats keyed by TYPE_ID.
     var byPlayer = {};
-    for (var i = 0; i < players.length; i++) {
-      byPlayer[players[i].ID] = {info: players[i], rating: null, stats: {}};
+    for (var pi = 0; pi < players.length; pi++) {
+      byPlayer[players[pi].ID] = {info: players[pi], rating: null, stats: {}};
     }
     for (var ri = 0; ri < ratings.length; ri++) {
       var rt = ratings[ri];
       if (byPlayer[rt.PLAYER_ID]) byPlayer[rt.PLAYER_ID].rating = parseFloat(rt.VALUE);
     }
+    // FS_RATING also appears in the STATS array — keep both sources
+    // in sync so sorting/coloring works whether RATINGS is empty or
+    // not.
     for (var si = 0; si < stats.length; si++) {
       var s = stats[si];
-      if (byPlayer[s.PLAYER_ID]) byPlayer[s.PLAYER_ID].stats[s.TYPE_ID] = s.VALUE;
+      var rec = byPlayer[s.PLAYER_ID];
+      if (!rec) continue;
+      rec.stats[s.TYPE_ID] = s.VALUE;
+      if (s.TYPE_ID === "FS_RATING" && rec.rating == null) {
+        var fv = parseFloat(s.VALUE);
+        if (!isNaN(fv) && fv > 0) rec.rating = fv;
+      }
     }
-    // Build team name lookup
-    var teamNames = {};
-    for (var ti = 0; ti < teams.length; ti++) {
-      teamNames[teams[ti].ID] = teams[ti].NAME || teams[ti].THREE_CHAR_NAME || "";
-    }
-    // Sort by rating desc, players who didn't play (rating null or 0) at the end
-    var arr = Object.values(byPlayer);
-    arr.sort(function(a, b) {
-      var ra = a.rating || 0, rb = b.rating || 0;
-      return rb - ra;
+    // Group players by team, preserving HOME → AWAY order.
+    var teamsList = teams.slice().sort(function(a, b) {
+      var rank = function(t) { return (t.SIDE === "HOME") ? 0 : (t.SIDE === "AWAY" ? 1 : 2); };
+      return rank(a) - rank(b);
     });
-    var h = '<div style="overflow-x:auto"><table style="width:100%;font-size:10px;border-collapse:collapse">';
-    h += '<thead><tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">';
-    h += '<th style="text-align:left;padding:4px 2px">Player</th>';
-    h += '<th style="text-align:center;padding:4px 2px">Rtg</th>';
-    h += '<th style="text-align:center;padding:4px 2px">Shots</th>';
-    h += '<th style="text-align:center;padding:4px 2px">Pass</th>';
-    h += '<th style="text-align:center;padding:4px 2px">Tch</th>';
-    h += '</tr></thead><tbody>';
-    for (var pi = 0; pi < arr.length; pi++) {
-      var p = arr[pi];
-      var name = p.info.SHORT_DISPLAY_NAME || p.info.NAME || "";
-      var rating = p.rating;
-      var ratingStr = rating != null && rating > 0 ? rating.toFixed(1) : "-";
-      var ratingColor = rating >= 7.5 ? '#4caf50' : rating >= 6.5 ? 'var(--text)' : rating > 0 ? '#f44336' : 'var(--text-muted)';
-      var shots = p.stats.SHOTS_TOTAL || "0";
-      var passAcc = p.stats.PASSES_ACCURACY || "0%";
-      var passTotal = p.stats.PASSES_TOTAL || "0";
-      var touches = p.stats.TOUCHES_TOTAL || "0";
-      var passDisplay = passTotal !== "0" ? (passAcc + " (" + p.stats.PASSES_ACCURATE + "/" + passTotal + ")") : "-";
-      h += '<tr style="border-bottom:1px solid var(--border)">';
-      h += '<td style="text-align:left;padding:4px 2px">' + escH(name) + '</td>';
-      h += '<td style="text-align:center;padding:4px 2px;font-weight:700;color:' + ratingColor + '">' + escH(ratingStr) + '</td>';
-      h += '<td style="text-align:center;padding:4px 2px">' + escH(String(shots)) + '</td>';
-      h += '<td style="text-align:center;padding:4px 2px">' + escH(passDisplay) + '</td>';
-      h += '<td style="text-align:center;padding:4px 2px">' + escH(String(touches)) + '</td>';
-      h += '</tr>';
+    var byTeam = {};
+    for (var ki = 0; ki < teamsList.length; ki++) byTeam[teamsList[ki].ID] = [];
+    for (var pi2 = 0; pi2 < players.length; pi2++) {
+      var p2 = players[pi2];
+      var rec2 = byPlayer[p2.ID];
+      if (byTeam[p2.TEAM_ID]) byTeam[p2.TEAM_ID].push(rec2);
     }
-    h += '</tbody></table></div>';
+    // Sort each team's players: rated outfielders first (by rating
+    // desc), then unrated outfielders, then goalkeepers last.
+    var sortRoster = function(arr) {
+      arr.sort(function(a, b) {
+        var aGK = a.info.POSITION_IS_GOALKEEPER ? 1 : 0;
+        var bGK = b.info.POSITION_IS_GOALKEEPER ? 1 : 0;
+        if (aGK !== bGK) return aGK - bGK;
+        var ra = a.rating || 0, rb = b.rating || 0;
+        if (ra !== rb) return rb - ra;
+        return (a.info.SHORT_DISPLAY_NAME || "").localeCompare(b.info.SHORT_DISPLAY_NAME || "");
+      });
+    };
+    for (var tk in byTeam) sortRoster(byTeam[tk]);
+    // Determine usable category tabs. FlashLive sometimes ships
+    // groups like GENERAL that overlap heavily with TOP_STATS — keep
+    // them all so users can compare with FlashScore directly.
+    var groups = typeGroups.length ? typeGroups : [{
+      ID: "ALL", LABEL: "Stats", IS_GOALKEEPER_STAT: false,
+      TYPES: [{ID: "FS_RATING"}, {ID: "SHOTS_TOTAL"}, {ID: "PASSES_ACCURACY"}, {ID: "TOUCHES_TOTAL"}],
+    }];
+    // Stable ID for tab buttons so switching doesn't collide across
+    // re-renders.
+    var uid = "ps-" + Math.random().toString(36).slice(2, 8);
+    var h = '<div class="ps-cat-tabs">';
+    for (var gi = 0; gi < groups.length; gi++) {
+      h += '<button class="ed-sb-tab' + (gi === 0 ? ' active' : '') + '"'
+         + ' data-ps-grp="' + gi + '" onclick="window._psSwitchGroup(this)">'
+         + escH(groups[gi].LABEL || groups[gi].ID) + '</button>';
+    }
+    h += '</div>';
+    // Build one panel per group, only the first is visible.
+    for (var gi2 = 0; gi2 < groups.length; gi2++) {
+      var g = groups[gi2];
+      var typeIds = (g.TYPES || []).map(function(t) { return t.ID; });
+      // Rating label gets a tighter "Rtg" header in the table even
+      // though the catalog calls it "Rating".
+      h += '<div class="ps-grp-panel" data-ps-grp="' + gi2 + '"'
+         + ' style="display:' + (gi2 === 0 ? 'block' : 'none') + '">';
+      for (var tj = 0; tj < teamsList.length; tj++) {
+        var team = teamsList[tj];
+        var roster = byTeam[team.ID] || [];
+        if (!roster.length) continue;
+        var crestUrl = team.IMAGE
+          ? ('https://www.flashscore.com/res/image/data/' + team.IMAGE) : "";
+        h += '<div class="ps-team-header">';
+        if (crestUrl) h += '<img class="ps-team-crest" src="' + escH(crestUrl) + '" alt="" loading="lazy">';
+        h += '<span class="ps-team-name">' + escH(team.NAME || team.THREE_CHAR_NAME || "") + '</span>';
+        h += '<span class="ps-team-side">' + escH(team.SIDE || "") + '</span>';
+        h += '</div>';
+        h += '<div class="ps-table-wrap"><table class="ps-table">';
+        h += '<thead><tr><th class="ps-col-name">Player</th>';
+        for (var ci = 0; ci < typeIds.length; ci++) {
+          var meta = typeMeta[typeIds[ci]] || {};
+          var label = meta.LABEL || typeIds[ci];
+          if (typeIds[ci] === "FS_RATING") label = "Rtg";
+          h += '<th title="' + escH(meta.LABEL || "") + '">' + escH(label) + '</th>';
+        }
+        h += '</tr></thead><tbody>';
+        for (var pj = 0; pj < roster.length; pj++) {
+          var p = roster[pj];
+          var name = p.info.SHORT_DISPLAY_NAME || p.info.NAME || "";
+          var pos = p.info.POSITION_IS_GOALKEEPER ? "GK"
+            : (p.info.POSITION_NAME ? p.info.POSITION_NAME.substring(0, 3).toUpperCase() : "");
+          h += '<tr>';
+          h += '<td class="ps-col-name">'
+             + (pos ? '<span class="ps-pos">' + escH(pos) + '</span>' : '')
+             + '<span class="ps-pname">' + escH(name) + '</span></td>';
+          for (var ck = 0; ck < typeIds.length; ck++) {
+            var tid = typeIds[ck];
+            var raw = p.stats[tid];
+            var cellHTML;
+            if (tid === "FS_RATING") {
+              var rv = p.rating;
+              if (rv != null && rv > 0) {
+                var color = rv >= 7.5 ? '#4caf50' : rv >= 6.5 ? 'var(--text)' : '#f44336';
+                cellHTML = '<span style="font-weight:700;color:' + color + '">' + rv.toFixed(1) + '</span>';
+              } else {
+                cellHTML = '<span style="color:var(--text-muted)">-</span>';
+              }
+            } else if (raw == null || raw === "" || raw === "0" || raw === "0%" || raw === "0.00") {
+              cellHTML = '<span style="color:var(--text-muted)">-</span>';
+            } else {
+              cellHTML = escH(String(raw));
+            }
+            h += '<td>' + cellHTML + '</td>';
+          }
+          h += '</tr>';
+        }
+        h += '</tbody></table></div>';
+      }
+      h += '</div>';
+    }
     container.innerHTML = h;
+    container.dataset.psUid = uid;
   } catch (e) {
     container.innerHTML = '<div class="ed-stats-loading">Failed to load player stats.</div>';
   }
 }
+
+window._psSwitchGroup = function(btn) {
+  var wrap = btn.closest(".ed-sb-lazy") || btn.closest(".ed-sb-panel") || btn.parentNode.parentNode;
+  if (!wrap) return;
+  var target = btn.getAttribute("data-ps-grp");
+  var tabs = wrap.querySelectorAll(".ps-cat-tabs .ed-sb-tab");
+  for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle("active", tabs[i].getAttribute("data-ps-grp") === target);
+  var panels = wrap.querySelectorAll(".ps-grp-panel");
+  for (var j = 0; j < panels.length; j++) {
+    panels[j].style.display = (panels[j].getAttribute("data-ps-grp") === target) ? "block" : "none";
+  }
+};
 
 async function _loadNews(container, ticker) {
   container.innerHTML = '<div class="ed-stats-loading">Loading news…</div>';
