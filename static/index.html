@@ -396,8 +396,8 @@ html,body{overscroll-behavior:none}
 .ed-stats-stage-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin:8px 0 8px;overflow-x:auto;scrollbar-width:thin}
 .ed-stats-stage-tabs .ed-sb-tab{flex:0 0 auto;padding:6px 10px;font-size:9px}
 .ed-stats-group-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin:10px 0 4px;padding:4px 0 4px;border-bottom:1px solid var(--border)}
-.ed-debug-st{margin:14px 0;padding:14px 18px;background:var(--bg2);border:1px solid var(--border);border-radius:12px}
-.ed-debug-st-header{font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:10px}
+.ed-debug-st{margin-top:14px}
+.ed-debug-st-inner{padding:0 18px 14px}
 .ed-debug-st-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:6px;flex-wrap:wrap}
 .ed-debug-st-tabs .ed-sb-tab{flex:0 0 auto;padding:8px 14px;font-size:10px}
 .ed-debug-st-filter{display:none;gap:0;border-bottom:1px solid var(--border);margin-bottom:8px}
@@ -3844,7 +3844,8 @@ async function hydrateGameStats(evTicker) {
     var h = '<div class="ed-sb-tabs ed-sb-main-tabs">';
     h += '<button class="ed-sb-tab active" data-main="match" onclick="window.switchMainTab(this)">Match</button>';
     if (hasH2H) h += '<button class="ed-sb-tab" data-main="h2h" onclick="window.switchMainTab(this)">H2H</button>';
-    if (hasStandings) h += '<button class="ed-sb-tab" data-main="standings" onclick="window.switchMainTab(this)">Standings</button>';
+    // STANDINGS lives in its own collapsible panel below ed-header
+    // — see _toggleStandingsSection. No sidebar top-tab needed.
     if (hasNews) h += '<button class="ed-sb-tab" data-main="news" onclick="window.switchMainTab(this)">News</button>';
     h += '</div>';
 
@@ -4118,50 +4119,11 @@ async function hydrateGameStats(evTicker) {
       h += '</div>';
     }
 
-    // ════════════════════════════════════════════════════
-    // STANDINGS main panel — sub-tabs reflect which standing_type
-    // values FlashLive actually returned data for in the capability
-    // scan (e.g. Tennis returns nothing, Hockey omits top_scores).
-    // ════════════════════════════════════════════════════
-    if (hasStandings) {
-      h += '<div class="ed-sb-main" data-main="standings">';
-      h += '<div class="ed-sb-tabs ed-sb-sub-tabs">';
-      var firstSt = true;
-      if (stHasOverall) {
-        h += '<button class="ed-sb-tab' + (firstSt ? ' active' : '') + '" data-panel="st-standings" onclick="window.switchStTab(this,\'overall\')">Standings</button>';
-        firstSt = false;
-      }
-      if (stHasForm) {
-        h += '<button class="ed-sb-tab' + (firstSt ? ' active' : '') + '" data-panel="st-form" onclick="window.switchStTab(this,\'form\')">Form</button>';
-        firstSt = false;
-      }
-      if (stHasTopScorers) {
-        h += '<button class="ed-sb-tab' + (firstSt ? ' active' : '') + '" data-panel="st-topscorers" onclick="window.switchStTab(this,\'top_scores\')">Top Scorers</button>';
-        firstSt = false;
-      }
-      h += '</div>';
-      // Overall/Home/Away filter row only makes sense when those
-      // standing_types exist.
-      if (stHasOverall) {
-        h += '<div class="ed-sb-tabs ed-sb-filter-tabs" id="st-filters-' + escH(evTicker) + '">';
-        var firstFilter = true;
-        if (stTypes.indexOf("overall") >= 0) {
-          h += '<button class="ed-sb-tab' + (firstFilter ? ' active' : '') + '" data-filter="overall" onclick="window.switchStFilter(this)">Overall</button>';
-          firstFilter = false;
-        }
-        if (stTypes.indexOf("home") >= 0) {
-          h += '<button class="ed-sb-tab' + (firstFilter ? ' active' : '') + '" data-filter="home" onclick="window.switchStFilter(this)">Home</button>';
-          firstFilter = false;
-        }
-        if (stTypes.indexOf("away") >= 0) {
-          h += '<button class="ed-sb-tab' + (firstFilter ? ' active' : '') + '" data-filter="away" onclick="window.switchStFilter(this)">Away</button>';
-          firstFilter = false;
-        }
-        h += '</div>';
-      }
-      h += '<div id="st-content-' + escH(evTicker) + '"><div class="ed-stats-loading">Select Standings tab above.</div></div>';
-      h += '</div>'; // close STANDINGS
-    }
+    // STANDINGS panel removed from the sidebar — it's now the
+    // collapsible section below ed-header (the one hydrating off
+    // _initDebugStandings). Single source of truth keeps the two
+    // renderers from diverging on which standing_types they
+    // surface.
 
     // ════════════════════════════════════════════════════
     // NEWS main panel
@@ -4200,15 +4162,8 @@ window.switchMainTab = function(btn) {
     if (target === "h2h") _loadH2H(lazy, ticker);
     else if (target === "news") _loadNews(lazy, ticker);
   }
-  // Auto-load standings when switching to that tab
-  if (target === "standings") {
-    var ticker2 = panel.dataset.ticker;
-    var stContent = document.getElementById("st-content-" + ticker2);
-    if (stContent && !stContent.dataset.loaded) {
-      stContent.dataset.loaded = "1";
-      _loadStandingsType(stContent, ticker2, "overall");
-    }
-  }
+  // STANDINGS top-tab no longer exists in the sidebar — its data
+  // hydrates in the collapsible panel below ed-header.
 };
 
 // Standings sub-tab switcher (Standings / Form / Top Scorers)
@@ -5008,9 +4963,22 @@ async function _loadPlayerStats(container, ticker) {
   }
 }
 
-// Debug standings strip (below ed-header). Two switchers — one for
-// the standing_type sub-tab, one for the Overall/Home/Away filter
-// that only appears under Standings.
+// Standings panel collapse/expand. Mirrors window.toggleObSection
+// but flipped: panel starts expanded so the data is visible on
+// modal open, and the chevron's .open class points up. Click flips
+// hidden + .open + aria-expanded.
+window._toggleStandingsSection = function(btn) {
+  var body = btn.nextElementSibling;
+  if (!body) return;
+  var open = body.hidden;
+  body.hidden = !open;
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  btn.classList.toggle("open", open);
+};
+
+// Standings panel sub-tab switchers — one for the standing_type
+// sub-tab, one for the Overall/Home/Away filter that only appears
+// under Standings.
 window._dbgStSwitch = function(btn) {
   var wrap = btn.closest(".ed-debug-st");
   if (!wrap) return;
@@ -5783,20 +5751,23 @@ function renderEventDetail(ev) {
 
   h += '</div>'; // /ed-header
 
-  // ── DEBUG: full standings strip below ed-header ──────────────
-  // Test placement so we can verify every standing_type FlashLive
-  // exposes for this league before wiring the real STANDINGS sub-
-  // tabs over in the sidebar. The strip mirrors FlashScore's
-  // (Live Standings / Standings / Form / Over-Under / HT-FT / Top
-  // Scorers) plus an Overall / Home / Away filter that only
-  // appears under Standings. Each tab calls /api/event/{ticker}
-  // /standings?standing_type=X — the same endpoint the sidebar
-  // uses, so the renderer auto-adapts to whatever columns the API
-  // returns.
+  // ── Standings panel (full sub-tab strip) ─────────────────────
+  // Mirrors FlashScore's standings layout (Live Standings /
+  // Standings / Form / Over-Under / HT-FT / Top Scorers) plus an
+  // Overall / Home / Away filter that only appears under
+  // Standings. Each tab calls /api/event/{ticker}/standings
+  // ?standing_type=X — _renderStandingsTable auto-adapts to
+  // whatever columns FlashLive returns for the type, so a single
+  // renderer covers all sub-tabs. Wrapped in the same collapsible
+  // toggle pattern as the Order Book section so users can fold it
+  // away when they don't need it. Defaults to expanded.
   var isSport = !!sport;
   if (isSport) {
-    h += '<div class="ed-debug-st" data-debug-ticker="' + escH(ticker) + '">';
-    h += '<div class="ed-debug-st-header">Standings ▸ debug strip (will move into the proper tab once verified)</div>';
+    h += '<div class="ed-debug-st ob-section" data-debug-ticker="' + escH(ticker) + '">';
+    h += '<button class="ob-toggle open" aria-expanded="true" onclick="window._toggleStandingsSection(this)">';
+    h += '<span>Standings</span><span class="ob-chevron">▾</span>';
+    h += '</button>';
+    h += '<div class="ob-inner ed-debug-st-inner">';
     h += '<div class="ed-debug-st-tabs">';
     h += '<button class="ed-sb-tab" data-st-type="live" onclick="window._dbgStSwitch(this)">Live Standings</button>';
     h += '<button class="ed-sb-tab active" data-st-type="overall" onclick="window._dbgStSwitch(this)">Standings</button>';
@@ -5814,6 +5785,7 @@ function renderEventDetail(ev) {
     h += '<button class="ed-sb-tab" data-st-filter="away" onclick="window._dbgStFilter(this)">Away</button>';
     h += '</div>';
     h += '<div class="ed-debug-st-content"><div class="ed-stats-loading">Loading standings…</div></div>';
+    h += '</div>';
     h += '</div>';
   }
 
