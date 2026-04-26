@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 import os, time, tempfile, functools, asyncio, threading, logging, hashlib, json
-from datetime import date, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 logging.basicConfig(level=logging.INFO)
@@ -1081,6 +1081,12 @@ CACHE_TTL = 300            # 5 min — fresh
 CACHE_STALE_TTL = 1800     # 30 min — hard expiry, beyond this we block
 _rebuild_lock = threading.Lock()
 _rebuilding = {"active": False}
+
+# FlashLive capability map cache. Populated by /api/debug_fl_capabilities.
+# A full scan can spend ~150-300 RapidAPI calls so we hold the result
+# for a day. Pass ?refresh=1 to force a re-scan.
+_FL_CAPABILITIES_CACHE = {"data": None, "ts": 0}
+FL_CAPABILITIES_TTL = 86400  # 24 h
 
 
 # ── Per-market response cache ─────────────────────────────────────
@@ -4362,6 +4368,67 @@ async def get_event_player_stats(ticker: str):
     except Exception as e:
         return {"error": str(e)[:200]}
 
+# Fields FlashLive uses to label sub-tabs inside a single response.
+# H2H uses TAB_NAME ("Overall"/"Home"/"Away"), stats use STAGE_NAME
+# ("Match"/"1st Half"/"2nd Half"), lineups use FORMATION_NAME
+# ("Starting Lineups"/"Substitutes"/"Coaches"), some endpoints group
+# by GROUP_NAME or NAME. The capability scanner looks for any of
+# these on the first item of a DATA array to classify a Pattern-B
+# (nested-array) endpoint and surface the visible sub-labels.
+FL_SUB_LABEL_FIELDS = ("TAB_NAME", "STAGE_NAME", "FORMATION_NAME",
+                       "GROUP_NAME", "NAME")
+
+
+def _detect_fl_pattern(obj):
+    """Classify a FlashLive response for the capability map.
+
+    Returns a small dict describing whether the endpoint produced
+    data, and if so what shape it took. The frontend uses this to
+    decide whether to render a single panel or a tab-strip with
+    sub-tabs.
+    """
+    if obj is None:
+        return {"available": False}
+    if not isinstance(obj, dict):
+        return {"available": True, "pattern": "non_dict",
+                "type": type(obj).__name__}
+    items = obj.get("DATA")
+    if items is None:
+        # Some endpoints return their payload at the top level.
+        return {"available": True, "pattern": "flat",
+                "top_keys": list(obj.keys())[:8]}
+    if not isinstance(items, list):
+        return {"available": True, "pattern": "flat",
+                "data_type": type(items).__name__}
+    if not items:
+        return {"available": True, "pattern": "empty_data"}
+    first = items[0]
+    if not isinstance(first, dict):
+        return {"available": True, "pattern": "list_of_primitives",
+                "count": len(items)}
+    for f in FL_SUB_LABEL_FIELDS:
+        if f in first:
+            labels = []
+            for it in items:
+                if isinstance(it, dict):
+                    val = it.get(f)
+                    if val and val not in labels:
+                        labels.append(str(val))
+            return {
+                "available": True,
+                "pattern": "nested_array",
+                "sub_label_field": f,
+                "sub_labels": labels,
+                "count": len(items),
+            }
+    return {
+        "available": True,
+        "pattern": "flat_array",
+        "count": len(items),
+        "first_keys": list(first.keys())[:8],
+    }
+
+
 def _describe_fl(obj, depth=0, max_depth=4):
     """Compact structural summary of a FlashLive response — shows
     the shape (keys, list lengths, nesting) without dumping all the
@@ -4482,6 +4549,170 @@ async def debug_fl_schema(ticker: str):
         return out
     except Exception as e:
         return {"error": str(e)[:300]}
+
+
+@app.get("/api/debug_fl_capabilities")
+async def debug_fl_capabilities(
+    samples_per_sport: int = 2,
+    sports: str = "",
+    refresh: bool = False,
+):
+    """Multi-sport capability discovery for FlashLive.
+
+    Hits every event-level endpoint plus the standings endpoint with
+    each known standing_type for a small sample of events per sport,
+    then aggregates the results into a per-sport capability map. The
+    frontend can read this map to render exactly the tabs and
+    sub-tabs that have data for a given sport — same structure
+    FlashScore exposes, without ever scraping their UI.
+
+    Result is cached for 24 h (FL_CAPABILITIES_TTL). Pass
+    ?refresh=1 to force a re-scan.
+
+    Query params:
+      samples_per_sport — events to probe per sport (default 2)
+      sports            — comma-separated sport filter (e.g. "Soccer,Tennis")
+      refresh           — bypass cache and re-scan
+
+    Usage:
+      /api/debug_fl_capabilities
+      /api/debug_fl_capabilities?samples_per_sport=3
+      /api/debug_fl_capabilities?sports=Soccer,Basketball&refresh=1
+    """
+    now = time.time()
+    cached = _FL_CAPABILITIES_CACHE.get("data")
+    cached_ts = _FL_CAPABILITIES_CACHE.get("ts", 0)
+    if cached and not refresh and (now - cached_ts) < FL_CAPABILITIES_TTL:
+        return {**cached, "_cache_age_seconds": int(now - cached_ts)}
+
+    try:
+        from flashlive_feed import GAMES, _fl_get
+    except Exception as e:
+        return {"error": f"flashlive feed unavailable: {e}"}
+
+    if not GAMES:
+        return {"error": "FlashLive GAMES dict is empty — feed not yet "
+                         "warmed up. Wait ~2 minutes after startup and retry."}
+
+    sport_filter = None
+    if sports:
+        sport_filter = {s.strip() for s in sports.split(",") if s.strip()}
+
+    by_sport: dict = {}
+    for g in GAMES.values():
+        sp = g.get("sport") or ""
+        if not sp or not g.get("event_id"):
+            continue
+        if sport_filter and sp not in sport_filter:
+            continue
+        by_sport.setdefault(sp, []).append(g)
+
+    EVENT_ENDPOINTS = [
+        "/v1/events/data", "/v1/events/details", "/v1/events/brief",
+        "/v1/events/summary", "/v1/events/summary-incidents",
+        "/v1/events/summary-results", "/v1/events/statistics",
+        "/v1/events/lineups", "/v1/events/predicted-lineups",
+        "/v1/events/missing-players", "/v1/events/player-stats",
+        "/v1/events/h2h", "/v1/events/commentary", "/v1/events/news",
+        "/v1/events/highlights", "/v1/events/report",
+        "/v1/events/last-change", "/v1/events/odds",
+    ]
+    # Standing-type variants worth probing. Some are league-specific
+    # (over_under is soccer-only, live_table only when a round is in
+    # progress, etc.) — the scanner just records which ones returned
+    # data so the frontend can light up only the real tabs.
+    STANDING_TYPES = ["overall", "home", "away", "form", "top_scores",
+                      "over_under", "live_table"]
+
+    out = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "samples_per_sport": samples_per_sport,
+        "sports_scanned": sorted(by_sport.keys()),
+        "sports": {},
+    }
+
+    for sport, games in sorted(by_sport.items()):
+        samples = games[:max(1, samples_per_sport)]
+        ep_agg = {ep: {"hits": 0, "samples": 0, "patterns": set(),
+                       "sub_label_field": None, "sub_labels": []}
+                  for ep in EVENT_ENDPOINTS}
+        st_hits: set = set()
+
+        for g in samples:
+            event_id = g.get("event_id")
+            stage_id = g.get("tournament_stage_id") or ""
+            season_id = g.get("tournament_season_id") or ""
+
+            ev_tasks = [_fl_get(ep, {"event_id": event_id})
+                        for ep in EVENT_ENDPOINTS]
+            ev_results = await asyncio.gather(*ev_tasks,
+                                              return_exceptions=True)
+            for ep, data in zip(EVENT_ENDPOINTS, ev_results):
+                if isinstance(data, Exception):
+                    data = None
+                ep_agg[ep]["samples"] += 1
+                detect = _detect_fl_pattern(data)
+                if not detect.get("available"):
+                    continue
+                ep_agg[ep]["hits"] += 1
+                pat = detect.get("pattern")
+                if pat:
+                    ep_agg[ep]["patterns"].add(pat)
+                f = detect.get("sub_label_field")
+                if f:
+                    ep_agg[ep]["sub_label_field"] = f
+                for lab in detect.get("sub_labels") or []:
+                    if lab not in ep_agg[ep]["sub_labels"]:
+                        ep_agg[ep]["sub_labels"].append(lab)
+
+            if stage_id:
+                st_tasks = []
+                for st in STANDING_TYPES:
+                    p = {"tournament_stage_id": stage_id,
+                         "standing_type": st}
+                    if season_id:
+                        p["tournament_season_id"] = season_id
+                    st_tasks.append(_fl_get("/v1/tournaments/standings", p))
+                st_results = await asyncio.gather(*st_tasks,
+                                                  return_exceptions=True)
+                for st, data in zip(STANDING_TYPES, st_results):
+                    if isinstance(data, Exception):
+                        data = None
+                    has_rows = False
+                    if isinstance(data, dict):
+                        d = data.get("DATA")
+                        has_rows = bool(d) or bool(data.get("ROWS"))
+                    if has_rows:
+                        st_hits.add(st)
+
+        sport_caps = {
+            "samples_used": len(samples),
+            "sample_event_ids": [g.get("event_id") for g in samples],
+            "endpoints": {},
+            "tournaments": {
+                "/v1/tournaments/standings": {
+                    "available": bool(st_hits),
+                    "pattern": "query_param_tabs",
+                    "param": "standing_type",
+                    "values_with_data": sorted(st_hits),
+                },
+            },
+        }
+        for ep, agg in ep_agg.items():
+            sport_caps["endpoints"][ep] = {
+                "available": agg["hits"] > 0,
+                "hit_rate": f"{agg['hits']}/{agg['samples']}",
+                "patterns": sorted(agg["patterns"]),
+                "sub_label_field": agg["sub_label_field"],
+                "sub_labels": agg["sub_labels"],
+            }
+        out["sports"][sport] = sport_caps
+
+    _FL_CAPABILITIES_CACHE["data"] = out
+    _FL_CAPABILITIES_CACHE["ts"] = now
+    return {**out, "_cache_age_seconds": 0}
+
+
 @app.get("/api/event/{ticker}/debug_fl")
 async def debug_flashlive_data(ticker: str):
     """Debug: show raw FlashLive API responses for all endpoints."""
