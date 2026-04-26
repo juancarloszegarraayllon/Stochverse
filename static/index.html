@@ -3852,7 +3852,7 @@ async function hydrateGameStats(evTicker) {
              + escH(lu.manager) + '</div>';
         }
         var starters = players.filter(function(p) { return !p.substitute; });
-        var subs = players.filter(function(p) { return p.substitute; });
+        var subs = lu.substitutes || players.filter(function(p) { return p.substitute; });
         if (starters.length) {
           h += '<div class="ed-lu-section">Starting XI</div>';
           for (var pi = 0; pi < starters.length; pi++) {
