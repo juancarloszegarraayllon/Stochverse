@@ -3875,6 +3875,17 @@ async function hydrateGameStats(evTicker) {
             h += '</div>';
           }
         }
+       if (lu.coaches && lu.coaches.length) {
+        h += '<div class="ed-lu-section">Coach</div>';
+        for (var ci = 0; ci < lu.coaches.length; ci++) {
+          var c = lu.coaches[ci];
+          h += '<div class="ed-lu-player">';
+          h += '<div class="ed-lu-num">' + (c.jerseyNumber != null ? c.jerseyNumber : "") + '</div>';
+          h += '<div class="ed-lu-name">' + escH(c.name) + '</div>';
+          h += '<div class="ed-lu-pos">' + escH(c.position || "") + '</div>';
+          h += '</div>';
+        }
+      }  
       }
       h += '</div>';
     }
