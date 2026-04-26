@@ -1951,8 +1951,7 @@ def get_events(
         the teams appear in the Kalshi event title."""
         if not g:
             return ""
-        hs = g.get("home_score", "")
-        as_ = g.get("away_score", "")
+        hs, as_ = _normalize_scores(g)
         if hs == "" or as_ == "":
             return ""
         ha = g.get("home_abbr", "") or "HOME"
@@ -2053,6 +2052,7 @@ def get_events(
             base_label = compact_label(g) if compact_label else ""
             if g.get("sport") == "Tennis" and _needs_flip(title, g):
                 base_label = _flip_score_pairs(base_label)
+            home_score_n, away_score_n = _normalize_scores(g)
             rc["_live_state"] = {
                 "label":          base_label,
                 "state":          g.get("state", ""),
@@ -2066,8 +2066,8 @@ def get_events(
                 "away_abbr":      g.get("away_abbr", ""),
                 "home_display":   g.get("home_display", ""),
                 "away_display":   g.get("away_display", ""),
-                "home_score":     g.get("home_score", "") or ("0" if g.get("state") == "in" else ""),
-                "away_score":     g.get("away_score", "") or ("0" if g.get("state") == "in" else ""),
+                "home_score":     home_score_n,
+                "away_score":     away_score_n,
                 "score_display":  _score_display(title, g),
                 # Title-derived team names so the frontend can match
                 # outcome labels even when Kalshi uses a different name
@@ -2167,6 +2167,19 @@ def get_events(
             for mg in (ev.get("market_groups") or []):
                 _overlay_live(mg.get("outcomes") or [], _LP)
     return {"total": total, "offset": offset, "limit": limit, "events": formatted}
+
+
+def _normalize_scores(g):
+    """Source-agnostic score gate. Scores are only meaningful for
+    games that are in-progress or finished — pre-game (or unknown)
+    state always yields empty strings, so a feed that reports "0"
+    for a scheduled fixture cannot leak a phantom 0-0 into the UI."""
+    state = (g or {}).get("state", "")
+    if state == "in":
+        return (g.get("home_score", "") or "0", g.get("away_score", "") or "0")
+    if state == "post":
+        return (g.get("home_score", ""), g.get("away_score", ""))
+    return ("", "")
 
 
 def _overlay_live(outcomes, lp):
@@ -2459,6 +2472,7 @@ def get_event_detail(ticker: str):
             except Exception:
                 pass
     if g:
+        home_score_n, away_score_n = _normalize_scores(g)
         rc["_live_state"] = {
             "label":          (compact_label(g) if compact_label else ""),
             "state":          g.get("state", ""),
@@ -2471,8 +2485,8 @@ def get_event_detail(ticker: str):
             "away_abbr":      g.get("away_abbr", ""),
             "home_display":   g.get("home_display", ""),
             "away_display":   g.get("away_display", ""),
-            "home_score":     g.get("home_score", "") or ("0" if g.get("state") == "in" else ""),
-            "away_score":     g.get("away_score", "") or ("0" if g.get("state") == "in" else ""),
+            "home_score":     home_score_n,
+            "away_score":     away_score_n,
             # Playoff series metadata — see /api/events for details.
             "is_playoff":         bool(g.get("is_playoff")),
             "series_title":       g.get("series_title", ""),
