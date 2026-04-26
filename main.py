@@ -4287,7 +4287,8 @@ async def get_event_commentary(ticker: str):
             return {"error": "no commentary available"}
         return {"data": data, "source": "flashlive"}
     except Exception as e:
-        return {"error": str(e)[:200]}
+            return {"error": str(e)[:200]}
+
 
 @app.get("/api/event/{ticker}/missing-players")
 async def get_event_missing_players(ticker: str):
