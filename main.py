@@ -6365,6 +6365,10 @@ async def get_event_stats(ticker: str, debug: bool = False):
                         "venue": info.get("VENUE", ""),
                         "attendance": info.get("MIV", ""),
                     }
+            # Frontend tab generator keys off sport — ensure it's
+            # always present even when _parse_flashlive_stats omits it.
+            if isinstance(result, dict):
+                result.setdefault("sport", sport)
             return result
     except Exception as e:
         logging.getLogger("stochverse").warning("FlashLive stats failed: %s", e)

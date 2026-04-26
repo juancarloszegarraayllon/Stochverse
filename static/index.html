@@ -3703,15 +3703,58 @@ function renderStatsSidebar(evTicker) {
        + '</div></div>';
 }
 
-// Fetch SofaScore stats and populate the sidebar panel.
+// FlashLive capability map, fetched once per page load and cached.
+// Drives which detail-page tabs/sub-tabs we render per sport so the
+// layout matches whatever FlashLive (and therefore FlashScore) actually
+// exposes for that sport — Tennis hides STANDINGS, Hockey hides
+// Top Scorers, etc. Falls back to the generous default if the fetch
+// fails so we never silently strip the UI down to nothing.
+var _flCaps = null;
+var _flCapsPromise = null;
+function fetchCapabilities() {
+  if (_flCaps) return Promise.resolve(_flCaps);
+  if (_flCapsPromise) return _flCapsPromise;
+  _flCapsPromise = fetch("/api/debug_fl_capabilities")
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+      _flCaps = (j && j.sports) ? j.sports : {};
+      return _flCaps;
+    })
+    .catch(function() { _flCaps = {}; return _flCaps; });
+  return _flCapsPromise;
+}
+function _capEpAvailable(sportCaps, epPath) {
+  // Returns true when we have no data for this sport (graceful fallback
+  // to the generous default), or when the endpoint reports available.
+  if (!sportCaps) return true;
+  var ep = (sportCaps.endpoints || {})[epPath];
+  if (!ep) return true;
+  return !!ep.available;
+}
+function _capStandingTypes(sportCaps) {
+  // Returns the list of standing_type values FlashLive returned data
+  // for. Empty list = no standings available for the sport.
+  if (!sportCaps) return ["overall", "form", "top_scores"];
+  var st = (sportCaps.tournaments || {})["/v1/tournaments/standings"];
+  if (!st || !st.available) return [];
+  var vals = st.values_with_data || [];
+  return Array.isArray(vals) ? vals.slice() : [];
+}
+
+// Fetch live game stats + capability map and populate the sidebar.
 async function hydrateGameStats(evTicker) {
   var panel = document.querySelector('[data-stats-ticker="' + evTicker + '"]');
   if (!panel) return;
   // Store evTicker for lazy-loaded tabs (H2H, Standings, News).
   panel.dataset.ticker = evTicker;
   try {
-    var r = await fetch("/api/event/" + encodeURIComponent(evTicker) + "/stats");
-    var d = await r.json();
+    var statsResp = fetch("/api/event/" + encodeURIComponent(evTicker) + "/stats")
+      .then(function(r) { return r.json(); });
+    var pair = await Promise.all([statsResp, fetchCapabilities()]);
+    var d = pair[0];
+    var caps = pair[1] || {};
+    var sport = d.sport || "";
+    var sportCaps = caps[sport] || null;
     var home = d.home || "Home";
     var away = d.away || "Away";
     var stats = d.stats || [];
@@ -3721,12 +3764,34 @@ async function hydrateGameStats(evTicker) {
     var hasTimeline = incidents.length > 0;
     var hasLineups = (lineups.home && lineups.home.players && lineups.home.players.length > 0);
 
+    // ── Per-sport gates from the capability map ────────────────
+    // The capability scan reports availability across multiple sample
+    // events; even a 1/N hit means the sport supports the endpoint.
+    // We keep the tab visible and let the lazy-loader render an
+    // empty-state for events that personally lack the data.
+    var hasH2H = _capEpAvailable(sportCaps, "/v1/events/h2h");
+    var hasNews = _capEpAvailable(sportCaps, "/v1/events/news");
+    var hasCommentary = _capEpAvailable(sportCaps, "/v1/events/commentary");
+    var hasMissingPlayers = _capEpAvailable(sportCaps, "/v1/events/missing-players");
+    var hasPlayerStats = _capEpAvailable(sportCaps, "/v1/events/player-stats");
+    var stTypes = _capStandingTypes(sportCaps);
+    var hasStandings = stTypes.length > 0;
+    var stHasOverall = stTypes.indexOf("overall") >= 0
+                       || stTypes.indexOf("home") >= 0
+                       || stTypes.indexOf("away") >= 0;
+    var stHasForm = stTypes.indexOf("form") >= 0;
+    var stHasTopScorers = stTypes.indexOf("top_scores") >= 0
+                          || stTypes.indexOf("top_scorers") >= 0;
+
     // ── Main tabs: MATCH | H2H | STANDINGS | NEWS ──
+    // Each non-MATCH tab renders only when the capability map says
+    // the sport actually has data for it. MATCH always renders since
+    // every sport has at least summary/timeline.
     var h = '<div class="ed-sb-tabs ed-sb-main-tabs">';
     h += '<button class="ed-sb-tab active" data-main="match" onclick="window.switchMainTab(this)">Match</button>';
-    h += '<button class="ed-sb-tab" data-main="h2h" onclick="window.switchMainTab(this)">H2H</button>';
-    h += '<button class="ed-sb-tab" data-main="standings" onclick="window.switchMainTab(this)">Standings</button>';
-    h += '<button class="ed-sb-tab" data-main="news" onclick="window.switchMainTab(this)">News</button>';
+    if (hasH2H) h += '<button class="ed-sb-tab" data-main="h2h" onclick="window.switchMainTab(this)">H2H</button>';
+    if (hasStandings) h += '<button class="ed-sb-tab" data-main="standings" onclick="window.switchMainTab(this)">Standings</button>';
+    if (hasNews) h += '<button class="ed-sb-tab" data-main="news" onclick="window.switchMainTab(this)">News</button>';
     h += '</div>';
 
     // ════════════════════════════════════════════════════
@@ -3738,9 +3803,9 @@ async function hydrateGameStats(evTicker) {
     h += '<button class="ed-sb-tab active" data-mt="summary" onclick="window.switchMatchTab(this)">Summary</button>';
     if (hasStats) h += '<button class="ed-sb-tab" data-mt="match-stats" onclick="window.switchMatchTab(this)">Stats</button>';
     if (hasLineups) h += '<button class="ed-sb-tab" data-mt="lineups" onclick="window.switchMatchTab(this)">Lineups</button>';
-    h += '<button class="ed-sb-tab" data-mt="player-stats" onclick="window.switchMatchTab(this)">Player Stats</button>';
-    h += '<button class="ed-sb-tab" data-mt="commentary" onclick="window.switchMatchTab(this)">Commentary</button>';
-    h += '<button class="ed-sb-tab" data-mt="missing-players" onclick="window.switchMatchTab(this)">Missing</button>';
+    if (hasPlayerStats) h += '<button class="ed-sb-tab" data-mt="player-stats" onclick="window.switchMatchTab(this)">Player Stats</button>';
+    if (hasCommentary) h += '<button class="ed-sb-tab" data-mt="commentary" onclick="window.switchMatchTab(this)">Commentary</button>';
+    if (hasMissingPlayers) h += '<button class="ed-sb-tab" data-mt="missing-players" onclick="window.switchMatchTab(this)">Missing</button>';
     h += '</div>';
     // Summary panel (timeline / incidents)
     h += '<div data-mt="summary" style="display:block">';
@@ -3890,57 +3955,93 @@ async function hydrateGameStats(evTicker) {
       h += '</div>';
     }
     // ── Player Stats panel (lazy-loaded) ──────────────────
-    h += '<div data-mt="player-stats" style="display:none">';
-    h += '<div class="ed-sb-lazy" data-lazy="player-stats">Loading player stats…</div>';
-    h += '</div>';
+    if (hasPlayerStats) {
+      h += '<div data-mt="player-stats" style="display:none">';
+      h += '<div class="ed-sb-lazy" data-lazy="player-stats">Loading player stats…</div>';
+      h += '</div>';
+    }
     // ── Commentary panel (lazy-loaded) ─────────────────
-    h += '<div data-mt="commentary" style="display:none">';
-    h += '<div class="ed-sb-lazy" data-lazy="commentary">Loading commentary…</div>';
-    h += '</div>';
-    h += '<div data-mt="missing-players" style="display:none">';
-    h += '<div class="ed-sb-lazy" data-lazy="missing-players">Loading missing players…</div>';
-    h += '</div>'; 
+    if (hasCommentary) {
+      h += '<div data-mt="commentary" style="display:none">';
+      h += '<div class="ed-sb-lazy" data-lazy="commentary">Loading commentary…</div>';
+      h += '</div>';
+    }
+    if (hasMissingPlayers) {
+      h += '<div data-mt="missing-players" style="display:none">';
+      h += '<div class="ed-sb-lazy" data-lazy="missing-players">Loading missing players…</div>';
+      h += '</div>';
+    }
     h += '</div>'; // close MATCH main panel
 
     // ════════════════════════════════════════════════════
-    // H2H main panel
+    // H2H main panel — only built if the sport supports it
     // ════════════════════════════════════════════════════
-    h += '<div class="ed-sb-main" data-main="h2h">';
-    h += '<div class="ed-sb-tabs ed-sb-sub-tabs">';
-    h += '<button class="ed-sb-tab active" data-panel="h2h-overall" onclick="window.switchSBTab(this)">Overall</button>';
-    h += '<button class="ed-sb-tab" data-panel="h2h-home" onclick="window.switchSBTab(this)">' + escH(home) + ' - Home</button>';
-    h += '<button class="ed-sb-tab" data-panel="h2h-away" onclick="window.switchSBTab(this)">' + escH(away) + ' - Away</button>';
-    h += '</div>';
-    h += '<div class="ed-sb-panel active" data-panel="h2h-overall"><div class="ed-sb-lazy" data-lazy="h2h">Loading H2H…</div></div>';
-    h += '<div class="ed-sb-panel" data-panel="h2h-home"><div class="ed-sb-lazy" data-lazy="h2h-home">Loading…</div></div>';
-    h += '<div class="ed-sb-panel" data-panel="h2h-away"><div class="ed-sb-lazy" data-lazy="h2h-away">Loading…</div></div>';
-    h += '</div>';
+    if (hasH2H) {
+      h += '<div class="ed-sb-main" data-main="h2h">';
+      h += '<div class="ed-sb-tabs ed-sb-sub-tabs">';
+      h += '<button class="ed-sb-tab active" data-panel="h2h-overall" onclick="window.switchSBTab(this)">Overall</button>';
+      h += '<button class="ed-sb-tab" data-panel="h2h-home" onclick="window.switchSBTab(this)">' + escH(home) + ' - Home</button>';
+      h += '<button class="ed-sb-tab" data-panel="h2h-away" onclick="window.switchSBTab(this)">' + escH(away) + ' - Away</button>';
+      h += '</div>';
+      h += '<div class="ed-sb-panel active" data-panel="h2h-overall"><div class="ed-sb-lazy" data-lazy="h2h">Loading H2H…</div></div>';
+      h += '<div class="ed-sb-panel" data-panel="h2h-home"><div class="ed-sb-lazy" data-lazy="h2h-home">Loading…</div></div>';
+      h += '<div class="ed-sb-panel" data-panel="h2h-away"><div class="ed-sb-lazy" data-lazy="h2h-away">Loading…</div></div>';
+      h += '</div>';
+    }
 
     // ════════════════════════════════════════════════════
-    // STANDINGS main panel
+    // STANDINGS main panel — sub-tabs reflect which standing_type
+    // values FlashLive actually returned data for in the capability
+    // scan (e.g. Tennis returns nothing, Hockey omits top_scores).
     // ════════════════════════════════════════════════════
-    h += '<div class="ed-sb-main" data-main="standings">';
-    // Sub-tabs matching FlashLive's actual TABS: TABLE, TABLE_HOME, TABLE_AWAY, TABLE_FORM, TOP_SCORERS
-    h += '<div class="ed-sb-tabs ed-sb-sub-tabs">';
-    h += '<button class="ed-sb-tab active" data-panel="st-standings" onclick="window.switchStTab(this,\'overall\')">Standings</button>';
-    h += '<button class="ed-sb-tab" data-panel="st-form" onclick="window.switchStTab(this,\'form\')">Form</button>';
-    h += '<button class="ed-sb-tab" data-panel="st-topscorers" onclick="window.switchStTab(this,\'top_scores\')">Top Scorers</button>';
-    h += '</div>';
-    // Single container for standings data (all sub-tabs render here)
-    h += '<div class="ed-sb-tabs ed-sb-filter-tabs" id="st-filters-' + escH(evTicker) + '">';
-    h += '<button class="ed-sb-tab active" data-filter="overall" onclick="window.switchStFilter(this)">Overall</button>';
-    h += '<button class="ed-sb-tab" data-filter="home" onclick="window.switchStFilter(this)">Home</button>';
-    h += '<button class="ed-sb-tab" data-filter="away" onclick="window.switchStFilter(this)">Away</button>';
-    h += '</div>';
-    h += '<div id="st-content-' + escH(evTicker) + '"><div class="ed-stats-loading">Select Standings tab above.</div></div>';
-    h += '</div>'; // close STANDINGS
+    if (hasStandings) {
+      h += '<div class="ed-sb-main" data-main="standings">';
+      h += '<div class="ed-sb-tabs ed-sb-sub-tabs">';
+      var firstSt = true;
+      if (stHasOverall) {
+        h += '<button class="ed-sb-tab' + (firstSt ? ' active' : '') + '" data-panel="st-standings" onclick="window.switchStTab(this,\'overall\')">Standings</button>';
+        firstSt = false;
+      }
+      if (stHasForm) {
+        h += '<button class="ed-sb-tab' + (firstSt ? ' active' : '') + '" data-panel="st-form" onclick="window.switchStTab(this,\'form\')">Form</button>';
+        firstSt = false;
+      }
+      if (stHasTopScorers) {
+        h += '<button class="ed-sb-tab' + (firstSt ? ' active' : '') + '" data-panel="st-topscorers" onclick="window.switchStTab(this,\'top_scores\')">Top Scorers</button>';
+        firstSt = false;
+      }
+      h += '</div>';
+      // Overall/Home/Away filter row only makes sense when those
+      // standing_types exist.
+      if (stHasOverall) {
+        h += '<div class="ed-sb-tabs ed-sb-filter-tabs" id="st-filters-' + escH(evTicker) + '">';
+        var firstFilter = true;
+        if (stTypes.indexOf("overall") >= 0) {
+          h += '<button class="ed-sb-tab' + (firstFilter ? ' active' : '') + '" data-filter="overall" onclick="window.switchStFilter(this)">Overall</button>';
+          firstFilter = false;
+        }
+        if (stTypes.indexOf("home") >= 0) {
+          h += '<button class="ed-sb-tab' + (firstFilter ? ' active' : '') + '" data-filter="home" onclick="window.switchStFilter(this)">Home</button>';
+          firstFilter = false;
+        }
+        if (stTypes.indexOf("away") >= 0) {
+          h += '<button class="ed-sb-tab' + (firstFilter ? ' active' : '') + '" data-filter="away" onclick="window.switchStFilter(this)">Away</button>';
+          firstFilter = false;
+        }
+        h += '</div>';
+      }
+      h += '<div id="st-content-' + escH(evTicker) + '"><div class="ed-stats-loading">Select Standings tab above.</div></div>';
+      h += '</div>'; // close STANDINGS
+    }
 
     // ════════════════════════════════════════════════════
     // NEWS main panel
     // ════════════════════════════════════════════════════
-    h += '<div class="ed-sb-main" data-main="news">';
-    h += '<div class="ed-sb-lazy" data-lazy="news">Loading news…</div>';
-    h += '</div>';
+    if (hasNews) {
+      h += '<div class="ed-sb-main" data-main="news">';
+      h += '<div class="ed-sb-lazy" data-lazy="news">Loading news…</div>';
+      h += '</div>';
+    }
 
     panel.innerHTML = h;
   } catch (ex) {
