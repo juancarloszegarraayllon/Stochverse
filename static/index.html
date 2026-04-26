@@ -5231,8 +5231,11 @@ function renderEventDetail(ev) {
   if (kalshiUrl) h += '<span class="ed-meta-item"><a href="' + escH(kalshiUrl) + '" target="_blank">View on Kalshi ↗</a></span>';
   h += '</div>';
 
-  // Scoreboard row when a live game is matched.
-  if (live && (live.home_abbr || live.away_abbr || live.home_score !== "" || live.away_score !== "")) {
+  // Scoreboard row when a live game is matched. Gated on state so a
+  // pre-game fixture (which may still carry abbrs/0-0 from the feed)
+  // does not render a phantom 0-0 scoreboard.
+  if (live && (live.state === "in" || live.state === "post")
+      && (live.home_abbr || live.away_abbr || live.home_score !== "" || live.away_score !== "")) {
     // Tennis: use the card-style row layout (sets, games, points)
     if (live.tennis && live.tennis.row1_name && live.tennis.row2_name) {
       var tennisHtml = buildTennisScore(ev);
