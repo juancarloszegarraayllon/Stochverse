@@ -3783,16 +3783,24 @@ async function hydrateGameStats(evTicker) {
     var hasTimeline = incidents.length > 0;
     var hasLineups = (lineups.home && lineups.home.players && lineups.home.players.length > 0);
 
-    // ── Per-sport gates from the capability map ────────────────
-    // The capability scan reports availability across multiple sample
-    // events; even a 1/N hit means the sport supports the endpoint.
-    // We keep the tab visible and let the lazy-loader render an
-    // empty-state for events that personally lack the data.
-    var hasH2H = _capEpAvailable(sportCaps, "/v1/events/h2h");
-    var hasNews = _capEpAvailable(sportCaps, "/v1/events/news");
-    var hasCommentary = _capEpAvailable(sportCaps, "/v1/events/commentary");
-    var hasMissingPlayers = _capEpAvailable(sportCaps, "/v1/events/missing-players");
-    var hasPlayerStats = _capEpAvailable(sportCaps, "/v1/events/player-stats");
+    // ── Per-sport gates ────────────────────────────────────────
+    // Top-level tabs (MATCH/H2H/NEWS) and the secondary lazy-loaded
+    // panels (Player Stats / Commentary / Missing) always render.
+    // The capability scan returns availability for *sample* events,
+    // not this specific event — so a 0/3 sample does NOT mean the
+    // sport itself lacks the endpoint. The lazy-loaders show a
+    // "No data available" message when an individual event's
+    // response is empty, which is the right empty-state UX.
+    //
+    // STANDINGS is the one tab we genuinely hide per-sport — Tennis
+    // has no league table, so the standings endpoint legitimately
+    // doesn't exist for it. Drive that off the standing_type values
+    // FlashLive returned data for in the sample.
+    var hasH2H = true;
+    var hasNews = true;
+    var hasCommentary = true;
+    var hasMissingPlayers = true;
+    var hasPlayerStats = true;
     var stTypes = _capStandingTypes(sportCaps);
     var hasStandings = stTypes.length > 0;
     var stHasOverall = stTypes.indexOf("overall") >= 0
