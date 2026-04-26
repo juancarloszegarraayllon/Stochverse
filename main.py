@@ -4657,11 +4657,12 @@ async def debug_fl_capabilities(
         "/v1/events/last-change", "/v1/events/odds",
     ]
     # Standing-type variants worth probing. Some are league-specific
-    # (over_under is soccer-only, live_table only when a round is in
-    # progress, etc.) — the scanner just records which ones returned
-    # data so the frontend can light up only the real tabs.
+    # (over_under is soccer-only, live / live_table only when a round
+    # is in progress, ht_ft is soccer cup ties, etc.) — the scanner
+    # just records which ones returned data so the frontend can light
+    # up only the real tabs.
     STANDING_TYPES = ["overall", "home", "away", "form", "top_scores",
-                      "over_under", "live_table"]
+                      "over_under", "ht_ft", "live", "live_table"]
 
     out = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
