@@ -3757,13 +3757,21 @@ function _capEpAvailable(sportCaps, epPath) {
   return !!ep.available;
 }
 function _capStandingTypes(sportCaps) {
-  // Returns the list of standing_type values FlashLive returned data
-  // for. Empty list = no standings available for the sport.
-  if (!sportCaps) return ["overall", "form", "top_scores"];
+  // Returns the list of standing_type values to render. The cap scan
+  // samples a handful of events per sport; a 0-hit result doesn't
+  // prove the sport never has standings, just that the sample missed
+  // (or the cap cache is stale — e.g. just after we corrected a
+  // sport's FlashLive ID). Default to the canonical three types so
+  // the STANDINGS tab always renders and the lazy-loader handles the
+  // empty-state per event. Sports with genuinely no league table
+  // (Tennis) will just show empty sub-tabs, which beats hiding the
+  // tab and looking broken.
+  var DEFAULT = ["overall", "form", "top_scores"];
+  if (!sportCaps) return DEFAULT;
   var st = (sportCaps.tournaments || {})["/v1/tournaments/standings"];
-  if (!st || !st.available) return [];
+  if (!st || !st.available) return DEFAULT;
   var vals = st.values_with_data || [];
-  return Array.isArray(vals) ? vals.slice() : [];
+  return (Array.isArray(vals) && vals.length) ? vals.slice() : DEFAULT;
 }
 
 // Fetch live game stats + capability map and populate the sidebar.
@@ -4320,31 +4328,57 @@ window.switchStFilter = function(btn) {
 };
 
 // H2H: shared cache on the h2h main panel so all sub-tabs use one fetch
-var _h2hCache = {}; // ticker → {tabs, homeName, awayName}
+var _h2hCache = {};        // ticker → {tabs, homeName, awayName}
+var _h2hPending = {};      // ticker → in-flight Promise (dedup parallel clicks)
+
+async function _ensureH2HCache(ticker) {
+  if (_h2hCache[ticker]) return _h2hCache[ticker];
+  if (_h2hPending[ticker]) return _h2hPending[ticker];
+  _h2hPending[ticker] = (async function() {
+    try {
+      var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/h2h");
+      var d = await r.json();
+      if (d.error) return {error: d.error};
+      var data = d.data || {};
+      // FlashLive H2H: DATA → array of tabs (Overall, Home, Away).
+      // Each tab has GROUPS → ITEMS.
+      var tabs = data.DATA || data.data || [];
+      if (!Array.isArray(tabs)) tabs = [];
+      _h2hCache[ticker] = {
+        tabs: tabs,
+        homeName: d.home_name || "",
+        awayName: d.away_name || "",
+      };
+      return _h2hCache[ticker];
+    } catch (e) {
+      return {error: "Failed to load H2H."};
+    } finally {
+      delete _h2hPending[ticker];
+    }
+  })();
+  return _h2hPending[ticker];
+}
 
 async function _loadH2H(container, ticker) {
   container.innerHTML = '<div class="ed-stats-loading">Loading H2H…</div>';
-  try {
-    var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/h2h");
-    var d = await r.json();
-    if (d.error) { container.innerHTML = '<div class="ed-stats-loading">' + escH(d.error) + '</div>'; return; }
-    var data = d.data || {};
-    var homeName = d.home_name || "";
-    var awayName = d.away_name || "";
-    // FlashLive H2H: DATA → array of tabs (Overall, Home, Away)
-    // Each tab has GROUPS → ITEMS
-    var tabs = data.DATA || data.data || [];
-    if (!Array.isArray(tabs)) tabs = [];
-    _h2hCache[ticker] = {tabs: tabs, homeName: homeName, awayName: awayName};
-    _renderH2HTab(container, tabs, 0, homeName, awayName);
-  } catch (e) {
-    container.innerHTML = '<div class="ed-stats-loading">Failed to load H2H.</div>';
+  var cached = await _ensureH2HCache(ticker);
+  if (!cached || cached.error) {
+    container.innerHTML = '<div class="ed-stats-loading">' + escH((cached && cached.error) || "Failed to load H2H.") + '</div>';
+    return;
   }
+  _renderH2HTab(container, cached.tabs, 0, cached.homeName, cached.awayName);
 }
 
-function _loadH2HSubTab(container, ticker, tabIdx) {
-  var cached = _h2hCache[ticker];
-  if (!cached) { container.innerHTML = '<div class="ed-stats-loading">Load Overall first.</div>'; return; }
+async function _loadH2HSubTab(container, ticker, tabIdx) {
+  // Auto-trigger the H2H fetch when a sub-tab is clicked first —
+  // previously we showed "Load Overall first" which forced the user
+  // back to a different tab just to populate the cache.
+  container.innerHTML = '<div class="ed-stats-loading">Loading…</div>';
+  var cached = await _ensureH2HCache(ticker);
+  if (!cached || cached.error) {
+    container.innerHTML = '<div class="ed-stats-loading">' + escH((cached && cached.error) || "Failed to load H2H.") + '</div>';
+    return;
+  }
   _renderH2HTab(container, cached.tabs, tabIdx, cached.homeName, cached.awayName);
 }
 
