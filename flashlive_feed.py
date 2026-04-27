@@ -568,13 +568,27 @@ async def run_flashlive_feed():
                     key = f"{g['sport']}:{_normalize(g['home_name'])}:{_normalize(g['away_name'])}"
                     new_games[key] = g
                     parsed += 1
-            GAMES.clear()
+            # Merge into GAMES rather than clear+update — that earlier
+            # clear left GAMES briefly empty between the two lines (any
+            # /api/events request landing in the gap saw no _live_state
+            # for any event), and any single sport-day FL request that
+            # transiently hiccupped would drop matches from GAMES until
+            # the next clean poll, flickering LIVE badges + scores on
+            # cards. Now: new entries overwrite old, and a stale-entry
+            # sweep removes anything we haven't seen in 10 minutes so
+            # the dict doesn't grow unbounded.
             GAMES.update(new_games)
+            stale_cutoff_ms = int((time.time() - 600) * 1000)
+            stale_keys = [k for k, g in list(GAMES.items())
+                          if (g.get("captured_at_ms") or 0) < stale_cutoff_ms]
+            for k in stale_keys:
+                GAMES.pop(k, None)
             STATUS["games"] = len(GAMES)
             STATUS["last_fetch_ts"] = time.time()
             STATUS["polls"] += 1
             if parsed:
-                log.info("FlashLive: %d games across all sports", parsed)
+                log.info("FlashLive: %d games across all sports (kept %d, swept %d stale)",
+                         parsed, len(GAMES), len(stale_keys))
         except Exception as e:
             STATUS["last_error"] = str(e)[:200]
             log.error("FlashLive poll error: %s", e)
