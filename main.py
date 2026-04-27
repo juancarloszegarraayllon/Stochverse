@@ -4924,6 +4924,84 @@ async def debug_fl_sports_list():
         return {"error": str(e)[:300]}
 
 
+@app.get("/api/debug_fl_games")
+async def debug_fl_games(search: str = "", ticker: str = ""):
+    """Dump the FlashLive GAMES cache state. Useful for diagnosing
+    "FlashLive doesn't cover this match yet" errors.
+
+    Returns:
+      - poll status (running, last_fetch_ts, last_error, polls)
+      - per-sport count of cached games
+      - ?search=<text>: list games whose title contains the text
+      - ?ticker=<KXTICKER>: run match_game() against this Kalshi event
+        and show what we found / why we couldn't match
+    """
+    try:
+        from flashlive_feed import GAMES, STATUS, SPORT_MAP, ACTIVE_SPORTS, match_game, _normalize
+        # Per-sport count
+        per_sport: dict = {}
+        for g in GAMES.values():
+            sport = g.get("sport") or "?"
+            per_sport[sport] = per_sport.get(sport, 0) + 1
+        out = {
+            "status": dict(STATUS),
+            "active_sports": ACTIVE_SPORTS,
+            "total_games": len(GAMES),
+            "per_sport_counts": per_sport,
+        }
+        # Search GAMES by partial title match — useful to confirm
+        # whether a specific fixture is in the cache.
+        if search:
+            term = _normalize(search)
+            matches = []
+            for key, g in GAMES.items():
+                hay = _normalize(f"{g.get('home_name','')} {g.get('away_name','')}")
+                if term in hay:
+                    matches.append({
+                        "sport": g.get("sport"),
+                        "home_name": g.get("home_name"),
+                        "away_name": g.get("away_name"),
+                        "event_id": g.get("event_id"),
+                        "stage": g.get("stage"),
+                        "tournament_stage_id": g.get("tournament_stage_id"),
+                    })
+                    if len(matches) >= 20:
+                        break
+            out["search_matches"] = matches
+            out["search_term_normalized"] = term
+        # Ticker probe — replays the match_game() lookup for the
+        # given Kalshi ticker so we can see whether the title and
+        # sport categorization line up.
+        if ticker:
+            ticker_norm = ticker.strip().upper()
+            get_data()
+            records = _cache.get("data_all") or _cache.get("data") or []
+            found = next((r for r in records if r.get("event_ticker") == ticker_norm), None)
+            if not found:
+                out["ticker_probe"] = {"error": f"ticker {ticker_norm!r} not in Kalshi cache"}
+            else:
+                title = found.get("title", "")
+                sport = found.get("_sport") or ""
+                g = match_game(title, sport)
+                out["ticker_probe"] = {
+                    "ticker": ticker_norm,
+                    "title": title,
+                    "sport": sport,
+                    "title_normalized": _normalize(title),
+                    "matched": bool(g),
+                    "match": ({
+                        "home_name": g.get("home_name"),
+                        "away_name": g.get("away_name"),
+                        "event_id": g.get("event_id"),
+                        "stage": g.get("stage"),
+                        "tournament_stage_id": g.get("tournament_stage_id"),
+                    } if g else None),
+                }
+        return out
+    except Exception as e:
+        return {"error": str(e)[:300]}
+
+
 @app.get("/api/debug_fl_capabilities")
 async def debug_fl_capabilities(
     samples_per_sport: int = 2,
