@@ -1414,6 +1414,17 @@ function appendCards(evs) {
   if (subList.length && typeof PriceStream !== "undefined") {
     PriceStream.subscribe(subList);
   }
+  // Eager warm on first paint — IntersectionObserver fires its
+  // initial callbacks asynchronously after the cards land in the
+  // DOM, so we defer slightly to give it time to populate
+  // _visibleTickers, then trigger one refreshVisible cycle. Backend
+  // sees ?warm= for those tickers and re-fetches FlashLive before
+  // formatting the response. Cards land on fresh scores within
+  // ~300 ms of the initial paint instead of waiting 3 s for the
+  // first scheduled refresh tick.
+  setTimeout(function() {
+    if (typeof refreshVisible === "function") refreshVisible();
+  }, 150);
 }
 
 function isLive(ev) {
