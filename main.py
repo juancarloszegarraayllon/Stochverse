@@ -7012,9 +7012,22 @@ async def get_event_stats(ticker: str, debug: bool = False):
         g = await _find_fl_game(found)
         fl_id = g.get("event_id") if g else None
         if fl_id:
-            fl_data = await fl_stats(fl_id)
-            fl_lineups_data = await fl_lineups(fl_id)
-            fl_summary_data = await fl_summary(fl_id)
+            # Fan the three FL endpoints out in parallel — they're
+            # independent. Sequential awaits used to stack ~150 ms each
+            # for ~450 ms total; gather() collapses that to the slowest
+            # single call (~150 ms). Exception-safe: a failure on any
+            # one endpoint becomes None, mirroring the per-call try/except
+            # the parser already tolerates downstream.
+            import asyncio as _asyncio
+            fl_data, fl_lineups_data, fl_summary_data = await _asyncio.gather(
+                fl_stats(fl_id),
+                fl_lineups(fl_id),
+                fl_summary(fl_id),
+                return_exceptions=True,
+            )
+            if isinstance(fl_data, Exception): fl_data = None
+            if isinstance(fl_lineups_data, Exception): fl_lineups_data = None
+            if isinstance(fl_summary_data, Exception): fl_summary_data = None
             result = _parse_flashlive_stats(fl_data, title, sport) if fl_data else None
             if not result:
                 result = {"home": "", "away": "", "sport": sport, "stats": [], "source": "flashlive"}

@@ -1426,7 +1426,19 @@ function isLive(ev) {
 // data (covers NBA/NFL/MLB/NHL/major soccer) and falls back to a
 // wall-clock soccer estimate for anything ESPN doesn't match.
 function liveTimeLabel(ev) {
-  if (ev._live_state && ev._live_state.label) return ev._live_state.label;
+  // Backend's _live_state.label is built by compact_label — it's a
+  // score string ("BLO 0 - AUG 0"), not a clock, so returning it
+  // here would duplicate score_display in the renderTimeSlot badge
+  // ("LIVE · BLO 0 - AUG 0 · BLO 0 - AUG 0"). Prefer short_detail /
+  // display_clock which carry the actual clock/period info ESPN
+  // ships when present. Tennis / motorsport / other clock-less sports
+  // leave both empty, so we fall through to null and the badge skips
+  // the clock part entirely.
+  var live = ev && ev._live_state;
+  if (live) {
+    if (live.short_detail) return live.short_detail;
+    if (live.display_clock) return live.display_clock;
+  }
   if (ev._sport !== "Soccer" || !ev._kickoff_dt) return null;
   try {
     var k = new Date(ev._kickoff_dt).getTime();
