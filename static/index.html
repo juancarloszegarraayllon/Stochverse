@@ -4139,15 +4139,17 @@ async function hydrateGameStats(evTicker) {
     // H2H main panel — only built if the sport supports it
     // ════════════════════════════════════════════════════
     if (hasH2H) {
+      // FlashLive's H2H sub-tabs are sport-specific (tennis: All
+      // surfaces / Clay / Grass / Hard; cricket: Overall / Test / ODI
+      // / T20; soccer: Overall / Home / Away). _rebuildH2HSubTabs fills
+      // them in from the actual TAB_NAME values once the H2H fetch
+      // completes — we render an empty strip up front so the user
+      // never sees a soccer-styled placeholder briefly flash on a
+      // tennis match. The single hidden panel below carries the
+      // data-lazy="h2h" hook that triggers _loadH2H on first click.
       h += '<div class="ed-sb-main" data-main="h2h">';
-      h += '<div class="ed-sb-tabs ed-sb-sub-tabs">';
-      h += '<button class="ed-sb-tab active" data-panel="h2h-overall" onclick="window.switchSBTab(this)">Overall</button>';
-      h += '<button class="ed-sb-tab" data-panel="h2h-home" onclick="window.switchSBTab(this)">' + escH(home) + ' - Home</button>';
-      h += '<button class="ed-sb-tab" data-panel="h2h-away" onclick="window.switchSBTab(this)">' + escH(away) + ' - Away</button>';
-      h += '</div>';
+      h += '<div class="ed-sb-tabs ed-sb-sub-tabs"></div>';
       h += '<div class="ed-sb-panel active" data-panel="h2h-overall"><div class="ed-sb-lazy" data-lazy="h2h">Loading H2H…</div></div>';
-      h += '<div class="ed-sb-panel" data-panel="h2h-home"><div class="ed-sb-lazy" data-lazy="h2h-home">Loading…</div></div>';
-      h += '<div class="ed-sb-panel" data-panel="h2h-away"><div class="ed-sb-lazy" data-lazy="h2h-away">Loading…</div></div>';
       h += '</div>';
     }
 
@@ -4188,10 +4190,84 @@ async function hydrateGameStats(evTicker) {
     }
 
     panel.innerHTML = h;
+    // Async per-event capability probe — sport-level cap-scan only
+    // samples 2 events per sport every 24 h, so a tennis match with a
+    // published bracket can be missed if neither sample happened to
+    // expose `draw`. The per-event probe knows authoritatively for
+    // this specific match. We don't block hydration on it (it fires
+    // 17 parallel FlashLive calls and adds 200-500 ms) — fire it
+    // after the panel renders and upgrade the tab strip if it
+    // surfaces standing types the sport-level cap-scan missed.
+    _augmentEventCapabilities(panel, evTicker, stTypes);
   } catch (ex) {
     panel.innerHTML = '<div class="ed-stats-loading">Failed to load game stats.</div>';
     console.error("hydrateGameStats error", ex);
   }
+}
+
+async function _augmentEventCapabilities(panel, ticker, sportStTypes) {
+  try {
+    var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/capabilities");
+    var d = await r.json();
+    if (!d || d.error) return;
+    var caps = d.capabilities || {};
+    var st = caps.standings || {};
+    // Preserve canonical render order so a sport that gains "draw"
+    // mid-session ends up with the same tab order as a sport that had
+    // it from the start.
+    var ORDER = ["overall_live", "overall", "home", "away", "form", "draw", "top_scores"];
+    var perEventTypes = [];
+    for (var i = 0; i < ORDER.length; i++) {
+      if (st[ORDER[i]]) perEventTypes.push(ORDER[i]);
+    }
+    if (!perEventTypes.length) return;
+    var combined = sportStTypes.slice();
+    for (var j = 0; j < perEventTypes.length; j++) {
+      if (combined.indexOf(perEventTypes[j]) < 0) combined.push(perEventTypes[j]);
+    }
+    if (combined.length === sportStTypes.length) return;  // nothing new
+    var mainTabsBar = panel.querySelector(".ed-sb-main-tabs");
+    if (!mainTabsBar) return;
+    var stBtn = mainTabsBar.querySelector('[data-main="standings"]');
+    var stPanel = panel.querySelector('.ed-sb-main[data-main="standings"]');
+    var newLabel = _standingsTabLabel(combined);
+    if (stBtn) {
+      stBtn.textContent = newLabel;
+    } else {
+      // Inject the parent tab. Insert before News if present, else at
+      // the end of the main-tabs strip.
+      var newsBtn = mainTabsBar.querySelector('[data-main="news"]');
+      var btnHtml = '<button class="ed-sb-tab" data-main="standings" onclick="window.switchMainTab(this)">' + escH(newLabel) + '</button>';
+      if (newsBtn) newsBtn.insertAdjacentHTML('beforebegin', btnHtml);
+      else mainTabsBar.insertAdjacentHTML('beforeend', btnHtml);
+    }
+    if (stPanel) {
+      stPanel.dataset.stTypes = combined.join(",");
+      // If the user already opened Standings before the upgrade
+      // arrived, re-hydrate so the sub-tab strip picks up the new
+      // ceiling (e.g. a Draw sub-tab that wasn't there before).
+      if (stPanel.dataset.loaded) {
+        _hydrateStandingsTabs(stPanel, ticker);
+      }
+    } else {
+      // Build the standings panel inline. Mirrors the markup at the
+      // hydrateGameStats build site so subsequent _hydrateStandingsTabs
+      // calls find the structure they expect.
+      var ph = '<div class="ed-sb-main" data-main="standings" data-debug-ticker="' + escH(ticker) + '" data-st-types="' + escH(combined.join(",")) + '">';
+      ph += '<div class="ed-debug-st-tabs"></div>';
+      ph += '<div class="ed-debug-st-filter">';
+      ph += '<button class="ed-sb-tab active" data-st-filter="overall" onclick="window._dbgStFilter(this)">Overall</button>';
+      ph += '<button class="ed-sb-tab" data-st-filter="home" onclick="window._dbgStFilter(this)">Home</button>';
+      ph += '<button class="ed-sb-tab" data-st-filter="away" onclick="window._dbgStFilter(this)">Away</button>';
+      ph += '</div>';
+      ph += '<div class="ed-debug-st-content"><div class="ed-stats-loading">Loading standings…</div></div>';
+      ph += '</div>';
+      // Insert as the last main panel so tab order in the DOM follows
+      // tab order in the strip.
+      var mains = panel.querySelectorAll(".ed-sb-main");
+      if (mains.length) mains[mains.length - 1].insertAdjacentHTML("afterend", ph);
+    }
+  } catch (e) { /* augmentation is best-effort — silent on error */ }
 }
 
 // Main tab switcher (MATCH / H2H / STANDINGS / NEWS)
