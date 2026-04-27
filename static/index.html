@@ -1135,7 +1135,8 @@ async function restoreFromUrl(searchStr) {
     document.getElementById("nav").style.display = "none";
     document.getElementById("home-screen").style.display = "none";
     document.getElementById("cards-grid").style.display = "grid";
-    document.getElementById("cards-grid").innerHTML = "";
+    if (typeof _resetCardObserver === "function") _resetCardObserver();
+  document.getElementById("cards-grid").innerHTML = "";
     renderCatTabs();
     loadMore();
     return;
@@ -1168,6 +1169,7 @@ async function restoreFromUrl(searchStr) {
   }
   document.getElementById("home-screen").style.display = "none";
   document.getElementById("cards-grid").style.display = "grid";
+  if (typeof _resetCardObserver === "function") _resetCardObserver();
   document.getElementById("cards-grid").innerHTML = "";
   document.getElementById("count-bar").textContent = "";
   renderCatTabs();
@@ -1221,6 +1223,7 @@ async function selectCat(key, skipHistory) {
   }
   document.getElementById("home-screen").style.display = "none";
   document.getElementById("cards-grid").style.display = "grid";
+  if (typeof _resetCardObserver === "function") _resetCardObserver();
   document.getElementById("cards-grid").innerHTML = "";
   document.getElementById("count-bar").textContent = "";
   loadMore();
@@ -1290,7 +1293,8 @@ function renderNav() {
           state.offset = 0;
           state.allLoaded = false;
           pushNavState(false);
-          document.getElementById("cards-grid").innerHTML = "";
+          if (typeof _resetCardObserver === "function") _resetCardObserver();
+  document.getElementById("cards-grid").innerHTML = "";
           renderNav();
           loadMore();
         });
@@ -1330,6 +1334,7 @@ function selectSport(name, skipHistory) {
   renderCatTabs();
   document.getElementById("home-screen").style.display = "none";
   document.getElementById("cards-grid").style.display = "grid";
+  if (typeof _resetCardObserver === "function") _resetCardObserver();
   document.getElementById("cards-grid").innerHTML = "";
   renderNav();
   loadMore();
@@ -1340,6 +1345,7 @@ function selectComp(comp, skipHistory) {
   state.offset = 0;
   state.allLoaded = false;
   if (!skipHistory) pushNavState(false);
+  if (typeof _resetCardObserver === "function") _resetCardObserver();
   document.getElementById("cards-grid").innerHTML = "";
   renderNav();
   loadMore();
@@ -1396,6 +1402,7 @@ function appendCards(evs) {
       if (tkr) showEventDetail(tkr);
     });
     grid.appendChild(card);
+    _observeCard(card);
   }
   // Subscribe all visible card tickers to WS for real-time updates.
   var cardTickers = document.querySelectorAll("[data-card-ticker]");
@@ -2083,7 +2090,8 @@ document.getElementById("search-input").addEventListener("input", function(e) {
       document.getElementById("home-screen").style.display = "flex";
       document.getElementById("cards-grid").style.display = "none";
     }
-    document.getElementById("cards-grid").innerHTML = "";
+    if (typeof _resetCardObserver === "function") _resetCardObserver();
+  document.getElementById("cards-grid").innerHTML = "";
     loadMore();
   }, 350);
 });
@@ -2092,24 +2100,28 @@ document.getElementById("date-sel").addEventListener("change", function(e) {
   var cd = document.getElementById("custom-dates");
   cd.style.display = state.dateFilter === "custom" ? "flex" : "none";
   state.offset = 0; state.allLoaded = false;
+  if (typeof _resetCardObserver === "function") _resetCardObserver();
   document.getElementById("cards-grid").innerHTML = "";
   if (state.dateFilter !== "custom") loadMore();
 });
 document.getElementById("date-from").addEventListener("change", function(e) {
   state.dateFrom = e.target.value;
   state.offset = 0; state.allLoaded = false;
+  if (typeof _resetCardObserver === "function") _resetCardObserver();
   document.getElementById("cards-grid").innerHTML = "";
   loadMore();
 });
 document.getElementById("date-to").addEventListener("change", function(e) {
   state.dateTo = e.target.value;
   state.offset = 0; state.allLoaded = false;
+  if (typeof _resetCardObserver === "function") _resetCardObserver();
   document.getElementById("cards-grid").innerHTML = "";
   loadMore();
 });
 document.getElementById("sort-sel").addEventListener("change", function(e) {
   state.sort = e.target.value;
   state.offset = 0; state.allLoaded = false;
+  if (typeof _resetCardObserver === "function") _resetCardObserver();
   document.getElementById("cards-grid").innerHTML = "";
   loadMore();
 });
@@ -2121,6 +2133,7 @@ function setViewMode(mode) {
   document.getElementById("view-all").classList.toggle("active", mode === "all");
   state.offset = 0;
   state.allLoaded = false;
+  if (typeof _resetCardObserver === "function") _resetCardObserver();
   document.getElementById("cards-grid").innerHTML = "";
   loadMore();
 }
@@ -2167,6 +2180,43 @@ function _updateIfChanged(el, flashTarget, newVal) {
   _flash(flashTarget || el, old, newVal);
   el.textContent = newVal;
 }
+
+// Visible-card tracking for per-event live refresh. The
+// IntersectionObserver below adds/removes tickers from
+// _visibleTickers as cards scroll in/out of viewport; the
+// refreshVisible loop sends those tickers to /api/events?warm=
+// so the backend re-fetches FlashLive for each one before
+// formatting the response — viewport cards land on near-realtime
+// scores regardless of where the broad poll happens to be in its
+// cycle.
+var _visibleTickers = new Set();
+var _cardObs = null;
+function _ensureCardObs() {
+  if (_cardObs) return _cardObs;
+  if (typeof IntersectionObserver === "undefined") return null;
+  _cardObs = new IntersectionObserver(function(entries) {
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var t = e.target.getAttribute("data-event-ticker");
+      if (!t) continue;
+      if (e.isIntersecting) _visibleTickers.add(t);
+      else _visibleTickers.delete(t);
+    }
+  }, { rootMargin: "100px", threshold: 0.05 });
+  return _cardObs;
+}
+function _observeCard(cardEl) {
+  if (!cardEl || !cardEl.getAttribute) return;
+  var obs = _ensureCardObs();
+  if (obs) obs.observe(cardEl);
+}
+function _resetCardObserver() {
+  // Disconnect when the grid is wiped (filter / sort / category
+  // change) so the observer doesn't hold detached nodes.
+  if (_cardObs) { try { _cardObs.disconnect(); } catch (e) {} }
+  _visibleTickers.clear();
+}
+
 async function refreshVisible() {
   if (state.category === null || state.loading || state.offset === 0) return;
   // Don't refresh the (hidden) cards grid while the event-detail
@@ -2182,6 +2232,13 @@ async function refreshVisible() {
   if (state._liveCat) url += "&live_cat=" + encodeURIComponent(state._liveCat);
   if (state.viewMode === "all") url += "&view=all";
   if (state.search) url += "&search=" + encodeURIComponent(state.search);
+  // Warm the viewport cards' FlashLive state on the backend before
+  // it formats the response. Capped at 30 tickers per request to
+  // keep the per-event fan-out bounded.
+  if (_visibleTickers.size > 0) {
+    var visArr = Array.from(_visibleTickers).slice(0, 30);
+    if (visArr.length) url += "&warm=" + encodeURIComponent(visArr.join(","));
+  }
   try {
     var r = await fetch(url);
     var d = await r.json();
@@ -2291,7 +2348,11 @@ async function refreshVisible() {
     }
   } catch (e) { /* swallow: next tick will try again */ }
 }
-setInterval(refreshVisible, 5000);
+// 3 s tick — paired with /api/events?warm= for viewport cards. The
+// per-event FL refresh fans out only for the cards the user is
+// looking at, so this faster cadence costs ~10-30 calls per tick
+// instead of polling all 200+ events on the platform.
+setInterval(refreshVisible, 3000);
 
 // ── Screener ──────────────────────────────────────────────────────
 var screenerState = { sort: "volume_24h", dir: "desc", offset: 0, total: 0 };
@@ -2481,7 +2542,8 @@ async function screenerLoad(append) {
             state.search = evt;
             state.offset = 0;
             state.allLoaded = false;
-            document.getElementById("cards-grid").innerHTML = "";
+            if (typeof _resetCardObserver === "function") _resetCardObserver();
+  document.getElementById("cards-grid").innerHTML = "";
             loadMore();
           }, 100);
         });

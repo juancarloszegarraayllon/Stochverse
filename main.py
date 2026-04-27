@@ -1667,7 +1667,16 @@ def get_events(
     date_to: Optional[str] = None,
     offset: int = 0,
     limit: int = 24,
+    warm: Optional[str] = None,
 ):
+    # Per-event live refresh — frontend sends the comma-separated
+    # tickers of currently-visible cards so the response carries fresh
+    # _live_state for them even between broad-poll cycles. Bounded at
+    # 30 tickers per call to cap fan-out cost.
+    if warm:
+        warm_list = [t for t in warm.split(",") if t][:30]
+        if warm_list:
+            _warm_specific_events(warm_list)
     from datetime import date as _date
     # "game" view = tabbed cards (grouped siblings, default).
     # "all" view  = every market type as its own card (ungrouped).
@@ -4906,6 +4915,84 @@ def _fl_has_data(resp) -> bool:
 # absorb repeated opens of the same event panel.
 _EVENT_CAPS_CACHE: dict = {}
 _EVENT_CAPS_TTL = 300  # seconds
+
+
+async def _warm_events_async(tickers):
+    """Per-event FlashLive refresh for the given Kalshi tickers.
+
+    Resolves each ticker to its FL event_id (cached via _find_fl_game),
+    fetches /v1/events/data for that event, parses the result with the
+    standard _parse_event, and updates the in-memory GAMES dict in
+    place. The next /api/events response then carries the fresh
+    _live_state for those events without waiting for the broad
+    background poll to come around.
+
+    Bounded fan-out: ticker_set is capped by the caller (currently 30)
+    and individual calls are exception-safe so a single FL hiccup
+    can't poison the warm.
+    """
+    if not tickers:
+        return
+    try:
+        from flashlive_feed import _fl_get, _parse_event, GAMES, _normalize as fl_normalize
+    except ImportError:
+        return
+    ticker_set = set()
+    for t in tickers:
+        t2 = (t or "").strip().upper()
+        if t2:
+            ticker_set.add(t2)
+    if not ticker_set:
+        return
+    records = _cache.get("data_all") or _cache.get("data") or []
+    by_ticker = {}
+    for r in records:
+        tk = r.get("event_ticker")
+        if tk in ticker_set:
+            by_ticker[tk] = r
+
+    async def warm_one(ticker, found):
+        try:
+            g = await _find_fl_game(found)
+            if not g or not g.get("event_id"):
+                return
+            ev_data = await _fl_get("/v1/events/data", {"event_id": g["event_id"]})
+            if not ev_data:
+                return
+            items = ev_data.get("DATA") if isinstance(ev_data, dict) else None
+            ev = None
+            if isinstance(items, list) and items:
+                ev = items[0]
+            elif isinstance(items, dict):
+                ev = items
+            elif isinstance(ev_data, dict):
+                ev = ev_data
+            if not ev or not isinstance(ev, dict):
+                return
+            ev["_sport"] = g.get("sport") or ev.get("_sport")
+            new_g = _parse_event(ev)
+            if new_g and new_g.get("home_name") and new_g.get("away_name"):
+                key = f"{new_g['sport']}:{fl_normalize(new_g['home_name'])}:{fl_normalize(new_g['away_name'])}"
+                GAMES[key] = new_g
+        except Exception:
+            pass
+
+    tasks = [warm_one(t, by_ticker[t]) for t in ticker_set if t in by_ticker]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _warm_specific_events(tickers):
+    """Sync wrapper around _warm_events_async. FastAPI runs sync
+    /api/events handlers in a threadpool, so asyncio.run() inside one
+    spins up a fresh event loop without conflicting with the main
+    async worker. 2 s ceiling means a hung FlashLive call can't stall
+    the events response — the warm just completes whatever it managed
+    in time."""
+    try:
+        asyncio.run(asyncio.wait_for(_warm_events_async(tickers), timeout=2.0))
+    except Exception:
+        pass
 
 # /stats response cache. Keyed by ticker, holds the parsed payload with
 # its capture timestamp. TTL is short (10 s) so live tennis matches
