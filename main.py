@@ -4274,6 +4274,104 @@ async def get_event_topscorers(ticker: str):
         return {"error": str(e)[:200]}
 
 
+@app.get("/api/event/{ticker}/standings_debug")
+async def get_event_standings_debug(ticker: str):
+    """Probe every plausible standing_type value against FlashLive's
+    /v1/tournaments/standings endpoint and report what each returns.
+    Lets us see which keys are accepted, which return data, and the
+    shape of each response — without burning a frontend reload per
+    guess.
+
+    Usage: /api/event/KXARGPREMDIVGAME-26APR26TUCBAN/standings_debug
+    """
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = None
+    for r in records:
+        if r.get("event_ticker") == ticker:
+            found = r
+            break
+    if not found:
+        return {"error": "event not found"}
+    try:
+        from flashlive_feed import _fl_get
+        g = await _find_fl_game(found)
+        if not g:
+            return {"error": "FlashLive doesn't cover this match yet"}
+        stage_id = g.get("tournament_stage_id", "")
+        season_id = g.get("tournament_season_id", "")
+        if not stage_id:
+            return {"error": "no tournament stage ID available"}
+        # Probe every variant we've seen across FlashLive's surface.
+        # Order is for readability in the response — every key is
+        # tried regardless.
+        VARIANTS = [
+            "overall", "OVERALL", "TABLE",
+            "home", "HOME", "TABLE_HOME",
+            "away", "AWAY", "TABLE_AWAY",
+            "form", "FORM", "TABLE_FORM",
+            "top_scores", "top_scorers", "TOP_SCORERS",
+            "over_under", "OVER_UNDER", "TABLE_OVER_UNDER",
+            "ht_ft", "HT_FT", "TABLE_HT_FT",
+            "live", "live_table", "LIVE", "LIVE_TABLE",
+        ]
+        # Pull the tabs response too so the user can cross-reference
+        # which TABS the league advertises against which standing_type
+        # query params actually return data.
+        tabs_data = await _fl_get("/v1/tournaments/standings/tabs", {
+            "tournament_stage_id": stage_id,
+            "tournament_season_id": season_id,
+        })
+        results: dict = {}
+        for v in VARIANTS:
+            params = {"tournament_stage_id": stage_id, "standing_type": v}
+            if season_id:
+                params["tournament_season_id"] = season_id
+            try:
+                data = await _fl_get("/v1/tournaments/standings", params)
+            except Exception as ex:
+                results[v] = {"error": str(ex)[:120]}
+                continue
+            if data is None:
+                results[v] = {"status": "null"}
+                continue
+            rows_total = 0
+            outer_keys = []
+            sample_row_keys: list = []
+            if isinstance(data, dict):
+                outer_keys = list(data.keys())
+                groups = data.get("DATA") or []
+                if isinstance(groups, list):
+                    for grp in groups:
+                        if isinstance(grp, dict):
+                            r = grp.get("ROWS") or []
+                            if isinstance(r, list):
+                                rows_total += len(r)
+                                if r and isinstance(r[0], dict) and not sample_row_keys:
+                                    sample_row_keys = list(r[0].keys())
+                elif isinstance(groups, dict):
+                    r = groups.get("ROWS") or []
+                    if isinstance(r, list):
+                        rows_total = len(r)
+                        if r and isinstance(r[0], dict):
+                            sample_row_keys = list(r[0].keys())
+            results[v] = {
+                "rows": rows_total,
+                "outer_keys": outer_keys[:10],
+                "sample_row_keys": sample_row_keys[:14],
+            }
+        return {
+            "ticker": ticker,
+            "stage_id": stage_id,
+            "season_id": season_id,
+            "tabs_endpoint": tabs_data,
+            "by_standing_type": results,
+        }
+    except Exception as e:
+        return {"error": str(e)[:300]}
+
+
 @app.get("/api/event/{ticker}/standings_tabs")
 async def get_event_standings_tabs(ticker: str):
     """Return the list of standings sub-tabs FlashLive supports for

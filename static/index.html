@@ -4216,16 +4216,14 @@ async function _hydrateStandingsTabs(stPanel, ticker) {
     var d = await r.json();
     if (d && Array.isArray(d.tabs)) avail = d.tabs;
   } catch (e) { /* fall through to all-tabs default */ }
-  // Build the sub-tab buttons. If the API gave us an explicit list,
-  // filter to those; otherwise show the full strip and let each
-  // tab surface its own empty-state on click.
+  // Always show every sub-tab in the map — even if the FlashLive
+  // tabs endpoint doesn't list one, we still want the user to see
+  // what's available across the whole league surface, and tabs that
+  // are genuinely empty for this league surface a "no data
+  // available" message on click rather than vanishing. (Filtering
+  // by `avail` was hiding Over/Under and HT/FT for Argentine Liga
+  // even though they exist as endpoints.)
   var tabs = _STANDINGS_TAB_MAP;
-  if (avail) {
-    var availSet = {};
-    for (var ai = 0; ai < avail.length; ai++) availSet[avail[ai]] = true;
-    tabs = _STANDINGS_TAB_MAP.filter(function(t) { return availSet[t.code]; });
-    if (!tabs.length) tabs = _STANDINGS_TAB_MAP; // safety fallback
-  }
   // Dedupe by `type` since LIVE_TABLE and LIVE both map to "live".
   var seen = {};
   tabs = tabs.filter(function(t) {
