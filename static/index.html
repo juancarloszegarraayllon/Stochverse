@@ -4102,21 +4102,20 @@ async function hydrateGameStats(evTicker) {
     // FlashLive returns.
     // ════════════════════════════════════════════════════
     if (hasStandings) {
+      // Sub-tabs render lazily — _hydrateStandingsTabs probes
+      // FlashLive's /v1/tournaments/standings/tabs to find out which
+      // ones this league actually supports (Argentina Liga has 5,
+      // a European cup might have all 7) and only shows those.
+      // The filter row stays in place but hidden until a tab with
+      // hasFilter=true (currently just Standings) is active.
       h += '<div class="ed-sb-main" data-main="standings" data-debug-ticker="' + escH(evTicker) + '">';
-      h += '<div class="ed-debug-st-tabs">';
-      h += '<button class="ed-sb-tab" data-st-type="live" onclick="window._dbgStSwitch(this)">Live Standings</button>';
-      h += '<button class="ed-sb-tab active" data-st-type="overall" onclick="window._dbgStSwitch(this)">Standings</button>';
-      h += '<button class="ed-sb-tab" data-st-type="form" onclick="window._dbgStSwitch(this)">Form</button>';
-      h += '<button class="ed-sb-tab" data-st-type="over_under" onclick="window._dbgStSwitch(this)">Over/Under</button>';
-      h += '<button class="ed-sb-tab" data-st-type="ht_ft" onclick="window._dbgStSwitch(this)">HT/FT</button>';
-      h += '<button class="ed-sb-tab" data-st-type="top_scores" onclick="window._dbgStSwitch(this)">Top Scorers</button>';
-      h += '</div>';
-      h += '<div class="ed-debug-st-filter" style="display:flex">';
+      h += '<div class="ed-debug-st-tabs"></div>';
+      h += '<div class="ed-debug-st-filter">';
       h += '<button class="ed-sb-tab active" data-st-filter="overall" onclick="window._dbgStFilter(this)">Overall</button>';
       h += '<button class="ed-sb-tab" data-st-filter="home" onclick="window._dbgStFilter(this)">Home</button>';
       h += '<button class="ed-sb-tab" data-st-filter="away" onclick="window._dbgStFilter(this)">Away</button>';
       h += '</div>';
-      h += '<div class="ed-debug-st-content"><div class="ed-stats-loading">Click a sub-tab to load standings.</div></div>';
+      h += '<div class="ed-debug-st-content"><div class="ed-stats-loading">Loading standings…</div></div>';
       h += '</div>';
     }
 
@@ -4157,19 +4156,89 @@ window.switchMainTab = function(btn) {
     if (target === "h2h") _loadH2H(lazy, ticker);
     else if (target === "news") _loadNews(lazy, ticker);
   }
-  // Auto-load Standings (overall) on first switch into that tab —
-  // saves the user a second click and matches the FlashScore behaviour
-  // of showing the league table immediately.
+  // Auto-load Standings on first switch into that tab. We probe
+  // /standings_tabs first to learn which sub-tabs FlashLive
+  // actually supports for this league (e.g. Argentine Liga
+  // Profesional has no Live Standings / Over-Under / HT-FT, while
+  // a European cup might) and rebuild the sub-tab strip to only
+  // include those, then load the first one.
   if (target === "standings") {
     var stPanel = panel.querySelector('.ed-sb-main[data-main="standings"]');
     if (stPanel && !stPanel.dataset.loaded) {
       stPanel.dataset.loaded = "1";
       var ticker3 = panel.dataset.ticker;
-      var content = stPanel.querySelector(".ed-debug-st-content");
-      if (content && ticker3) _loadStandingsType(content, ticker3, "overall");
+      if (ticker3) _hydrateStandingsTabs(stPanel, ticker3);
     }
   }
 };
+
+// FlashLive standings_tabs codes (from /v1/tournaments/standings
+// /tabs) → the standing_type query param the data endpoint takes,
+// plus the visible label. Order below = display order.
+var _STANDINGS_TAB_MAP = [
+  {code: "LIVE_TABLE",        type: "live",       label: "Live Standings"},
+  {code: "LIVE",              type: "live",       label: "Live Standings"},
+  {code: "TABLE",             type: "overall",    label: "Standings",      hasFilter: true},
+  {code: "TABLE_FORM",        type: "form",       label: "Form"},
+  {code: "TABLE_OVER_UNDER",  type: "over_under", label: "Over/Under"},
+  {code: "TABLE_HT_FT",       type: "ht_ft",      label: "HT/FT"},
+  {code: "TOP_SCORERS",       type: "top_scores", label: "Top Scorers"},
+];
+
+async function _hydrateStandingsTabs(stPanel, ticker) {
+  var tabsRow = stPanel.querySelector(".ed-debug-st-tabs");
+  var filterRow = stPanel.querySelector(".ed-debug-st-filter");
+  var content = stPanel.querySelector(".ed-debug-st-content");
+  if (!tabsRow || !content) return;
+  // Probe FlashLive for the list of sub-tabs this league exposes.
+  var avail = null;
+  try {
+    var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/standings_tabs");
+    var d = await r.json();
+    if (d && Array.isArray(d.tabs)) avail = d.tabs;
+  } catch (e) { /* fall through to all-tabs default */ }
+  // Build the sub-tab buttons. If the API gave us an explicit list,
+  // filter to those; otherwise show the full strip and let each
+  // tab surface its own empty-state on click.
+  var tabs = _STANDINGS_TAB_MAP;
+  if (avail) {
+    var availSet = {};
+    for (var ai = 0; ai < avail.length; ai++) availSet[avail[ai]] = true;
+    tabs = _STANDINGS_TAB_MAP.filter(function(t) { return availSet[t.code]; });
+    if (!tabs.length) tabs = _STANDINGS_TAB_MAP; // safety fallback
+  }
+  // Dedupe by `type` since LIVE_TABLE and LIVE both map to "live".
+  var seen = {};
+  tabs = tabs.filter(function(t) {
+    if (seen[t.type]) return false;
+    seen[t.type] = true;
+    return true;
+  });
+  // Pick the default active tab — prefer overall (the standings
+  // table itself). If the league doesn't have it, use the first
+  // available.
+  var defaultTab = null;
+  for (var di = 0; di < tabs.length; di++) {
+    if (tabs[di].type === "overall") { defaultTab = tabs[di]; break; }
+  }
+  if (!defaultTab) defaultTab = tabs[0];
+  // Render the strip.
+  var th = "";
+  for (var ti = 0; ti < tabs.length; ti++) {
+    var t = tabs[ti];
+    var active = (t === defaultTab) ? " active" : "";
+    th += '<button class="ed-sb-tab' + active + '" data-st-type="' + t.type
+        + '" onclick="window._dbgStSwitch(this)">' + escH(t.label) + '</button>';
+  }
+  tabsRow.innerHTML = th;
+  // Show / hide the Overall/Home/Away filter based on the default
+  // tab's hasFilter property.
+  if (filterRow) {
+    filterRow.style.display = (defaultTab && defaultTab.hasFilter) ? "flex" : "none";
+  }
+  // Auto-load the default tab.
+  if (defaultTab) _loadStandingsType(content, ticker, defaultTab.type);
+}
 
 // Standings sub-tab switcher (Standings / Form / Top Scorers)
 var _stCurrentType = {};

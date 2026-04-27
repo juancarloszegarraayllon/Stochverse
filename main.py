@@ -4252,6 +4252,47 @@ async def get_event_topscorers(ticker: str):
         return {"error": str(e)[:200]}
 
 
+@app.get("/api/event/{ticker}/standings_tabs")
+async def get_event_standings_tabs(ticker: str):
+    """Return the list of standings sub-tabs FlashLive supports for
+    this event's tournament. Argentine Liga Profesional surfaces
+    [TABLE, TABLE_HOME, TABLE_AWAY, TABLE_FORM, TOP_SCORERS]; a
+    European cup might also expose LIVE_TABLE / TABLE_OVER_UNDER /
+    TABLE_HT_FT. The frontend uses this to render only the sub-tabs
+    that actually have data instead of showing dead buttons.
+    """
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = None
+    for r in records:
+        if r.get("event_ticker") == ticker:
+            found = r
+            break
+    if not found:
+        return {"error": "event not found"}
+    try:
+        from flashlive_feed import _fl_get
+        g = await _find_fl_game(found)
+        if not g:
+            return {"error": "no FlashLive match found"}
+        stage_id = g.get("tournament_stage_id", "")
+        season_id = g.get("tournament_season_id", "")
+        if not stage_id:
+            return {"error": "no tournament stage ID available"}
+        params = {"tournament_stage_id": stage_id}
+        if season_id:
+            params["tournament_season_id"] = season_id
+        data = await _fl_get("/v1/tournaments/standings/tabs", params)
+        if not data:
+            return {"error": "no tabs available"}
+        inner = data.get("DATA") if isinstance(data, dict) else None
+        tabs = (inner or {}).get("TABS") or []
+        return {"tabs": tabs, "source": "flashlive"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
 @app.get("/api/event/{ticker}/news")
 async def get_event_news(ticker: str):
     """Fetch news from FlashLive for this event."""
