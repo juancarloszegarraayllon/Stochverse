@@ -4887,13 +4887,25 @@ async def debug_fl_sports_list():
             if sid not in ACTIVE_SPORTS
         ]
         # Gap 3: Kalshi categories with no name match in FlashLive's
-        # advertised list (case-insensitive substring match handles
-        # things like "Mixed Martial Arts" vs "MMA").
-        fl_names_low = [n.lower() for n in fl_id_to_name.values()]
+        # advertised list. Normalize underscores → spaces (FlashLive
+        # uses AUSSIE_RULES / AMERICAN_FOOTBALL) and accept either
+        # direction of substring match plus a couple of known aliases
+        # (Football → American Football, Rugby → Rugby Union/League).
+        def _norm(n: str) -> str:
+            return (n or "").lower().replace("_", " ").strip()
+        fl_names_norm = [_norm(n) for n in fl_id_to_name.values() if n]
+        aliases = {
+            "football": "american football",
+            "rugby": "rugby",
+        }
         kalshi_no_fl = []
         for ks in kalshi_sports:
-            ks_low = ks.lower()
-            hit = any(ks_low in fln or fln in ks_low for fln in fl_names_low if fln)
+            ks_norm = _norm(ks)
+            alias = aliases.get(ks_norm, ks_norm)
+            hit = any(
+                ks_norm in fln or fln in ks_norm or alias in fln
+                for fln in fl_names_norm
+            )
             if not hit:
                 kalshi_no_fl.append(ks)
         return {

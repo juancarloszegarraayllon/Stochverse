@@ -29,14 +29,27 @@ BASE_URL = f"https://{API_HOST}"
 
 POLL_INTERVAL = 120  # seconds between polls (conserve API quota)
 
-# Only poll sports that Kalshi actively covers to save requests.
-# Each sport = 1 API call per poll cycle.
+# Poll every FlashLive sport that maps to a Kalshi sport category in
+# main.py's _SPORT_SERIES. Each sport = 1 API call per POLL_INTERVAL,
+# so this list directly drives quota. IDs verified against
+# /v1/sports/list (see /api/debug_fl_sports_list).
 ACTIVE_SPORTS = {
     "1": "Soccer",
     "2": "Tennis",
     "3": "Basketball",
     "4": "Hockey",
+    "5": "Football",       # AMERICAN_FOOTBALL on FlashLive
     "6": "Baseball",
+    "8": "Rugby",          # RUGBY_UNION (Premiership, French Top 14)
+    "13": "Cricket",
+    "14": "Darts",
+    "16": "Boxing",
+    "18": "Aussie Rules",
+    "19": "Rugby",         # RUGBY_LEAGUE (NRL, Super League)
+    "23": "Golf",
+    "28": "MMA",
+    "31": "Motorsport",
+    "36": "Esports",
 }
 GAMES: dict = {}    # normalized key → game dict
 
@@ -48,7 +61,14 @@ STATUS = {
     "polls": 0,
 }
 
-# FlashLive sport IDs → our sport names
+# FlashLive sport IDs → our sport names. Verified against
+# /v1/sports/list. Earlier versions of this map had the IDs from 7
+# onwards wildly wrong (7 was labelled Rugby but FlashLive 7 is
+# HANDBALL, etc.) — the bug was hidden because ACTIVE_SPORTS only
+# polled IDs 1-4 and 6, but anywhere SPORT_MAP.get(SPORT_ID) was
+# called for an event without a _sport tag, sports past 6 were
+# mislabelled. SPORT_MAP is a superset of ACTIVE_SPORTS so freshly
+# returned events always get a label, even if we change polling.
 SPORT_MAP = {
     "1": "Soccer",
     "2": "Tennis",
@@ -56,13 +76,18 @@ SPORT_MAP = {
     "4": "Hockey",
     "5": "Football",
     "6": "Baseball",
-    "7": "Rugby",
-    "8": "Cricket",
-    "9": "Golf",
-    "10": "MMA",
-    "11": "Motorsport",
-    "12": "Esports",
-    "22": "Darts",
+    "8": "Rugby",
+    "13": "Cricket",
+    "14": "Darts",
+    "16": "Boxing",
+    "18": "Aussie Rules",
+    "19": "Rugby",
+    "23": "Golf",
+    "28": "MMA",
+    "31": "Motorsport",
+    "32": "Motorsport",   # AUTORACING — same Kalshi bucket
+    "33": "Motorsport",   # MOTORACING — same Kalshi bucket
+    "36": "Esports",
 }
 
 
