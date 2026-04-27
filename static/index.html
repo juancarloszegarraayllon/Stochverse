@@ -4209,22 +4209,13 @@ async function _hydrateStandingsTabs(stPanel, ticker) {
   var filterRow = stPanel.querySelector(".ed-debug-st-filter");
   var content = stPanel.querySelector(".ed-debug-st-content");
   if (!tabsRow || !content) return;
-  // Probe FlashLive for the list of sub-tabs this league exposes.
-  var avail = null;
-  try {
-    var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/standings_tabs");
-    var d = await r.json();
-    if (d && Array.isArray(d.tabs)) avail = d.tabs;
-  } catch (e) { /* fall through to all-tabs default */ }
-  // Always show every sub-tab in the map — even if the FlashLive
-  // tabs endpoint doesn't list one, we still want the user to see
-  // what's available across the whole league surface, and tabs that
-  // are genuinely empty for this league surface a "no data
-  // available" message on click rather than vanishing. (Filtering
-  // by `avail` was hiding Over/Under and HT/FT for Argentine Liga
-  // even though they exist as endpoints.)
+  // Always show every sub-tab in the map. Tabs that don't have data
+  // for this league surface a clear empty-state on click (handled
+  // by _loadStandingsType). The previous version awaited the
+  // /standings_tabs probe before rendering, which delayed the
+  // default tab's data fetch behind a now-unused roundtrip.
   var tabs = _STANDINGS_TAB_MAP;
-  // Dedupe by `type` since LIVE_TABLE and LIVE both map to "live".
+  // Dedupe by `type` since LIVE_TABLE and LIVE both map to "live_table".
   var seen = {};
   tabs = tabs.filter(function(t) {
     if (seen[t.type]) return false;
@@ -4730,12 +4721,33 @@ async function _loadTopScorers(container, ticker) {
   }
 }
 
+// Translate the raw "no X data available" backend errors into
+// per-standing-type messages users can actually parse.
+function _stEmptyMsg(standingType) {
+  if (standingType === "live_table" || standingType === "live") {
+    return "No live standings — round isn't in progress.";
+  }
+  if (standingType === "over_under") return "Over/Under not tracked for this league.";
+  if (standingType === "ht_ft") return "HT/FT not tracked for this league.";
+  if (standingType === "top_scores" || standingType === "top_scorers") {
+    return "Top scorers haven't been published yet for this stage.";
+  }
+  return "No data available.";
+}
+
 async function _loadStandingsType(container, ticker, standingType) {
   container.innerHTML = '<div class="ed-stats-loading">Loading…</div>';
   try {
     var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/standings?standing_type=" + encodeURIComponent(standingType));
     var d = await r.json();
-    if (d.error) { container.innerHTML = '<div class="ed-stats-loading">' + escH(d.error) + '</div>'; return; }
+    if (d.error) {
+      // Backend errors like "no live_table data available" are
+      // technical — replace them with the per-tab message so the
+      // user sees a sentence, not a path-like string.
+      var msg = /no .* data available/i.test(d.error) ? _stEmptyMsg(standingType) : d.error;
+      container.innerHTML = '<div class="ed-stats-loading">' + escH(msg) + '</div>';
+      return;
+    }
     var data = d.data || {};
     var rows = [];
     if (data.ROWS && Array.isArray(data.ROWS)) {
@@ -4751,7 +4763,7 @@ async function _loadStandingsType(container, ticker, standingType) {
       }
     }
     if (!rows.length) {
-      container.innerHTML = '<div class="ed-stats-loading">No data available.</div>';
+      container.innerHTML = '<div class="ed-stats-loading">' + escH(_stEmptyMsg(standingType)) + '</div>';
       return;
     }
     // META carries column legend + qualification color codes for
