@@ -4510,15 +4510,23 @@ function _stVal(row) {
   return "";
 }
 
-// Form match count click handler
+// Form window-button click handler. `count` is the group index key
+// stashed on container._formWindows by _loadStandingsType.
 window._stFormCount = function(btn, count) {
   var row = btn.closest(".ed-sb-filter-tabs");
-  if (row) { var tabs = row.querySelectorAll(".ed-sb-tab"); for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove("active"); btn.classList.add("active"); }
-  var container = btn.closest("[id^='st-content-']");
+  if (row) {
+    var tabs = row.querySelectorAll(".ed-sb-tab");
+    for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove("active");
+    btn.classList.add("active");
+  }
+  // The standings render container is `.ed-debug-st-content` —
+  // the older `[id^='st-content-']` selector was a leftover from a
+  // sidebar variant we removed, which is why clicks did nothing.
+  var container = btn.closest(".ed-debug-st-content");
   if (!container || !container._formWindows) return;
-  var tableDiv = document.getElementById("st-form-table");
+  var tableDiv = container.querySelector("#st-form-table");
   if (tableDiv && container._formWindows[count]) {
-    _renderStandingsTable(tableDiv, container._formWindows[count], container._homeName || "", container._awayName || "");
+    _renderStandingsTable(tableDiv, container._formWindows[count], container._homeName || "", container._awayName || "", container._meta || null);
   }
 };
 
@@ -4788,7 +4796,20 @@ async function _loadStandingsType(container, ticker, standingType) {
         var grp = groups[gi];
         var grpRows = grp.ROWS || grp.rows || [];
         if (!Array.isArray(grpRows)) continue;
-        for (var ri = 0; ri < grpRows.length; ri++) rows.push(grpRows[ri]);
+        // Tag each row with its group index/name so consumers (Form
+        // bucketing in particular) can preserve which window the row
+        // came from. Bucketing by MATCHES_PLAYED instead produces
+        // phantom buckets when a team has played fewer matches than
+        // the window size (e.g. MP=14 inside the "Last 15" group).
+        var grpName = grp.GROUP_NAME || grp.NAME || grp.STAGE_NAME || "";
+        for (var ri = 0; ri < grpRows.length; ri++) {
+          var rr = grpRows[ri];
+          if (rr && typeof rr === "object") {
+            rr._GROUP_INDEX = gi;
+            rr._GROUP_NAME = grpName;
+          }
+          rows.push(rr);
+        }
       }
     }
     if (!rows.length) {
@@ -4805,19 +4826,37 @@ async function _loadStandingsType(container, ticker, standingType) {
     if (standingType === "top_scores" || standingType === "top_scorers" || standingType === "TOP_SCORERS") {
       _renderTopScorersFromStandings(container, rows);
     } else if (standingType === "form") {
-      // Form data has multiple match-count windows (5, 10, 15, 20, 25, 30)
+      // Form data ships as multiple windowed groups (typically Last 5,
+      // Last 10, Last 15). Bucket by source group, not by MP, so a
+      // team that's only played 14 of its "Last 15" doesn't spawn its
+      // own button. Each button's label is the max MP within that
+      // group — that's the actual window size.
       var windows = {};
       for (var fi = 0; fi < rows.length; fi++) {
-        var mp = rows[fi].MATCHES_PLAYED || 0;
-        if (!windows[mp]) windows[mp] = [];
-        windows[mp].push(rows[fi]);
+        var gIdx = rows[fi]._GROUP_INDEX;
+        if (gIdx === undefined || gIdx === null) gIdx = 0;
+        if (!windows[gIdx]) windows[gIdx] = [];
+        windows[gIdx].push(rows[fi]);
       }
-      var windowKeys = Object.keys(windows).sort(function(a,b) { return parseInt(a) - parseInt(b); });
-      // Render match count buttons + table
+      var groupKeys = Object.keys(windows).sort(function(a,b) { return parseInt(a) - parseInt(b); });
+      // Compute a label per group: max MP within the group (the
+      // actual window size), falling back to the group's name from
+      // the API if MP isn't populated.
+      var labelByKey = {};
+      for (var gk = 0; gk < groupKeys.length; gk++) {
+        var grp = windows[groupKeys[gk]];
+        var maxMP = 0;
+        for (var rj = 0; rj < grp.length; rj++) {
+          var mp = parseInt(grp[rj].MATCHES_PLAYED || 0);
+          if (mp > maxMP) maxMP = mp;
+        }
+        labelByKey[groupKeys[gk]] = maxMP > 0 ? String(maxMP) : (grp[0]._GROUP_NAME || ("Window " + (parseInt(groupKeys[gk]) + 1)));
+      }
+      // Render window buttons + table.
       var h = '<div class="ed-sb-tabs ed-sb-filter-tabs" style="margin-bottom:8px">';
-      for (var wk = 0; wk < windowKeys.length; wk++) {
-        var k = windowKeys[wk];
-        h += '<button class="ed-sb-tab' + (wk === 0 ? ' active' : '') + '" onclick="window._stFormCount(this,\'' + k + '\')">' + k + '</button>';
+      for (var wk = 0; wk < groupKeys.length; wk++) {
+        var k = groupKeys[wk];
+        h += '<button class="ed-sb-tab' + (wk === 0 ? ' active' : '') + '" onclick="window._stFormCount(this,\'' + k + '\')">' + escH(labelByKey[k]) + '</button>';
       }
       h += '</div><div id="st-form-table"></div>';
       container.innerHTML = h;
@@ -4826,7 +4865,7 @@ async function _loadStandingsType(container, ticker, standingType) {
       container._awayName = awayName;
       container._meta = meta;
       var tableDiv = document.getElementById("st-form-table");
-      if (tableDiv && windowKeys.length) _renderStandingsTable(tableDiv, windows[windowKeys[0]], homeName, awayName, meta);
+      if (tableDiv && groupKeys.length) _renderStandingsTable(tableDiv, windows[groupKeys[0]], homeName, awayName, meta);
     } else {
       _renderStandingsTable(container, rows, homeName, awayName, meta);
     }
