@@ -5471,8 +5471,14 @@ async def debug_top_scorers(stage_id: str, season_id: str):
 
 
 @app.get("/api/flashlive_status")
-def flashlive_status():
-    """Debug endpoint: reports the FlashLive feed state."""
+def flashlive_status(sport: str = ""):
+    """Debug endpoint: reports the FlashLive feed state.
+
+    Pass ?sport=Tennis to focus the raw-events sample on a single
+    sport, and prefer live games over pre/post so field-discovery
+    (e.g. current game point 15/30/40 for tennis) lands on an event
+    that actually has the dynamic keys populated.
+    """
     try:
         from flashlive_feed import STATUS, GAMES
         sample = []
@@ -5488,12 +5494,26 @@ def flashlive_status():
                 "tournament_id": g.get("tournament_id"),
                 "tournament_stage_id": g.get("tournament_stage_id"),
             })
-        # Include raw events for field discovery — one soccer, one tennis
+        # Raw-events sample — used to discover what FlashLive actually
+        # ships per sport so the parser can pick up newly-surfaced keys
+        # (e.g. current game point for tennis). Prefer live games and
+        # optionally filter by sport so the response is targeted.
+        candidates = list(GAMES.values())
+        if sport:
+            candidates = [g for g in candidates if (g.get("sport") or "") == sport]
+        candidates.sort(key=lambda g: 0 if g.get("state") == "in" else 1)
         raw_events = {}
-        for g in list(GAMES.values()):
-            sport = g.get("sport", "")
-            if sport and sport not in raw_events:
-                raw_events[sport] = {"keys": g.get("_raw_keys", []), "preview": g.get("_raw_preview", "")}
+        for g in candidates:
+            sp = g.get("sport", "")
+            if sp and sp not in raw_events:
+                raw_events[sp] = {
+                    "state": g.get("state"),
+                    "home": g.get("home_name"),
+                    "away": g.get("away_name"),
+                    "score": f"{g.get('home_score', '')} - {g.get('away_score', '')}",
+                    "keys": g.get("_raw_keys", []),
+                    "preview": g.get("_raw_preview", ""),
+                }
             if len(raw_events) >= 3:
                 break
         return {"status": dict(STATUS), "sample_games": sample, "raw_events": raw_events}
