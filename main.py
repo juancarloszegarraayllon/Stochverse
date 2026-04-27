@@ -2074,6 +2074,7 @@ def get_events(
                 "short_detail":   g.get("short_detail", ""),
                 "display_clock":  g.get("display_clock", ""),
                 "period":         g.get("period", 0),
+                "stage_start_ms": g.get("stage_start_ms", 0),
                 "league":         g.get("league", ""),
                 "captured_at_ms": g.get("captured_at_ms", 0),
                 "clock_running":  g.get("clock_running", True),

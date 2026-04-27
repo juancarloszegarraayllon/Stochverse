@@ -1581,6 +1581,13 @@ function renderTimeSlot(ev) {
       attrs += ' data-live-captured="' + live.captured_at_ms + '"';
       attrs += ' data-live-running="' + (live.clock_running ? '1' : '0') + '"';
     }
+    // Soccer's STAGE_START_TIME (Unix ms) lets buildLiveLabel
+    // compute the exact match minute + render stoppage time
+    // naturally (45+3', 90+5') without depending on FL's
+    // minute-resolution GAME_TIME snapshots.
+    if (live && live.stage_start_ms) {
+      attrs += ' data-live-stage-start="' + live.stage_start_ms + '"';
+    }
     // Score goes into its own attribute so the tick loop can rebuild
     // the full text (LIVE · SCORE · CLOCK) without erasing it.
     if (scoreStr) {
@@ -1611,8 +1618,37 @@ function formatMMSS(secs) {
   return m + ':' + (s < 10 ? '0' + s : s);
 }
 
-function buildLiveLabel(sport, period, clockSecs) {
+// Soccer period offsets (minutes elapsed in the match when the
+// period starts) and the regular-time minute mark. Stoppage in
+// each period is whatever runs past the end mark.
+var SOCCER_PERIOD_OFFSETS = {1: 0, 2: 45, 3: 90, 4: 105};
+var SOCCER_PERIOD_END     = {1: 45, 2: 90, 3: 105, 4: 120};
+
+function buildLiveLabel(sport, period, clockSecs, stageStartMs) {
   if (sport === 'Soccer') {
+    // STAGE_START_TIME path: precise to the second, stoppage time
+    // falls out for free (any minute past the period's regular
+    // end mark gets rendered as "{end}+{extra}'", e.g. 45+3').
+    if (stageStartMs && SOCCER_PERIOD_OFFSETS.hasOwnProperty(period)) {
+      var elapsedSec = Math.max(0, Math.floor((Date.now() - stageStartMs) / 1000));
+      var elapsedMin = Math.floor(elapsedSec / 60);
+      var base = SOCCER_PERIOD_OFFSETS[period];
+      var endMark = SOCCER_PERIOD_END[period];
+      var minute = base + elapsedMin;
+      if (minute > endMark) {
+        var extra = minute - endMark;
+        return endMark + "+" + extra + "'";
+      }
+      // Minimum minute = base + 1 (a match displayed as "0'" in 2H
+      // would be confusing — broadcast shows "46'" the moment 2H
+      // kicks off). Treat the first second of the half as minute 1
+      // of that half.
+      if (minute < base + 1) minute = base + 1;
+      return minute + "'";
+    }
+    // Fallback when STAGE_START_TIME isn't shipped (e.g. ESPN feed):
+    // count up from the GAME_TIME-derived clock seconds the way the
+    // pre-STAGE_START_TIME path did, stage-prefixed.
     var mins = Math.floor(clockSecs / 60);
     var tick = mins + "'";
     if (period === 1) return '1st ' + tick;
@@ -1640,6 +1676,7 @@ function tickLiveClocks() {
     var period = parseInt(badge.getAttribute('data-live-period') || '0', 10);
     var initial = badge.getAttribute('data-live-clock-initial');
     var captured = parseInt(badge.getAttribute('data-live-captured') || '0', 10);
+    var stageStartMs = parseInt(badge.getAttribute('data-live-stage-start') || '0', 10) || null;
     if (!initial || !captured) continue;
     var baseSecs = parseClockSecs(initial);
     if (baseSecs === null) continue;
@@ -1652,7 +1689,7 @@ function tickLiveClocks() {
     } else {
       newSecs = Math.max(0, baseSecs - elapsed);
     }
-    var label = buildLiveLabel(sport, period, newSecs);
+    var label = buildLiveLabel(sport, period, newSecs, stageStartMs);
     var text = badge.querySelector('.live-text');
     if (text) {
       var score = badge.getAttribute('data-live-score') || '';

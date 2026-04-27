@@ -183,6 +183,13 @@ async def _fetch_live_events(days=("0",)):
                         "locale": "en_INT",
                     },
                 )
+                # Throttle the broad poll — Mega caps at 10 req/sec
+                # and our 32 sequential calls + concurrent warm path
+                # were spiking past that, returning 429s on whichever
+                # sport happened to land in the burst. 150 ms between
+                # calls keeps us at ~6.7 req/sec, leaving headroom for
+                # the warm path's per-event fetches.
+                await asyncio.sleep(0.15)
                 if r.status_code == 200:
                     data = r.json()
                     top_data = data.get("DATA", []) if isinstance(data, dict) else data
@@ -243,6 +250,17 @@ def _parse_event(ev):
         # Game state from STAGE_TYPE
         stage = str(ev.get("STAGE_TYPE") or ev.get("STAGE") or "").upper()
         game_time = ev.get("GAME_TIME")
+        # FlashLive ships GAME_TIME as integer minutes (often null when
+        # they don't have a precise count), but every live event
+        # includes STAGE_START_TIME — Unix seconds when the current
+        # period kicked off. The frontend uses this to compute the
+        # match minute precisely + format stoppage time naturally
+        # (45+3', 90+5') without relying on FL minute snapshots.
+        stage_start_raw = ev.get("STAGE_START_TIME")
+        try:
+            stage_start_ms = int(float(stage_start_raw)) * 1000 if stage_start_raw else 0
+        except (ValueError, TypeError):
+            stage_start_ms = 0
 
         live_stages = {"LIVE", "FIRST_HALF", "SECOND_HALF", "FIRST_SET",
                        "SECOND_SET", "THIRD_SET", "FOURTH_SET", "FIFTH_SET",
@@ -354,6 +372,7 @@ def _parse_event(ev):
             "display_clock": display_clock,
             "short_detail": short_detail,
             "period": period,
+            "stage_start_ms": stage_start_ms,
             "scheduled_kickoff_ms": start_ms,
             "home_phrases": home_phrases,
             "away_phrases": away_phrases,
