@@ -5606,58 +5606,6 @@ async def debug_flashlive_data(ticker: str):
         return {"error": str(e), "traceback": traceback.format_exc()[:1000]}
 
 
-@app.get("/api/event/{ticker}/debug_fs")
-async def debug_flashscore_data(ticker: str):
-    """Debug: show the raw FlashScore.com web-feed response + the
-    parsed added-time figures for an event. Lets us verify the
-    fallback's regex against real data without redeploying. Requires
-    FLASHSCORE_FALLBACK=1 to actually fetch — otherwise returns the
-    flag state so the deployment knows why it's empty."""
-    ticker = (ticker or "").strip().upper()
-    get_data()
-    records = _cache.get("data_all") or _cache.get("data") or []
-    found = None
-    for r in records:
-        if r.get("event_ticker") == ticker:
-            found = r
-            break
-    if not found:
-        return {"error": "event not found"}
-    try:
-        from flashlive_feed import (
-            match_game as flash_match,
-            _fetch_flashscore_raw,
-            _parse_flashscore_added_time,
-            _FS_FALLBACK_ENABLED,
-        )
-        title = found.get("title", "")
-        sport = found.get("_sport", "")
-        g = flash_match(title, sport)
-        if not g:
-            return {"error": "no FL game match", "title": title, "sport": sport}
-        fl_id = g.get("event_id")
-        if not _FS_FALLBACK_ENABLED:
-            return {
-                "event_id": fl_id,
-                "fallback_enabled": False,
-                "hint": "set FLASHSCORE_FALLBACK=1 to enable",
-            }
-        raw = await _fetch_flashscore_raw(fl_id)
-        parsed = _parse_flashscore_added_time(raw)
-        # Trim raw to keep response small but keep enough context to
-        # eyeball the +N markers if the regex missed.
-        return {
-            "event_id": fl_id,
-            "fallback_enabled": True,
-            "raw_len": len(raw),
-            "raw_preview": raw[:6000] if raw else "",
-            "parsed": {"1h": parsed[1], "2h": parsed[2]},
-        }
-    except Exception as e:
-        import traceback
-        return {"error": str(e), "traceback": traceback.format_exc()[:1000]}
-
-
 @app.get("/api/debug_ts/{stage_id}/{season_id}")
 async def debug_top_scorers(stage_id: str, season_id: str):
     """Show raw top_scores response structure."""
