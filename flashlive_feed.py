@@ -357,6 +357,20 @@ def _parse_event(ev):
                         "row1": str(hs) if hs is not None else "",
                         "row2": str(as_) if as_ is not None else "",
                     })
+            # Current game point and server come from FlashLive's
+            # live event payload — keys discovered via /api/flashlive_status
+            # ?sport=Tennis on a live match:
+            #   HOME_SCORE_PART_GAME / AWAY_SCORE_PART_GAME → 0/15/30/40/A
+            #   SERVICE → "1" home, "2" away, "" between points
+            home_point = ev.get("HOME_SCORE_PART_GAME")
+            away_point = ev.get("AWAY_SCORE_PART_GAME")
+            svc = str(ev.get("SERVICE") or "").strip().upper()
+            if svc in ("1", "HOME", "H"):
+                server = "row1"
+            elif svc in ("2", "AWAY", "A"):
+                server = "row2"
+            else:
+                server = ""
             result["tennis"] = {
                 "row1_name": home_name,
                 "row2_name": away_name,
@@ -364,10 +378,10 @@ def _parse_event(ev):
                 "row2_sets": away_score if away_score not in ("", "None") else "0",
                 "row1_games": set_history[-1]["row1"] if set_history else "",
                 "row2_games": set_history[-1]["row2"] if set_history else "",
-                "row1_point": "",
-                "row2_point": "",
+                "row1_point": str(home_point) if home_point not in (None, "", "None") else "",
+                "row2_point": str(away_point) if away_point not in (None, "", "None") else "",
                 "set_history": set_history,
-                "server": "",
+                "server": server,
             }
         return result
     except Exception as e:
