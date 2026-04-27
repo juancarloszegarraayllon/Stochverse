@@ -3777,6 +3777,16 @@ async function hydrateGameStats(evTicker) {
       .then(function(r) { return r.json(); });
     var pair = await Promise.all([statsResp, fetchCapabilities()]);
     var d = pair[0];
+    // If FlashLive can't resolve this Kalshi event to one of its
+    // games, every per-event endpoint will return the same error.
+    // Hide the whole Background panel rather than render a tab
+    // strip where every tab says "no coverage".
+    if (d && d.error && /doesn't cover|not found|no FlashLive/i.test(d.error)) {
+      var section = panel.closest(".ed-detailed-stats");
+      if (section) section.style.display = "none";
+      else panel.innerHTML = '<div class="ed-stats-loading">' + escH(d.error) + '</div>';
+      return;
+    }
     var caps = pair[1] || {};
     var sport = d.sport || "";
     var sportCaps = caps[sport] || null;

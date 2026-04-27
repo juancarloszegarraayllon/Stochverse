@@ -4137,14 +4137,36 @@ async def sportsdb_probe():
     except Exception as e:
         return {"error": str(e)}
 
+# Per-event cache for FlashLive game lookups. When a user opens a
+# detail modal we fire several endpoints in parallel (h2h, news,
+# standings_tabs, standings, missing-players, player-stats, …) and
+# every one of them used to re-run match_game + search_flashlive_event
+# from scratch. That meant ~6 redundant lookups per modal open and
+# each unmatched fallback path hit the FlashLive search endpoint
+# again. Cache the resolved game (or the negative result) for a
+# short window so the second-through-Nth callers reuse it.
+_FL_GAME_CACHE: dict = {}  # ticker -> (expires_ts, game_dict_or_None)
+FL_GAME_CACHE_TTL = 600    # 10 min — generous; modal sessions are short
+
+
 async def _find_fl_game(found: dict):
-    """Find a FlashLive game for a Kalshi event, with on-demand search fallback."""
+    """Find a FlashLive game for a Kalshi event, with on-demand
+    search fallback. Cached per ticker for FL_GAME_CACHE_TTL so a
+    single modal open doesn't fan out into N concurrent searches."""
+    ticker = found.get("event_ticker") or found.get("ticker") or ""
+    now = time.time()
+    if ticker:
+        cached = _FL_GAME_CACHE.get(ticker)
+        if cached and cached[0] > now:
+            return cached[1]
     title = found.get("title", "")
     sport = found.get("_sport", "")
     from flashlive_feed import match_game as flash_match, search_flashlive_event
     g = flash_match(title, sport)
     if not g:
         g = await search_flashlive_event(title, sport)
+    if ticker:
+        _FL_GAME_CACHE[ticker] = (now + FL_GAME_CACHE_TTL, g)
     return g
 
 
@@ -4165,7 +4187,7 @@ async def get_event_h2h(ticker: str):
         from flashlive_feed import match_game as flash_match, fetch_event_h2h
         g = await _find_fl_game(found)
         if not g:
-            return {"error": "no FlashLive match found"}
+            return {"error": "FlashLive doesn't cover this match yet"}
         fl_id = g.get("event_id")
         if not fl_id:
             return {"error": "no FlashLive event ID"}
@@ -4200,7 +4222,7 @@ async def get_event_standings(ticker: str, standing_type: str = "overall"):
         from flashlive_feed import match_game as flash_match, _fl_get
         g = await _find_fl_game(found)
         if not g:
-            return {"error": "no FlashLive match found"}
+            return {"error": "FlashLive doesn't cover this match yet"}
         stage_id = g.get("tournament_stage_id", "")
         season_id = g.get("tournament_season_id", "")
         if not stage_id:
@@ -4239,7 +4261,7 @@ async def get_event_topscorers(ticker: str):
         from flashlive_feed import match_game as flash_match, fetch_top_scorers
         g = await _find_fl_game(found)
         if not g:
-            return {"error": "no FlashLive match found"}
+            return {"error": "FlashLive doesn't cover this match yet"}
         stage_id = g.get("tournament_stage_id", "")
         season_id = g.get("tournament_season_id", "")
         if not stage_id:
@@ -4275,7 +4297,7 @@ async def get_event_standings_tabs(ticker: str):
         from flashlive_feed import _fl_get
         g = await _find_fl_game(found)
         if not g:
-            return {"error": "no FlashLive match found"}
+            return {"error": "FlashLive doesn't cover this match yet"}
         stage_id = g.get("tournament_stage_id", "")
         season_id = g.get("tournament_season_id", "")
         if not stage_id:
@@ -4310,7 +4332,7 @@ async def get_event_news(ticker: str):
         from flashlive_feed import match_game as flash_match, fetch_event_news
         g = await _find_fl_game(found)
         if not g:
-            return {"error": "no FlashLive match found"}
+            return {"error": "FlashLive doesn't cover this match yet"}
         fl_id = g.get("event_id")
         if not fl_id:
             return {"error": "no FlashLive event ID"}
@@ -4339,7 +4361,7 @@ async def get_event_commentary(ticker: str):
         from flashlive_feed import match_game as flash_match, fetch_event_commentary
         g = await _find_fl_game(found)
         if not g:
-            return {"error": "no FlashLive match found"}
+            return {"error": "FlashLive doesn't cover this match yet"}
         fl_id = g.get("event_id")
         if not fl_id:
             return {"error": "no FlashLive event ID"}
@@ -4368,7 +4390,7 @@ async def get_event_missing_players(ticker: str):
         from flashlive_feed import match_game as flash_match
         g = await _find_fl_game(found)
         if not g:
-            return {"error": "no FlashLive match found"}
+            return {"error": "FlashLive doesn't cover this match yet"}
         fl_id = g.get("event_id")
         if not fl_id:
             return {"error": "no FlashLive event ID"}
@@ -4397,7 +4419,7 @@ async def get_event_player_stats(ticker: str):
         from flashlive_feed import match_game as flash_match
         g = await _find_fl_game(found)
         if not g:
-            return {"error": "no FlashLive match found"}
+            return {"error": "FlashLive doesn't cover this match yet"}
         fl_id = g.get("event_id")
         if not fl_id:
             return {"error": "no FlashLive event ID"}
@@ -4558,7 +4580,7 @@ async def debug_fl_schema(ticker: str):
         sport = found.get("_sport", "")
         g = match_game(title, sport)
         if not g:
-            return {"error": "no FlashLive match found",
+            return {"error": "FlashLive doesn't cover this match yet",
                     "title": title, "sport": sport}
         fl_id = g.get("event_id")
         if not fl_id:
