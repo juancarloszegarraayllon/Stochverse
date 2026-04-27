@@ -291,10 +291,7 @@ html,body{overscroll-behavior:none}
 #event-detail{display:none;max-width:1100px;margin:0 auto;padding:0 4px}
 .ed-layout{position:relative}
 .ed-main{}
-.ed-sidebar{position:fixed;right:50px;top:calc(50% + var(--header-h) / 2);transform:translateY(-50%);width:420px;max-height:calc(100vh - var(--header-h) - 32px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent;z-index:50}
-@media(max-width:1500px){.ed-sidebar{width:350px}}
-@media(max-width:1200px){.ed-sidebar{position:static;width:100%;max-height:none;margin-bottom:16px;transform:none}}
-.ed-stats-panel{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px}
+.ed-stats-panel{background:transparent;border:0;border-radius:0;padding:0}
 .ed-stats-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--green);text-align:center;margin-bottom:12px}
 .ed-stats-teams{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
 .ed-stats-team{font-size:11px;font-weight:700;color:var(--text);max-width:120px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -396,8 +393,8 @@ html,body{overscroll-behavior:none}
 .ed-stats-stage-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin:8px 0 8px;overflow-x:auto;scrollbar-width:thin}
 .ed-stats-stage-tabs .ed-sb-tab{flex:0 0 auto;padding:6px 10px;font-size:9px}
 .ed-stats-group-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin:10px 0 4px;padding:4px 0 4px;border-bottom:1px solid var(--border)}
-.ed-debug-st{margin-top:14px}
-.ed-debug-st-inner{padding:0 18px 14px}
+.ed-detailed-stats{margin-top:14px}
+.ed-detailed-stats-inner{padding:14px 18px 16px}
 .ed-debug-st-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:6px;flex-wrap:wrap}
 .ed-debug-st-tabs .ed-sb-tab{flex:0 0 auto;padding:8px 14px;font-size:10px}
 .ed-debug-st-filter{display:none;gap:0;border-bottom:1px solid var(--border);margin-bottom:8px}
@@ -2436,30 +2433,11 @@ function showEventDetail(ticker, skipHistory) {
       // event detail page shows a loading placeholder until this
       // fetch completes.
       hydratePriceCharts();
-      // Hydrate the game stats sidebar if present.
+      // Hydrate the Detailed Event Stats panel (Match / H2H /
+      // Standings / News). Standings lazy-loads when its tab is
+      // first clicked — no eager fetch on modal open.
       if (d.event && d.event.event_ticker) {
         hydrateGameStats(d.event.event_ticker);
-        // Auto-load the default tab of the debug standings strip
-        // we render below ed-header.
-        var dbgPanel = document.querySelector('.ed-debug-st[data-debug-ticker="' + d.event.event_ticker + '"]');
-        if (dbgPanel) _initDebugStandings(dbgPanel);
-        // Align sidebar: top matches ed-main top, left edge
-        // sits right of ed-main's right edge. Compute max-height
-        // from the top so the entire sidebar fits in the viewport
-        // and the inner content scrolls when it overflows.
-        setTimeout(function() {
-          var main = document.querySelector(".ed-main");
-          var sidebar = document.querySelector(".ed-sidebar");
-          if (main && sidebar && window.innerWidth > 1200) {
-            var rect = main.getBoundingClientRect();
-            var topPx = Math.max(8, rect.top);
-            sidebar.style.top = topPx + "px";
-            sidebar.style.left = (rect.right + 20) + "px";
-            sidebar.style.right = "auto";
-            sidebar.style.transform = "none";
-            sidebar.style.maxHeight = "calc(100vh - " + topPx + "px - 16px)";
-          }
-        }, 100);
       }
       // Order book + whale sentiment are lazy-loaded when expanded.
     })
@@ -3740,13 +3718,9 @@ function _recomputeSummaryStats() {
   set("oi", totOI);
 }
 
-// Render the stats sidebar placeholder.
-function renderStatsSidebar(evTicker) {
-  return '<div class="ed-sidebar">'
-       + '<div class="ed-stats-panel" data-stats-ticker="' + escH(evTicker) + '">'
-       + '<div class="ed-stats-loading">Loading game stats\u2026</div>'
-       + '</div></div>';
-}
+// renderStatsSidebar() removed \u2014 the per-event stats panel now
+// lives inside the Detailed Event Stats collapsible above
+// ed-layout, not in a fixed-position sidebar.
 
 // FlashLive capability map, fetched once per page load and cached.
 // Drives which detail-page tabs/sub-tabs we render per sport so the
@@ -3844,8 +3818,7 @@ async function hydrateGameStats(evTicker) {
     var h = '<div class="ed-sb-tabs ed-sb-main-tabs">';
     h += '<button class="ed-sb-tab active" data-main="match" onclick="window.switchMainTab(this)">Match</button>';
     if (hasH2H) h += '<button class="ed-sb-tab" data-main="h2h" onclick="window.switchMainTab(this)">H2H</button>';
-    // STANDINGS lives in its own collapsible panel below ed-header
-    // — see _toggleStandingsSection. No sidebar top-tab needed.
+    if (hasStandings) h += '<button class="ed-sb-tab" data-main="standings" onclick="window.switchMainTab(this)">Standings</button>';
     if (hasNews) h += '<button class="ed-sb-tab" data-main="news" onclick="window.switchMainTab(this)">News</button>';
     h += '</div>';
 
@@ -4119,11 +4092,33 @@ async function hydrateGameStats(evTicker) {
       h += '</div>';
     }
 
-    // STANDINGS panel removed from the sidebar — it's now the
-    // collapsible section below ed-header (the one hydrating off
-    // _initDebugStandings). Single source of truth keeps the two
-    // renderers from diverging on which standing_types they
-    // surface.
+    // ════════════════════════════════════════════════════
+    // STANDINGS main panel — full FlashScore-style sub-tab strip
+    // (Live Standings / Standings / Form / Over-Under / HT-FT /
+    // Top Scorers) with an Overall / Home / Away filter that only
+    // shows under Standings. Each sub-tab calls
+    // /api/event/{ticker}/standings?standing_type=X and the
+    // existing _renderStandingsTable adapts to whatever columns
+    // FlashLive returns.
+    // ════════════════════════════════════════════════════
+    if (hasStandings) {
+      h += '<div class="ed-sb-main" data-main="standings" data-debug-ticker="' + escH(evTicker) + '">';
+      h += '<div class="ed-debug-st-tabs">';
+      h += '<button class="ed-sb-tab" data-st-type="live" onclick="window._dbgStSwitch(this)">Live Standings</button>';
+      h += '<button class="ed-sb-tab active" data-st-type="overall" onclick="window._dbgStSwitch(this)">Standings</button>';
+      h += '<button class="ed-sb-tab" data-st-type="form" onclick="window._dbgStSwitch(this)">Form</button>';
+      h += '<button class="ed-sb-tab" data-st-type="over_under" onclick="window._dbgStSwitch(this)">Over/Under</button>';
+      h += '<button class="ed-sb-tab" data-st-type="ht_ft" onclick="window._dbgStSwitch(this)">HT/FT</button>';
+      h += '<button class="ed-sb-tab" data-st-type="top_scores" onclick="window._dbgStSwitch(this)">Top Scorers</button>';
+      h += '</div>';
+      h += '<div class="ed-debug-st-filter" style="display:flex">';
+      h += '<button class="ed-sb-tab active" data-st-filter="overall" onclick="window._dbgStFilter(this)">Overall</button>';
+      h += '<button class="ed-sb-tab" data-st-filter="home" onclick="window._dbgStFilter(this)">Home</button>';
+      h += '<button class="ed-sb-tab" data-st-filter="away" onclick="window._dbgStFilter(this)">Away</button>';
+      h += '</div>';
+      h += '<div class="ed-debug-st-content"><div class="ed-stats-loading">Click a sub-tab to load standings.</div></div>';
+      h += '</div>';
+    }
 
     // ════════════════════════════════════════════════════
     // NEWS main panel
@@ -4162,8 +4157,18 @@ window.switchMainTab = function(btn) {
     if (target === "h2h") _loadH2H(lazy, ticker);
     else if (target === "news") _loadNews(lazy, ticker);
   }
-  // STANDINGS top-tab no longer exists in the sidebar — its data
-  // hydrates in the collapsible panel below ed-header.
+  // Auto-load Standings (overall) on first switch into that tab —
+  // saves the user a second click and matches the FlashScore behaviour
+  // of showing the league table immediately.
+  if (target === "standings") {
+    var stPanel = panel.querySelector('.ed-sb-main[data-main="standings"]');
+    if (stPanel && !stPanel.dataset.loaded) {
+      stPanel.dataset.loaded = "1";
+      var ticker3 = panel.dataset.ticker;
+      var content = stPanel.querySelector(".ed-debug-st-content");
+      if (content && ticker3) _loadStandingsType(content, ticker3, "overall");
+    }
+  }
 };
 
 // Standings sub-tab switcher (Standings / Form / Top Scorers)
@@ -4976,11 +4981,11 @@ window._toggleStandingsSection = function(btn) {
   btn.classList.toggle("open", open);
 };
 
-// Standings panel sub-tab switchers — one for the standing_type
-// sub-tab, one for the Overall/Home/Away filter that only appears
-// under Standings.
+// Standings panel sub-tab switchers. The wrap is whichever
+// ancestor carries data-debug-ticker — currently the
+// .ed-sb-main[data-main="standings"] block inside hydrateGameStats.
 window._dbgStSwitch = function(btn) {
-  var wrap = btn.closest(".ed-debug-st");
+  var wrap = btn.closest("[data-debug-ticker]");
   if (!wrap) return;
   var stType = btn.getAttribute("data-st-type");
   var tabs = wrap.querySelectorAll(".ed-debug-st-tabs [data-st-type]");
@@ -5002,7 +5007,7 @@ window._dbgStSwitch = function(btn) {
   if (content && ticker) _loadStandingsType(content, ticker, stType);
 };
 window._dbgStFilter = function(btn) {
-  var wrap = btn.closest(".ed-debug-st");
+  var wrap = btn.closest("[data-debug-ticker]");
   if (!wrap) return;
   var fil = btn.getAttribute("data-st-filter");
   var fbtns = wrap.querySelectorAll(".ed-debug-st-filter [data-st-filter]");
@@ -5015,19 +5020,19 @@ window._dbgStFilter = function(btn) {
   // accepts directly, so we just forward the filter as the type.
   if (content && ticker) _loadStandingsType(content, ticker, fil);
 };
-// Auto-load the default Standings tab once the modal is in the DOM
-// — uses a MutationObserver instead of a setTimeout so we don't
-// race the modal's render path. Triggered by hydrateGameStats below
-// since that's already the per-modal lifecycle hook.
+// Legacy auto-loader retained as a no-op so older entry points
+// (showEventDetail) don't break if they still reference it. The
+// Standings tab now lazy-loads on first switchMainTab click.
 function _initDebugStandings(panel) {
   if (!panel || panel.dataset.dbgLoaded) return;
   panel.dataset.dbgLoaded = "1";
-  var ticker = panel.getAttribute("data-debug-ticker");
-  var content = panel.querySelector(".ed-debug-st-content");
-  if (!ticker || !content) return;
-  // Default active tab is "Standings" (overall) — show the
-  // Overall/Home/Away filter row to match, then eagerly load so
-  // the panel isn't empty on open.
+  // No eager fetch — switchMainTab triggers _loadStandingsType the
+  // first time the user clicks STANDINGS, which avoids burning a
+  // RapidAPI call on every modal open.
+  return;
+  // (unreachable — kept to retain the original closure shape so
+  // any minified callers that captured this function don't OOPS
+  // when they look for the filter element.)
   var filterRow = panel.querySelector(".ed-debug-st-filter");
   if (filterRow) filterRow.style.display = "flex";
   _loadStandingsType(content, ticker, "overall");
@@ -5751,40 +5756,22 @@ function renderEventDetail(ev) {
 
   h += '</div>'; // /ed-header
 
-  // ── Standings panel (full sub-tab strip) ─────────────────────
-  // Mirrors FlashScore's standings layout (Live Standings /
-  // Standings / Form / Over-Under / HT-FT / Top Scorers) plus an
-  // Overall / Home / Away filter that only appears under
-  // Standings. Each tab calls /api/event/{ticker}/standings
-  // ?standing_type=X — _renderStandingsTable auto-adapts to
-  // whatever columns FlashLive returns for the type, so a single
-  // renderer covers all sub-tabs. Wrapped in the same collapsible
-  // toggle pattern as the Order Book section so users can fold it
-  // away when they don't need it. Defaults to expanded.
+  // ── Detailed Event Stats panel ──────────────────────────────
+  // Single home for every per-event stats surface — Match, H2H,
+  // Standings, News — collapsed under one toggle so the layout
+  // doesn't fragment between sidebar + below-header sections.
+  // hydrateGameStats() fills the inner ed-stats-panel with the
+  // top-tab strip and lazy-loads each tab on first click.
   var isSport = !!sport;
   if (isSport) {
-    h += '<div class="ed-debug-st ob-section" data-debug-ticker="' + escH(ticker) + '">';
+    h += '<div class="ed-detailed-stats ob-section">';
     h += '<button class="ob-toggle open" aria-expanded="true" onclick="window._toggleStandingsSection(this)">';
-    h += '<span>Standings</span><span class="ob-chevron">▾</span>';
+    h += '<span>Detailed Event Stats</span><span class="ob-chevron">▾</span>';
     h += '</button>';
-    h += '<div class="ob-inner ed-debug-st-inner">';
-    h += '<div class="ed-debug-st-tabs">';
-    h += '<button class="ed-sb-tab" data-st-type="live" onclick="window._dbgStSwitch(this)">Live Standings</button>';
-    h += '<button class="ed-sb-tab active" data-st-type="overall" onclick="window._dbgStSwitch(this)">Standings</button>';
-    h += '<button class="ed-sb-tab" data-st-type="form" onclick="window._dbgStSwitch(this)">Form</button>';
-    h += '<button class="ed-sb-tab" data-st-type="over_under" onclick="window._dbgStSwitch(this)">Over/Under</button>';
-    h += '<button class="ed-sb-tab" data-st-type="ht_ft" onclick="window._dbgStSwitch(this)">HT/FT</button>';
-    h += '<button class="ed-sb-tab" data-st-type="top_scores" onclick="window._dbgStSwitch(this)">Top Scorers</button>';
+    h += '<div class="ob-inner ed-detailed-stats-inner">';
+    h += '<div class="ed-stats-panel" data-stats-ticker="' + escH(ticker) + '">';
+    h += '<div class="ed-stats-loading">Loading detailed event stats…</div>';
     h += '</div>';
-    // Overall / Home / Away filter only meaningful under "Standings"
-    // — _dbgStSwitch shows it for that tab and hides it for the
-    // others.
-    h += '<div class="ed-debug-st-filter">';
-    h += '<button class="ed-sb-tab active" data-st-filter="overall" onclick="window._dbgStFilter(this)">Overall</button>';
-    h += '<button class="ed-sb-tab" data-st-filter="home" onclick="window._dbgStFilter(this)">Home</button>';
-    h += '<button class="ed-sb-tab" data-st-filter="away" onclick="window._dbgStFilter(this)">Away</button>';
-    h += '</div>';
-    h += '<div class="ed-debug-st-content"><div class="ed-stats-loading">Loading standings…</div></div>';
     h += '</div>';
     h += '</div>';
   }
@@ -5833,10 +5820,9 @@ function renderEventDetail(ev) {
   }
 
   h += '</div>'; // /ed-main
-  // Stats sidebar (sport events only).
-  if (isSport) {
-    h += renderStatsSidebar(ticker);
-  }
+  // Stats sidebar removed — its content moved into the Event Scope
+  // collapsible panel above (renders inside ed-event-scope-inner so
+  // the user has a single place to look for per-event stats).
   h += '</div>'; // /ed-layout
 
   return h;
