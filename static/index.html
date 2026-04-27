@@ -406,9 +406,19 @@ html,body{overscroll-behavior:none}
 .ed-debug-st-filter{display:none;gap:0;border-bottom:1px solid var(--border);margin-bottom:8px}
 .ed-debug-st-filter .ed-sb-tab{flex:0 0 auto;padding:6px 12px;font-size:9px}
 .ed-debug-st-content{min-height:60px}
-.ed-bracket{display:flex;gap:24px;overflow-x:auto;padding:8px 0 16px;scrollbar-width:thin;align-items:stretch}
-.ed-bracket::-webkit-scrollbar{height:6px}
-.ed-bracket::-webkit-scrollbar-thumb{background:var(--text-muted);border-radius:3px}
+.ed-bracket-wrap{display:flex;flex-direction:column}
+.ed-bracket-nav{display:flex;gap:0;border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent;margin-bottom:8px}
+.ed-bracket-nav::-webkit-scrollbar{height:6px}
+.ed-bracket-nav::-webkit-scrollbar-track{background:transparent}
+.ed-bracket-nav::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.ed-bracket-nav-btn{flex:0 0 auto;padding:8px 14px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);background:transparent;border:0;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit;white-space:nowrap}
+.ed-bracket-nav-btn:hover{color:var(--text-dim)}
+.ed-bracket-nav-btn.active{color:var(--green);border-bottom-color:var(--green)}
+.ed-bracket{display:flex;gap:24px;overflow-x:auto;padding:8px 0 16px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;align-items:stretch}
+.ed-bracket::-webkit-scrollbar{height:8px;width:8px}
+.ed-bracket::-webkit-scrollbar-track{background:transparent}
+.ed-bracket::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.ed-bracket::-webkit-scrollbar-thumb:hover{background:var(--text-muted)}
 .ed-bracket-round{display:flex;flex-direction:column;justify-content:space-around;min-width:210px;flex:0 0 210px}
 .ed-bracket-round-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--green);text-align:center;padding-bottom:6px;border-bottom:1px solid var(--border);margin-bottom:8px}
 .ed-bracket-match{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:6px 8px;margin:4px 0;font-size:11px;display:flex;flex-direction:column;gap:3px}
@@ -5142,12 +5152,36 @@ function _renderBracket(container, data, currentEventId) {
     html += '</div>';
     return html;
   };
+  // Find which round contains the current match — used to highlight
+  // the active nav button so the user immediately sees "you are here"
+  // without needing to read every round column.
+  var currentRoundIdx = -1;
+  if (currentEventId) {
+    for (var crI = 0; crI < rounds.length; crI++) {
+      var crBlocks = (rounds[crI] && rounds[crI].BLOCKS) || [];
+      var hit = false;
+      for (var crJ = 0; crJ < crBlocks.length; crJ++) {
+        if (crBlocks[crJ].DRAW_ROUND_EVENT_ID === currentEventId) { hit = true; break; }
+      }
+      if (hit) { currentRoundIdx = crI; break; }
+    }
+  }
+  // Round-jump nav strip. Renders before the bracket so the user can
+  // scrub to any round (1/64 → Final) without manually scrolling
+  // through 64 first-round matchups.
+  var navHtml = '<div class="ed-bracket-nav">';
+  for (var ni = 0; ni < rounds.length; ni++) {
+    var nlabel = roundLabels[String(rounds[ni].DRAW_ROUND)] || ("Round " + rounds[ni].DRAW_ROUND);
+    var ncls = "ed-bracket-nav-btn" + (ni === currentRoundIdx ? " active" : "");
+    navHtml += '<button class="' + ncls + '" data-round-idx="' + ni + '" onclick="window._bracketJumpToRound(this)">' + escH(nlabel) + '</button>';
+  }
+  navHtml += '</div>';
   var html = '<div class="ed-bracket">';
   for (var ri = 0; ri < rounds.length; ri++) {
     var round = rounds[ri] || {};
     var label = roundLabels[String(round.DRAW_ROUND)] || ("Round " + round.DRAW_ROUND);
     var blocks = Array.isArray(round.BLOCKS) ? round.BLOCKS : [];
-    html += '<div class="ed-bracket-round">';
+    html += '<div class="ed-bracket-round" data-round-idx="' + ri + '">';
     html += '<div class="ed-bracket-round-label">' + escH(label) + '</div>';
     for (var bi = 0; bi < blocks.length; bi++) {
       html += renderMatch(blocks[bi]);
@@ -5155,7 +5189,7 @@ function _renderBracket(container, data, currentEventId) {
     html += '</div>';
   }
   html += '</div>';
-  container.innerHTML = html;
+  container.innerHTML = '<div class="ed-bracket-wrap">' + navHtml + html + '</div>';
   // Auto-scroll to the current match if we tagged one — saves the user
   // from hunting through 64 first-round matchups to find their bet.
   if (currentEventId) {
@@ -5170,6 +5204,24 @@ function _renderBracket(container, data, currentEventId) {
     }
   }
 }
+
+window._bracketJumpToRound = function(btn) {
+  var nav = btn.closest(".ed-bracket-nav");
+  var wrap = nav && nav.parentElement;
+  var bracket = wrap && wrap.querySelector(".ed-bracket");
+  if (!bracket) return;
+  var idx = parseInt(btn.getAttribute("data-round-idx"), 10);
+  if (isNaN(idx)) return;
+  var target = bracket.querySelector('.ed-bracket-round[data-round-idx="' + idx + '"]');
+  if (!target) return;
+  // Update active state on nav buttons.
+  var btns = nav.querySelectorAll(".ed-bracket-nav-btn");
+  for (var i = 0; i < btns.length; i++) btns[i].classList.toggle("active", btns[i] === btn);
+  // Scroll the round column to the start of the bracket viewport.
+  // Computed scroll on the bracket element directly avoids the page
+  // jumping vertically when a child uses scrollIntoView.
+  bracket.scrollTo({left: target.offsetLeft - bracket.offsetLeft, behavior: "smooth"});
+};
 
 async function _loadStandingsType(container, ticker, standingType) {
   container.innerHTML = '<div class="ed-stats-loading">Loading…</div>';
