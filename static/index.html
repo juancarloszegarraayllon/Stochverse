@@ -99,6 +99,12 @@ html,body{overscroll-behavior:none}
 .outcome-expand-btn:hover{color:var(--text);border-color:var(--text-muted)}
 .outcome-label{flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .outcome-score{flex:0 0 32px;text-align:center;font-size:13px;font-weight:700;color:var(--text)}
+.outcome-score-tennis{flex:0 1 auto;display:inline-flex;align-items:center;gap:3px;justify-content:flex-end;min-width:0}
+.outcome-score-tennis .ts-sets{font-size:11px;font-weight:700;color:var(--text);min-width:12px;text-align:center}
+.outcome-score-tennis .ts-serve{width:8px;text-align:center;color:var(--green);font-size:10px;flex-shrink:0}
+.outcome-score-tennis .ts-box{min-width:20px;padding:2px 5px;border:1px solid var(--border);border-radius:3px;background:var(--bg3);text-align:center;font-size:11px;font-weight:700;color:var(--text);flex-shrink:0}
+.outcome-score-tennis .ts-history-box{background:transparent;color:var(--text-dim);border-color:transparent;padding:2px 4px;min-width:14px}
+.outcome-score-tennis .ts-point{background:var(--green-bg);border-color:var(--green-line);color:var(--green)}
 .header-score{flex:0 0 32px;text-align:center;font-size:8px;font-weight:700;letter-spacing:0.4px;color:var(--text-muted);text-transform:uppercase}
 .outcome-chance{flex:0 0 58px;text-align:center;font-size:11px;color:var(--text-dim);border-radius:4px}
 .outcome-odds{display:flex;gap:4px;flex-shrink:0}
@@ -1535,15 +1541,7 @@ function renderTimeSlot(ev) {
       return '<span class="final-badge">FINAL' + score + '</span>';
     }
     var scoreStr = liveScoreString(live);
-    // When the card renders a richer scoreboard below the badge
-    // (tennis tn-rows with sets / games / current point), the
-    // abbreviated "MAR 1 - KAL 0" in the badge would just duplicate
-    // the same numbers the rows already show. Hide it in the badge
-    // so all the score info lives in one place. Other sports without
-    // a rich row layout still keep the badge score as their only
-    // surface.
-    var hasRichRows = live && live.tennis && live.tennis.row1_name;
-    var scorePart = (scoreStr && !hasRichRows) ? ' \u00B7 ' + scoreStr : '';
+    var scorePart = scoreStr ? ' \u00B7 ' + scoreStr : '';
     var t = liveTimeLabel(ev);
     var clockPart = t ? ' \u00B7 ' + t : '';
     // Stash ESPN state on the badge so the 500ms tick loop can
@@ -1725,17 +1723,48 @@ function buildScoreMap(ev) {
   var ak = keywords(ls.away_abbr, ls.away_display);
   if (ls.title_home) hk = hk.concat(keywords("", ls.title_home));
   if (ls.title_away) ak = ak.concat(keywords("", ls.title_away));
-  return {
+  var sides = {
     home: { score: String(hs), keys: hk },
     away: { score: String(as_), keys: ak }
   };
+  // Tennis: attach the rich per-side scoreboard (sets, games-by-set
+  // history, current-set games, current game point, server flag) so
+  // the outcome-row renderer can show the full breakdown next to the
+  // player name instead of a separate scoreboard block above the
+  // outcomes table.
+  var t = ls.tennis;
+  if (t && t.row1_name) {
+    var hist = Array.isArray(t.set_history) ? t.set_history : [];
+    var lastIdx = hist.length - 1;
+    var pastSets = lastIdx >= 0 ? hist.slice(0, lastIdx) : hist.slice();
+    var current = lastIdx >= 0 ? hist[lastIdx] : null;
+    sides.home.tennis = {
+      sets:          t.row1_sets || "",
+      serving:       t.server === "row1",
+      history:       pastSets.map(function(h) { return h && h.row1; }),
+      current_games: current ? (current.row1 != null ? String(current.row1) : "") : "",
+      point:         t.row1_point || "",
+    };
+    sides.away.tennis = {
+      sets:          t.row2_sets || "",
+      serving:       t.server === "row2",
+      history:       pastSets.map(function(h) { return h && h.row2; }),
+      current_games: current ? (current.row2 != null ? String(current.row2) : "") : "",
+      point:         t.row2_point || "",
+    };
+  }
+  return sides;
 }
 // Strip accents/diacritics for fuzzy team name matching
 // ("Tucumán" → "tucuman", "Grêmio" → "gremio")
 function stripAccents(s) {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
-function matchScore(label, scoreMap) {
+function matchSide(label, scoreMap) {
+  // Returns "home" | "away" | "" — the side identity matched against
+  // the outcome label using fuzzy keyword scoring. Pulled out of
+  // matchScore so the same matcher serves both the plain-score code
+  // path and the rich tennis cell.
   if (!scoreMap) return "";
   var ll = stripAccents(label);
   // Sum total length of all matching keywords per side. The side with
@@ -1752,9 +1781,49 @@ function matchScore(label, scoreMap) {
     }
   }
   if (totals[0] === 0 && totals[1] === 0) return "";
-  if (totals[0] > totals[1]) return sides[0].score;
-  if (totals[1] > totals[0]) return sides[1].score;
+  if (totals[0] > totals[1]) return "home";
+  if (totals[1] > totals[0]) return "away";
   return ""; // true tie
+}
+function matchScore(label, scoreMap) {
+  var side = matchSide(label, scoreMap);
+  return side ? scoreMap[side].score : "";
+}
+function matchTennisScore(label, scoreMap) {
+  // Returns the rich tennis breakdown for the side matching this
+  // outcome label, or null when the scoreMap doesn't carry tennis
+  // data (any other sport / pre-game tennis without _live_state).
+  var side = matchSide(label, scoreMap);
+  if (!side) return null;
+  var s = scoreMap[side];
+  return s && s.tennis ? s.tennis : null;
+}
+function buildTennisScoreCell(ts) {
+  // Build the rich score cell for a single side. Mirrors the layout
+  // the standalone .tennis-score block used to render — sets, serve
+  // dot, completed-set history boxes, current-set games box, current
+  // game point box — packaged into a single inline-flex span so it
+  // drops cleanly into an outcome row.
+  if (!ts) return "";
+  function esc(s) { return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  var html = '';
+  if (ts.sets !== "" && ts.sets != null) {
+    html += '<span class="ts-sets">' + esc(ts.sets) + '</span>';
+  }
+  html += '<span class="ts-serve">' + (ts.serving ? "●" : "") + '</span>';
+  var hist = ts.history || [];
+  for (var i = 0; i < hist.length; i++) {
+    if (hist[i] != null && hist[i] !== "") {
+      html += '<span class="ts-box ts-history-box">' + esc(hist[i]) + '</span>';
+    }
+  }
+  if (ts.current_games !== "" && ts.current_games != null) {
+    html += '<span class="ts-box">' + esc(ts.current_games) + '</span>';
+  }
+  if (ts.point !== "" && ts.point != null) {
+    html += '<span class="ts-box ts-point">' + esc(ts.point) + '</span>';
+  }
+  return html;
 }
 
 // Render one outcome table (header row + outcome rows + optional
@@ -1784,8 +1853,13 @@ function buildOutcomeTable(outcomes, groupCode, scoreMap) {
     h += ">";
     h += "<div class=\"outcome-label\">" + o.label + "</div>";
     if (scoreMap) {
-      var sc = matchScore(o.label, scoreMap);
-      h += "<div class=\"outcome-score\">" + sc + "</div>";
+      var ts = matchTennisScore(o.label, scoreMap);
+      if (ts) {
+        h += '<div class="outcome-score outcome-score-tennis">' + buildTennisScoreCell(ts) + '</div>';
+      } else {
+        var sc = matchScore(o.label, scoreMap);
+        h += "<div class=\"outcome-score\">" + sc + "</div>";
+      }
     }
     h += "<div class=\"outcome-chance\">" + o.chance + "</div>";
     h += "<div class=\"outcome-odds\">";
@@ -1839,10 +1913,12 @@ function buildCard(ev) {
   if (url) h += "<a href=\"" + url + "\" target=\"_blank\">" + ticker + "</a>";
   else h += "<span>" + ticker + "</span>";
   h += "</div>";
-  // Tennis scoreboard (2 rows per player) when available.
-  h += buildTennisScore(ev);
   // Score map for showing live scores next to team names in
-  // moneyline outcome rows.
+  // moneyline outcome rows. For tennis the map carries rich per-side
+  // data (sets / games / point / serve) which the outcome row
+  // renderer expands into a multi-cell score column — the standalone
+  // .tennis-score table that used to live here is gone, all score
+  // info now lives in the outcome rows below.
   var scoreMap = buildScoreMap(ev);
 
   if (hasGroups) {
@@ -2114,27 +2190,13 @@ async function refreshVisible() {
       } else if (seriesEl && !freshSeries) {
         seriesEl.parentNode.removeChild(seriesEl);
       }
-      // Tennis scoreboard (if present) — update in place from the
-      // freshly fetched _live_state so live score changes flow in
-      // without rebuilding the whole card.
+      // Tennis rich score now lives inside outcome rows (handled
+      // below by the freshScoreMap-driven loop). The legacy
+      // .tennis-score standalone table isn't rendered on cards
+      // anymore — purge any lingering instance from a previously
+      // cached DOM in case a hot-swap left one behind.
       var tscore = card.querySelector(".tennis-score");
-      var freshTennis = buildTennisScore(ev);
-      if (tscore && freshTennis) {
-        if (tscore.outerHTML !== freshTennis) {
-          tscore.outerHTML = freshTennis;
-        }
-      } else if (!tscore && freshTennis) {
-        // Card didn't have a tennis block before (tennis match just
-        // went live) — insert it before outcome-header.
-        var anchor = card.querySelector(".outcome-header") || card.querySelector(".outcome-row");
-        if (anchor) {
-          var tmp = document.createElement("div");
-          tmp.innerHTML = freshTennis;
-          if (tmp.firstChild) anchor.parentNode.insertBefore(tmp.firstChild, anchor);
-        }
-      } else if (tscore && !freshTennis) {
-        tscore.parentNode.removeChild(tscore);
-      }
+      if (tscore) tscore.parentNode.removeChild(tscore);
       // Rebuild scoreMap from fresh _live_state so score column
       // updates when goals are scored (not just on full page load).
       var freshScoreMap = buildScoreMap(ev);
@@ -2157,7 +2219,17 @@ async function refreshVisible() {
             var grow = grows[gj];
             var go = gouts[gj];
             var gScoreEl = grow.querySelector(".outcome-score");
-            if (gScoreEl && freshScoreMap) gScoreEl.textContent = matchScore(go.label, freshScoreMap);
+            if (gScoreEl && freshScoreMap) {
+              var gts = matchTennisScore(go.label, freshScoreMap);
+              if (gts) {
+                gScoreEl.classList.add("outcome-score-tennis");
+                var gNew = buildTennisScoreCell(gts);
+                if (gScoreEl.innerHTML !== gNew) gScoreEl.innerHTML = gNew;
+              } else {
+                gScoreEl.classList.remove("outcome-score-tennis");
+                gScoreEl.textContent = matchScore(go.label, freshScoreMap);
+              }
+            }
             var gChance = grow.querySelector(".outcome-chance");
             _updateIfChanged(gChance, gChance, go.chance);
             var gBoxes = grow.querySelectorAll(".odds-box");
@@ -2172,7 +2244,17 @@ async function refreshVisible() {
           var row = rows[j];
           var o = outs[j];
           var scoreEl = row.querySelector(".outcome-score");
-          if (scoreEl && freshScoreMap) scoreEl.textContent = matchScore(o.label, freshScoreMap);
+          if (scoreEl && freshScoreMap) {
+            var ots = matchTennisScore(o.label, freshScoreMap);
+            if (ots) {
+              scoreEl.classList.add("outcome-score-tennis");
+              var oNew = buildTennisScoreCell(ots);
+              if (scoreEl.innerHTML !== oNew) scoreEl.innerHTML = oNew;
+            } else {
+              scoreEl.classList.remove("outcome-score-tennis");
+              scoreEl.textContent = matchScore(o.label, freshScoreMap);
+            }
+          }
           var chanceEl = row.querySelector(".outcome-chance");
           _updateIfChanged(chanceEl, chanceEl, o.chance);
           var boxes = row.querySelectorAll(".odds-box");
