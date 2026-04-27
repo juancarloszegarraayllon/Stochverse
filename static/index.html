@@ -406,6 +406,23 @@ html,body{overscroll-behavior:none}
 .ed-debug-st-filter{display:none;gap:0;border-bottom:1px solid var(--border);margin-bottom:8px}
 .ed-debug-st-filter .ed-sb-tab{flex:0 0 auto;padding:6px 12px;font-size:9px}
 .ed-debug-st-content{min-height:60px}
+.ed-bracket{display:flex;gap:24px;overflow-x:auto;padding:8px 0 16px;scrollbar-width:thin;align-items:stretch}
+.ed-bracket::-webkit-scrollbar{height:6px}
+.ed-bracket::-webkit-scrollbar-thumb{background:var(--text-muted);border-radius:3px}
+.ed-bracket-round{display:flex;flex-direction:column;justify-content:space-around;min-width:210px;flex:0 0 210px}
+.ed-bracket-round-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--green);text-align:center;padding-bottom:6px;border-bottom:1px solid var(--border);margin-bottom:8px}
+.ed-bracket-match{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:6px 8px;margin:4px 0;font-size:11px;display:flex;flex-direction:column;gap:3px}
+.ed-bracket-match.ed-bracket-current{border-color:var(--green);box-shadow:0 0 0 1px var(--green)}
+.ed-bracket-match.ed-bracket-future{opacity:0.65}
+.ed-bracket-match.ed-bracket-bye{opacity:0.4;font-style:italic}
+.ed-bracket-player{display:flex;align-items:center;gap:6px;line-height:1.3;color:var(--text-dim);min-height:16px}
+.ed-bracket-player.ed-bracket-winner{color:var(--text);font-weight:700}
+.ed-bracket-info{font-size:9px;color:var(--text-muted);font-weight:700;flex-shrink:0}
+.ed-bracket-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-bracket-score{font-variant-numeric:tabular-nums;color:var(--text);font-weight:700;flex-shrink:0;min-width:14px;text-align:right}
+.ed-bracket-status{font-size:9px;color:var(--red);font-weight:700;text-transform:uppercase;text-align:center;padding-top:2px;letter-spacing:0.5px}
+.ed-bracket-time{font-size:9px;color:var(--text-muted);text-align:center;padding-top:2px}
+.ed-bracket-empty{padding:20px;text-align:center;color:var(--text-muted);font-size:11px;font-style:italic}
 .ed-header{display:flex;flex-direction:column;gap:10px;padding:18px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:12px}
 .ed-pills{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .ed-title{font-size:20px;font-weight:700;line-height:1.3;color:var(--text);margin:0}
@@ -4955,6 +4972,129 @@ function _stEmptyMsg(standingType) {
   return "No data available.";
 }
 
+// FlashLive bracket renderer. Consumes the shape returned by
+// standing_type=draw — TABS holds index → participant lookup tables,
+// ROUNDS[] holds the per-round matchups. Handles tennis singles/doubles
+// today; the same shape works for any sport that surfaces a knockout
+// draw (soccer cup rounds, basketball playoffs, MMA tournaments).
+//
+// STAGE_ID semantics observed in real responses:
+//   "1"  scheduled        "8"  retired          "19" in-progress (live)
+//   "3"  finished          "9"  walkover
+//
+// INFO field markers (parens-wrapped, may stack with seed):
+//   (Bye) (WC) (Q) (LL) (Alt)         entry conditions
+//   (RET.)        (WO.)               outcome modifiers
+//   (1) (15) (33)                     seed numbers
+function _renderBracket(container, data, currentEventId) {
+  var tabs = data.TABS || {};
+  var participants = tabs.DRAW_EVENT_PARTICIPANTS || {};
+  var roundLabels = tabs.DRAW_ROUNDS || {};
+  var rounds = Array.isArray(data.ROUNDS) ? data.ROUNDS : [];
+  if (!rounds.length) {
+    container.innerHTML = '<div class="ed-bracket-empty">No bracket published yet.</div>';
+    return;
+  }
+  var STAGE_BYE = {"Bye": 1};
+  var fmtTime = function(ts) {
+    if (!ts) return "";
+    var d = new Date(ts * 1000);
+    var now = new Date();
+    var sameDay = d.toDateString() === now.toDateString();
+    var time = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+    if (sameDay) return time;
+    var date = d.toLocaleDateString([], {month: "short", day: "numeric"});
+    return date + " " + time;
+  };
+  var resolveName = function(idx) {
+    if (idx == null || idx === "") return "";
+    var n = participants[String(idx)];
+    return n == null ? "" : n;
+  };
+  var isByeBlock = function(b) {
+    var hi = b.DRAW_EVENT_PARTICIPANT_INFO_HOME || "";
+    var ai = b.DRAW_EVENT_PARTICIPANT_INFO_AWAY || "";
+    if (/\(Bye\)/i.test(hi) || /\(Bye\)/i.test(ai)) return true;
+    var hn = resolveName(b.DRAW_ROUND_HOME_EVENT_PARTICIPANT);
+    var an = resolveName(b.DRAW_ROUND_AWAY_EVENT_PARTICIPANT);
+    return !hn || !an;
+  };
+  var renderPlayer = function(name, info, score, isWinner, isBye) {
+    var cls = "ed-bracket-player";
+    if (isWinner) cls += " ed-bracket-winner";
+    var label = isBye ? (name || "Bye") : (name || "TBD");
+    var infoHTML = info ? '<span class="ed-bracket-info">' + escH(info) + '</span>' : "";
+    var scoreHTML = (score != null && score !== "") ? '<span class="ed-bracket-score">' + escH(String(score)) + '</span>' : "";
+    return '<div class="' + cls + '">'
+         + infoHTML
+         + '<span class="ed-bracket-name">' + escH(label) + '</span>'
+         + scoreHTML
+         + '</div>';
+  };
+  var renderMatch = function(b) {
+    var homeName = resolveName(b.DRAW_ROUND_HOME_EVENT_PARTICIPANT);
+    var awayName = resolveName(b.DRAW_ROUND_AWAY_EVENT_PARTICIPANT);
+    var homeInfo = b.DRAW_EVENT_PARTICIPANT_INFO_HOME || "";
+    var awayInfo = b.DRAW_EVENT_PARTICIPANT_INFO_AWAY || "";
+    var homeScore = b.DRAW_ROUND_HOME_RESULT;
+    var awayScore = b.DRAW_ROUND_AWAY_RESULT;
+    var winner = b.DRAW_ROUND_EVENT_WINNER_OVERALL || "";
+    var stageId = String(b.DRAW_ROUND_EVENT_STAGE_ID || "");
+    var bye = isByeBlock(b);
+    var hasResult = (homeScore != null && homeScore !== "") || (awayScore != null && awayScore !== "");
+    var classes = ["ed-bracket-match"];
+    var statusBadge = "";
+    if (bye) {
+      classes.push("ed-bracket-bye");
+    } else if (stageId === "9" || /\(WO\.\)/i.test(homeInfo + awayInfo)) {
+      statusBadge = '<div class="ed-bracket-status">Walkover</div>';
+    } else if (stageId === "8" || /\(RET\.\)/i.test(homeInfo + awayInfo)) {
+      statusBadge = '<div class="ed-bracket-status">Retired</div>';
+    } else if (!hasResult) {
+      classes.push("ed-bracket-future");
+    }
+    if (currentEventId && b.DRAW_ROUND_EVENT_ID === currentEventId) {
+      classes.push("ed-bracket-current");
+    }
+    var html = '<div class="' + classes.join(" ") + '">';
+    html += renderPlayer(homeName, homeInfo, homeScore, winner === "H" && !bye, bye && !homeName);
+    html += renderPlayer(awayName, awayInfo, awayScore, winner === "A" && !bye, bye && !awayName);
+    html += statusBadge;
+    if (!hasResult && !bye && !statusBadge && b.DRAW_ROUND_EVENT_START) {
+      html += '<div class="ed-bracket-time">' + escH(fmtTime(b.DRAW_ROUND_EVENT_START)) + '</div>';
+    }
+    html += '</div>';
+    return html;
+  };
+  var html = '<div class="ed-bracket">';
+  for (var ri = 0; ri < rounds.length; ri++) {
+    var round = rounds[ri] || {};
+    var label = roundLabels[String(round.DRAW_ROUND)] || ("Round " + round.DRAW_ROUND);
+    var blocks = Array.isArray(round.BLOCKS) ? round.BLOCKS : [];
+    html += '<div class="ed-bracket-round">';
+    html += '<div class="ed-bracket-round-label">' + escH(label) + '</div>';
+    for (var bi = 0; bi < blocks.length; bi++) {
+      html += renderMatch(blocks[bi]);
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  container.innerHTML = html;
+  // Auto-scroll to the current match if we tagged one — saves the user
+  // from hunting through 64 first-round matchups to find their bet.
+  if (currentEventId) {
+    var current = container.querySelector(".ed-bracket-current");
+    if (current) {
+      try {
+        current.scrollIntoView({behavior: "instant", block: "nearest", inline: "center"});
+      } catch (e) {
+        // Older browsers — fall back to no smooth scroll.
+        current.scrollIntoView();
+      }
+    }
+  }
+}
+
 async function _loadStandingsType(container, ticker, standingType) {
   container.innerHTML = '<div class="ed-stats-loading">Loading…</div>';
   try {
@@ -4969,6 +5109,17 @@ async function _loadStandingsType(container, ticker, standingType) {
       return;
     }
     var data = d.data || {};
+    // Bracket dispatch — FlashLive's standing_type=draw response is
+    // shape-distinct from the league-table response. TABS holds the
+    // participant index → name lookup and ROUNDS[] is an array of
+    // round groups with BLOCKS[] of matchups. Route to the bracket
+    // renderer; the existing table renderer below handles every
+    // other standing_type.
+    var bracketData = data.DATA && data.DATA.TABS && Array.isArray(data.DATA.ROUNDS) ? data.DATA : null;
+    if (bracketData) {
+      _renderBracket(container, bracketData, d.current_event_id || "");
+      return;
+    }
     var rows = [];
     if (data.ROWS && Array.isArray(data.ROWS)) {
       rows = data.ROWS;

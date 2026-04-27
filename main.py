@@ -4247,6 +4247,7 @@ async def get_event_standings(ticker: str, standing_type: str = "overall"):
             "standing_type": standing_type,
             "home_name": g.get("home_name", ""),
             "away_name": g.get("away_name", ""),
+            "current_event_id": g.get("event_id", ""),
             "source": "flashlive",
         }
     except Exception as e:
