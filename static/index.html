@@ -4602,6 +4602,9 @@ function _renderStandingsTable(container, rows, homeName, awayName, meta) {
   for (var ek = 0; ek < extraKeys.length; ek++) {
     var k = extraKeys[ek];
     if (usedKeys[k]) continue;
+    // Skip our own internal tagging fields (prefixed with `_`) and
+    // any IDs / flags / country codes the API tacks on.
+    if (k.charAt(0) === "_") continue;
     if (k.indexOf("IMAGE") >= 0 || k.indexOf("ID") >= 0 || k.indexOf("FLAG") >= 0 || k.indexOf("COUNTRY") >= 0) continue;
     var v = sample[k];
     if (typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v))) {
@@ -5976,10 +5979,10 @@ function renderEventDetail(ev) {
   var isSport = !!sport;
   if (isSport) {
     h += '<div class="ed-detailed-stats ob-section">';
-    h += '<button class="ob-toggle open" aria-expanded="true" onclick="window._toggleStandingsSection(this)">';
+    h += '<button class="ob-toggle" aria-expanded="false" onclick="window._toggleStandingsSection(this)">';
     h += '<span>Detailed Event Stats</span><span class="ob-chevron">▾</span>';
     h += '</button>';
-    h += '<div class="ob-inner ed-detailed-stats-inner">';
+    h += '<div class="ob-inner ed-detailed-stats-inner" hidden>';
     h += '<div class="ed-stats-panel" data-stats-ticker="' + escH(ticker) + '">';
     h += '<div class="ed-stats-loading">Loading detailed event stats…</div>';
     h += '</div>';
