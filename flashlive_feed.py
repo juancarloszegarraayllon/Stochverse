@@ -443,7 +443,13 @@ def _parse_event(ev):
             "away_phrases": away_phrases,
             "captured_at_ms": int(time.time() * 1000),
             "_raw_keys": list(ev.keys()) if isinstance(ev, dict) else [],
-            "_raw_preview": str(ev)[:1200] if isinstance(ev, dict) else "",
+            "_raw_preview": str(ev)[:3000] if isinstance(ev, dict) else "",
+            # Surface INFO_NOTICE directly so /api/flashlive_status can
+            # report it without truncation. Soccer matches in stoppage
+            # may carry the announced added-time figure here ("4 minutes
+            # added" / "+4") — once we see the actual format from a
+            # real match in stoppage we'll wire it into the badge.
+            "info_notice": (ev.get("INFO_NOTICE") or "").strip(),
         }
         # Playoff series state. FlashLive ships it as free-text in
         # INFO_NOTICE (observed live: "Kitchener Rangers leads series
