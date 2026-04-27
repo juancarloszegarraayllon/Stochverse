@@ -104,6 +104,8 @@ html,body{overscroll-behavior:none}
 .outcome-score-tennis .ts-serve{width:8px;text-align:center;color:var(--green);font-size:10px;flex-shrink:0}
 .outcome-score-tennis .ts-box{min-width:20px;padding:2px 5px;border:1px solid var(--border);border-radius:3px;background:var(--bg3);text-align:center;font-size:11px;font-weight:700;color:var(--text);flex-shrink:0}
 .outcome-score-tennis .ts-history-box{background:transparent;color:var(--text-dim);border-color:transparent;padding:2px 4px;min-width:14px}
+.outcome-score-tennis .ts-history-box.ts-winner{color:var(--text);font-weight:800}
+.outcome-score-tennis .ts-box.ts-winner{color:var(--text);font-weight:800}
 .outcome-score-tennis .ts-point{background:var(--green-bg);border-color:var(--green-line);color:var(--green)}
 .header-score{flex:0 0 32px;text-align:center;font-size:8px;font-weight:700;letter-spacing:0.4px;color:var(--text-muted);text-transform:uppercase}
 .outcome-chance{flex:0 0 58px;text-align:center;font-size:11px;color:var(--text-dim);border-radius:4px}
@@ -1790,35 +1792,55 @@ function matchScore(label, scoreMap) {
   return side ? scoreMap[side].score : "";
 }
 function matchTennisScore(label, scoreMap) {
-  // Returns the rich tennis breakdown for the side matching this
-  // outcome label, or null when the scoreMap doesn't carry tennis
-  // data (any other sport / pre-game tennis without _live_state).
+  // Returns { self, opp } — the matched side's rich tennis breakdown
+  // alongside the opponent's, so the cell renderer can compare set
+  // scores and bold whichever side won each set. null when the
+  // scoreMap doesn't carry tennis data (any other sport / pre-game
+  // tennis without _live_state).
   var side = matchSide(label, scoreMap);
   if (!side) return null;
   var s = scoreMap[side];
-  return s && s.tennis ? s.tennis : null;
+  if (!s || !s.tennis) return null;
+  var oppSide = side === "home" ? "away" : "home";
+  var opp = scoreMap[oppSide] ? scoreMap[oppSide].tennis : null;
+  return { self: s.tennis, opp: opp };
 }
-function buildTennisScoreCell(ts) {
-  // Build the rich score cell for a single side. Mirrors the layout
-  // the standalone .tennis-score block used to render — sets, serve
-  // dot, completed-set history boxes, current-set games box, current
-  // game point box — packaged into a single inline-flex span so it
-  // drops cleanly into an outcome row.
+function buildTennisScoreCell(pair) {
+  // Build the rich score cell for one side. Mirrors the layout the
+  // standalone .tennis-score block used to render — minus the
+  // sets-won number, which is now redundant with the LIVE badge
+  // ("LIVE · BLO 1 - AUG 0") above the card. Bolds whichever side
+  // won each completed set + the current set's leading game count
+  // so the user can scan winners at a glance.
+  if (!pair) return "";
+  var ts = pair.self;
+  var opp = pair.opp;
   if (!ts) return "";
-  function esc(s) { return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
-  var html = '';
-  if (ts.sets !== "" && ts.sets != null) {
-    html += '<span class="ts-sets">' + esc(ts.sets) + '</span>';
+  function esc(v) { return String(v == null ? "" : v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function leads(mine, theirs) {
+    // True when this side has a strictly higher numeric value than
+    // the opponent for the same set. Falsy when equal, missing, or
+    // not a number (Ad / tiebreak text → no comparison).
+    if (mine == null || mine === "") return false;
+    var a = parseFloat(mine);
+    if (isNaN(a)) return false;
+    if (theirs == null || theirs === "") return true;  // opp has nothing
+    var b = parseFloat(theirs);
+    if (isNaN(b)) return false;
+    return a > b;
   }
-  html += '<span class="ts-serve">' + (ts.serving ? "●" : "") + '</span>';
+  var html = '<span class="ts-serve">' + (ts.serving ? "●" : "") + '</span>';
   var hist = ts.history || [];
+  var oppHist = (opp && opp.history) || [];
   for (var i = 0; i < hist.length; i++) {
     if (hist[i] != null && hist[i] !== "") {
-      html += '<span class="ts-box ts-history-box">' + esc(hist[i]) + '</span>';
+      var hwin = leads(hist[i], oppHist[i]) ? " ts-winner" : "";
+      html += '<span class="ts-box ts-history-box' + hwin + '">' + esc(hist[i]) + '</span>';
     }
   }
   if (ts.current_games !== "" && ts.current_games != null) {
-    html += '<span class="ts-box">' + esc(ts.current_games) + '</span>';
+    var cgWin = leads(ts.current_games, opp ? opp.current_games : null) ? " ts-winner" : "";
+    html += '<span class="ts-box' + cgWin + '">' + esc(ts.current_games) + '</span>';
   }
   if (ts.point !== "" && ts.point != null) {
     html += '<span class="ts-box ts-point">' + esc(ts.point) + '</span>';
