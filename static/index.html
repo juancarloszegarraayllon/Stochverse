@@ -1436,8 +1436,11 @@ function liveTimeLabel(ev) {
   // the clock part entirely.
   var live = ev && ev._live_state;
   if (live) {
-    if (live.short_detail) return live.short_detail;
-    if (live.display_clock) return live.display_clock;
+    var clk = live.short_detail || live.display_clock || "";
+    // Filter generic status strings the badge prefix already conveys
+    // ("LIVE", "In Progress") so we don't render "LIVE · score · LIVE".
+    // Useful clock-like values (Q3 7:32, Set 1, HT, 67') pass through.
+    if (clk && !/^(live|in[-_ ]?progress)$/i.test(clk.trim())) return clk;
   }
   if (ev._sport !== "Soccer" || !ev._kickoff_dt) return null;
   try {
