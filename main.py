@@ -4276,11 +4276,18 @@ async def get_event_topscorers(ticker: str):
 
 @app.get("/api/event/{ticker}/standings_debug")
 async def get_event_standings_debug(ticker: str):
-    """Probe every plausible standing_type value against FlashLive's
-    /v1/tournaments/standings endpoint and report what each returns.
-    Lets us see which keys are accepted, which return data, and the
-    shape of each response — without burning a frontend reload per
-    guess.
+    """Probe every plausible standing_type value (and parameter
+    combination) against FlashLive's /v1/tournaments/standings
+    endpoint plus a few alternate endpoint paths. Lets us see which
+    keys are accepted, which return data, and the shape of each
+    response — without burning a frontend reload per guess.
+
+    Now also probes:
+      - The hash codes from /standings/tabs as standing_type (since
+        FlashLive sometimes wants those instead of friendly names)
+      - over_under combined with threshold/over_under_value params
+        (FlashScore's UI passes a threshold like 2.5 for Over/Under)
+      - Alternate endpoint paths /standings/live, /standings/over_under
 
     Usage: /api/event/KXARGPREMDIVGAME-26APR26TUCBAN/standings_debug
     """
@@ -4323,22 +4330,15 @@ async def get_event_standings_debug(ticker: str):
             "tournament_stage_id": stage_id,
             "tournament_season_id": season_id,
         })
-        results: dict = {}
-        for v in VARIANTS:
-            params = {"tournament_stage_id": stage_id, "standing_type": v}
-            if season_id:
-                params["tournament_season_id"] = season_id
-            try:
-                data = await _fl_get("/v1/tournaments/standings", params)
-            except Exception as ex:
-                results[v] = {"error": str(ex)[:120]}
-                continue
+
+        def _summarize(data):
+            """Compact summary of a FlashLive standings response."""
             if data is None:
-                results[v] = {"status": "null"}
-                continue
+                return {"status": "null"}
             rows_total = 0
             outer_keys = []
             sample_row_keys: list = []
+            sample_row: dict = {}
             if isinstance(data, dict):
                 outer_keys = list(data.keys())
                 groups = data.get("DATA") or []
@@ -4350,23 +4350,116 @@ async def get_event_standings_debug(ticker: str):
                                 rows_total += len(r)
                                 if r and isinstance(r[0], dict) and not sample_row_keys:
                                     sample_row_keys = list(r[0].keys())
+                                    sample_row = r[0]
                 elif isinstance(groups, dict):
                     r = groups.get("ROWS") or []
                     if isinstance(r, list):
                         rows_total = len(r)
                         if r and isinstance(r[0], dict):
                             sample_row_keys = list(r[0].keys())
-            results[v] = {
+                            sample_row = r[0]
+                # Some shapes put ROWS at the top level
+                if not sample_row_keys and isinstance(data.get("ROWS"), list):
+                    rs = data.get("ROWS")
+                    rows_total = len(rs)
+                    if rs and isinstance(rs[0], dict):
+                        sample_row_keys = list(rs[0].keys())
+                        sample_row = rs[0]
+            return {
                 "rows": rows_total,
                 "outer_keys": outer_keys[:10],
-                "sample_row_keys": sample_row_keys[:14],
+                "sample_row_keys": sample_row_keys[:18],
+                "sample_row": sample_row,
             }
+
+        results: dict = {}
+        # Pass 1: standing_type variants on the main endpoint.
+        for v in VARIANTS:
+            params = {"tournament_stage_id": stage_id, "standing_type": v}
+            if season_id:
+                params["tournament_season_id"] = season_id
+            try:
+                data = await _fl_get("/v1/tournaments/standings", params)
+            except Exception as ex:
+                results[v] = {"error": str(ex)[:120]}
+                continue
+            results[v] = _summarize(data)
+
+        # Pass 2: standing_type=over_under with various threshold-shaped
+        # params (FlashScore UI shows a 0.5/1.5/2.5/3.5/.../6.5 picker).
+        ou_results: dict = {}
+        ou_thresholds = ["0.5", "1.5", "2.5", "3.5", "4.5", "5.5", "6.5"]
+        ou_threshold_keys = ["over_under", "threshold", "ou", "value", "over_under_value"]
+        for tkey in ou_threshold_keys:
+            for thr in ou_thresholds:
+                params = {"tournament_stage_id": stage_id,
+                          "standing_type": "over_under",
+                          tkey: thr}
+                if season_id:
+                    params["tournament_season_id"] = season_id
+                try:
+                    data = await _fl_get("/v1/tournaments/standings", params)
+                except Exception as ex:
+                    ou_results[tkey + "=" + thr] = {"error": str(ex)[:120]}
+                    continue
+                summary = _summarize(data)
+                # Skip uninteresting null responses to keep the
+                # report compact.
+                if summary.get("rows", 0) > 0:
+                    ou_results[tkey + "=" + thr] = summary
+
+        # Pass 3: hash codes from the tabs endpoint as standing_type.
+        # FlashLive sometimes accepts those directly.
+        hash_results: dict = {}
+        if isinstance(tabs_data, dict):
+            tabs_inner = tabs_data.get("DATA")
+            if isinstance(tabs_inner, dict):
+                for hkey, hval in tabs_inner.items():
+                    if hkey == "TABS" or not isinstance(hval, str):
+                        continue
+                    params = {"tournament_stage_id": stage_id,
+                              "standing_type": hval}
+                    if season_id:
+                        params["tournament_season_id"] = season_id
+                    try:
+                        data = await _fl_get("/v1/tournaments/standings", params)
+                    except Exception as ex:
+                        hash_results[hkey] = {"error": str(ex)[:120]}
+                        continue
+                    summary = _summarize(data)
+                    summary["hash"] = hval
+                    hash_results[hkey] = summary
+
+        # Pass 4: alternate endpoint paths.
+        alt_results: dict = {}
+        ALT_ENDPOINTS = [
+            "/v1/tournaments/standings/live",
+            "/v1/tournaments/standings/over_under",
+            "/v1/tournaments/standings/over-under",
+            "/v1/tournaments/standings/htft",
+            "/v1/tournaments/standings/ht_ft",
+            "/v1/tournaments/standings/top_scorers",
+        ]
+        for ep in ALT_ENDPOINTS:
+            params = {"tournament_stage_id": stage_id}
+            if season_id:
+                params["tournament_season_id"] = season_id
+            try:
+                data = await _fl_get(ep, params)
+            except Exception as ex:
+                alt_results[ep] = {"error": str(ex)[:120]}
+                continue
+            alt_results[ep] = _summarize(data)
+
         return {
             "ticker": ticker,
             "stage_id": stage_id,
             "season_id": season_id,
             "tabs_endpoint": tabs_data,
             "by_standing_type": results,
+            "over_under_with_threshold": ou_results,
+            "by_tab_hash": hash_results,
+            "alternate_endpoints": alt_results,
         }
     except Exception as e:
         return {"error": str(e)[:300]}
