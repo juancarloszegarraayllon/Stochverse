@@ -27,29 +27,22 @@ API_KEY = os.environ.get("FLASHLIVE_API_KEY", "").strip()
 API_HOST = "flashlive-sports.p.rapidapi.com"
 BASE_URL = f"https://{API_HOST}"
 
-# Adaptive poll cadence. RapidAPI Pro tier ships 10,000 included
-# requests/month; each broad poll fires len(ACTIVE_SPORTS) calls (one
-# per sport, today's events only — tomorrow's are slow-refreshed
-# below). Defaults sized to keep the included quota viable: 60 s when
-# any game is live, 300 s when nothing's in progress. Tighten via env
-# vars on plans with bigger quotas.
-POLL_INTERVAL = int(os.environ.get("FLASHLIVE_POLL_INTERVAL", "300"))
-LIVE_POLL_INTERVAL = int(os.environ.get("FLASHLIVE_LIVE_POLL_INTERVAL", "60"))
-# Tomorrow's events refresh on a slow loop independent of the broad
-# poll — they don't change minute-to-minute and don't need a 60 s
-# heartbeat. 30 min is plenty to surface schedule changes.
-TOMORROW_REFRESH_INTERVAL = int(os.environ.get("FLASHLIVE_TOMORROW_INTERVAL", "1800"))
+# Adaptive poll cadence. RapidAPI Mega tier ships unlimited monthly
+# requests with a 10 req/sec rate cap, so we can run the broad poll
+# aggressively without quota anxiety. Defaults sized for "full feature
+# parity with Kalshi": 10 s live cadence so scores feel near-realtime,
+# 60 s idle cadence so the GAMES dict stays warm between matches.
+# Override via env vars if you ever switch tiers.
+POLL_INTERVAL = int(os.environ.get("FLASHLIVE_POLL_INTERVAL", "60"))
+LIVE_POLL_INTERVAL = int(os.environ.get("FLASHLIVE_LIVE_POLL_INTERVAL", "10"))
 
 # Poll every FlashLive sport that maps to a Kalshi sport category in
 # main.py's _SPORT_SERIES. Each sport = 1 API call per POLL_INTERVAL,
 # so this list directly drives quota. IDs verified against
 # /v1/sports/list (see /api/debug_fl_sports_list).
-# Sports we actually poll on the broad live-feed loop. Each entry costs
-# one /v1/events/list call per poll, so this list is the single biggest
-# lever on RapidAPI quota burn. Trimmed to the six majors that Kalshi
-# consistently lists matches for; the parser still understands every
-# SPORT_MAP entry below if FlashLive surfaces them via search/per-event
-# endpoints, so adding a sport here is a pure quota decision.
+# Sports polled on the broad live-feed loop. Each entry costs one
+# /v1/events/list call per poll. Mega tier removes the quota concern
+# so the full sport list is restored for true cross-sport coverage.
 ACTIVE_SPORTS = {
     "1": "Soccer",
     "2": "Tennis",
@@ -57,6 +50,16 @@ ACTIVE_SPORTS = {
     "4": "Hockey",
     "5": "Football",       # AMERICAN_FOOTBALL on FlashLive
     "6": "Baseball",
+    "8": "Rugby",          # RUGBY_UNION (Premiership, French Top 14)
+    "13": "Cricket",
+    "14": "Darts",
+    "16": "Boxing",
+    "18": "Aussie Rules",
+    "19": "Rugby",         # RUGBY_LEAGUE (NRL, Super League)
+    "23": "Golf",
+    "28": "MMA",
+    "31": "Motorsport",
+    "36": "Esports",
 }
 GAMES: dict = {}    # normalized key → game dict
 
@@ -548,22 +551,15 @@ async def run_flashlive_feed():
         return
 
     STATUS["running"] = True
-    log.info("FlashLive feed starting (live poll: %ds, idle poll: %ds, tomorrow refresh: %ds)",
-             LIVE_POLL_INTERVAL, POLL_INTERVAL, TOMORROW_REFRESH_INTERVAL)
+    log.info("FlashLive feed starting (live poll: %ds, idle poll: %ds)",
+             LIVE_POLL_INTERVAL, POLL_INTERVAL)
 
-    last_tomorrow_refresh = 0  # epoch seconds; 0 forces refresh on first iter
     while True:
         try:
-            now = time.time()
-            # Most polls fetch today only (the hot path). Every
-            # TOMORROW_REFRESH_INTERVAL we also pull tomorrow's events
-            # so newly-listed matches appear; that's a 2× call cost on
-            # those iterations only.
-            include_tomorrow = (now - last_tomorrow_refresh) >= TOMORROW_REFRESH_INTERVAL
-            days = ("0", "1") if include_tomorrow else ("0",)
-            events = await _fetch_live_events(days=days)
-            if include_tomorrow:
-                last_tomorrow_refresh = now
+            # Mega tier: fetch today + tomorrow on every poll for full
+            # coverage. Tomorrow's events surface in the calendar
+            # immediately when FlashLive lists them.
+            events = await _fetch_live_events(days=("0", "1"))
             parsed = 0
             new_games = {}
             for ev in events:
@@ -577,9 +573,8 @@ async def run_flashlive_feed():
             STATUS["games"] = len(GAMES)
             STATUS["last_fetch_ts"] = time.time()
             STATUS["polls"] += 1
-            STATUS["last_days"] = ",".join(days)
             if parsed:
-                log.info("FlashLive: %d games across all sports (days=%s)", parsed, days)
+                log.info("FlashLive: %d games across all sports", parsed)
         except Exception as e:
             STATUS["last_error"] = str(e)[:200]
             log.error("FlashLive poll error: %s", e)
