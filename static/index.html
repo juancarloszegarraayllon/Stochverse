@@ -4190,18 +4190,19 @@ window.switchMainTab = function(btn) {
 
 // FlashLive standings_tabs codes (from /v1/tournaments/standings
 // /tabs) → the standing_type query param the data endpoint takes,
-// plus the visible label. Order below = display order. Convention:
-// the standing_type param mirrors the lowercase tab code minus the
-// leading "TABLE_" prefix where applicable, except TABLE itself
-// which uses "overall".
+// plus the visible label. Order below = display order.
+//
+// The valid StandingsType enum from the OpenAPI spec is exactly:
+//   home, away, overall, form, top_scores, draw, overall_live
+// There is no over_under or ht_ft in the API — FlashScore.com
+// surfaces those tabs from internal endpoints we don't have access
+// to, so we don't render them here.
 var _STANDINGS_TAB_MAP = [
-  {code: "LIVE_TABLE",        type: "live_table", label: "Live Standings"},
-  {code: "LIVE",              type: "live_table", label: "Live Standings"},
-  {code: "TABLE",             type: "overall",    label: "Standings",      hasFilter: true},
-  {code: "TABLE_FORM",        type: "form",       label: "Form"},
-  {code: "TABLE_OVER_UNDER",  type: "over_under", label: "Over/Under"},
-  {code: "TABLE_HT_FT",       type: "ht_ft",      label: "HT/FT"},
-  {code: "TOP_SCORERS",       type: "top_scores", label: "Top Scorers"},
+  {code: "LIVE_TABLE",  type: "overall_live", label: "Live Standings"},
+  {code: "TABLE",       type: "overall",      label: "Standings",     hasFilter: true},
+  {code: "TABLE_FORM",  type: "form",         label: "Form"},
+  {code: "TABLE_DRAW",  type: "draw",         label: "Draw"},
+  {code: "TOP_SCORERS", type: "top_scores",   label: "Top Scorers"},
 ];
 
 async function _hydrateStandingsTabs(stPanel, ticker) {
@@ -4229,7 +4230,7 @@ async function _hydrateStandingsTabs(stPanel, ticker) {
     for (var ai = 0; ai < advertised.length; ai++) advSet[advertised[ai]] = true;
     tabs = tabs.filter(function(t) { return advSet[t.code]; });
   }
-  // Dedupe by `type` since LIVE_TABLE and LIVE both map to "live_table".
+  // Dedupe defensively in case a future map entry repeats a type.
   var seen = {};
   tabs = tabs.filter(function(t) {
     if (seen[t.type]) return false;
@@ -4753,12 +4754,11 @@ async function _loadTopScorers(container, ticker) {
 // Translate the raw "no X data available" backend errors into
 // per-standing-type messages users can actually parse.
 function _stEmptyMsg(standingType) {
-  if (standingType === "live_table" || standingType === "live") {
+  if (standingType === "overall_live") {
     return "No live standings — round isn't in progress.";
   }
-  if (standingType === "over_under") return "Over/Under not tracked for this league.";
-  if (standingType === "ht_ft") return "HT/FT not tracked for this league.";
-  if (standingType === "top_scores" || standingType === "top_scorers") {
+  if (standingType === "draw") return "Draw standings not tracked for this league.";
+  if (standingType === "top_scores") {
     return "Top scorers haven't been published yet for this stage.";
   }
   return "No data available.";
@@ -5314,8 +5314,6 @@ window.switchSBTab = function(btn) {
       else if (lazyKey === "h2h-away") _loadH2HSubTab(lazy, ticker, 2);
       else if (lazyKey === "topscorers") _loadStandingsType(lazy, ticker, "top_scores");
       else if (lazyKey === "form") _loadStandingsType(lazy, ticker, "form");
-      else if (lazyKey === "overunder") _loadStandingsType(lazy, ticker, "over_under");
-      else if (lazyKey === "htft") _loadStandingsType(lazy, ticker, "ht_ft");
       else if (lazyKey === "commentary") _loadCommentary(lazy, ticker);
       else if (lazyKey === "player-stats") _loadPlayerStats(lazy, ticker);
     }

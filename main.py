@@ -4207,7 +4207,9 @@ async def get_event_h2h(ticker: str):
 @app.get("/api/event/{ticker}/standings")
 async def get_event_standings(ticker: str, standing_type: str = "overall"):
     """Fetch league standings from FlashLive for this event's tournament.
-    standing_type: overall, form, over_under, ht_ft, top_scores"""
+    Per the OpenAPI spec, standing_type ∈ {overall, home, away, form,
+    top_scores, draw, overall_live}. over_under and ht_ft are not
+    exposed by this API."""
     ticker = (ticker or "").strip().upper()
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
@@ -4910,13 +4912,12 @@ async def debug_fl_capabilities(
         "/v1/events/highlights", "/v1/events/report",
         "/v1/events/last-change", "/v1/events/odds",
     ]
-    # Standing-type variants worth probing. Some are league-specific
-    # (over_under is soccer-only, live / live_table only when a round
-    # is in progress, ht_ft is soccer cup ties, etc.) — the scanner
-    # just records which ones returned data so the frontend can light
-    # up only the real tabs.
+    # Standing-type variants worth probing. The OpenAPI spec defines
+    # the full enum as {overall, home, away, form, top_scores, draw,
+    # overall_live}; overall_live only returns rows when a round is
+    # in progress, draw is mostly cup competitions.
     STANDING_TYPES = ["overall", "home", "away", "form", "top_scores",
-                      "over_under", "ht_ft", "live", "live_table"]
+                      "draw", "overall_live"]
 
     out = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
