@@ -4776,10 +4776,10 @@ async def debug_fl_schema(ticker: str):
     if not found:
         return {"error": f"event {ticker!r} not found in cache"}
     try:
-        from flashlive_feed import match_game, _fl_get
+        from flashlive_feed import _fl_get
         title = found.get("title", "")
         sport = found.get("_sport", "")
-        g = match_game(title, sport)
+        g = await _find_fl_game(found)
         if not g:
             return {"error": "FlashLive doesn't cover this match yet",
                     "title": title, "sport": sport}
@@ -4951,10 +4951,10 @@ async def event_capabilities(ticker: str):
     if not found:
         return {"error": f"event {ticker_norm!r} not found in cache"}
     try:
-        from flashlive_feed import match_game, _fl_get
+        from flashlive_feed import _fl_get
         title = found.get("title", "")
         sport = found.get("_sport", "")
-        g = match_game(title, sport)
+        g = await _find_fl_game(found)
         if not g:
             return {"error": "FlashLive doesn't cover this match yet",
                     "title": title, "sport": sport}
@@ -7000,10 +7000,17 @@ async def get_event_stats(ticker: str, debug: bool = False):
         return {"error": "event has no sport or title"}
     try:
         from flashlive_feed import (
-            find_flashlive_event_id, fetch_event_stats as fl_stats,
+            fetch_event_stats as fl_stats,
             fetch_event_lineups as fl_lineups, fetch_event_summary as fl_summary,
         )
-        fl_id = find_flashlive_event_id(title, sport)
+        # Use the cached + async-search-fallback lookup so a fresh event
+        # whose GAMES entry hasn't been refreshed yet still resolves on
+        # first call (search_flashlive_event hits FlashLive's search
+        # endpoint when match_game misses). Same pattern h2h/standings/
+        # news already use; previously /stats took the synchronous
+        # find_flashlive_event_id path and silently returned no data.
+        g = await _find_fl_game(found)
+        fl_id = g.get("event_id") if g else None
         if fl_id:
             fl_data = await fl_stats(fl_id)
             fl_lineups_data = await fl_lineups(fl_id)
