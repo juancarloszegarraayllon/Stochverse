@@ -14,6 +14,7 @@ scores on Kalshi event cards.
 import asyncio
 import logging
 import os
+import re
 import time
 
 try:
@@ -444,6 +445,75 @@ def _parse_event(ev):
             "_raw_keys": list(ev.keys()) if isinstance(ev, dict) else [],
             "_raw_preview": str(ev)[:1200] if isinstance(ev, dict) else "",
         }
+        # Playoff series state. FlashLive ships it as free-text in
+        # INFO_NOTICE (observed live: "Kitchener Rangers leads series
+        # 2-0." / "Series tied 2-2." / "Boston wins series 4-1.").
+        # Extract numeric wins so the frontend SERIES pill can render
+        # the compact "SERIES KIT 2-0" form instead of falling back to
+        # the verbose summary string. ROUND ("Semi-finals" /
+        # "Quarter-finals" / "Final") feeds round_name for context.
+        info_notice = (ev.get("INFO_NOTICE") or "").strip()
+        result["round_name"] = (ev.get("ROUND") or "").strip()
+        if info_notice:
+            leads_match = re.search(
+                r'(.+?)\s+leads\s+series\s+(\d+)\s*[-:]\s*(\d+)',
+                info_notice, re.IGNORECASE,
+            )
+            tied_match = re.search(
+                r'series\s+tied\s+(\d+)\s*[-:]\s*(\d+)',
+                info_notice, re.IGNORECASE,
+            )
+            wins_match = re.search(
+                r'(.+?)\s+wins?\s+series\s+(\d+)\s*[-:]\s*(\d+)',
+                info_notice, re.IGNORECASE,
+            )
+            summary = info_notice.rstrip(".").strip()
+            if leads_match:
+                leader = _normalize(leads_match.group(1))
+                lead_w = int(leads_match.group(2))
+                trail_w = int(leads_match.group(3))
+                result["is_playoff"] = True
+                result["series_summary"] = summary
+                # Decide which side leads by name match — use `in`
+                # both directions so abbreviations / partial names
+                # still bind to the right team.
+                home_norm = _normalize(home_name) if home_name else ""
+                away_norm = _normalize(away_name) if away_name else ""
+                if home_norm and (leader in home_norm or home_norm in leader):
+                    result["series_home_wins"] = lead_w
+                    result["series_away_wins"] = trail_w
+                elif away_norm and (leader in away_norm or away_norm in leader):
+                    result["series_home_wins"] = trail_w
+                    result["series_away_wins"] = lead_w
+            elif tied_match:
+                result["is_playoff"] = True
+                result["series_home_wins"] = int(tied_match.group(1))
+                result["series_away_wins"] = int(tied_match.group(2))
+                result["series_summary"] = summary
+            elif wins_match:
+                # Series ended — winner gets the higher number.
+                winner = _normalize(wins_match.group(1))
+                w_w = int(wins_match.group(2))
+                l_w = int(wins_match.group(3))
+                result["is_playoff"] = True
+                result["series_summary"] = summary
+                home_norm = _normalize(home_name) if home_name else ""
+                away_norm = _normalize(away_name) if away_name else ""
+                if home_norm and (winner in home_norm or home_norm in winner):
+                    result["series_home_wins"] = w_w
+                    result["series_away_wins"] = l_w
+                elif away_norm and (winner in away_norm or away_norm in winner):
+                    result["series_home_wins"] = l_w
+                    result["series_away_wins"] = w_w
+            elif "playoff" in info_notice.lower() or result["round_name"].lower() in (
+                "semi-finals", "quarter-finals", "final", "finals", "1/8-finals",
+                "1/16-finals", "round of 16",
+            ):
+                # Playoff context but no parseable series score —
+                # surface what we have so the frontend pill renders
+                # at least the round + summary.
+                result["is_playoff"] = True
+                result["series_summary"] = summary
         # Tennis: build per-set scoring data
         if sport == "Tennis" and home_name and away_name:
             set_history = []
