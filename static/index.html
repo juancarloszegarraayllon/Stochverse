@@ -1410,14 +1410,21 @@ function appendCards(evs) {
 }
 
 function isLive(ev) {
-  // If ESPN or SofaScore explicitly reported the game as in
-  // progress or finished, trust that directly. This avoids bad
-  // edge cases where our computed kickoff window (derived from
-  // Kalshi's expected_expiration_time minus a per-sport DURATION
-  // estimate) is off by an hour or two and hides a clearly-live
-  // game behind a static kickoff timestamp.
-  if (ev._live_state && ev._live_state.state === "in") return true;
-  if (ev._live_state && ev._live_state.state === "post") return true;
+  // If a feed explicitly classifies the game (in / pre / post),
+  // trust that over the time-window heuristic — feeds know whether
+  // play has actually started, our kickoff_dt is just an estimate
+  // (exp_dt minus a per-sport DURATION constant in main.py:1330).
+  //
+  // The earlier version only short-circuited on "in"/"post", which
+  // meant a feed-attached "pre" event whose estimated kickoff had
+  // already passed (common on ITF tennis, where Kalshi's
+  // expected_expiration_time can be set early in the day) would
+  // fall through to the time-window check and wrongly render as
+  // LIVE — feed says pre, time window says live, time window won.
+  var ls = ev._live_state;
+  if (ls && ls.state === "in") return true;
+  if (ls && ls.state === "post") return true;
+  if (ls && ls.state === "pre") return false;
   if (!ev._kickoff_dt || !ev._game_end_dt) return false;
   try {
     var now = Date.now();
