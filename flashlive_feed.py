@@ -697,18 +697,29 @@ def _parse_added_time_from_summary(data) -> dict:
     """Walk a /v1/events/summary response and return announced added
     time per half: {1: int|None, 2: int|None}.
 
-    Handles INJURY_TIME / STOPPAGE_TIME / ADDED_TIME incident types in
-    the DATA[].ITEMS[] structure. The +N value can live in several
-    length-style fields (LENGTH, INCIDENT_LENGTH, INCIDENT_VALUE,
-    VALUE) depending on the league — first numeric field wins. If no
-    explicit length field is present, falls back to extracting "+N"
-    from the INCIDENT_TIME string itself ("45+2'", "90+5'").
+    Two signals are scanned, in priority order:
 
-    Half is inferred from the surrounding STAGE_NAME ("1st Half" /
-    "2nd Half") or, failing that, from the leading minute in
-    INCIDENT_TIME (45 → 1H, 90 → 2H).
+      1. Explicit INJURY_TIME / STOPPAGE_TIME / ADDED_TIME-typed
+         incidents with an explicit length field (LENGTH /
+         INCIDENT_LENGTH / INCIDENT_VALUE / VALUE / MIN). Rare —
+         only top-flight feeds expose it.
+
+      2. The ADDED_TIME attribute that FL attaches to ANY incident
+         occurring during stoppage (a red card at 45+1' carries
+         ADDED_TIME="1"). The max across all incidents in a half
+         is a tight lower bound on the announced figure, and an
+         exact match once the half has fully played out.
+
+         Same fallback also extracts "+N" inline from INCIDENT_TIME
+         (e.g. "45+1'") when the ADDED_TIME attribute is missing.
+
+    Signal 1 wins when present (it's the actual board figure);
+    otherwise signal 2 fills in. Half is inferred from STAGE_NAME
+    ("1st Half" / "2nd Half") with a fallback to the leading minute
+    of INCIDENT_TIME (45 → 1H, 90 → 2H).
     """
     out = {1: None, 2: None}
+    max_per_half = {1: None, 2: None}  # signal-2 lower bound
     if not isinstance(data, dict):
         return out
     stages = data.get("DATA") or data.get("data") or []
@@ -728,42 +739,66 @@ def _parse_added_time_from_summary(data) -> dict:
             if not isinstance(inc, dict):
                 continue
             inc_type = str(inc.get("INCIDENT_TYPE") or "").upper()
-            if not ("INJURY" in inc_type or "STOPPAGE" in inc_type
-                    or "ADDED" in inc_type):
-                continue
-            mins = None
-            for fld in ("LENGTH", "INCIDENT_LENGTH", "INCIDENT_VALUE",
-                        "VALUE", "MIN", "MINUTES"):
-                v = inc.get(fld)
-                if v is None:
+
+            # Half resolution shared by both signals — stage_name
+            # first, fall back to INCIDENT_TIME prefix.
+            half = stage_half
+            if half is None:
+                t = str(inc.get("INCIDENT_TIME") or inc.get("TIME") or "")
+                if t.startswith("45"): half = 1
+                elif t.startswith("90"): half = 2
+
+            # ── Signal 1: explicit added-time-typed incident ─────
+            if "INJURY" in inc_type or "STOPPAGE" in inc_type or "ADDED" in inc_type:
+                mins = None
+                for fld in ("LENGTH", "INCIDENT_LENGTH", "INCIDENT_VALUE",
+                            "VALUE", "MIN", "MINUTES"):
+                    v = inc.get(fld)
+                    if v is None:
+                        continue
+                    try:
+                        mins = int(str(v).strip().lstrip("+"))
+                        break
+                    except (TypeError, ValueError):
+                        continue
+                if mins is not None and 1 <= mins <= 15:
+                    if half == 1 and out[1] is None: out[1] = mins
+                    elif half == 2 and out[2] is None: out[2] = mins
                     continue
+
+            # ── Signal 2: ADDED_TIME attribute on ANY incident ───
+            # Tracks the max stoppage minute observed per half. Any
+            # incident with ADDED_TIME=N tells us at least N minutes
+            # of stoppage have been played.
+            at_val = inc.get("ADDED_TIME")
+            at_mins = None
+            if at_val is not None:
                 try:
-                    mins = int(str(v).strip().lstrip("+"))
-                    break
+                    at_mins = int(str(at_val).strip().lstrip("+"))
                 except (TypeError, ValueError):
-                    continue
-            # Fallback: extract "+N" from INCIDENT_TIME ("45+2'" form).
-            if mins is None:
+                    pass
+            # Inline "+N" inside INCIDENT_TIME — same signal, used
+            # when FL omits the ADDED_TIME attribute.
+            if at_mins is None:
                 t = str(inc.get("INCIDENT_TIME") or inc.get("TIME") or "")
                 m = re.search(r"\+\s*(\d+)", t)
                 if m:
                     try:
-                        mins = int(m.group(1))
+                        at_mins = int(m.group(1))
                     except (TypeError, ValueError):
                         pass
-            if mins is None or not (1 <= mins <= 15):
-                continue  # noise filter — added time never exceeds ~10
-            half = stage_half
-            if half is None:
-                t = str(inc.get("INCIDENT_TIME") or inc.get("TIME") or "")
-                if t.startswith("45"):
-                    half = 1
-                elif t.startswith("90"):
-                    half = 2
-            if half == 1 and out[1] is None:
-                out[1] = mins
-            elif half == 2 and out[2] is None:
-                out[2] = mins
+            if at_mins is None or not (1 <= at_mins <= 15):
+                continue
+            if half in (1, 2):
+                cur = max_per_half[half]
+                if cur is None or at_mins > cur:
+                    max_per_half[half] = at_mins
+
+    # Merge: signal-1 (explicit) wins where present, signal-2 (max)
+    # fills the rest.
+    for h in (1, 2):
+        if out[h] is None and max_per_half[h] is not None:
+            out[h] = max_per_half[h]
     return out
 
 
