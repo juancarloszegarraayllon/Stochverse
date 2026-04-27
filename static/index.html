@@ -4348,7 +4348,7 @@ function _loadH2HSubTab(container, ticker, tabIdx) {
   _renderH2HTab(container, cached.tabs, tabIdx, cached.homeName, cached.awayName);
 }
 
-function _renderH2HRow(m, homeName, awayName) {
+function _renderH2HRow(m, homeName, awayName, focalTeam) {
   // Strip the leading "*" FlashLive uses to mark the actual home team —
   // the field naming already conveys that, so the asterisk is noise.
   var home = (m.HOME_PARTICIPANT_NAME_ONE || m.HOME_PARTICIPANT || "").replace(/^\*/, "");
@@ -4356,6 +4356,23 @@ function _renderH2HRow(m, homeName, awayName) {
   var hs = m.HOME_SCORE_FULL != null ? m.HOME_SCORE_FULL : "";
   var as2 = m.AWAY_SCORE_FULL != null ? m.AWAY_SCORE_FULL : "";
   var result = (m.H_RESULT || "").toUpperCase();
+  // FlashLive populates H_RESULT for "Last matches" sections (every row
+  // involves one focal team so W/L/D is unambiguous) but leaves it
+  // empty in the head-to-head section, where both event participants
+  // appear. Derive it from the score relative to the tab's focal team.
+  if (!result && focalTeam) {
+    var fhs = parseInt(hs, 10), fas = parseInt(as2, 10);
+    if (!isNaN(fhs) && !isNaN(fas)) {
+      var focalLow = focalTeam.toLowerCase();
+      var focalIsHome = home.toLowerCase().indexOf(focalLow) >= 0;
+      var focalIsAway = away.toLowerCase().indexOf(focalLow) >= 0;
+      if (focalIsHome || focalIsAway) {
+        if (fhs === fas) result = "DRAW";
+        else if ((focalIsHome && fhs > fas) || (focalIsAway && fas > fhs)) result = "WIN";
+        else result = "LOSS";
+      }
+    }
+  }
   var league = m.EVENT_NAME || "";
   // EVENT_ACRONYM is FlashLive's compact tournament code (LPF, COP, CLP,
   // CF, PN, etc). Render it directly — it's always 2-4 chars and fits
@@ -4418,9 +4435,17 @@ function _renderH2HTab(container, allTabs, tabIdx, homeName, awayName) {
     if (items.length) sections.push({title: title, items: items, idx: gi});
   }
   if (!sections.length) { container.innerHTML = '<div class="ed-stats-loading">No matches found.</div>'; return; }
+  // Tab → focal team for the result-badge perspective in head-to-head
+  // rows: HOME tab = home team, AWAY tab = away team. Overall (tabIdx 0)
+  // has no clear focal, so leave empty — H2H rows render without badges
+  // there, matching what FlashLive ships.
+  var focalTeam = "";
+  if (tabIdx === 1) focalTeam = homeName;
+  else if (tabIdx === 2) focalTeam = awayName;
   container._h2hSections = sections;
   container._h2hHome = homeName;
   container._h2hAway = awayName;
+  container._h2hFocal = focalTeam;
   var h = '';
   for (var si = 0; si < sections.length; si++) {
     var sec = sections[si];
@@ -4435,11 +4460,11 @@ function _renderH2HTab(container, allTabs, tabIdx, homeName, awayName) {
     h += '<div class="h2h-rows">';
     var max = Math.min(sec.items.length, 5);
     for (var mi = 0; mi < max; mi++) {
-      h += _renderH2HRow(sec.items[mi], homeName, awayName);
+      h += _renderH2HRow(sec.items[mi], homeName, awayName, focalTeam);
     }
     h += '</div>';
     if (sec.items.length > 5) {
-      h += '<button class="h2h-show-more" onclick="window._h2hShowMore(this,' + si + ')">Show more matches</button>';
+      h += '<button class="h2h-show-more" data-expanded="0" onclick="window._h2hShowMore(this,' + si + ')">Show more matches</button>';
     }
     h += '</div>';
   }
@@ -4455,12 +4480,16 @@ window._h2hShowMore = function(btn, sectionIdx) {
   if (!rowsDiv) return;
   var homeName = container._h2hHome || "";
   var awayName = container._h2hAway || "";
+  var focalTeam = container._h2hFocal || "";
+  var expanded = btn.getAttribute("data-expanded") === "1";
+  var limit = expanded ? Math.min(sec.items.length, 5) : sec.items.length;
   var h = '';
-  for (var mi = 0; mi < sec.items.length; mi++) {
-    h += _renderH2HRow(sec.items[mi], homeName, awayName);
+  for (var mi = 0; mi < limit; mi++) {
+    h += _renderH2HRow(sec.items[mi], homeName, awayName, focalTeam);
   }
   rowsDiv.innerHTML = h;
-  btn.remove();
+  btn.setAttribute("data-expanded", expanded ? "0" : "1");
+  btn.textContent = expanded ? "Show more matches" : "Show less";
 };
 
 async function _loadStandings(container, ticker) {
