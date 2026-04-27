@@ -716,10 +716,124 @@ def get_added_time(event_id: str, period: int):
     return entry.get(period)
 
 
+# ---- FlashScore.com fallback ----------------------------------------
+#
+# FL RapidAPI's commentary endpoint returns null for ~30-40% of leagues
+# in our coverage (anything below the top-flight European tier). The
+# 4th official's added-time figure for those matches lives on the
+# public FlashScore website though — same parent company (Livesport
+# s.r.o.), same event_id primary key.
+#
+# This fallback hits FlashScore's internal feed endpoint with a long-
+# lived public sign header. Off by default (FLASHSCORE_FALLBACK=1 to
+# enable) since it's an undocumented surface they can change without
+# notice. Same snap-once / lazy semantics as the FL commentary path —
+# zero extra cost for matches where FL already had the figure.
+_FS_FALLBACK_ENABLED = os.environ.get("FLASHSCORE_FALLBACK", "").lower() in ("1", "true", "yes")
+_FS_FEED_URL = "https://d.flashscore.com/x/feed/df_sui_1_{event_id}"
+_FS_FSIGN = os.environ.get("FLASHSCORE_FSIGN", "SW9D1eZo")
+_FS_HEADERS = {
+    "X-Fsign": _FS_FSIGN,
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Accept": "*/*",
+    "Referer": "https://www.flashscore.com/",
+}
+
+# FlashScore's feed format is a flat key-value soup — records separated
+# by `~`, fields by `¬`. Stoppage announcements surface a couple of
+# different ways depending on the league/feed. These regexes are
+# permissive: any "+N min" or "X min. of stoppage/added time" near a
+# 45 / 90 marker counts. Returns the *highest* match per half (the
+# 4th official can revise up; never down).
+_FS_ADDED_RE_MIN_OF = re.compile(
+    r"(?:minimum of\s+)?(\d+)\s*min\.?\s*of\s*(?:stoppage[- ]time|added time)",
+    re.IGNORECASE,
+)
+_FS_ADDED_RE_PLUS = re.compile(r"(?<![\d])\+\s*(\d+)\s*(?:min|')", re.IGNORECASE)
+
+
+async def _fetch_flashscore_raw(event_id: str) -> str:
+    """Return the raw FlashScore feed text for an event, or empty string
+    on any failure. Read-only, single GET, ~8s timeout."""
+    if not _FS_FALLBACK_ENABLED or not event_id or httpx is None:
+        return ""
+    url = _FS_FEED_URL.format(event_id=event_id)
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(url, headers=_FS_HEADERS)
+            if r.status_code != 200:
+                log.debug("flashscore feed %s: HTTP %s", event_id, r.status_code)
+                return ""
+            return r.text or ""
+    except Exception as e:
+        log.debug("flashscore feed %s failed: %s", event_id, e)
+        return ""
+
+
+def _parse_flashscore_added_time(raw: str) -> dict:
+    """Best-effort scan of the FlashScore feed text for the 4th official's
+    announced added time per half. Returns {1: int|None, 2: int|None}.
+
+    Two patterns checked:
+      1. "X min. of stoppage-time" / "X min. of added time" — same
+         phrasing FL ships in commentary, sometimes mirrored verbatim
+         in the website's incidents stream.
+      2. Bare "+N" followed by min/'  near a 45/90 minute marker —
+         typical for the in-feed incident row.
+
+    The half is inferred from a 45/90 marker within ~30 chars of the
+    match. Misses default to None — same null contract as the
+    commentary parser, so the cache layer treats them identically.
+    """
+    out = {1: None, 2: None}
+    if not raw:
+        return out
+    # Pass 1: literal "min. of stoppage-time" — no positional context
+    # needed; this phrasing is unambiguous about which half is in
+    # stoppage because the 1H announcement only ever appears in 1H
+    # context and same for 2H. We use proximity to "45" or "90" within
+    # the surrounding 60 chars to disambiguate.
+    for m in _FS_ADDED_RE_MIN_OF.finditer(raw):
+        try:
+            mins = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        ctx = raw[max(0, m.start() - 60): m.end() + 20]
+        # Crude but effective — 90+1, 90', 90:00 all hit "90"
+        if "90" in ctx and out[2] is None:
+            out[2] = mins
+        elif "45" in ctx and out[1] is None:
+            out[1] = mins
+    # Pass 2: bare "+N min" / "+N'" — only consider when we still
+    # have a None slot, since pass 1 is more reliable.
+    if out[1] is None or out[2] is None:
+        for m in _FS_ADDED_RE_PLUS.finditer(raw):
+            try:
+                mins = int(m.group(1))
+            except (TypeError, ValueError):
+                continue
+            if not (1 <= mins <= 15):
+                continue  # noise filter — added time never exceeds ~10
+            ctx = raw[max(0, m.start() - 30): m.end() + 10]
+            if "90" in ctx and out[2] is None:
+                out[2] = mins
+            elif "45" in ctx and out[1] is None:
+                out[1] = mins
+    return out
+
+
 async def _fetch_and_cache_added_time(event_id: str):
     """Background fetch + parse + snap into _ADDED_TIME_CACHE. Once the
     figure for a given half is non-None it stays — the 4th official
-    only announces once per half and the number never changes."""
+    only announces once per half and the number never changes.
+
+    Two-tier source: FL RapidAPI commentary first (covers top-flight
+    European leagues, rich text with the 4th-official quote). Falls
+    back to FlashScore.com web feed when the FL response is null or
+    yields nothing — covers lower-tier leagues that FL doesn't ship
+    commentary for. Off by default; flip FLASHSCORE_FALLBACK=1 to
+    enable the second tier."""
     if not event_id:
         return
     if event_id in _ADDED_TIME_INFLIGHT:
@@ -728,6 +842,13 @@ async def _fetch_and_cache_added_time(event_id: str):
     try:
         data = await fetch_event_commentary(event_id)
         parsed = _parse_added_time_from_commentary(data)
+        # FL commentary missed → try FlashScore web fallback. Skipped
+        # entirely when the flag is off (no extra latency, no scrape).
+        if (parsed[1] is None and parsed[2] is None) and _FS_FALLBACK_ENABLED:
+            raw = await _fetch_flashscore_raw(event_id)
+            fs_parsed = _parse_flashscore_added_time(raw)
+            if parsed[1] is None: parsed[1] = fs_parsed[1]
+            if parsed[2] is None: parsed[2] = fs_parsed[2]
         entry = _ADDED_TIME_CACHE.setdefault(event_id, {})
         now_ms = int(time.time() * 1000)
         # Only overwrite a half's value if we have a fresh int for it
