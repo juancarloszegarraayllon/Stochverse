@@ -3787,18 +3787,7 @@ async function hydrateGameStats(evTicker) {
   try {
     var statsResp = fetch("/api/event/" + encodeURIComponent(evTicker) + "/stats")
       .then(function(r) { return r.json(); });
-    // Per-event capability probe. Fires every relevant FlashLive
-    // endpoint in parallel and reports which ones returned data
-    // FOR THIS MATCH. Used to prune empty tabs (Tennis: no
-    // Standings/Lineups/Player Stats; Soccer pre-match: no
-    // Lineups until the XI is published; Tennis tournaments:
-    // adds DRAW sub-tab when bracket data exists). Cached
-    // server-side for 5 min per ticker so repeated opens of the
-    // same panel don't re-probe.
-    var eventCapsResp = fetch("/api/event/" + encodeURIComponent(evTicker) + "/capabilities")
-      .then(function(r) { return r.json(); })
-      .catch(function() { return null; });
-    var pair = await Promise.all([statsResp, fetchCapabilities(), eventCapsResp]);
+    var pair = await Promise.all([statsResp, fetchCapabilities()]);
     var d = pair[0];
     // If FlashLive can't resolve this Kalshi event to one of its
     // games, every per-event endpoint will return the same error.
@@ -3823,16 +3812,13 @@ async function hydrateGameStats(evTicker) {
     var hasTimeline = incidents.length > 0;
     var hasLineups = (lineups.home && lineups.home.players && lineups.home.players.length > 0);
 
-    // ── Per-sport gates (ADDITIVE per-event refinement) ─────
-    // Sport-level deny-list is the BASELINE — it determines which
-    // tabs even make sense for the sport. Per-event probe results
-    // are ADDITIVE only: they can surface new sub-tabs we wouldn't
-    // know about otherwise (like a tennis tournament's DRAW
-    // bracket), but they NEVER hide tabs that the sport-level
-    // baseline would show. This avoids false-negative regressions
-    // where a probe missed real data and the user lost access to
-    // tabs they'd otherwise have.
-    var eventCaps = (pair[2] && pair[2].capabilities) || null;
+    // ── Per-sport gates ─────────────────────────────────────
+    // Sport-level deny-list determines which tabs make sense for
+    // the sport. The /api/event/{ticker}/capabilities probe is
+    // available server-side and used additively elsewhere (e.g.
+    // adding a DRAW sub-tab for tennis tournaments) but we don't
+    // block panel render on it — that probe fires ~17 parallel
+    // FlashLive calls and would delay the user-facing tab strip.
     var INDIVIDUAL_SPORTS = {
       "Tennis": 1, "Golf": 1, "MMA": 1, "Boxing": 1,
       "Darts": 1, "Motorsport": 1,
@@ -3843,21 +3829,7 @@ async function hydrateGameStats(evTicker) {
     var hasCommentary = true;
     var hasMissingPlayers = !isIndividual;
     var hasPlayerStats = !isIndividual;
-    // Standings: start with sport-aware defaults, then UNION any
-    // additional types the per-event probe found (e.g. DRAW for
-    // tennis tournaments). Never subtract — empty sub-tabs render
-    // a clean "no data" state which is acceptable.
     var stTypes = _capStandingTypes(sportCaps, sport);
-    if (eventCaps && eventCaps.standings) {
-      var stOrder = ["overall", "home", "away", "form",
-                     "top_scores", "draw", "overall_live"];
-      for (var sti = 0; sti < stOrder.length; sti++) {
-        var stKey = stOrder[sti];
-        if (eventCaps.standings[stKey] && stTypes.indexOf(stKey) < 0) {
-          stTypes.push(stKey);
-        }
-      }
-    }
     var hasStandings = stTypes.length > 0;
     var stHasOverall = stTypes.indexOf("overall") >= 0
                        || stTypes.indexOf("home") >= 0
