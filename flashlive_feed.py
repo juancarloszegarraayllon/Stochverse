@@ -65,16 +65,28 @@ LIVE_POLL_INTERVAL = int(os.environ.get("FLASHLIVE_LIVE_POLL_INTERVAL", "10"))
 # through _fl_throttle() so the two paths share one rate budget.
 # 200 ms min gap = 5 req/sec sustained, which keeps us comfortably
 # under 10/sec even when both paths are active.
-_FL_THROTTLE_LOCK = None
+#
+# Locks are bound to the loop they were created on, so we keep one
+# lock per loop instead of a single module-level one. Otherwise a
+# thread that initializes the lock first (e.g. the sync get_data()
+# bootstrap) leaves a lock bound to a short-lived loop, and any
+# later async caller from the FastAPI request loop crashes with
+# "bound to a different event loop". The shared timestamp still
+# enforces the rate cap globally — the only thing per-loop is the
+# critical-section serialization.
+_FL_THROTTLE_LOCKS: dict = {}
 _FL_LAST_CALL_TS = 0.0
 _FL_MIN_GAP_S = float(os.environ.get("FLASHLIVE_MIN_GAP_S", "0.20"))
 
 
 async def _fl_throttle():
-    global _FL_THROTTLE_LOCK, _FL_LAST_CALL_TS
-    if _FL_THROTTLE_LOCK is None:
-        _FL_THROTTLE_LOCK = asyncio.Lock()
-    async with _FL_THROTTLE_LOCK:
+    global _FL_LAST_CALL_TS
+    loop = asyncio.get_running_loop()
+    lock = _FL_THROTTLE_LOCKS.get(id(loop))
+    if lock is None:
+        lock = asyncio.Lock()
+        _FL_THROTTLE_LOCKS[id(loop)] = lock
+    async with lock:
         now = time.time()
         gap = now - _FL_LAST_CALL_TS
         if gap < _FL_MIN_GAP_S:
