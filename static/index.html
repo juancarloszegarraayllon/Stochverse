@@ -3823,49 +3823,40 @@ async function hydrateGameStats(evTicker) {
     var hasTimeline = incidents.length > 0;
     var hasLineups = (lineups.home && lineups.home.players && lineups.home.players.length > 0);
 
-    // ── Per-event gates ────────────────────────────────────────
-    // Tabs render based on what FlashLive *actually returned* for
-    // THIS match. The /capabilities endpoint probes every relevant
-    // endpoint in parallel and reports per-event availability —
-    // tennis singles match: no Standings/Lineups/Missing/Player
-    // Stats; tennis tournament pre-final: adds DRAW sub-tab; soccer
-    // event with XI published: shows Lineups; soccer with no XI yet:
-    // hides it.
-    //
-    // Sport-level deny-list (INDIVIDUAL_SPORTS) is the immediate
-    // fallback when /capabilities fails or hasn't returned yet —
-    // ensures the panel renders instantly with sensible defaults
-    // and never shows a tab for something structurally impossible.
-    // When /capabilities does return, its per-event truth wins.
+    // ── Per-sport gates (ADDITIVE per-event refinement) ─────
+    // Sport-level deny-list is the BASELINE — it determines which
+    // tabs even make sense for the sport. Per-event probe results
+    // are ADDITIVE only: they can surface new sub-tabs we wouldn't
+    // know about otherwise (like a tennis tournament's DRAW
+    // bracket), but they NEVER hide tabs that the sport-level
+    // baseline would show. This avoids false-negative regressions
+    // where a probe missed real data and the user lost access to
+    // tabs they'd otherwise have.
     var eventCaps = (pair[2] && pair[2].capabilities) || null;
     var INDIVIDUAL_SPORTS = {
       "Tennis": 1, "Golf": 1, "MMA": 1, "Boxing": 1,
       "Darts": 1, "Motorsport": 1,
     };
     var isIndividual = !!INDIVIDUAL_SPORTS[sport];
-    function _gate(capKey, sportDefault) {
-      if (eventCaps && capKey in eventCaps) return !!eventCaps[capKey];
-      return sportDefault;
-    }
-    var hasH2H = _gate("h2h", true);
-    var hasNews = _gate("news", true);
-    var hasCommentary = _gate("commentary", true);
-    var hasMissingPlayers = _gate("missing_players", !isIndividual);
-    var hasPlayerStats = _gate("player_stats", !isIndividual);
-    // Standings sub-tabs come from per-event probe when available
-    // (so tennis tournaments with a draw show DRAW only; soccer
-    // cup competitions show overall+form+draw, etc.). Falls back
-    // to the sport-aware default when /capabilities is unavailable.
-    var stTypes;
+    var hasH2H = true;
+    var hasNews = true;
+    var hasCommentary = true;
+    var hasMissingPlayers = !isIndividual;
+    var hasPlayerStats = !isIndividual;
+    // Standings: start with sport-aware defaults, then UNION any
+    // additional types the per-event probe found (e.g. DRAW for
+    // tennis tournaments). Never subtract — empty sub-tabs render
+    // a clean "no data" state which is acceptable.
+    var stTypes = _capStandingTypes(sportCaps, sport);
     if (eventCaps && eventCaps.standings) {
-      stTypes = [];
       var stOrder = ["overall", "home", "away", "form",
                      "top_scores", "draw", "overall_live"];
       for (var sti = 0; sti < stOrder.length; sti++) {
-        if (eventCaps.standings[stOrder[sti]]) stTypes.push(stOrder[sti]);
+        var stKey = stOrder[sti];
+        if (eventCaps.standings[stKey] && stTypes.indexOf(stKey) < 0) {
+          stTypes.push(stKey);
+        }
       }
-    } else {
-      stTypes = _capStandingTypes(sportCaps, sport);
     }
     var hasStandings = stTypes.length > 0;
     var stHasOverall = stTypes.indexOf("overall") >= 0
