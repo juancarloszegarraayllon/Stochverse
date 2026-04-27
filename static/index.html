@@ -1644,17 +1644,27 @@ function computeSoccerMinute(stageStartMs, period) {
   // alternated. Now both code paths invoke this helper so the
   // minute is computed exclusively against Date.now() and never
   // disagrees with itself.
+  //
+  // Output format mirrors FlashScore: "1H 32'" / "2H 67'" /
+  // "1H 45+3'" / "ET 95'". Period prefix tells the user which half
+  // they're watching without inferring from the minute.
   if (!stageStartMs || !SOCCER_PERIOD_OFFSETS.hasOwnProperty(period)) return null;
   var elapsedSec = Math.max(0, Math.floor((Date.now() - stageStartMs) / 1000));
   var elapsedMin = Math.floor(elapsedSec / 60);
   var base = SOCCER_PERIOD_OFFSETS[period];
   var endMark = SOCCER_PERIOD_END[period];
   var minute = base + elapsedMin;
-  if (minute > endMark) return endMark + "+" + (minute - endMark) + "'";
-  // First second of a half displays as "1'" / "46'" — broadcast
-  // convention is to round up, not down.
-  if (minute < base + 1) minute = base + 1;
-  return minute + "'";
+  var prefix = (period === 1) ? "1H" : (period === 2) ? "2H" : "ET";
+  var body;
+  if (minute > endMark) {
+    body = endMark + "+" + (minute - endMark) + "'";
+  } else {
+    // First second of a half displays as "1'" / "46'" — broadcast
+    // convention is to round up, not down.
+    if (minute < base + 1) minute = base + 1;
+    body = minute + "'";
+  }
+  return prefix + " " + body;
 }
 
 function buildLiveLabel(sport, period, clockSecs, stageStartMs) {
