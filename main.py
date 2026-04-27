@@ -2077,10 +2077,11 @@ def get_events(
             home_score_n, away_score_n = _normalize_scores(g)
             # Soccer announced added-time ("+4" board) — snap-once cache.
             # Trigger a non-blocking fetch when this match is in
-            # regulation stoppage (period 1 past 44 min, period 2 past
-            # 89 min). The first user request lands a fetch, the next
-            # lands the figure from cache. Fire-and-forget so it
-            # doesn't add latency to /api/events.
+            # regulation stoppage. _elapsed_min is minutes since the
+            # current half's stage started, so 44 means we're 44 min
+            # into the half — minute 44 of 1H or minute 89 of 2H, the
+            # window the 4th official typically announces in. Same
+            # threshold for both halves.
             _added_1h = None
             _added_2h = None
             if g.get("sport") == "Soccer" and g.get("state") == "in":
@@ -2090,8 +2091,7 @@ def get_events(
                 if _evid and _stage_ms and _per in (1, 2) and _fl_ensure_added_time:
                     import time as _t_added
                     _elapsed_min = max(0, int((_t_added.time() * 1000 - _stage_ms) / 60000))
-                    _threshold = 44 if _per == 1 else 89
-                    if _elapsed_min >= _threshold:
+                    if _elapsed_min >= 44:
                         _fl_ensure_added_time(_evid, _per)
                 if _evid and _fl_get_added_time:
                     _added_1h = _fl_get_added_time(_evid, 1)
@@ -2536,8 +2536,7 @@ def get_event_detail(ticker: str):
             if _evid and _stage_ms and _per in (1, 2) and _fl_ensure_added_time:
                 import time as _t_added
                 _elapsed_min = max(0, int((_t_added.time() * 1000 - _stage_ms) / 60000))
-                _threshold = 44 if _per == 1 else 89
-                if _elapsed_min >= _threshold:
+                if _elapsed_min >= 44:
                     _fl_ensure_added_time(_evid, _per)
             if _evid and _fl_get_added_time:
                 _added_1h = _fl_get_added_time(_evid, 1)
