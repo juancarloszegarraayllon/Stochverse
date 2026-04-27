@@ -4490,6 +4490,13 @@ window._h2hShowMore = function(btn, sectionIdx) {
   rowsDiv.innerHTML = h;
   btn.setAttribute("data-expanded", expanded ? "0" : "1");
   btn.textContent = expanded ? "Show more matches" : "Show less";
+  // On collapse, scroll the section header back into view — otherwise
+  // the user stays scrolled where the expanded list used to end and
+  // the now-shorter section is above the viewport.
+  if (expanded) {
+    var section = btn.closest(".h2h-section");
+    if (section && section.scrollIntoView) section.scrollIntoView({behavior: "smooth", block: "start"});
+  }
 };
 
 async function _loadStandings(container, ticker) {
