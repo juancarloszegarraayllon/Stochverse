@@ -4630,8 +4630,26 @@ function _renderStandingsTable(container, rows, homeName, awayName, meta) {
     h += '<th style="' + st + '">' + escH(c.hdr) + '</th>';
   }
   h += '</tr></thead><tbody>';
+  // Detect whether the row set spans multiple league groups (e.g.
+  // Argentine Liga's "Group A" / "Group B"). If so, emit a section
+  // header row whenever _GROUP_NAME changes so the user sees where
+  // each group's ranking restarts.
+  var distinctGroups = {};
+  for (var dgi = 0; dgi < rows.length; dgi++) {
+    var gn = rows[dgi]._GROUP_NAME;
+    if (gn) distinctGroups[gn] = true;
+  }
+  var hasMultipleGroups = Object.keys(distinctGroups).length > 1;
+  // Total column span = qualification band (1) + cols.length.
+  var totalColSpan = cols.length + 1;
+  var prevGroupName = null;
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
+    var groupName = row._GROUP_NAME || "";
+    if (hasMultipleGroups && groupName && groupName !== prevGroupName) {
+      h += '<tr><td colspan="' + totalColSpan + '" style="padding:10px 4px 4px;font-weight:700;color:var(--text-muted);font-size:10px;letter-spacing:0.6px;text-transform:uppercase;background:var(--bg2)">' + escH(groupName) + '</td></tr>';
+      prevGroupName = groupName;
+    }
     var teamName = _stVal(row, "TEAM_NAME", "team_name", "name") || "";
     var isHL = (homeName && teamName.toLowerCase().indexOf(homeName) >= 0) ||
               (awayName && teamName.toLowerCase().indexOf(awayName) >= 0);
@@ -4799,12 +4817,11 @@ async function _loadStandingsType(container, ticker, standingType) {
         var grp = groups[gi];
         var grpRows = grp.ROWS || grp.rows || [];
         if (!Array.isArray(grpRows)) continue;
-        // Tag each row with its group index/name so consumers (Form
-        // bucketing in particular) can preserve which window the row
-        // came from. Bucketing by MATCHES_PLAYED instead produces
-        // phantom buckets when a team has played fewer matches than
-        // the window size (e.g. MP=14 inside the "Last 15" group).
-        var grpName = grp.GROUP_NAME || grp.NAME || grp.STAGE_NAME || "";
+        // Tag each row with its source-group label so consumers can
+        // render section headers when a league has multiple groups
+        // (e.g. Argentine Liga's "Group A" / "Group B"). The API uses
+        // GROUP for league groups and GROUP_NAME for some other shapes.
+        var grpName = grp.GROUP || grp.GROUP_NAME || grp.NAME || grp.STAGE_NAME || "";
         for (var ri = 0; ri < grpRows.length; ri++) {
           var rr = grpRows[ri];
           if (rr && typeof rr === "object") {
@@ -4829,37 +4846,29 @@ async function _loadStandingsType(container, ticker, standingType) {
     if (standingType === "top_scores" || standingType === "top_scorers" || standingType === "TOP_SCORERS") {
       _renderTopScorersFromStandings(container, rows);
     } else if (standingType === "form") {
-      // Form data ships as multiple windowed groups (typically Last 5,
-      // Last 10, Last 15). Bucket by source group, not by MP, so a
-      // team that's only played 14 of its "Last 15" doesn't spawn its
-      // own button. Each button's label is the max MP within that
-      // group — that's the actual window size.
+      // Form data shape: data.DATA splits by league group (Argentine
+      // Liga has two — "Group A" / "Group B"); within each group's
+      // ROWS, rows are concatenated across windows (Last 5 / Last 10
+      // / Last 15). The window size is in DYNAMIC_COLUMNS_DATA[0]
+      // (consistently "5", "10", "15" — independent of how many
+      // matches a specific team has actually played, which lets the
+      // MATCHES_PLAYED column drift to 14 for teams with postponed
+      // games). Bucket by that.
       var windows = {};
       for (var fi = 0; fi < rows.length; fi++) {
-        var gIdx = rows[fi]._GROUP_INDEX;
-        if (gIdx === undefined || gIdx === null) gIdx = 0;
-        if (!windows[gIdx]) windows[gIdx] = [];
-        windows[gIdx].push(rows[fi]);
+        var dcd = rows[fi].DYNAMIC_COLUMNS_DATA;
+        var winKey = "";
+        if (dcd && Array.isArray(dcd) && dcd.length) winKey = String(dcd[0]);
+        if (!winKey) winKey = String(rows[fi].MATCHES_PLAYED || "0");
+        if (!windows[winKey]) windows[winKey] = [];
+        windows[winKey].push(rows[fi]);
       }
-      var groupKeys = Object.keys(windows).sort(function(a,b) { return parseInt(a) - parseInt(b); });
-      // Compute a label per group: max MP within the group (the
-      // actual window size), falling back to the group's name from
-      // the API if MP isn't populated.
-      var labelByKey = {};
-      for (var gk = 0; gk < groupKeys.length; gk++) {
-        var grp = windows[groupKeys[gk]];
-        var maxMP = 0;
-        for (var rj = 0; rj < grp.length; rj++) {
-          var mp = parseInt(grp[rj].MATCHES_PLAYED || 0);
-          if (mp > maxMP) maxMP = mp;
-        }
-        labelByKey[groupKeys[gk]] = maxMP > 0 ? String(maxMP) : (grp[0]._GROUP_NAME || ("Window " + (parseInt(groupKeys[gk]) + 1)));
-      }
+      var winKeys = Object.keys(windows).sort(function(a,b) { return parseInt(a) - parseInt(b); });
       // Render window buttons + table.
       var h = '<div class="ed-sb-tabs ed-sb-filter-tabs" style="margin-bottom:8px">';
-      for (var wk = 0; wk < groupKeys.length; wk++) {
-        var k = groupKeys[wk];
-        h += '<button class="ed-sb-tab' + (wk === 0 ? ' active' : '') + '" onclick="window._stFormCount(this,\'' + k + '\')">' + escH(labelByKey[k]) + '</button>';
+      for (var wk = 0; wk < winKeys.length; wk++) {
+        var k = winKeys[wk];
+        h += '<button class="ed-sb-tab' + (wk === 0 ? ' active' : '') + '" onclick="window._stFormCount(this,\'' + k + '\')">' + escH("Last " + k) + '</button>';
       }
       h += '</div><div id="st-form-table"></div>';
       container.innerHTML = h;
@@ -4867,8 +4876,8 @@ async function _loadStandingsType(container, ticker, standingType) {
       container._homeName = homeName;
       container._awayName = awayName;
       container._meta = meta;
-      var tableDiv = document.getElementById("st-form-table");
-      if (tableDiv && groupKeys.length) _renderStandingsTable(tableDiv, windows[groupKeys[0]], homeName, awayName, meta);
+      var tableDiv = container.querySelector("#st-form-table");
+      if (tableDiv && winKeys.length) _renderStandingsTable(tableDiv, windows[winKeys[0]], homeName, awayName, meta);
     } else {
       _renderStandingsTable(container, rows, homeName, awayName, meta);
     }
