@@ -247,8 +247,17 @@ def _parse_event(ev):
         away_score = str(ev.get("AWAY_SCORE_CURRENT") or ev.get("AWAY_SCORE_FULL") or "")
         sport = ev.get("_sport") or SPORT_MAP.get(str(ev.get("SPORT_ID", "")), "")
 
-        # Game state from STAGE_TYPE
-        stage = str(ev.get("STAGE_TYPE") or ev.get("STAGE") or "").upper()
+        # FlashLive ships TWO classification fields per event:
+        #   STAGE_TYPE — broad: "LIVE" / "SCHEDULED" / "FINISHED"
+        #   STAGE      — specific period: "FIRST_HALF" / "SECOND_SET" / "Q3"
+        # The earlier code used `stage = STAGE_TYPE or STAGE` for
+        # everything which clobbered period detection on soccer/etc.
+        # (STAGE_TYPE="LIVE" → period_map.get("LIVE", 0) = 0 → the
+        # frontend's data-live-period gate failed → no clock badge,
+        # no tick interpolation). Keep both fields and use whichever
+        # is right for each downstream lookup.
+        stage_type = str(ev.get("STAGE_TYPE") or "").upper()
+        stage      = str(ev.get("STAGE") or stage_type or "").upper()
         game_time = ev.get("GAME_TIME")
         # FlashLive ships GAME_TIME as integer minutes (often null when
         # they don't have a precise count), but every live event
@@ -274,39 +283,72 @@ def _parse_event(ev):
                           "AWARDED", "ABANDONED", "CANCELLED", "RETIRED",
                           "WALKOVER", "POSTPONED"}
 
-        if stage in live_stages:
+        # Live/finished classification — accept either field. Some
+        # leagues only ship STAGE_TYPE, some only STAGE; either being
+        # in the live or finished set means the match has the
+        # corresponding state.
+        if stage_type in live_stages or stage in live_stages:
             state = "in"
-        elif stage in finished_stages:
+        elif stage_type in finished_stages or stage in finished_stages:
             state = "post"
         else:
             state = "pre"
 
-        # Game clock / minute
+        # Soccer minute offsets per period for the STAGE_START_TIME
+        # math below. Values are minutes elapsed in the match when
+        # the period kicks off.
+        SOCCER_PERIOD_OFFSETS = {
+            "FIRST_HALF": 0, "SECOND_HALF": 45,
+            "EXTRA_TIME_FIRST_HALF": 90, "EXTRA_TIME_SECOND_HALF": 105,
+        }
+        SOCCER_PERIOD_END = {
+            "FIRST_HALF": 45, "SECOND_HALF": 90,
+            "EXTRA_TIME_FIRST_HALF": 105, "EXTRA_TIME_SECOND_HALF": 120,
+        }
+        stage_labels = {
+            "FIRST_HALF": "1st Half",
+            "SECOND_HALF": "2nd Half",
+            "HALFTIME": "Halftime",
+            "FIRST_PERIOD": "1st Period",
+            "SECOND_PERIOD": "2nd Period",
+            "THIRD_PERIOD": "3rd Period",
+            "OVERTIME": "Overtime",
+            "FIRST_QUARTER": "Q1",
+            "SECOND_QUARTER": "Q2",
+            "THIRD_QUARTER": "Q3",
+            "FOURTH_QUARTER": "Q4",
+            "FIRST_SET": "Set 1",
+            "SECOND_SET": "Set 2",
+            "THIRD_SET": "Set 3",
+            "FOURTH_SET": "Set 4",
+            "FIFTH_SET": "Set 5",
+            "BREAK_TIME": "Break",
+            "PENALTIES": "Penalties",
+        }
+        # Game clock / minute display
         game_time_str = str(game_time or "")
         if game_time_str and game_time_str not in ("-1", "0", "", "None"):
             display_clock = f"{game_time_str}'"
-        elif stage in live_stages:
-            # Use the stage as a descriptive label
-            stage_labels = {
-                "FIRST_HALF": "1st Half",
-                "SECOND_HALF": "2nd Half",
-                "HALFTIME": "Halftime",
-                "FIRST_PERIOD": "1st Period",
-                "SECOND_PERIOD": "2nd Period",
-                "THIRD_PERIOD": "3rd Period",
-                "OVERTIME": "Overtime",
-                "FIRST_QUARTER": "Q1",
-                "SECOND_QUARTER": "Q2",
-                "THIRD_QUARTER": "Q3",
-                "FOURTH_QUARTER": "Q4",
-                "FIRST_SET": "Set 1",
-                "SECOND_SET": "Set 2",
-                "THIRD_SET": "Set 3",
-                "FOURTH_SET": "Set 4",
-                "FIFTH_SET": "Set 5",
-                "BREAK_TIME": "Break",
-                "PENALTIES": "Penalties",
-            }
+        elif sport == "Soccer" and state == "in" and stage_start_ms and stage in SOCCER_PERIOD_OFFSETS:
+            # GAME_TIME is unreliable on FlashLive — frequently null,
+            # often stale. STAGE_START_TIME gives the exact second the
+            # current period kicked off, so we derive the minute fresh
+            # and let the frontend tick interpolation refine the
+            # in-minute count without us needing to ship seconds.
+            elapsed_secs = max(0, int(time.time()) - int(stage_start_ms / 1000))
+            elapsed_min = elapsed_secs // 60
+            base = SOCCER_PERIOD_OFFSETS[stage]
+            end = SOCCER_PERIOD_END[stage]
+            minute = max(base + 1, base + elapsed_min)
+            if minute > end:
+                # Stoppage — keep counting past the period mark, render
+                # as "45+3'" / "90+5'" so the badge reads natural.
+                display_clock = f"{end}+{minute - end}'"
+            else:
+                display_clock = f"{minute}'"
+        elif state == "in":
+            # Tennis sets, NBA quarters, hockey periods, soccer
+            # halftime, etc. — descriptive label, no clock.
             display_clock = stage_labels.get(stage, stage.replace("_", " ").title())
         elif state == "post":
             display_clock = "FT"

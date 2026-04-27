@@ -1679,7 +1679,15 @@ function tickLiveClocks() {
     var stageStartMs = parseInt(badge.getAttribute('data-live-stage-start') || '0', 10) || null;
     if (!initial || !captured) continue;
     var baseSecs = parseClockSecs(initial);
-    if (baseSecs === null) continue;
+    if (baseSecs === null) {
+      // Initial isn't a clock-shaped string ("Halftime", "Set 1",
+      // etc.) — usually means no second-precision count is available
+      // for this sport. Fall through with baseSecs=0 only when
+      // STAGE_START_TIME is present (soccer), so buildLiveLabel can
+      // compute the minute from that instead.
+      if (!stageStartMs) continue;
+      baseSecs = 0;
+    }
     var elapsed = Math.max(0, Math.floor((now - captured) / 1000));
     // Cap drift so a stale capture doesn't run the clock to zero.
     if (elapsed > 15) elapsed = 15;
