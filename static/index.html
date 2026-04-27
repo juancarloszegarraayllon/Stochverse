@@ -4366,7 +4366,52 @@ async function _loadH2H(container, ticker) {
     container.innerHTML = '<div class="ed-stats-loading">' + escH((cached && cached.error) || "Failed to load H2H.") + '</div>';
     return;
   }
+  // FlashLive's H2H sub-tabs aren't always Overall/Home/Away. They
+  // vary by sport: cricket ships Overall/Test/ODI/T20 (by format),
+  // tennis ships Overall/Singles/Doubles, etc. The hardcoded
+  // Overall/Home/Away buttons therefore mislabelled formats as
+  // "TeamA - Home" / "TeamB - Away" and silently dropped any 4th tab
+  // (e.g. T20, the one with the actual IPL data). Rebuild the sub-tab
+  // strip from cached.tabs[].TAB_NAME so the labels and indices match
+  // what FlashLive actually returned.
+  var mainPanel = container.closest('.ed-sb-main[data-main="h2h"]');
+  if (mainPanel && Array.isArray(cached.tabs) && cached.tabs.length) {
+    _rebuildH2HSubTabs(mainPanel, cached);
+    var firstLazy = mainPanel.querySelector('[data-panel="h2h-tab-0"] .ed-sb-lazy');
+    if (firstLazy) {
+      firstLazy.dataset.loaded = "1";
+      _renderH2HTab(firstLazy, cached.tabs, 0, cached.homeName, cached.awayName);
+      return;
+    }
+  }
+  // Fallback: render into the original container.
   _renderH2HTab(container, cached.tabs, 0, cached.homeName, cached.awayName);
+}
+
+function _rebuildH2HSubTabs(mainPanel, cached) {
+  var tabsRow = mainPanel.querySelector('.ed-sb-tabs, .ed-sb-sub-tabs');
+  if (!tabsRow) return;
+  // Drop the hardcoded Overall/Home/Away panels — we'll replace them
+  // with one panel per actual TAB_NAME.
+  var existingPanels = mainPanel.querySelectorAll(':scope > .ed-sb-panel');
+  for (var ep = 0; ep < existingPanels.length; ep++) existingPanels[ep].remove();
+  var btnHtml = '';
+  var panelHtml = '';
+  for (var ti = 0; ti < cached.tabs.length; ti++) {
+    var tab = cached.tabs[ti];
+    var raw = (tab && tab.TAB_NAME) || ("Tab " + (ti + 1));
+    // Keep the friendlier "TeamName - Home/Away" labels for the
+    // soccer-style convention while passing everything else through.
+    var label = raw;
+    if (raw === "Home" && cached.homeName) label = cached.homeName + " - Home";
+    else if (raw === "Away" && cached.awayName) label = cached.awayName + " - Away";
+    var key = "h2h-tab-" + ti;
+    var active = (ti === 0) ? ' active' : '';
+    btnHtml += '<button class="ed-sb-tab' + active + '" data-panel="' + key + '" data-tab-idx="' + ti + '" onclick="window.switchSBTab(this)">' + escH(label) + '</button>';
+    panelHtml += '<div class="ed-sb-panel' + active + '" data-panel="' + key + '"><div class="ed-sb-lazy" data-lazy="' + key + '"></div></div>';
+  }
+  tabsRow.innerHTML = btnHtml;
+  tabsRow.insertAdjacentHTML('afterend', panelHtml);
 }
 
 async function _loadH2HSubTab(container, ticker, tabIdx) {
@@ -5473,6 +5518,12 @@ window.switchSBTab = function(btn) {
       var lazyKey = lazy.getAttribute("data-lazy");
       if (lazyKey === "h2h-home") _loadH2HSubTab(lazy, ticker, 1);
       else if (lazyKey === "h2h-away") _loadH2HSubTab(lazy, ticker, 2);
+      else if (lazyKey && lazyKey.indexOf("h2h-tab-") === 0) {
+        // Generic handler for the dynamically-rebuilt H2H sub-tabs
+        // (cricket: Overall/Test/ODI/T20; soccer: Overall/Home/Away).
+        var h2hIdx = parseInt(lazyKey.substring(8), 10);
+        if (!isNaN(h2hIdx)) _loadH2HSubTab(lazy, ticker, h2hIdx);
+      }
       else if (lazyKey === "topscorers") _loadStandingsType(lazy, ticker, "top_scores");
       else if (lazyKey === "form") _loadStandingsType(lazy, ticker, "form");
       else if (lazyKey === "commentary") _loadCommentary(lazy, ticker);
