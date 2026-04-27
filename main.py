@@ -4837,6 +4837,181 @@ async def debug_fl_schema(ticker: str):
         return {"error": str(e)[:300]}
 
 
+def _fl_has_data(resp) -> bool:
+    """Decide whether a FlashLive response has 'real' data or is
+    null/empty. Used by /api/event/{ticker}/capabilities to gate per-
+    event tab visibility. A response counts as having data when it's
+    a dict whose DATA contains a non-empty list with at least one
+    non-empty item — empty arrays, all-null entries, or completely
+    missing DATA all count as no data.
+    """
+    if not resp or not isinstance(resp, dict):
+        return False
+    data = resp.get("DATA")
+    if data is None:
+        # Some endpoints (e.g. summary-incidents) return a list at
+        # the top level; treat the whole response as the payload.
+        if isinstance(resp.get("INCIDENTS"), list) and resp["INCIDENTS"]:
+            return True
+        return False
+    if isinstance(data, list):
+        if not data:
+            return False
+        # Walk each entry: if any has nested ITEMS / GROUPS / ROWS /
+        # MEMBERS / FORMATIONS with at least one element, the
+        # endpoint has data. Predicted-lineups in particular ships
+        # PLAYERS: [] for tennis even though DATA itself is non-empty
+        # — that's "structure without content" and shouldn't gate a
+        # tab on.
+        nested_keys = ("ITEMS", "GROUPS", "ROWS", "MEMBERS",
+                       "FORMATIONS", "PLAYERS", "RESULT_HOME")
+        for entry in data:
+            if not isinstance(entry, dict):
+                if entry:
+                    return True
+                continue
+            for k in nested_keys:
+                v = entry.get(k)
+                if isinstance(v, list) and v:
+                    return True
+                if isinstance(v, dict):
+                    for inner in v.values():
+                        if isinstance(inner, list) and inner:
+                            return True
+                if v not in (None, "", [], {}):
+                    return True
+            # Direct scalar payload (e.g. set-by-set summary rows
+            # with RESULT_HOME / MATCH_TIME_PART_1 fields).
+            for k, v in entry.items():
+                if k in ("STAGE_NAME", "TAB_NAME", "FORMATION_NAME"):
+                    continue
+                if v not in (None, "", [], {}):
+                    return True
+        return False
+    if isinstance(data, dict):
+        return bool(data)
+    return bool(data)
+
+
+# Per-event capability probe cache. Probing every endpoint in
+# parallel costs ~500ms worst-case, so cache by ticker for 5 min to
+# absorb repeated opens of the same event panel.
+_EVENT_CAPS_CACHE: dict = {}
+_EVENT_CAPS_TTL = 300  # seconds
+
+
+@app.get("/api/event/{ticker}/capabilities")
+async def event_capabilities(ticker: str):
+    """Per-event capability probe — fires every relevant FlashLive
+    endpoint in parallel for THIS specific match and reports which
+    ones actually returned data. The frontend uses this to build the
+    Detailed Event Stats tab strip dynamically per event, so Tennis
+    matches don't show STANDINGS/Lineups (no league table, no
+    roster), Soccer matches show LINEUPS only when XI is published,
+    and tennis tournaments surface a DRAW sub-tab (standing_type=
+    draw) when the bracket exists.
+
+    Returns:
+      {
+        "event_id": "...",
+        "stage_id": "...",
+        "capabilities": {
+          "stats": true, "lineups": false, "h2h": true,
+          "news": false, "commentary": false,
+          "missing_players": false, "player_stats": false,
+          "summary_incidents": false, "predicted_lineups": false,
+          "standings": {"overall": false, "draw": true,
+                        "form": false, "top_scores": false}
+        }
+      }
+
+    Falls back gracefully when a probe fails — a failed probe counts
+    as no data (so the tab is hidden) rather than blocking the whole
+    response.
+    """
+    import asyncio, time
+    ticker_norm = (ticker or "").strip().upper()
+    if not ticker_norm:
+        return {"error": "ticker required"}
+    # Cache hit — same event opened recently, no need to re-probe.
+    cached = _EVENT_CAPS_CACHE.get(ticker_norm)
+    if cached and (time.time() - cached["_ts"]) < _EVENT_CAPS_TTL:
+        return cached["payload"]
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = next((r for r in records if r.get("event_ticker") == ticker_norm), None)
+    if not found:
+        return {"error": f"event {ticker_norm!r} not found in cache"}
+    try:
+        from flashlive_feed import match_game, _fl_get
+        title = found.get("title", "")
+        sport = found.get("_sport", "")
+        g = match_game(title, sport)
+        if not g:
+            return {"error": "FlashLive doesn't cover this match yet",
+                    "title": title, "sport": sport}
+        fl_id = g.get("event_id")
+        stage_id = g.get("tournament_stage_id", "")
+        season_id = g.get("tournament_season_id", "")
+        # Per-event endpoints — single call per capability.
+        event_probes = {
+            "stats": ("/v1/events/statistics", {"event_id": fl_id}),
+            "lineups": ("/v1/events/lineups", {"event_id": fl_id}),
+            "predicted_lineups": ("/v1/events/predicted-lineups", {"event_id": fl_id}),
+            "h2h": ("/v1/events/h2h", {"event_id": fl_id}),
+            "news": ("/v1/events/news", {"event_id": fl_id}),
+            "commentary": ("/v1/events/commentary", {"event_id": fl_id}),
+            "missing_players": ("/v1/events/missing-players", {"event_id": fl_id}),
+            "player_stats": ("/v1/events/player-stats", {"event_id": fl_id}),
+            "summary_incidents": ("/v1/events/summary-incidents", {"event_id": fl_id}),
+            "summary": ("/v1/events/summary", {"event_id": fl_id}),
+        }
+        # Standings sub-types — one probe per documented
+        # standing_type so the frontend can build sub-tabs from
+        # whatever has data (Cricket: overall+form, Tennis WTA: just
+        # draw, Soccer: overall+form+top_scores+draw for cup
+        # competitions).
+        standing_types = ["overall", "home", "away", "form",
+                          "top_scores", "draw", "overall_live"]
+        standings_probes = {}
+        if stage_id:
+            for st in standing_types:
+                params = {"tournament_stage_id": stage_id,
+                          "standing_type": st}
+                if season_id:
+                    params["tournament_season_id"] = season_id
+                standings_probes[st] = ("/v1/tournaments/standings", params)
+        # Fire everything in parallel.
+        all_probes = list(event_probes.items()) + [
+            ("__standings__" + st, probe)
+            for st, probe in standings_probes.items()
+        ]
+        coros = [_fl_get(path, params) for _, (path, params) in all_probes]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        capabilities: dict = {}
+        standings_caps: dict = {}
+        for (key, _), result in zip(all_probes, results):
+            has = False if isinstance(result, Exception) else _fl_has_data(result)
+            if key.startswith("__standings__"):
+                standings_caps[key[len("__standings__"):]] = has
+            else:
+                capabilities[key] = has
+        capabilities["standings"] = standings_caps
+        payload = {
+            "ticker": ticker_norm,
+            "event_id": fl_id,
+            "stage_id": stage_id,
+            "season_id": season_id,
+            "sport": sport,
+            "capabilities": capabilities,
+        }
+        _EVENT_CAPS_CACHE[ticker_norm] = {"_ts": time.time(),
+                                           "payload": payload}
+        return payload
+    except Exception as e:
+        return {"error": str(e)[:300]}
+
+
 @app.get("/api/debug_fl_sports_list")
 async def debug_fl_sports_list():
     """Probe FlashLive's /v1/sports/list to discover the full ID→name
