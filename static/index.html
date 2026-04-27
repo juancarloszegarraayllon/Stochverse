@@ -1573,7 +1573,9 @@ function renderTimeSlot(ev) {
     // offset. Other sports fall through to liveTimeLabel.
     var t;
     if (ev._sport === 'Soccer' && live && live.stage_start_ms) {
-      t = computeSoccerMinute(live.stage_start_ms, live.period) || liveTimeLabel(ev);
+      var addedFor = (live.period === 1) ? live.added_time_1h
+                    : (live.period === 2) ? live.added_time_2h : null;
+      t = computeSoccerMinute(live.stage_start_ms, live.period, addedFor) || liveTimeLabel(ev);
     } else {
       t = liveTimeLabel(ev);
     }
@@ -1597,6 +1599,17 @@ function renderTimeSlot(ev) {
     // minute-resolution GAME_TIME snapshots.
     if (live && live.stage_start_ms) {
       attrs += ' data-live-stage-start="' + live.stage_start_ms + '"';
+    }
+    // Announced added-time (the 4th official's "+N" board). Captured
+    // once per half from FlashLive commentary, snapped into a backend
+    // cache, surfaced here so computeSoccerMinute can append "(+N)"
+    // alongside the live stoppage clock. Each half has its own field
+    // — the badge reads the one matching live.period.
+    if (live && live.added_time_1h != null) {
+      attrs += ' data-live-added-1h="' + live.added_time_1h + '"';
+    }
+    if (live && live.added_time_2h != null) {
+      attrs += ' data-live-added-2h="' + live.added_time_2h + '"';
     }
     // Score goes into its own attribute so the tick loop can rebuild
     // the full text (LIVE · SCORE · CLOCK) without erasing it.
@@ -1634,7 +1647,7 @@ function formatMMSS(secs) {
 var SOCCER_PERIOD_OFFSETS = {1: 0, 2: 45, 3: 90, 4: 105};
 var SOCCER_PERIOD_END     = {1: 45, 2: 90, 3: 105, 4: 120};
 
-function computeSoccerMinute(stageStartMs, period) {
+function computeSoccerMinute(stageStartMs, period, announcedAdded) {
   // Single source of truth for the soccer match minute. Used by
   // both renderTimeSlot's initial paint AND tickLiveClocks' 500 ms
   // refresh so the two code paths never disagree on the displayed
@@ -1645,9 +1658,10 @@ function computeSoccerMinute(stageStartMs, period) {
   //
   // Output format mirrors FlashScore with seconds added per user
   // request: "1H 32:15" / "2H 67:42" / "1H 45+3:27" / "ET 95:08".
-  // The seconds tick smoothly because tickLiveClocks calls this
-  // every 500 ms — if you'd rather drop seconds and show plain
-  // minute, swap the body assignment back to `minute + "'"`.
+  // When the 4th official's announced added-time figure is known
+  // (passed in via announcedAdded), append " (+N)" once we cross
+  // into stoppage so the user sees both elapsed extra and the
+  // announced total: "2H 90+3:27 (+6)".
   if (!stageStartMs || !SOCCER_PERIOD_OFFSETS.hasOwnProperty(period)) return null;
   var elapsedSec = Math.max(0, Math.floor((Date.now() - stageStartMs) / 1000));
   var elapsedMin = Math.floor(elapsedSec / 60);
@@ -1658,11 +1672,16 @@ function computeSoccerMinute(stageStartMs, period) {
   var minute = base + elapsedMin;
   var prefix = (period === 1) ? "1H" : (period === 2) ? "2H" : "ET";
   var body;
+  var addedSuffix = "";
   if (minute > endMark) {
     // Stoppage — count the extra time portion seconds-precise too,
     // so users see "1H 45+3:27" not just "1H 45+3'".
     var extraMin = minute - endMark;
     body = endMark + "+" + extraMin + ":" + pad(elapsedSecOnly);
+    var addedNum = parseInt(announcedAdded, 10);
+    if (!isNaN(addedNum) && addedNum > 0) {
+      addedSuffix = " (+" + addedNum + ")";
+    }
   } else {
     // First second of a half displays as "1:00" / "46:00" — broadcast
     // convention is to round the minute up (not down) inside its
@@ -1674,12 +1693,12 @@ function computeSoccerMinute(stageStartMs, period) {
       body = minute + ":" + pad(elapsedSecOnly);
     }
   }
-  return prefix + " " + body;
+  return prefix + " " + body + addedSuffix;
 }
 
-function buildLiveLabel(sport, period, clockSecs, stageStartMs) {
+function buildLiveLabel(sport, period, clockSecs, stageStartMs, announcedAdded) {
   if (sport === 'Soccer') {
-    var precise = computeSoccerMinute(stageStartMs, period);
+    var precise = computeSoccerMinute(stageStartMs, period, announcedAdded);
     if (precise !== null) return precise;
     // Fallback when STAGE_START_TIME isn't shipped (e.g. ESPN feed):
     // count up from the GAME_TIME-derived clock seconds the way the
@@ -1712,6 +1731,18 @@ function tickLiveClocks() {
     var initial = badge.getAttribute('data-live-clock-initial');
     var captured = parseInt(badge.getAttribute('data-live-captured') || '0', 10);
     var stageStartMs = parseInt(badge.getAttribute('data-live-stage-start') || '0', 10) || null;
+    // Announced added-time per half — only one is relevant per badge
+    // (the half currently in play). 1H badges read data-live-added-1h,
+    // 2H badges read data-live-added-2h. Missing attr ⇒ no figure
+    // known yet, fall back to the bare clock without the (+N) suffix.
+    var addedFor = null;
+    if (period === 1) {
+      var a1 = badge.getAttribute('data-live-added-1h');
+      if (a1 != null && a1 !== '') addedFor = parseInt(a1, 10);
+    } else if (period === 2) {
+      var a2 = badge.getAttribute('data-live-added-2h');
+      if (a2 != null && a2 !== '') addedFor = parseInt(a2, 10);
+    }
     if (!initial || !captured) continue;
     var baseSecs = parseClockSecs(initial);
     if (baseSecs === null) {
@@ -1732,7 +1763,7 @@ function tickLiveClocks() {
     } else {
       newSecs = Math.max(0, baseSecs - elapsed);
     }
-    var label = buildLiveLabel(sport, period, newSecs, stageStartMs);
+    var label = buildLiveLabel(sport, period, newSecs, stageStartMs, addedFor);
     var text = badge.querySelector('.live-text');
     if (text) {
       // The event-detail header pill sets data-live-noscore so the
@@ -6611,8 +6642,10 @@ function renderEventDetail(ev) {
     // scoreboard below the pills already shows it; we don't want to
     // duplicate it inside the pill).
     var detailClock;
+    var detailAddedFor = (live.period === 1) ? live.added_time_1h
+                       : (live.period === 2) ? live.added_time_2h : null;
     if (ev._sport === 'Soccer' && live.stage_start_ms) {
-      detailClock = computeSoccerMinute(live.stage_start_ms, live.period) || live.short_detail || "";
+      detailClock = computeSoccerMinute(live.stage_start_ms, live.period, detailAddedFor) || live.short_detail || "";
     } else {
       detailClock = live.short_detail || "";
     }
@@ -6627,6 +6660,12 @@ function renderEventDetail(ev) {
     }
     if (live.stage_start_ms) {
       detailAttrs += ' data-live-stage-start="' + live.stage_start_ms + '"';
+    }
+    if (live.added_time_1h != null) {
+      detailAttrs += ' data-live-added-1h="' + live.added_time_1h + '"';
+    }
+    if (live.added_time_2h != null) {
+      detailAttrs += ' data-live-added-2h="' + live.added_time_2h + '"';
     }
     h += '<span class="live-badge"' + detailAttrs + '><span class="live-dot"></span>'
       + '<span class="live-text">LIVE' + (detailClock ? " · " + escH(detailClock) : "") + '</span></span>';

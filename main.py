@@ -1693,10 +1693,17 @@ def get_events(
 
     # Import live-score feed — FlashLive is the sole active source.
     try:
-        from flashlive_feed import match_game as flash_match_game, compact_label
+        from flashlive_feed import (
+            match_game as flash_match_game,
+            compact_label,
+            ensure_added_time_cached as _fl_ensure_added_time,
+            get_added_time as _fl_get_added_time,
+        )
     except Exception:
         flash_match_game = None
         compact_label = None
+        _fl_ensure_added_time = None
+        _fl_get_added_time = None
 
     # Filter
     results = []
@@ -2068,6 +2075,27 @@ def get_events(
             if g.get("sport") == "Tennis" and _needs_flip(title, g):
                 base_label = _flip_score_pairs(base_label)
             home_score_n, away_score_n = _normalize_scores(g)
+            # Soccer announced added-time ("+4" board) — snap-once cache.
+            # Trigger a non-blocking fetch when this match is in
+            # regulation stoppage (period 1 past 44 min, period 2 past
+            # 89 min). The first user request lands a fetch, the next
+            # lands the figure from cache. Fire-and-forget so it
+            # doesn't add latency to /api/events.
+            _added_1h = None
+            _added_2h = None
+            if g.get("sport") == "Soccer" and g.get("state") == "in":
+                _evid = g.get("event_id") or ""
+                _per  = g.get("period", 0)
+                _stage_ms = g.get("stage_start_ms", 0) or 0
+                if _evid and _stage_ms and _per in (1, 2) and _fl_ensure_added_time:
+                    import time as _t_added
+                    _elapsed_min = max(0, int((_t_added.time() * 1000 - _stage_ms) / 60000))
+                    _threshold = 44 if _per == 1 else 89
+                    if _elapsed_min >= _threshold:
+                        _fl_ensure_added_time(_evid, _per)
+                if _evid and _fl_get_added_time:
+                    _added_1h = _fl_get_added_time(_evid, 1)
+                    _added_2h = _fl_get_added_time(_evid, 2)
             rc["_live_state"] = {
                 "label":          base_label,
                 "state":          g.get("state", ""),
@@ -2085,6 +2113,8 @@ def get_events(
                 "home_score":     home_score_n,
                 "away_score":     away_score_n,
                 "score_display":  _score_display(title, g),
+                "added_time_1h":  _added_1h,
+                "added_time_2h":  _added_2h,
                 # Title-derived team names so the frontend can match
                 # outcome labels even when Kalshi uses a different name
                 # than ESPN (e.g. "Junin" vs "Sarmiento de Junín").
@@ -2359,10 +2389,17 @@ def get_event_detail(ticker: str):
 
     # Import live-score feed — FlashLive is the sole active source.
     try:
-        from flashlive_feed import match_game as flash_match_game, compact_label
+        from flashlive_feed import (
+            match_game as flash_match_game,
+            compact_label,
+            ensure_added_time_cached as _fl_ensure_added_time,
+            get_added_time as _fl_get_added_time,
+        )
     except Exception:
         flash_match_game = None
         compact_label = None
+        _fl_ensure_added_time = None
+        _fl_get_added_time = None
 
     try:
         from kalshi_ws import LIVE_PRICES
@@ -2489,6 +2526,22 @@ def get_event_detail(ticker: str):
                 pass
     if g:
         home_score_n, away_score_n = _normalize_scores(g)
+        # Soccer announced added-time — see /api/events for details.
+        _added_1h = None
+        _added_2h = None
+        if g.get("sport") == "Soccer" and g.get("state") == "in":
+            _evid = g.get("event_id") or ""
+            _per  = g.get("period", 0)
+            _stage_ms = g.get("stage_start_ms", 0) or 0
+            if _evid and _stage_ms and _per in (1, 2) and _fl_ensure_added_time:
+                import time as _t_added
+                _elapsed_min = max(0, int((_t_added.time() * 1000 - _stage_ms) / 60000))
+                _threshold = 44 if _per == 1 else 89
+                if _elapsed_min >= _threshold:
+                    _fl_ensure_added_time(_evid, _per)
+            if _evid and _fl_get_added_time:
+                _added_1h = _fl_get_added_time(_evid, 1)
+                _added_2h = _fl_get_added_time(_evid, 2)
         rc["_live_state"] = {
             "label":          (compact_label(g) if compact_label else ""),
             "state":          g.get("state", ""),
@@ -2505,6 +2558,8 @@ def get_event_detail(ticker: str):
             "away_display":   g.get("away_display", ""),
             "home_score":     home_score_n,
             "away_score":     away_score_n,
+            "added_time_1h":  _added_1h,
+            "added_time_2h":  _added_2h,
             # Playoff series metadata — see /api/events for details.
             "is_playoff":         bool(g.get("is_playoff")),
             "series_title":       g.get("series_title", ""),

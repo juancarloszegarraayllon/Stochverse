@@ -28,6 +28,25 @@ API_KEY = os.environ.get("FLASHLIVE_API_KEY", "").strip()
 API_HOST = "flashlive-sports.p.rapidapi.com"
 BASE_URL = f"https://{API_HOST}"
 
+# Snap-once cache for the announced added-time figure (the "+4" on the
+# 4th official's board at 45' / 90'). The broad-poll /v1/events/list
+# does NOT carry this — confirmed against a live in-stoppage payload.
+# It only surfaces on /v1/events/commentary as a "time"-class entry:
+#   {"COMMENT_CLASS":"time","COMMENT_TEXT":"There will be a minimum
+#    of 6 min. of added time.","COMMENT_TIME":"90+1'"}
+# The figure is announced once per half and never changes, so we snap
+# the int the first time we see it and never refetch that half. Lazy
+# fetches are triggered from main.py's _live_state builders — i.e.
+# we only pay for matches a user is actually rendering.
+# Layout: {event_id: {1: int|None, 2: int|None,
+#                     "1_tried_ms": int, "2_tried_ms": int}}
+# Setting *_tried_ms before kicking off the fetch (whether it
+# succeeds or not) so a stoppage match without a parseable comment
+# yet doesn't get hit on every render.
+_ADDED_TIME_CACHE: dict = {}
+_ADDED_TIME_RETRY_MS = 60_000   # if first fetch returned no figure, wait this long before retrying
+_ADDED_TIME_INFLIGHT: set = set()  # event_ids currently being fetched (dedup re-entry)
+
 # Adaptive poll cadence. RapidAPI Mega tier ships unlimited monthly
 # requests with a 10 req/sec rate cap, so we can run the broad poll
 # aggressively without quota anxiety. Defaults sized for "full feature
@@ -614,6 +633,129 @@ async def fetch_event_commentary(event_id: str):
     return await _fl_get("/v1/events/commentary", {"event_id": event_id})
 
 
+# ---- Added-time (4th official's board) parsing -----------------------
+#
+# Two formats observed in /v1/events/commentary on a live-in-stoppage
+# payload (Espanyol-Levante 26 Apr 2026):
+#
+#   1H announcement at 45':
+#     {"COMMENT_TIME":"45'","COMMENT_CLASS":"time",
+#      "COMMENT_TEXT":"2 min. of stoppage-time to be played."}
+#
+#   2H announcement at 90+1':
+#     {"COMMENT_TIME":"90+1'","COMMENT_CLASS":"time",
+#      "COMMENT_TEXT":"There will be a minimum of 6 min. of added time."}
+#
+# Both: COMMENT_CLASS == "time" + a leading-or-mid integer followed by
+# "min" and either "stoppage-time" or "added time". Regex below handles
+# both, with the "(?:minimum of\s+)?" branch absorbing the 90' phrasing.
+_ADDED_TIME_RE = re.compile(
+    r"(?:minimum of\s+)?(\d+)\s*min\.?\s*of\s*(?:stoppage-time|added time)",
+    re.IGNORECASE,
+)
+
+
+def _parse_added_time_from_commentary(data) -> dict:
+    """Walk a /v1/events/commentary response and return announced added
+    time per half: {1: int|None, 2: int|None}.
+
+    The half is inferred from COMMENT_TIME — anything starting with "45"
+    is a 1H announcement, anything starting with "90" is 2H. Earlier or
+    later prefixes are ignored (extra-time periods would announce at
+    105/120 but we don't render those yet).
+    """
+    out = {1: None, 2: None}
+    if not isinstance(data, dict):
+        return out
+    items = data.get("DATA") or []
+    if not isinstance(items, list):
+        return out
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if (it.get("COMMENT_CLASS") or "").lower() != "time":
+            continue
+        text = it.get("COMMENT_TEXT") or ""
+        m = _ADDED_TIME_RE.search(text)
+        if not m:
+            continue
+        try:
+            mins = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        ctime = str(it.get("COMMENT_TIME") or "")
+        if ctime.startswith("45"):
+            if out[1] is None:
+                out[1] = mins
+        elif ctime.startswith("90"):
+            if out[2] is None:
+                out[2] = mins
+    return out
+
+
+def get_added_time(event_id: str, period: int):
+    """Return the cached added-time figure for an event's half, or None.
+    Used by the frontend-state builders in main.py."""
+    if not event_id or period not in (1, 2):
+        return None
+    entry = _ADDED_TIME_CACHE.get(event_id)
+    if not entry:
+        return None
+    return entry.get(period)
+
+
+async def _fetch_and_cache_added_time(event_id: str):
+    """Background fetch + parse + snap into _ADDED_TIME_CACHE. Once the
+    figure for a given half is non-None it stays — the 4th official
+    only announces once per half and the number never changes."""
+    if not event_id:
+        return
+    if event_id in _ADDED_TIME_INFLIGHT:
+        return
+    _ADDED_TIME_INFLIGHT.add(event_id)
+    try:
+        data = await fetch_event_commentary(event_id)
+        parsed = _parse_added_time_from_commentary(data)
+        entry = _ADDED_TIME_CACHE.setdefault(event_id, {})
+        now_ms = int(time.time() * 1000)
+        # Only overwrite a half's value if we have a fresh int for it
+        # (preserves a previously snapped figure even if a later
+        # commentary fetch happens to drop the announcement entry).
+        if parsed[1] is not None and entry.get(1) is None:
+            entry[1] = parsed[1]
+        if parsed[2] is not None and entry.get(2) is None:
+            entry[2] = parsed[2]
+        entry["1_tried_ms"] = now_ms
+        entry["2_tried_ms"] = now_ms
+    except Exception as e:
+        log.debug("added-time fetch failed for %s: %s", event_id, e)
+    finally:
+        _ADDED_TIME_INFLIGHT.discard(event_id)
+
+
+def ensure_added_time_cached(event_id: str, period: int) -> None:
+    """Trigger a non-blocking, snap-once fetch of the announced
+    added-time figure for a soccer match in stoppage. Safe to call
+    every render — early-returns if the half is already cached or a
+    recent attempt is still cooling down. Re-fetches at most once per
+    _ADDED_TIME_RETRY_MS when the previous attempt found no figure
+    (the announcement may not have shipped yet)."""
+    if not event_id or period not in (1, 2):
+        return
+    entry = _ADDED_TIME_CACHE.get(event_id) or {}
+    if entry.get(period) is not None:
+        return  # snapped — never refetch
+    tried_ms = entry.get(f"{period}_tried_ms", 0)
+    now_ms = int(time.time() * 1000)
+    if tried_ms and (now_ms - tried_ms) < _ADDED_TIME_RETRY_MS:
+        return  # cooling down
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # no event loop in this context (e.g. sync request handler)
+    loop.create_task(_fetch_and_cache_added_time(event_id))
+
+
 async def fetch_event_news(event_id: str):
     if not event_id: return None
     return await _fl_get("/v1/events/news", {"event_id": event_id})
@@ -743,8 +885,14 @@ async def run_flashlive_feed():
             stale_cutoff_ms = int((time.time() - 600) * 1000)
             stale_keys = [k for k, g in list(GAMES.items())
                           if (g.get("captured_at_ms") or 0) < stale_cutoff_ms]
+            stale_event_ids = {GAMES[k].get("event_id") for k in stale_keys
+                               if GAMES.get(k, {}).get("event_id")}
             for k in stale_keys:
                 GAMES.pop(k, None)
+            # Drop the added-time snapshot for any event that just left
+            # GAMES — keeps the cache bounded to the live universe.
+            for eid in stale_event_ids:
+                _ADDED_TIME_CACHE.pop(eid, None)
             STATUS["games"] = len(GAMES)
             STATUS["last_fetch_ts"] = time.time()
             STATUS["polls"] += 1
