@@ -1566,7 +1566,17 @@ function renderTimeSlot(ev) {
     }
     var scoreStr = liveScoreString(live);
     var scorePart = scoreStr ? ' \u00B7 ' + scoreStr : '';
-    var t = liveTimeLabel(ev);
+    // For soccer with STAGE_START_TIME we compute the minute the
+    // same way tickLiveClocks does — single source of truth keeps
+    // the initial paint and the 500 ms tick from disagreeing on the
+    // displayed minute when the browser and server clocks are
+    // offset. Other sports fall through to liveTimeLabel.
+    var t;
+    if (ev._sport === 'Soccer' && live && live.stage_start_ms) {
+      t = computeSoccerMinute(live.stage_start_ms, live.period) || liveTimeLabel(ev);
+    } else {
+      t = liveTimeLabel(ev);
+    }
     var clockPart = t ? ' \u00B7 ' + t : '';
     // Stash ESPN state on the badge so the 500ms tick loop can
     // interpolate the clock between backend refreshes. clock_running
@@ -1624,28 +1634,33 @@ function formatMMSS(secs) {
 var SOCCER_PERIOD_OFFSETS = {1: 0, 2: 45, 3: 90, 4: 105};
 var SOCCER_PERIOD_END     = {1: 45, 2: 90, 3: 105, 4: 120};
 
+function computeSoccerMinute(stageStartMs, period) {
+  // Single source of truth for the soccer match minute. Used by
+  // both renderTimeSlot's initial paint AND tickLiveClocks' 500 ms
+  // refresh — earlier these disagreed when the user's browser clock
+  // was offset from the server clock (backend computed display_clock
+  // at parse time, frontend tick recomputed from STAGE_START_TIME),
+  // producing visible 55 → 54 → 55 oscillation as the two values
+  // alternated. Now both code paths invoke this helper so the
+  // minute is computed exclusively against Date.now() and never
+  // disagrees with itself.
+  if (!stageStartMs || !SOCCER_PERIOD_OFFSETS.hasOwnProperty(period)) return null;
+  var elapsedSec = Math.max(0, Math.floor((Date.now() - stageStartMs) / 1000));
+  var elapsedMin = Math.floor(elapsedSec / 60);
+  var base = SOCCER_PERIOD_OFFSETS[period];
+  var endMark = SOCCER_PERIOD_END[period];
+  var minute = base + elapsedMin;
+  if (minute > endMark) return endMark + "+" + (minute - endMark) + "'";
+  // First second of a half displays as "1'" / "46'" — broadcast
+  // convention is to round up, not down.
+  if (minute < base + 1) minute = base + 1;
+  return minute + "'";
+}
+
 function buildLiveLabel(sport, period, clockSecs, stageStartMs) {
   if (sport === 'Soccer') {
-    // STAGE_START_TIME path: precise to the second, stoppage time
-    // falls out for free (any minute past the period's regular
-    // end mark gets rendered as "{end}+{extra}'", e.g. 45+3').
-    if (stageStartMs && SOCCER_PERIOD_OFFSETS.hasOwnProperty(period)) {
-      var elapsedSec = Math.max(0, Math.floor((Date.now() - stageStartMs) / 1000));
-      var elapsedMin = Math.floor(elapsedSec / 60);
-      var base = SOCCER_PERIOD_OFFSETS[period];
-      var endMark = SOCCER_PERIOD_END[period];
-      var minute = base + elapsedMin;
-      if (minute > endMark) {
-        var extra = minute - endMark;
-        return endMark + "+" + extra + "'";
-      }
-      // Minimum minute = base + 1 (a match displayed as "0'" in 2H
-      // would be confusing — broadcast shows "46'" the moment 2H
-      // kicks off). Treat the first second of the half as minute 1
-      // of that half.
-      if (minute < base + 1) minute = base + 1;
-      return minute + "'";
-    }
+    var precise = computeSoccerMinute(stageStartMs, period);
+    if (precise !== null) return precise;
     // Fallback when STAGE_START_TIME isn't shipped (e.g. ESPN feed):
     // count up from the GAME_TIME-derived clock seconds the way the
     // pre-STAGE_START_TIME path did, stage-prefixed.
