@@ -4485,8 +4485,15 @@ function _renderH2HTab(container, allTabs, tabIdx, homeName, awayName) {
     var sec = sections[si];
     var secTitle = sec.title;
     if (!secTitle) {
-      if (si === 0) secTitle = "Last matches: " + homeName;
-      else if (si === 1) secTitle = "Last matches: " + awayName;
+      // Section ordering inside each tab:
+      //   Overall (tabIdx 0) → [home_matches, away_matches, h2h]
+      //   Home    (tabIdx 1) → [home_matches, h2h]
+      //   Away    (tabIdx 2) → [away_matches, h2h]
+      // The Away tab's first section is the AWAY team's matches, not
+      // home — synthesize accordingly when FlashLive omits a label.
+      var firstFocal = (tabIdx === 2) ? awayName : homeName;
+      if (si === 0) secTitle = "Last matches: " + firstFocal;
+      else if (si === 1 && tabIdx === 0) secTitle = "Last matches: " + awayName;
       else secTitle = "Head-to-head matches";
     }
     h += '<div class="h2h-section">';
@@ -4945,18 +4952,28 @@ async function _loadStandingsType(container, ticker, standingType) {
         windows[wi].push(rows[fi]);
       }
       var winKeys = Object.keys(windows).sort(function(a,b) { return parseInt(a) - parseInt(b); });
-      // Label each bucket with the max MP it contains — that's the
-      // actual window size (5/10/15). Falls back to "Window N" if MP
-      // isn't populated.
+      // FlashLive's form windows are canonically Last 5 / Last 10 /
+      // Last 15. Use that by window index so labels stay correct
+      // early in a season — using max MP within a bucket
+      // underestimates when no team has played enough yet (e.g. 5
+      // matchdays in, bucket 1's max MP = 8 but the window is still
+      // "Last 10"). Beyond 3 windows, fall back to max MP.
+      var CANONICAL_FORM_WINDOWS = [5, 10, 15];
       var labelByKey = {};
       for (var lk = 0; lk < winKeys.length; lk++) {
+        var widx = parseInt(winKeys[lk]);
+        var canonical = CANONICAL_FORM_WINDOWS[widx];
+        if (canonical) {
+          labelByKey[winKeys[lk]] = String(canonical);
+          continue;
+        }
         var bucket = windows[winKeys[lk]];
         var maxMP = 0;
         for (var bi = 0; bi < bucket.length; bi++) {
           var mp = parseInt(bucket[bi].MATCHES_PLAYED || 0);
           if (mp > maxMP) maxMP = mp;
         }
-        labelByKey[winKeys[lk]] = maxMP > 0 ? String(maxMP) : ("Window " + (parseInt(winKeys[lk]) + 1));
+        labelByKey[winKeys[lk]] = maxMP > 0 ? String(maxMP) : ("Window " + (widx + 1));
       }
       var h = '<div class="ed-sb-tabs ed-sb-filter-tabs" style="margin-bottom:8px">';
       for (var wk = 0; wk < winKeys.length; wk++) {
