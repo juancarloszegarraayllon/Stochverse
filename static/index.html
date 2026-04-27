@@ -395,6 +395,12 @@ html,body{overscroll-behavior:none}
 .ed-stats-group-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin:10px 0 4px;padding:4px 0 4px;border-bottom:1px solid var(--border)}
 .ed-detailed-stats{margin-top:14px}
 .ed-detailed-stats-inner{padding:14px 18px 16px}
+.ed-st-crest{width:14px;height:14px;object-fit:contain;vertical-align:middle;margin-right:6px;flex-shrink:0}
+.ed-st-team{vertical-align:middle}
+.ed-st-legend{margin-top:10px;padding-top:8px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:4px}
+.ed-st-legend-item{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-muted)}
+.ed-st-legend-swatch{width:10px;height:10px;border-radius:2px;flex-shrink:0}
+.ed-st-legend-text{color:var(--text-dim)}
 .ed-debug-st-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:6px;flex-wrap:wrap}
 .ed-debug-st-tabs .ed-sb-tab{flex:0 0 auto;padding:8px 14px;font-size:10px}
 .ed-debug-st-filter{display:none;gap:0;border-bottom:1px solid var(--border);margin-bottom:8px}
@@ -4174,10 +4180,13 @@ window.switchMainTab = function(btn) {
 
 // FlashLive standings_tabs codes (from /v1/tournaments/standings
 // /tabs) → the standing_type query param the data endpoint takes,
-// plus the visible label. Order below = display order.
+// plus the visible label. Order below = display order. Convention:
+// the standing_type param mirrors the lowercase tab code minus the
+// leading "TABLE_" prefix where applicable, except TABLE itself
+// which uses "overall".
 var _STANDINGS_TAB_MAP = [
-  {code: "LIVE_TABLE",        type: "live",       label: "Live Standings"},
-  {code: "LIVE",              type: "live",       label: "Live Standings"},
+  {code: "LIVE_TABLE",        type: "live_table", label: "Live Standings"},
+  {code: "LIVE",              type: "live_table", label: "Live Standings"},
   {code: "TABLE",             type: "overall",    label: "Standings",      hasFilter: true},
   {code: "TABLE_FORM",        type: "form",       label: "Form"},
   {code: "TABLE_OVER_UNDER",  type: "over_under", label: "Over/Under"},
@@ -4504,7 +4513,7 @@ function _findKey(row, candidates) {
   return null;
 }
 
-function _renderStandingsTable(container, rows, homeName, awayName) {
+function _renderStandingsTable(container, rows, homeName, awayName, meta) {
   var sample = rows[0] || {};
   // Resolve which actual key maps to each column
   var cols = [];
@@ -4562,9 +4571,17 @@ function _renderStandingsTable(container, rows, homeName, awayName) {
       cols.push({hdr: k.replace(/_/g," "), key: k, align: "center"});
     }
   }
+  // Qualification color legend lookup. META.QUALIFICATION_INFO is
+  // shaped like {"004682": ["q1", "Promotion - Liga Profesional...",
+  // "004682"]} where the key is a hex color code (no #) the team
+  // row's TUC field references. We use it both to paint the left
+  // bar on each row and to render the legend block underneath.
+  var qInfo = (meta && meta.QUALIFICATION_INFO) || {};
   var h = '<div style="overflow-x:auto">';
   h += '<table style="width:100%;font-size:11px;border-collapse:collapse">';
   h += '<thead><tr style="color:var(--text-muted);border-bottom:1px solid var(--border)">';
+  // Empty header for the qualification color bar column.
+  h += '<th style="width:3px;padding:0"></th>';
   for (var hi = 0; hi < cols.length; hi++) {
     var c = cols[hi];
     var st = 'text-align:' + c.align + ';padding:4px 2px';
@@ -4580,11 +4597,27 @@ function _renderStandingsTable(container, rows, homeName, awayName) {
               (awayName && teamName.toLowerCase().indexOf(awayName) >= 0);
     var rs = 'border-bottom:1px solid var(--border);' + (isHL ? 'background:rgba(74,144,226,0.15);font-weight:600' : '');
     h += '<tr style="' + rs + '">';
+    // Left-most column: 3px-wide qualification color band (matches
+    // FlashScore). Uses the row's TUC hex code; no qualification =
+    // transparent.
+    var qHex = row.TUC || "";
+    var bandStyle = qHex
+      ? 'background:#' + escH(qHex) + ';width:3px;padding:0'
+      : 'width:3px;padding:0';
+    h += '<td style="' + bandStyle + '"></td>';
     for (var ci3 = 0; ci3 < cols.length; ci3++) {
       var c2 = cols[ci3];
       var val = "";
+      var cellInner = "";
       if (c2.hdr === "#") val = _stVal(row, "RANKING", "ranking", "rank", "RANK") || String(i + 1);
-      else if (c2.hdr === "Team") val = teamName;
+      else if (c2.hdr === "Team") {
+        // Team cell: crest (TEAM_IMAGE_PATH) + name.
+        var crest = row.TEAM_IMAGE_PATH || row.team_image_path || "";
+        if (crest) {
+          cellInner = '<img class="ed-st-crest" src="' + escH(crest) + '" alt="" loading="lazy">';
+        }
+        cellInner += '<span class="ed-st-team">' + escH(teamName) + '</span>';
+      }
       else if (c2.key === "_calc_d" || c2.key === "_calc_l") {
         var rw = parseInt(_stVal(row, "WINS", "wins", "W") || 0);
         var rmp = parseInt(_stVal(row, "MATCHES_PLAYED", "MATCHES", "MP") || 0);
@@ -4611,11 +4644,28 @@ function _renderStandingsTable(container, rows, homeName, awayName) {
       var st2 = 'text-align:' + c2.align + ';padding:4px 2px';
       if (c2.bold) st2 += ';font-weight:700';
       if (c2.hdr === "#") st2 += ';color:var(--text-muted)';
-      h += '<td style="' + st2 + '">' + escH(val) + '</td>';
+      h += '<td style="' + st2 + '">' + (cellInner || escH(val)) + '</td>';
     }
     h += '</tr>';
   }
   h += '</tbody></table></div>';
+  // Qualification legend block. One row per distinct hex code in
+  // QUALIFICATION_INFO with the human-readable label.
+  var legendKeys = Object.keys(qInfo);
+  if (legendKeys.length) {
+    h += '<div class="ed-st-legend">';
+    for (var li = 0; li < legendKeys.length; li++) {
+      var lk = legendKeys[li];
+      var info = qInfo[lk] || [];
+      var lbl = info[1] || "";
+      if (!lbl) continue;
+      h += '<div class="ed-st-legend-item">'
+         + '<span class="ed-st-legend-swatch" style="background:#' + escH(lk) + '"></span>'
+         + '<span class="ed-st-legend-text">' + escH(lbl) + '</span>'
+         + '</div>';
+    }
+    h += '</div>';
+  }
   container.innerHTML = h;
 }
 
@@ -4696,6 +4746,11 @@ async function _loadStandingsType(container, ticker, standingType) {
       container.innerHTML = '<div class="ed-stats-loading">No data available.</div>';
       return;
     }
+    // META carries column legend + qualification color codes for
+    // promotion / Champions League / relegation bands. Pass it
+    // through so _renderStandingsTable can paint the bars and
+    // append the legend at the bottom.
+    var meta = data.META || data.meta || null;
     var homeName = (d.home_name || "").toLowerCase();
     var awayName = (d.away_name || "").toLowerCase();
     if (standingType === "top_scores" || standingType === "top_scorers" || standingType === "TOP_SCORERS") {
@@ -4720,10 +4775,11 @@ async function _loadStandingsType(container, ticker, standingType) {
       container._formWindows = windows;
       container._homeName = homeName;
       container._awayName = awayName;
+      container._meta = meta;
       var tableDiv = document.getElementById("st-form-table");
-      if (tableDiv && windowKeys.length) _renderStandingsTable(tableDiv, windows[windowKeys[0]], homeName, awayName);
+      if (tableDiv && windowKeys.length) _renderStandingsTable(tableDiv, windows[windowKeys[0]], homeName, awayName, meta);
     } else {
-      _renderStandingsTable(container, rows, homeName, awayName);
+      _renderStandingsTable(container, rows, homeName, awayName, meta);
     }
   } catch (e) {
     container.innerHTML = '<div class="ed-stats-loading">Failed to load data.</div>';
