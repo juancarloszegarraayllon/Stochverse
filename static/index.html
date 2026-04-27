@@ -1678,6 +1678,10 @@ function computeSoccerMinute(stageStartMs, period, announcedAdded) {
     // so users see "1H 45+3:27" not just "1H 45+3'".
     var extraMin = minute - endMark;
     body = endMark + "+" + extraMin + ":" + pad(elapsedSecOnly);
+    var addedNum = parseInt(announcedAdded, 10);
+    if (!isNaN(addedNum) && addedNum > 0) {
+      addedSuffix = " (+" + addedNum + ")";
+    }
   } else {
     // First second of a half displays as "1:00" / "46:00" — broadcast
     // convention is to round the minute up (not down) inside its
@@ -1687,15 +1691,6 @@ function computeSoccerMinute(stageStartMs, period, announcedAdded) {
       body = minute + ":" + pad(elapsedSecOnly);
     } else {
       body = minute + ":" + pad(elapsedSecOnly);
-    }
-  }
-  // Show the announced (+N) once we're at or past the regulation
-  // mark — FlashScore surfaces it during the 90:00–90:59 window too,
-  // not just after rolling into 90+1.
-  if (minute >= endMark) {
-    var addedNum = parseInt(announcedAdded, 10);
-    if (!isNaN(addedNum) && addedNum > 0) {
-      addedSuffix = " (+" + addedNum + ")";
     }
   }
   return prefix + " " + body + addedSuffix;
