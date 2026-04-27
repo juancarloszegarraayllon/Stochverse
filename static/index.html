@@ -414,7 +414,7 @@ html,body{overscroll-behavior:none}
 .ed-bracket-nav-btn{flex:0 0 auto;padding:8px 14px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);background:transparent;border:0;border-bottom:2px solid transparent;cursor:pointer;font-family:inherit;white-space:nowrap}
 .ed-bracket-nav-btn:hover{color:var(--text-dim)}
 .ed-bracket-nav-btn.active{color:var(--green);border-bottom-color:var(--green)}
-.ed-bracket{display:flex;gap:24px;overflow-x:auto;padding:8px 0 16px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;align-items:stretch}
+.ed-bracket{display:flex;gap:24px;overflow:auto;max-height:75vh;padding:8px 0 16px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;align-items:stretch}
 .ed-bracket::-webkit-scrollbar{height:8px;width:8px}
 .ed-bracket::-webkit-scrollbar-track{background:transparent}
 .ed-bracket::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
