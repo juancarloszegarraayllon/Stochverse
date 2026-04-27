@@ -1735,7 +1735,12 @@ function tickLiveClocks() {
     var label = buildLiveLabel(sport, period, newSecs, stageStartMs);
     var text = badge.querySelector('.live-text');
     if (text) {
-      var score = badge.getAttribute('data-live-score') || '';
+      // The event-detail header pill sets data-live-noscore so the
+      // duplicate score (already shown in its scoreboard below) gets
+      // skipped here. Cards leave the attr off and get the full
+      // "LIVE \u00B7 score \u00B7 clock" composition.
+      var noScore = badge.getAttribute('data-live-noscore') === '1';
+      var score = (!noScore && badge.getAttribute('data-live-score')) || '';
       var scorePart = score ? ' \u00B7 ' + score : '';
       var full = 'LIVE' + scorePart + ' \u00B7 ' + label;
       if (text.textContent !== full) text.textContent = full;
@@ -6600,8 +6605,31 @@ function renderEventDetail(ev) {
   h += '<span class="cat-pill">' + escH(label) + '</span>';
   if (subcat) h += '<span class="sub-pill">' + escH(subcat) + '</span>';
   if (live && live.state === "in") {
-    h += '<span class="live-badge"><span class="live-dot"></span>'
-      + '<span class="live-text">Live' + (live.short_detail ? " · " + escH(live.short_detail) : "") + '</span></span>';
+    // Mirror the card badge's tick attrs so the detail header pill
+    // updates every 500 ms via tickLiveClocks. data-live-noscore=1
+    // tells the tick handler to skip prepending the score (the
+    // scoreboard below the pills already shows it; we don't want to
+    // duplicate it inside the pill).
+    var detailClock;
+    if (ev._sport === 'Soccer' && live.stage_start_ms) {
+      detailClock = computeSoccerMinute(live.stage_start_ms, live.period) || live.short_detail || "";
+    } else {
+      detailClock = live.short_detail || "";
+    }
+    var detailAttrs = '';
+    if (live.display_clock && live.period && live.captured_at_ms) {
+      detailAttrs += ' data-live-sport="' + (ev._sport || '') + '"';
+      detailAttrs += ' data-live-period="' + live.period + '"';
+      detailAttrs += ' data-live-clock-initial="' + String(live.display_clock).replace(/"/g, '') + '"';
+      detailAttrs += ' data-live-captured="' + live.captured_at_ms + '"';
+      detailAttrs += ' data-live-running="' + (live.clock_running ? '1' : '0') + '"';
+      detailAttrs += ' data-live-noscore="1"';
+    }
+    if (live.stage_start_ms) {
+      detailAttrs += ' data-live-stage-start="' + live.stage_start_ms + '"';
+    }
+    h += '<span class="live-badge"' + detailAttrs + '><span class="live-dot"></span>'
+      + '<span class="live-text">LIVE' + (detailClock ? " · " + escH(detailClock) : "") + '</span></span>';
   } else if (live && live.state === "post") {
     h += '<span class="final-badge">Final</span>';
   }
@@ -6629,8 +6657,12 @@ function renderEventDetail(ev) {
       h += '<div class="ed-scoreboard">';
       h += '<div class="ed-sb-team"><div class="ed-sb-name">' + escH(live.home_display || live.home_abbr || "Home") + '</div>'
          + '<div class="ed-sb-score">' + escH(live.home_score || "0") + '</div></div>';
-      h += '<div class="ed-sb-team"><div class="ed-sb-sep">vs</div>'
-         + '<div class="ed-sb-clock">' + escH(live.short_detail || live.display_clock || "") + '</div></div>';
+      // Just "vs" between team scores — the clock used to live
+      // here too but the LIVE pill at the top of the page already
+      // shows the synchronized minute. A second redundant copy was
+      // confusing and worse, drifted from the pill when the user's
+      // browser clock was offset from the server.
+      h += '<div class="ed-sb-team"><div class="ed-sb-sep">vs</div></div>';
       h += '<div class="ed-sb-team"><div class="ed-sb-name">' + escH(live.away_display || live.away_abbr || "Away") + '</div>'
          + '<div class="ed-sb-score">' + escH(live.away_score || "0") + '</div></div>';
       h += '</div>';
