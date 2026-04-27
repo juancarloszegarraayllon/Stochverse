@@ -3826,11 +3826,22 @@ async function hydrateGameStats(evTicker) {
     // returns [] for those, which collapses hasStandings to false.
     // For team sports we default-show with the canonical three
     // sub-tabs so a stale cap-scan cache doesn't hide the tab.
+    //
+    // Missing Players and Player Stats also fundamentally don't
+    // apply to individual sports — there's no roster to be missing
+    // from, and tennis-style per-set stats live inside the regular
+    // /v1/events/statistics response, not /v1/events/player-stats.
+    // Hide both for sports where they're structurally absent.
+    var INDIVIDUAL_SPORTS = {
+      "Tennis": 1, "Golf": 1, "MMA": 1, "Boxing": 1,
+      "Darts": 1, "Motorsport": 1,
+    };
+    var isIndividual = !!INDIVIDUAL_SPORTS[sport];
     var hasH2H = true;
     var hasNews = true;
     var hasCommentary = true;
-    var hasMissingPlayers = true;
-    var hasPlayerStats = true;
+    var hasMissingPlayers = !isIndividual;
+    var hasPlayerStats = !isIndividual;
     var stTypes = _capStandingTypes(sportCaps, sport);
     var hasStandings = stTypes.length > 0;
     var stHasOverall = stTypes.indexOf("overall") >= 0
