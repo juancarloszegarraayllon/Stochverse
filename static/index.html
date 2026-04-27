@@ -1637,32 +1637,42 @@ var SOCCER_PERIOD_END     = {1: 45, 2: 90, 3: 105, 4: 120};
 function computeSoccerMinute(stageStartMs, period) {
   // Single source of truth for the soccer match minute. Used by
   // both renderTimeSlot's initial paint AND tickLiveClocks' 500 ms
-  // refresh — earlier these disagreed when the user's browser clock
-  // was offset from the server clock (backend computed display_clock
-  // at parse time, frontend tick recomputed from STAGE_START_TIME),
-  // producing visible 55 → 54 → 55 oscillation as the two values
-  // alternated. Now both code paths invoke this helper so the
-  // minute is computed exclusively against Date.now() and never
-  // disagrees with itself.
+  // refresh so the two code paths never disagree on the displayed
+  // value (earlier the backend computed once at parse time using
+  // server's clock and the frontend recomputed against the browser's;
+  // any clock skew between the two produced visible 55→54→55
+  // oscillation as refreshVisible re-rendered the badge).
   //
-  // Output format mirrors FlashScore: "1H 32'" / "2H 67'" /
-  // "1H 45+3'" / "ET 95'". Period prefix tells the user which half
-  // they're watching without inferring from the minute.
+  // Output format mirrors FlashScore with seconds added per user
+  // request: "1H 32:15" / "2H 67:42" / "1H 45+3:27" / "ET 95:08".
+  // The seconds tick smoothly because tickLiveClocks calls this
+  // every 500 ms — if you'd rather drop seconds and show plain
+  // minute, swap the body assignment back to `minute + "'"`.
   if (!stageStartMs || !SOCCER_PERIOD_OFFSETS.hasOwnProperty(period)) return null;
   var elapsedSec = Math.max(0, Math.floor((Date.now() - stageStartMs) / 1000));
   var elapsedMin = Math.floor(elapsedSec / 60);
+  var elapsedSecOnly = elapsedSec % 60;
+  var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
   var base = SOCCER_PERIOD_OFFSETS[period];
   var endMark = SOCCER_PERIOD_END[period];
   var minute = base + elapsedMin;
   var prefix = (period === 1) ? "1H" : (period === 2) ? "2H" : "ET";
   var body;
   if (minute > endMark) {
-    body = endMark + "+" + (minute - endMark) + "'";
+    // Stoppage — count the extra time portion seconds-precise too,
+    // so users see "1H 45+3:27" not just "1H 45+3'".
+    var extraMin = minute - endMark;
+    body = endMark + "+" + extraMin + ":" + pad(elapsedSecOnly);
   } else {
-    // First second of a half displays as "1'" / "46'" — broadcast
-    // convention is to round up, not down.
-    if (minute < base + 1) minute = base + 1;
-    body = minute + "'";
+    // First second of a half displays as "1:00" / "46:00" — broadcast
+    // convention is to round the minute up (not down) inside its
+    // first 60 seconds.
+    if (minute < base + 1) {
+      minute = base + 1;
+      body = minute + ":" + pad(elapsedSecOnly);
+    } else {
+      body = minute + ":" + pad(elapsedSecOnly);
+    }
   }
   return prefix + " " + body;
 }

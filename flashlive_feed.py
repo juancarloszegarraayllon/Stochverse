@@ -36,6 +36,31 @@ BASE_URL = f"https://{API_HOST}"
 POLL_INTERVAL = int(os.environ.get("FLASHLIVE_POLL_INTERVAL", "60"))
 LIVE_POLL_INTERVAL = int(os.environ.get("FLASHLIVE_LIVE_POLL_INTERVAL", "10"))
 
+# Global FlashLive rate limiter. Mega tier hard-caps at 10 req/sec
+# and we have two concurrent code paths hitting the API: the broad
+# poll's sequential per-sport-day fetch loop, and the per-event warm
+# path that fans out for viewport-visible cards. Each path was paced
+# in isolation but together they spiked above the cap, dropping
+# random sport fetches with HTTP 429s. Run every FL HTTP call
+# through _fl_throttle() so the two paths share one rate budget.
+# 200 ms min gap = 5 req/sec sustained, which keeps us comfortably
+# under 10/sec even when both paths are active.
+_FL_THROTTLE_LOCK = None
+_FL_LAST_CALL_TS = 0.0
+_FL_MIN_GAP_S = float(os.environ.get("FLASHLIVE_MIN_GAP_S", "0.20"))
+
+
+async def _fl_throttle():
+    global _FL_THROTTLE_LOCK, _FL_LAST_CALL_TS
+    if _FL_THROTTLE_LOCK is None:
+        _FL_THROTTLE_LOCK = asyncio.Lock()
+    async with _FL_THROTTLE_LOCK:
+        now = time.time()
+        gap = now - _FL_LAST_CALL_TS
+        if gap < _FL_MIN_GAP_S:
+            await asyncio.sleep(_FL_MIN_GAP_S - gap)
+        _FL_LAST_CALL_TS = time.time()
+
 # Poll every FlashLive sport that maps to a Kalshi sport category in
 # main.py's _SPORT_SERIES. Each sport = 1 API call per POLL_INTERVAL,
 # so this list directly drives quota. IDs verified against
@@ -173,6 +198,10 @@ async def _fetch_live_events(days=("0",)):
         for sport_id, sport_name in ACTIVE_SPORTS.items():
           for day in days:
             try:
+                # Global rate limiter — shared with the warm path's
+                # per-event _fl_get calls so the two code paths can't
+                # burst past Mega's 10 req/sec ceiling combined.
+                await _fl_throttle()
                 r = await client.get(
                     f"{BASE_URL}/v1/events/list",
                     headers=headers,
@@ -183,13 +212,6 @@ async def _fetch_live_events(days=("0",)):
                         "locale": "en_INT",
                     },
                 )
-                # Throttle the broad poll — Mega caps at 10 req/sec
-                # and our 32 sequential calls + concurrent warm path
-                # were spiking past that, returning 429s on whichever
-                # sport happened to land in the burst. 150 ms between
-                # calls keeps us at ~6.7 req/sec, leaving headroom for
-                # the warm path's per-event fetches.
-                await asyncio.sleep(0.15)
                 if r.status_code == 200:
                     data = r.json()
                     top_data = data.get("DATA", []) if isinstance(data, dict) else data
@@ -474,6 +496,9 @@ async def _fl_get(path: str, params: dict = None):
     if params is None:
         params = {}
     params.setdefault("locale", "en_INT")
+    # Global rate limiter — shared with the broad-poll loop so warm
+    # fan-out + scheduled poll calls can't burst past Mega's cap.
+    await _fl_throttle()
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.get(f"{BASE_URL}{path}", headers=headers, params=params)
