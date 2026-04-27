@@ -693,6 +693,80 @@ def _parse_added_time_from_commentary(data) -> dict:
     return out
 
 
+def _parse_added_time_from_summary(data) -> dict:
+    """Walk a /v1/events/summary response and return announced added
+    time per half: {1: int|None, 2: int|None}.
+
+    Handles INJURY_TIME / STOPPAGE_TIME / ADDED_TIME incident types in
+    the DATA[].ITEMS[] structure. The +N value can live in several
+    length-style fields (LENGTH, INCIDENT_LENGTH, INCIDENT_VALUE,
+    VALUE) depending on the league — first numeric field wins. If no
+    explicit length field is present, falls back to extracting "+N"
+    from the INCIDENT_TIME string itself ("45+2'", "90+5'").
+
+    Half is inferred from the surrounding STAGE_NAME ("1st Half" /
+    "2nd Half") or, failing that, from the leading minute in
+    INCIDENT_TIME (45 → 1H, 90 → 2H).
+    """
+    out = {1: None, 2: None}
+    if not isinstance(data, dict):
+        return out
+    stages = data.get("DATA") or data.get("data") or []
+    if not isinstance(stages, list):
+        return out
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        stage_name = str(stage.get("STAGE_NAME") or "").lower()
+        # Determine half from stage name when possible.
+        stage_half = None
+        if "1st" in stage_name or "first" in stage_name:
+            stage_half = 1
+        elif "2nd" in stage_name or "second" in stage_name:
+            stage_half = 2
+        for inc in (stage.get("ITEMS") or stage.get("items") or []):
+            if not isinstance(inc, dict):
+                continue
+            inc_type = str(inc.get("INCIDENT_TYPE") or "").upper()
+            if not ("INJURY" in inc_type or "STOPPAGE" in inc_type
+                    or "ADDED" in inc_type):
+                continue
+            mins = None
+            for fld in ("LENGTH", "INCIDENT_LENGTH", "INCIDENT_VALUE",
+                        "VALUE", "MIN", "MINUTES"):
+                v = inc.get(fld)
+                if v is None:
+                    continue
+                try:
+                    mins = int(str(v).strip().lstrip("+"))
+                    break
+                except (TypeError, ValueError):
+                    continue
+            # Fallback: extract "+N" from INCIDENT_TIME ("45+2'" form).
+            if mins is None:
+                t = str(inc.get("INCIDENT_TIME") or inc.get("TIME") or "")
+                m = re.search(r"\+\s*(\d+)", t)
+                if m:
+                    try:
+                        mins = int(m.group(1))
+                    except (TypeError, ValueError):
+                        pass
+            if mins is None or not (1 <= mins <= 15):
+                continue  # noise filter — added time never exceeds ~10
+            half = stage_half
+            if half is None:
+                t = str(inc.get("INCIDENT_TIME") or inc.get("TIME") or "")
+                if t.startswith("45"):
+                    half = 1
+                elif t.startswith("90"):
+                    half = 2
+            if half == 1 and out[1] is None:
+                out[1] = mins
+            elif half == 2 and out[2] is None:
+                out[2] = mins
+    return out
+
+
 def get_added_time(event_id: str, period: int):
     """Return the cached added-time figure for an event's half, or None.
     Used by the frontend-state builders in main.py."""
@@ -707,7 +781,14 @@ def get_added_time(event_id: str, period: int):
 async def _fetch_and_cache_added_time(event_id: str):
     """Background fetch + parse + snap into _ADDED_TIME_CACHE. Once the
     figure for a given half is non-None it stays — the 4th official
-    only announces once per half and the number never changes."""
+    only announces once per half and the number never changes.
+
+    Two-source: FL commentary text first (top-flight European leagues
+    typically carry the explicit "X min. of stoppage-time" quote), then
+    falls back to FL summary INJURY_TIME incidents (covers a third tier
+    of leagues whose summary feed has a typed incident but whose
+    commentary feed is sparse or absent). Either source can fill either
+    half independently."""
     if not event_id:
         return
     if event_id in _ADDED_TIME_INFLIGHT:
@@ -716,6 +797,18 @@ async def _fetch_and_cache_added_time(event_id: str):
     try:
         data = await fetch_event_commentary(event_id)
         parsed = _parse_added_time_from_commentary(data)
+        # Summary-incident fallback — only fired when commentary
+        # missed at least one half. Same snap-once semantics; if
+        # commentary already filled both halves we don't pay for a
+        # second HTTP call.
+        if parsed[1] is None or parsed[2] is None:
+            try:
+                summary = await fetch_event_summary(event_id)
+                sparsed = _parse_added_time_from_summary(summary)
+                if parsed[1] is None: parsed[1] = sparsed[1]
+                if parsed[2] is None: parsed[2] = sparsed[2]
+            except Exception as e:
+                log.debug("summary added-time fallback failed for %s: %s", event_id, e)
         entry = _ADDED_TIME_CACHE.setdefault(event_id, {})
         now_ms = int(time.time() * 1000)
         # Only overwrite a half's value if we have a fresh int for it
