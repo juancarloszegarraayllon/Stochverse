@@ -4822,11 +4822,24 @@ async function _loadStandingsType(container, ticker, standingType) {
         // (e.g. Argentine Liga's "Group A" / "Group B"). The API uses
         // GROUP for league groups and GROUP_NAME for some other shapes.
         var grpName = grp.GROUP || grp.GROUP_NAME || grp.NAME || grp.STAGE_NAME || "";
+        // Form responses concatenate N windows (Last 5/10/15) inside
+        // each group's ROWS — same teams repeated, no explicit window
+        // delimiter. Distinct-team count gives the chunk size, so
+        // floor(ri / chunk) is a stable window index even when a
+        // team's MP or DYNAMIC_COLUMNS_DATA drifts (e.g. MP=14 inside
+        // the Last 15 window for a team with a postponed match).
+        var seenTeams = {};
+        for (var ti = 0; ti < grpRows.length; ti++) {
+          var tn = grpRows[ti] && (grpRows[ti].TEAM_NAME || grpRows[ti].team_name || grpRows[ti].name);
+          if (tn) seenTeams[tn] = true;
+        }
+        var teamsPerWindow = Math.max(1, Object.keys(seenTeams).length);
         for (var ri = 0; ri < grpRows.length; ri++) {
           var rr = grpRows[ri];
           if (rr && typeof rr === "object") {
             rr._GROUP_INDEX = gi;
             rr._GROUP_NAME = grpName;
+            rr._WINDOW_INDEX = Math.floor(ri / teamsPerWindow);
           }
           rows.push(rr);
         }
@@ -4846,29 +4859,39 @@ async function _loadStandingsType(container, ticker, standingType) {
     if (standingType === "top_scores" || standingType === "top_scorers" || standingType === "TOP_SCORERS") {
       _renderTopScorersFromStandings(container, rows);
     } else if (standingType === "form") {
-      // Form data shape: data.DATA splits by league group (Argentine
-      // Liga has two — "Group A" / "Group B"); within each group's
-      // ROWS, rows are concatenated across windows (Last 5 / Last 10
-      // / Last 15). The window size is in DYNAMIC_COLUMNS_DATA[0]
-      // (consistently "5", "10", "15" — independent of how many
-      // matches a specific team has actually played, which lets the
-      // MATCHES_PLAYED column drift to 14 for teams with postponed
-      // games). Bucket by that.
+      // Form data ships N windows (Last 5 / Last 10 / Last 15)
+      // concatenated inside each league-group's ROWS — same teams
+      // repeated, no explicit delimiter. The flatten step tagged
+      // each row with _WINDOW_INDEX (computed from position-within-
+      // group ÷ distinct team count), which is stable even when a
+      // team's MATCHES_PLAYED or DYNAMIC_COLUMNS_DATA drifts (e.g.
+      // MP=14 inside the Last 15 window after a postponed match —
+      // that previously spawned a phantom "Last 14" button).
       var windows = {};
       for (var fi = 0; fi < rows.length; fi++) {
-        var dcd = rows[fi].DYNAMIC_COLUMNS_DATA;
-        var winKey = "";
-        if (dcd && Array.isArray(dcd) && dcd.length) winKey = String(dcd[0]);
-        if (!winKey) winKey = String(rows[fi].MATCHES_PLAYED || "0");
-        if (!windows[winKey]) windows[winKey] = [];
-        windows[winKey].push(rows[fi]);
+        var wi = rows[fi]._WINDOW_INDEX;
+        if (wi === undefined || wi === null) wi = 0;
+        if (!windows[wi]) windows[wi] = [];
+        windows[wi].push(rows[fi]);
       }
       var winKeys = Object.keys(windows).sort(function(a,b) { return parseInt(a) - parseInt(b); });
-      // Render window buttons + table.
+      // Label each bucket with the max MP it contains — that's the
+      // actual window size (5/10/15). Falls back to "Window N" if MP
+      // isn't populated.
+      var labelByKey = {};
+      for (var lk = 0; lk < winKeys.length; lk++) {
+        var bucket = windows[winKeys[lk]];
+        var maxMP = 0;
+        for (var bi = 0; bi < bucket.length; bi++) {
+          var mp = parseInt(bucket[bi].MATCHES_PLAYED || 0);
+          if (mp > maxMP) maxMP = mp;
+        }
+        labelByKey[winKeys[lk]] = maxMP > 0 ? String(maxMP) : ("Window " + (parseInt(winKeys[lk]) + 1));
+      }
       var h = '<div class="ed-sb-tabs ed-sb-filter-tabs" style="margin-bottom:8px">';
       for (var wk = 0; wk < winKeys.length; wk++) {
         var k = winKeys[wk];
-        h += '<button class="ed-sb-tab' + (wk === 0 ? ' active' : '') + '" onclick="window._stFormCount(this,\'' + k + '\')">' + escH("Last " + k) + '</button>';
+        h += '<button class="ed-sb-tab' + (wk === 0 ? ' active' : '') + '" onclick="window._stFormCount(this,\'' + k + '\')">' + escH("Last " + labelByKey[k]) + '</button>';
       }
       h += '</div><div id="st-form-table"></div>';
       container.innerHTML = h;
