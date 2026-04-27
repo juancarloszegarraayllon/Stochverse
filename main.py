@@ -4147,6 +4147,12 @@ async def sportsdb_probe():
 # short window so the second-through-Nth callers reuse it.
 _FL_GAME_CACHE: dict = {}  # ticker -> (expires_ts, game_dict_or_None)
 FL_GAME_CACHE_TTL = 600    # 10 min — generous; modal sessions are short
+FL_GAME_NEG_CACHE_TTL = 30 # 30 s for None results — shields the FlashLive
+                           # search endpoint from hammering on uncovered
+                           # events without locking out a ticker for the
+                           # full 10-minute window if the first probe was
+                           # unlucky (GAMES not yet populated, transient
+                           # match_game miss, etc.).
 
 
 async def _find_fl_game(found: dict):
@@ -4166,7 +4172,8 @@ async def _find_fl_game(found: dict):
     if not g:
         g = await search_flashlive_event(title, sport)
     if ticker:
-        _FL_GAME_CACHE[ticker] = (now + FL_GAME_CACHE_TTL, g)
+        ttl = FL_GAME_CACHE_TTL if g else FL_GAME_NEG_CACHE_TTL
+        _FL_GAME_CACHE[ticker] = (now + ttl, g)
     return g
 
 
