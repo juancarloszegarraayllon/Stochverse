@@ -4837,6 +4837,81 @@ async def debug_fl_schema(ticker: str):
         return {"error": str(e)[:300]}
 
 
+@app.get("/api/debug_fl_sports_list")
+async def debug_fl_sports_list():
+    """Probe FlashLive's /v1/sports/list to discover the full ID→name
+    table, then cross-reference against our hard-coded SPORT_MAP /
+    ACTIVE_SPORTS and the Kalshi sport categories that show up in
+    _SPORT_SERIES. Surfaces three gaps:
+
+      - sports FlashLive supports that we haven't mapped yet
+      - sports we've mapped but don't actively poll
+      - Kalshi sports with no FlashLive equivalent
+
+    One-off endpoint, hit it once when expanding coverage.
+    """
+    try:
+        from flashlive_feed import _fl_get, SPORT_MAP, ACTIVE_SPORTS
+        raw = await _fl_get("/v1/sports/list", {})
+        # FlashLive ships sports under DATA[].EVENT_NAMES sometimes,
+        # under DATA directly other times — capture whatever we get
+        # and let the caller eyeball the raw shape too.
+        items = []
+        if isinstance(raw, dict):
+            data = raw.get("DATA") or raw.get("data") or []
+            if isinstance(data, list):
+                items = data
+        # Normalize to {id, name} pairs. Fields vary across FlashLive
+        # responses: SPORT_ID/NAME, ID/NAME, or KEY/VALUE.
+        flashlive_sports = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            sid = it.get("SPORT_ID") or it.get("ID") or it.get("KEY") or ""
+            name = it.get("NAME") or it.get("SPORT_NAME") or it.get("VALUE") or ""
+            flashlive_sports.append({"id": str(sid), "name": str(name), "raw": it})
+        fl_id_to_name = {s["id"]: s["name"] for s in flashlive_sports if s["id"]}
+        # Kalshi sport categories — pulled from _SPORT_SERIES keys.
+        kalshi_sports = sorted(_SPORT_SERIES.keys())
+        # Gap 1: in FlashLive but not yet in our SPORT_MAP.
+        unmapped = [
+            {"id": sid, "name": name}
+            for sid, name in fl_id_to_name.items()
+            if sid not in SPORT_MAP
+        ]
+        # Gap 2: in SPORT_MAP but not in ACTIVE_SPORTS (we know about
+        # the sport but don't poll it).
+        mapped_not_polled = [
+            {"id": sid, "name": name}
+            for sid, name in SPORT_MAP.items()
+            if sid not in ACTIVE_SPORTS
+        ]
+        # Gap 3: Kalshi categories with no name match in FlashLive's
+        # advertised list (case-insensitive substring match handles
+        # things like "Mixed Martial Arts" vs "MMA").
+        fl_names_low = [n.lower() for n in fl_id_to_name.values()]
+        kalshi_no_fl = []
+        for ks in kalshi_sports:
+            ks_low = ks.lower()
+            hit = any(ks_low in fln or fln in ks_low for fln in fl_names_low if fln)
+            if not hit:
+                kalshi_no_fl.append(ks)
+        return {
+            "flashlive_sports": flashlive_sports,
+            "current_sport_map": SPORT_MAP,
+            "current_active_sports": ACTIVE_SPORTS,
+            "kalshi_sports": kalshi_sports,
+            "gaps": {
+                "in_flashlive_not_in_sport_map": unmapped,
+                "in_sport_map_not_polled": mapped_not_polled,
+                "in_kalshi_no_flashlive_equivalent": kalshi_no_fl,
+            },
+            "raw_top_level_keys": list(raw.keys()) if isinstance(raw, dict) else None,
+        }
+    except Exception as e:
+        return {"error": str(e)[:300]}
+
+
 @app.get("/api/debug_fl_capabilities")
 async def debug_fl_capabilities(
     samples_per_sport: int = 2,
