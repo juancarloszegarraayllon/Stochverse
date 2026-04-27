@@ -3757,25 +3757,40 @@ function _capEpAvailable(sportCaps, epPath) {
   return !!ep.available;
 }
 function _capStandingTypes(sportCaps, sportName) {
-  // Returns the list of standing_type values to render. Individual
-  // sports (Tennis, Golf, MMA, Boxing, Darts) genuinely have no
-  // league table — players have rankings, not standings — so the
-  // STANDINGS tab should be hidden for them entirely. For team
-  // sports we default to the canonical three types so the tab always
-  // renders even when the cap-scan cache is stale (e.g. just after
-  // we correct a sport's FlashLive ID), and the lazy-loader handles
-  // the empty-state per event.
-  var NO_STANDINGS_SPORTS = {
-    "Tennis": 1, "Golf": 1, "MMA": 1, "Boxing": 1,
-    "Darts": 1, "Motorsport": 1,
-  };
-  if (sportName && NO_STANDINGS_SPORTS[sportName]) return [];
+  // Fully data-driven. /api/debug_fl_capabilities probes every
+  // standing_type per sport and reports which ones FlashLive returns
+  // rows for in `values_with_data` — that's ground truth for what to
+  // render. Tennis tournaments expose `["draw"]` (the bracket); soccer
+  // leagues expose `["overall","home","away","form","top_scores"]`;
+  // soccer cups add `"draw"`; sports with no league/bracket data at all
+  // (Golf, Motorsport) end up with `available:false`.
+  //
+  // Fallback to the canonical team-sport defaults only when sportCaps
+  // is missing entirely (cap-scan hasn't reached this sport yet) — an
+  // edge case for newly-added sports.
   var DEFAULT = ["overall", "form", "top_scores"];
   if (!sportCaps) return DEFAULT;
   var st = (sportCaps.tournaments || {})["/v1/tournaments/standings"];
-  if (!st || !st.available) return DEFAULT;
+  if (!st) return DEFAULT;
+  if (!st.available) return [];
   var vals = st.values_with_data || [];
-  return (Array.isArray(vals) && vals.length) ? vals.slice() : DEFAULT;
+  return Array.isArray(vals) ? vals.slice() : [];
+}
+function _standingsTabLabel(stTypes) {
+  // Adapts the parent tab label to whatever sub-tabs FlashLive
+  // advertises. When a league-table view is present the parent stays
+  // "Standings" (the table dominates). When the only advertised type
+  // is alternate (e.g. tennis brackets → ["draw"]), use that sub-tab's
+  // label as the parent so the UX matches the content.
+  var TABLE_TYPES = {"overall":1, "home":1, "away":1, "overall_live":1};
+  for (var i = 0; i < stTypes.length; i++) {
+    if (TABLE_TYPES[stTypes[i]]) return "Standings";
+  }
+  if (stTypes.length === 1) {
+    var labelMap = {"draw":"Draw", "form":"Form", "top_scores":"Top Scorers"};
+    return labelMap[stTypes[0]] || "Standings";
+  }
+  return "Standings";
 }
 
 // Fetch live game stats + capability map and populate the sidebar.
@@ -3845,7 +3860,7 @@ async function hydrateGameStats(evTicker) {
     var h = '<div class="ed-sb-tabs ed-sb-main-tabs">';
     h += '<button class="ed-sb-tab active" data-main="match" onclick="window.switchMainTab(this)">Match</button>';
     if (hasH2H) h += '<button class="ed-sb-tab" data-main="h2h" onclick="window.switchMainTab(this)">H2H</button>';
-    if (hasStandings) h += '<button class="ed-sb-tab" data-main="standings" onclick="window.switchMainTab(this)">Standings</button>';
+    if (hasStandings) h += '<button class="ed-sb-tab" data-main="standings" onclick="window.switchMainTab(this)">' + escH(_standingsTabLabel(stTypes)) + '</button>';
     if (hasNews) h += '<button class="ed-sb-tab" data-main="news" onclick="window.switchMainTab(this)">News</button>';
     h += '</div>';
 
@@ -4259,15 +4274,23 @@ async function _hydrateStandingsTabs(stPanel, ticker) {
     if (tabs[di].type === "overall") { defaultTab = tabs[di]; break; }
   }
   if (!defaultTab) defaultTab = tabs[0];
-  // Render the strip.
-  var th = "";
-  for (var ti = 0; ti < tabs.length; ti++) {
-    var t = tabs[ti];
-    var active = (t === defaultTab) ? " active" : "";
-    th += '<button class="ed-sb-tab' + active + '" data-st-type="' + t.type
-        + '" onclick="window._dbgStSwitch(this)">' + escH(t.label) + '</button>';
+  // Render the strip — skip when there's only one sub-tab, since the
+  // parent tab's label already adapts to that single type (e.g. tennis
+  // brackets render as parent="Draw" with no redundant "Draw" sub-tab).
+  if (tabs.length <= 1) {
+    tabsRow.style.display = "none";
+    tabsRow.innerHTML = "";
+  } else {
+    tabsRow.style.display = "";
+    var th = "";
+    for (var ti = 0; ti < tabs.length; ti++) {
+      var t = tabs[ti];
+      var active = (t === defaultTab) ? " active" : "";
+      th += '<button class="ed-sb-tab' + active + '" data-st-type="' + t.type
+          + '" onclick="window._dbgStSwitch(this)">' + escH(t.label) + '</button>';
+    }
+    tabsRow.innerHTML = th;
   }
-  tabsRow.innerHTML = th;
   // Build the Overall/Home/Away filter dynamically — only expose
   // Home / Away buttons if TABLE_HOME / TABLE_AWAY are advertised.
   if (filterRow && advertised) {
