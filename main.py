@@ -4907,6 +4907,14 @@ def _fl_has_data(resp) -> bool:
 _EVENT_CAPS_CACHE: dict = {}
 _EVENT_CAPS_TTL = 300  # seconds
 
+# /stats response cache. Keyed by ticker, holds the parsed payload with
+# its capture timestamp. TTL is short (10 s) so live tennis matches
+# refresh fast enough to track set-by-set changes; finished/pre-match
+# events benefit from instant repeats when the user toggles between
+# tabs in the event-detail modal.
+_STATS_CACHE: dict = {}
+_STATS_CACHE_TTL = 10  # seconds
+
 
 @app.get("/api/event/{ticker}/capabilities")
 async def event_capabilities(ticker: str):
@@ -7005,6 +7013,15 @@ async def get_event_stats(ticker: str, debug: bool = False):
     ticker = (ticker or "").strip().upper()
     if not ticker:
         return {"error": "ticker required"}
+    # Cache hit — same ticker hit recently. The 10 s TTL keeps live
+    # tennis updates fresh while sparing the FlashLive edge from a flood
+    # of duplicate requests when the user toggles between sub-tabs in
+    # quick succession (Summary ↔ Stats ↔ Lineups all re-mount the
+    # detail panel and re-fetch /stats today).
+    if not debug:
+        cached = _STATS_CACHE.get(ticker)
+        if cached and (time.time() - cached["_ts"]) < _STATS_CACHE_TTL:
+            return cached["payload"]
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
     found = None
@@ -7071,6 +7088,8 @@ async def get_event_stats(ticker: str, debug: bool = False):
             # always present even when _parse_flashlive_stats omits it.
             if isinstance(result, dict):
                 result.setdefault("sport", sport)
+            if not debug:
+                _STATS_CACHE[ticker] = {"_ts": time.time(), "payload": result}
             return result
     except Exception as e:
         logging.getLogger("stochverse").warning("FlashLive stats failed: %s", e)
