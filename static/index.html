@@ -4209,12 +4209,26 @@ async function _hydrateStandingsTabs(stPanel, ticker) {
   var filterRow = stPanel.querySelector(".ed-debug-st-filter");
   var content = stPanel.querySelector(".ed-debug-st-content");
   if (!tabsRow || !content) return;
-  // Always show every sub-tab in the map. Tabs that don't have data
-  // for this league surface a clear empty-state on click (handled
-  // by _loadStandingsType). The previous version awaited the
-  // /standings_tabs probe before rendering, which delayed the
-  // default tab's data fetch behind a now-unused roundtrip.
+  // Probe FlashLive for the tabs this tournament actually advertises
+  // (TABLE / TABLE_HOME / TABLE_AWAY / TABLE_FORM / TOP_SCORERS, plus
+  // optionally LIVE_TABLE / TABLE_OVER_UNDER / TABLE_HT_FT for the
+  // few competitions that surface them). We render strip buttons
+  // only for advertised tabs — any others would fetch null and look
+  // broken. If the probe itself fails we fall back to the full map
+  // so the panel isn't empty.
+  var advertised = null;
+  try {
+    var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/standings_tabs");
+    var d = await r.json();
+    if (d && Array.isArray(d.tabs)) advertised = d.tabs;
+  } catch (e) { /* fall through to full map */ }
+
   var tabs = _STANDINGS_TAB_MAP;
+  if (advertised && advertised.length) {
+    var advSet = {};
+    for (var ai = 0; ai < advertised.length; ai++) advSet[advertised[ai]] = true;
+    tabs = tabs.filter(function(t) { return advSet[t.code]; });
+  }
   // Dedupe by `type` since LIVE_TABLE and LIVE both map to "live_table".
   var seen = {};
   tabs = tabs.filter(function(t) {
@@ -4222,6 +4236,9 @@ async function _hydrateStandingsTabs(stPanel, ticker) {
     seen[t.type] = true;
     return true;
   });
+  // If the filter wiped everything (unknown advertised codes), fall
+  // back to the full map so we still render something usable.
+  if (!tabs.length) tabs = _STANDINGS_TAB_MAP.slice();
   // Pick the default active tab — prefer overall (the standings
   // table itself). If the league doesn't have it, use the first
   // available.
@@ -4239,6 +4256,18 @@ async function _hydrateStandingsTabs(stPanel, ticker) {
         + '" onclick="window._dbgStSwitch(this)">' + escH(t.label) + '</button>';
   }
   tabsRow.innerHTML = th;
+  // Build the Overall/Home/Away filter dynamically — only expose
+  // Home / Away buttons if TABLE_HOME / TABLE_AWAY are advertised.
+  if (filterRow && advertised) {
+    var fh = '<button class="ed-sb-tab active" data-st-filter="overall" onclick="window._dbgStFilter(this)">Overall</button>';
+    if (advertised.indexOf("TABLE_HOME") !== -1) {
+      fh += '<button class="ed-sb-tab" data-st-filter="home" onclick="window._dbgStFilter(this)">Home</button>';
+    }
+    if (advertised.indexOf("TABLE_AWAY") !== -1) {
+      fh += '<button class="ed-sb-tab" data-st-filter="away" onclick="window._dbgStFilter(this)">Away</button>';
+    }
+    filterRow.innerHTML = fh;
+  }
   // Show / hide the Overall/Home/Away filter based on the default
   // tab's hasFilter property.
   if (filterRow) {
