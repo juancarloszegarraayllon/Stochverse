@@ -4150,7 +4150,7 @@ async function hydrateGameStats(evTicker) {
       // a European cup might have all 7) and only shows those.
       // The filter row stays in place but hidden until a tab with
       // hasFilter=true (currently just Standings) is active.
-      h += '<div class="ed-sb-main" data-main="standings" data-debug-ticker="' + escH(evTicker) + '">';
+      h += '<div class="ed-sb-main" data-main="standings" data-debug-ticker="' + escH(evTicker) + '" data-st-types="' + escH(stTypes.join(",")) + '">';
       h += '<div class="ed-debug-st-tabs"></div>';
       h += '<div class="ed-debug-st-filter">';
       h += '<button class="ed-sb-tab active" data-st-filter="overall" onclick="window._dbgStFilter(this)">Overall</button>';
@@ -4236,21 +4236,33 @@ async function _hydrateStandingsTabs(stPanel, ticker) {
   var filterRow = stPanel.querySelector(".ed-debug-st-filter");
   var content = stPanel.querySelector(".ed-debug-st-content");
   if (!tabsRow || !content) return;
-  // Probe FlashLive for the tabs this tournament actually advertises
-  // (TABLE / TABLE_HOME / TABLE_AWAY / TABLE_FORM / TOP_SCORERS, plus
-  // optionally LIVE_TABLE / TABLE_OVER_UNDER / TABLE_HT_FT for the
-  // few competitions that surface them). We render strip buttons
-  // only for advertised tabs — any others would fetch null and look
-  // broken. If the probe itself fails we fall back to the full map
-  // so the panel isn't empty.
+  // Sport-level ceiling — values_with_data from /api/debug_fl_capabilities
+  // is the authoritative list of standing_types FlashLive returns rows
+  // for. Tennis tournaments expose ["draw"], soccer leagues expose 5
+  // types, etc. The ceiling is non-negotiable: never render a sub-tab
+  // for a type the cap-scan says is empty.
+  var stTypesCsv = stPanel.dataset.stTypes || "";
+  var allowedTypes = stTypesCsv ? stTypesCsv.split(",").filter(Boolean) : [];
+  var allowedSet = null;
+  if (allowedTypes.length) {
+    allowedSet = {};
+    for (var ki = 0; ki < allowedTypes.length; ki++) allowedSet[allowedTypes[ki]] = true;
+  }
+  // Probe FlashLive's per-tournament tab inventory to refine the
+  // ceiling further (a sport may expose 5 types overall while a given
+  // tournament only surfaces 3). If the probe fails we keep the
+  // sport-level ceiling.
   var advertised = null;
   try {
     var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/standings_tabs");
     var d = await r.json();
     if (d && Array.isArray(d.tabs)) advertised = d.tabs;
-  } catch (e) { /* fall through to full map */ }
+  } catch (e) { /* keep sport-level ceiling */ }
 
-  var tabs = _STANDINGS_TAB_MAP;
+  var tabs = _STANDINGS_TAB_MAP.slice();
+  if (allowedSet) {
+    tabs = tabs.filter(function(t) { return allowedSet[t.type]; });
+  }
   if (advertised && advertised.length) {
     var advSet = {};
     for (var ai = 0; ai < advertised.length; ai++) advSet[advertised[ai]] = true;
@@ -4263,9 +4275,11 @@ async function _hydrateStandingsTabs(stPanel, ticker) {
     seen[t.type] = true;
     return true;
   });
-  // If the filter wiped everything (unknown advertised codes), fall
-  // back to the full map so we still render something usable.
-  if (!tabs.length) tabs = _STANDINGS_TAB_MAP.slice();
+  // Fall back to the full map ONLY when we have no ceiling at all —
+  // i.e. the sport-level cap-scan didn't reach this sport yet. With a
+  // ceiling in place an empty result is meaningful (sport genuinely
+  // has no standings) and we leave the strip empty.
+  if (!tabs.length && !allowedSet) tabs = _STANDINGS_TAB_MAP.slice();
   // Pick the default active tab — prefer overall (the standings
   // table itself). If the league doesn't have it, use the first
   // available.
