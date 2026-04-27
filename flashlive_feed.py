@@ -27,7 +27,13 @@ API_KEY = os.environ.get("FLASHLIVE_API_KEY", "").strip()
 API_HOST = "flashlive-sports.p.rapidapi.com"
 BASE_URL = f"https://{API_HOST}"
 
-POLL_INTERVAL = 120  # seconds between polls (conserve API quota)
+# Adaptive poll cadence. The slow interval keeps API quota in check
+# when nothing is in progress; the fast interval kicks in as long as
+# any GAMES entry is in state="in" so live-score freshness matches the
+# Kalshi event-list refresh rhythm. Override either via env vars when
+# the deployment's RapidAPI tier supports a different rate budget.
+POLL_INTERVAL = int(os.environ.get("FLASHLIVE_POLL_INTERVAL", "120"))
+LIVE_POLL_INTERVAL = int(os.environ.get("FLASHLIVE_LIVE_POLL_INTERVAL", "30"))
 
 # Poll every FlashLive sport that maps to a Kalshi sport category in
 # main.py's _SPORT_SERIES. Each sport = 1 API call per POLL_INTERVAL,
@@ -535,7 +541,8 @@ async def run_flashlive_feed():
         return
 
     STATUS["running"] = True
-    log.info("FlashLive feed starting (poll every %ds)", POLL_INTERVAL)
+    log.info("FlashLive feed starting (live poll: %ds, idle poll: %ds)",
+             LIVE_POLL_INTERVAL, POLL_INTERVAL)
 
     while True:
         try:
@@ -559,4 +566,10 @@ async def run_flashlive_feed():
             STATUS["last_error"] = str(e)[:200]
             log.error("FlashLive poll error: %s", e)
 
-        await asyncio.sleep(POLL_INTERVAL)
+        # Adaptive cadence — fast when at least one game is currently
+        # live so scores update at near-Kalshi refresh speed, slow
+        # otherwise to spare the API quota.
+        has_live = any(g.get("state") == "in" for g in GAMES.values())
+        sleep_for = LIVE_POLL_INTERVAL if has_live else POLL_INTERVAL
+        STATUS["last_sleep_s"] = sleep_for
+        await asyncio.sleep(sleep_for)

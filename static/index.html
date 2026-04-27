@@ -1535,7 +1535,15 @@ function renderTimeSlot(ev) {
       return '<span class="final-badge">FINAL' + score + '</span>';
     }
     var scoreStr = liveScoreString(live);
-    var scorePart = scoreStr ? ' \u00B7 ' + scoreStr : '';
+    // When the card renders a richer scoreboard below the badge
+    // (tennis tn-rows with sets / games / current point), the
+    // abbreviated "MAR 1 - KAL 0" in the badge would just duplicate
+    // the same numbers the rows already show. Hide it in the badge
+    // so all the score info lives in one place. Other sports without
+    // a rich row layout still keep the badge score as their only
+    // surface.
+    var hasRichRows = live && live.tennis && live.tennis.row1_name;
+    var scorePart = (scoreStr && !hasRichRows) ? ' \u00B7 ' + scoreStr : '';
     var t = liveTimeLabel(ev);
     var clockPart = t ? ' \u00B7 ' + t : '';
     // Stash ESPN state on the badge so the 500ms tick loop can
