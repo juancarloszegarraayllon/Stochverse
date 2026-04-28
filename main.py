@@ -1978,7 +1978,13 @@ def get_events(
             if tokens:
                 title_l = r["title"].lower()
                 ticker_l = r["event_ticker"].lower()
-                haystack = title_l + " " + ticker_l
+                # Sport / subcat / category included so users can
+                # search by sport name ("table tennis", "hockey",
+                # "tennis") even when the title is just "X vs Y".
+                sport_l = (r.get("_sport") or "").lower()
+                subcat_l = (r.get("_subcat") or "").lower()
+                cat_l = (r.get("category") or "").lower()
+                haystack = " ".join([title_l, ticker_l, sport_l, subcat_l, cat_l])
                 if not all(tok in haystack for tok in tokens):
                     continue
 
@@ -3291,7 +3297,17 @@ async def get_screener(
                     pass
             if search:
                 sq = search.lower()
-                if sq not in title.lower() and sq not in o.get("label", "").lower():
+                # Match against title, outcome label, and the record's
+                # sport/subcat so "table tennis" / "hockey" / "tennis"
+                # surface their events even when titles are bare team
+                # names.
+                hay = " ".join([
+                    title.lower(),
+                    str(o.get("label") or "").lower(),
+                    str(r.get("_sport") or "").lower(),
+                    str(r.get("_subcat") or "").lower(),
+                ])
+                if sq not in hay:
                     continue
 
             rows.append({
@@ -3481,8 +3497,6 @@ def get_sports(live: bool = False):
 
     sports = []
     for k, v in sport_counts.items():
-        if k not in _SPORT_SERIES:
-            continue
         # Build subtabs for this sport
         subtabs = []
         if k == "Soccer":
