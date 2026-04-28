@@ -379,6 +379,7 @@ SPORT_ICONS = {
     "Hockey":"🏒","Tennis":"🎾","Golf":"⛳","MMA":"🥊","Cricket":"🏏",
     "Esports":"🎮","Motorsport":"🏎️","Boxing":"🥊","Rugby":"🏉",
     "Lacrosse":"🥍","Chess":"♟️","Darts":"🎯","Aussie Rules":"🏉",
+    "Table Tennis":"🏓",
     "Other Sports":"🏆",
 }
 
@@ -530,6 +531,10 @@ _SPORT_PREFIX_FALLBACK = [
     ("KXATP", "Tennis"), ("KXWTA", "Tennis"), ("KXITF", "Tennis"),
     ("KXGRANDSLAM", "Tennis"), ("KXMCMMEN", "Tennis"),
     ("KXFOMEN", "Tennis"), ("KXFOWOMEN", "Tennis"),
+    # Table Tennis (must come before KXITF rule above wins via length-
+    # sort: KXITTF is longer than KXITF so the prefix sort handles it,
+    # but spell it explicitly here for readability).
+    ("KXITTF", "Table Tennis"),
     # Golf
     ("KXPGA", "Golf"), ("KXGOLFMAJORS", "Golf"),
     ("KXRYDERCUP", "Golf"),

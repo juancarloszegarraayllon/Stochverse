@@ -102,6 +102,7 @@ ACTIVE_SPORTS = {
     "18": "Aussie Rules",
     "19": "Rugby",         # RUGBY_LEAGUE (NRL, Super League)
     "23": "Golf",
+    "25": "Table Tennis",  # ITTF events (KXITTFMEN/KXITTFWOMEN on Kalshi)
     "28": "MMA",
     "31": "Motorsport",
     "36": "Esports",
@@ -138,6 +139,7 @@ SPORT_MAP = {
     "18": "Aussie Rules",
     "19": "Rugby",
     "23": "Golf",
+    "25": "Table Tennis",
     "28": "MMA",
     "31": "Motorsport",
     "32": "Motorsport",   # AUTORACING — same Kalshi bucket
