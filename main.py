@@ -7051,26 +7051,6 @@ def _parse_flashlive_incidents(fl_data):
                         icon = "\U0001f504"; label = "Substitution"
                     elif "penalty" in inc_type:
                         icon = "P"; label = "Penalty"
-                    elif "injury" in inc_type or "stoppage" in inc_type or "added" in inc_type:
-                        # 4th official's added-time board. The +N value
-                        # lives in any of a handful of length-style
-                        # fields depending on which league/feed FL is
-                        # mirroring; first numeric field wins.
-                        length = ""
-                        for fld in ("LENGTH", "INCIDENT_LENGTH",
-                                    "INCIDENT_VALUE", "VALUE", "MIN", "MINUTES"):
-                            v = inc.get(fld)
-                            if v is not None and str(v).strip():
-                                length = str(v).strip().lstrip("+")
-                                break
-                        incidents.append({
-                            "time": str(minute), "type": "injurytime",
-                            "icon": "⏳", "player": "", "assist": "",
-                            "score": "", "side": "neutral",
-                            "length": length,
-                            "text": (f"+{length} min" if length else ""),
-                        })
-                        continue
                     else:
                         continue
                     incidents.append({
