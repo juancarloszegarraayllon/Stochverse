@@ -1756,16 +1756,7 @@ function tickLiveClocks() {
     }
     var elapsed = Math.max(0, Math.floor((now - captured) / 1000));
     // Cap drift so a stale capture doesn't run the clock to zero.
-    // Tight cap for countdown sports (hockey/NBA/NFL) — they have
-    // frequent stoppages (faceoffs, timeouts, reviews) that pause the
-    // real clock while our tick keeps decrementing. A 15-second cap
-    // produced visible 8:47→8:42→8:46 bouncing as our interpolation
-    // out-ran the broadcast clock then snapped back on each poll.
-    // 3 seconds keeps the smooth-tick UX between polls without
-    // letting the over-count get noticeable. Soccer uses
-    // STAGE_START_TIME math separately and isn't affected.
-    var driftCap = (sport === 'Soccer') ? 15 : 3;
-    if (elapsed > driftCap) elapsed = driftCap;
+    if (elapsed > 15) elapsed = 15;
     var newSecs;
     if (sport === 'Soccer') {
       newSecs = baseSecs + elapsed;
