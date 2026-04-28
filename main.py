@@ -170,6 +170,12 @@ app.add_middleware(CloudflareCacheMiddleware)
 # spot regressions. Also sets X-Response-Time-Ms on the response.
 SLOW_REQUEST_MS = int(os.environ.get("SLOW_REQUEST_MS", "1000"))
 
+# Minimum 24h trading volume (sum across all outcomes in an event)
+# for a non-sport event to qualify as "trading hot" on the Live tab.
+# Tunable via env var so we can adjust without a redeploy if it ends
+# up too noisy or too quiet.
+LIVE_VOL24H_THRESHOLD = int(os.environ.get("LIVE_VOL24H_THRESHOLD", "1000"))
+
 
 class TimingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -1763,6 +1769,11 @@ def _build_cache():
                 "_close_dt": close_dt.isoformat() if close_dt else None,
                 "_exp_dt": game_end_dt.isoformat() if game_end_dt else None,
                 "_sort_ts": sort_ts_dt.isoformat() if sort_ts_dt else None,
+                # Total 24h trading volume across all markets in this
+                # event. Powers the "trading hot" inclusion path on
+                # the Live tab so actively-traded events show even
+                # when their settlement is weeks/months out.
+                "_vol24h_total": sum((o.get("_vol24h") or 0) for o in outcomes),
                 "outcomes": outcomes,
             }
             records.append(r)
@@ -1967,33 +1978,42 @@ def get_events(
                     if not (is_today or in_window):
                         continue
                 else:
-                    # Non-sport event (crypto, politics, etc.).
-                    # "Live" = event is happening today. Three ways
-                    # to qualify:
-                    #   1. Ticker date matches today (e.g. APR12 in
-                    #      KXHUNGARYMOV-26APR12 = election today)
-                    #   2. exp_dt is same UTC date as now
-                    #   3. exp_dt within 18h (timezone edge cases)
-                    # This handles cases where Kalshi's exp_dt is
-                    # days/weeks after the actual event (elections
-                    # settle later than they happen).
+                    # Non-sport event (crypto, politics, etc.). Two
+                    # paths into the Live tab:
+                    #
+                    #   A. "Happening today" — the existing settlement-
+                    #      window heuristic (ticker date today, exp_dt
+                    #      today, or exp_dt within 18h).
+                    #   B. "Trading hot" — actively traded right now,
+                    #      regardless of when it settles. Mirrors what
+                    #      Kalshi puts on their own Live tab: markets
+                    #      with significant 24h volume even if their
+                    #      settlement is weeks/months out (e.g. HOOD
+                    #      Gold Subs, ongoing political-cycle markets).
                     edt = r.get("_exp_dt")
                     ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
                     today_date = now_utc.date()
+                    _happening_today = False
+                    _settled = False
                     if ticker_date and ticker_date == today_date:
-                        pass  # event happening today — include
+                        _happening_today = True
                     elif edt:
                         try:
                             e = _dt.fromisoformat(edt)
                             if now_utc >= e:
-                                continue  # already settled
-                            same_day = e.date() == today_date
-                            within_18h = (e - now_utc).total_seconds() <= 18 * 3600
-                            if not (same_day or within_18h):
-                                continue
+                                _settled = True
+                            else:
+                                same_day = e.date() == today_date
+                                within_18h = (e - now_utc).total_seconds() <= 18 * 3600
+                                if same_day or within_18h:
+                                    _happening_today = True
                         except Exception:
-                            continue
-                    else:
+                            pass
+                    if _settled:
+                        continue
+                    _vol24h = r.get("_vol24h_total", 0) or 0
+                    _trading_hot = _vol24h >= LIVE_VOL24H_THRESHOLD
+                    if not (_happening_today or _trading_hot):
                         continue
             elif category == "Sports":
                 if not r["_is_sport"]: continue
