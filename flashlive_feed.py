@@ -384,10 +384,23 @@ def _parse_event(ev):
             "BREAK_TIME": "Break",
             "PENALTIES": "Penalties",
         }
-        # Game clock / minute display
+        # Game clock / minute display.
+        # Apostrophe-suffix ("45'") is a soccer broadcast convention.
+        # For other sports (basketball/hockey/football) we ship the
+        # raw value so the frontend's parseClockSecs can handle both
+        # MM:SS strings (e.g. "2:58" — Q2 with 2:58 remaining) and
+        # bare integer minutes (e.g. "3"). FL sometimes alternates
+        # between the two formats across polls; with the apostrophe
+        # appended, "2:58'" breaks parseClockSecs entirely and the
+        # tick falls back to rendering the raw string — producing
+        # the visible bounce between "Q2 2:58" (tick running) and
+        # "3'" (tick skipped) the user sees.
         game_time_str = str(game_time or "")
         if game_time_str and game_time_str not in ("-1", "0", "", "None"):
-            display_clock = f"{game_time_str}'"
+            if sport == "Soccer":
+                display_clock = f"{game_time_str}'"
+            else:
+                display_clock = game_time_str
         elif sport == "Soccer" and state == "in" and stage_start_ms and stage in SOCCER_PERIOD_OFFSETS:
             # GAME_TIME is unreliable on FlashLive — frequently null,
             # often stale. STAGE_START_TIME gives the exact second the
