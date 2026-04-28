@@ -162,7 +162,15 @@ def _normalize(s: str) -> str:
 
 def match_game(title: str, sport: str = ""):
     """Find a FlashLive game matching a Kalshi event title.
-    Returns a game dict or None."""
+    Returns a game dict or None.
+
+    Requires BOTH home and away to have at least one phrase hit in
+    the title — preventing the "single overlapping team" bug where
+    a Kalshi card like "Mexico vs Macao" used to match an FL game
+    "Denmark vs Mexico" (only "mexico" overlapping) and inherit the
+    wrong score. Score still picks the best dual-match when more
+    than one candidate satisfies both sides.
+    """
     if not GAMES or not title:
         return None
     norm_title = _normalize(title)
@@ -173,17 +181,24 @@ def match_game(title: str, sport: str = ""):
             continue
         home_phrases = g.get("home_phrases", [])
         away_phrases = g.get("away_phrases", [])
-        score = 0
+        home_hit_len = 0
+        away_hit_len = 0
         for phrase in home_phrases:
             if phrase and phrase in norm_title:
-                score += len(phrase)
+                home_hit_len = max(home_hit_len, len(phrase))
         for phrase in away_phrases:
             if phrase and phrase in norm_title:
-                score += len(phrase)
+                away_hit_len = max(away_hit_len, len(phrase))
+        # Both sides must match — single-side overlap is too noisy
+        # for country-name shared-name cases (Hungary, Mexico,
+        # Algeria, Slovenia, etc. recur across many fixtures).
+        if home_hit_len < 3 or away_hit_len < 3:
+            continue
+        score = home_hit_len + away_hit_len
         if score > best_score:
             best_score = score
             best = g
-    return best if best_score >= 4 else None
+    return best
 
 
 def compact_label(g: dict) -> str:

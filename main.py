@@ -3484,6 +3484,7 @@ def get_sports(live: bool = False):
     sport_counts = {}
     soccer_comps = set()
     sport_series = {}  # sport -> set of series tickers present in data
+    sport_subcats = {}  # sport -> set of _subcat strings present
 
     for r in records:
         if r["_is_sport"]:
@@ -3492,6 +3493,9 @@ def get_sports(live: bool = False):
             if s not in sport_series:
                 sport_series[s] = set()
             sport_series[s].add(r["series_ticker"].upper())
+            sub = r.get("_subcat") or ""
+            if sub:
+                sport_subcats.setdefault(s, set()).add(sub)
             if s == "Soccer" and r["_soccer_comp"] and r["_soccer_comp"] not in ("Other",""):
                 soccer_comps.add(r["_soccer_comp"])
 
@@ -3508,6 +3512,13 @@ def get_sports(live: bool = False):
                 for tab_name, series_list in tabs_def:
                     if any(s in present for s in series_list):
                         subtabs.append(tab_name)
+            else:
+                # Sports without a hardcoded SPORT_SUBTABS entry
+                # (Table Tennis, etc.) — derive subtabs from the
+                # auto-generated _subcat strings each record carries.
+                # Lets newly-classified sports surface league/category
+                # subtabs without a code change.
+                subtabs = sorted(sport_subcats.get(k, set()))
         sports.append({
             "name": k,
             "count": v,
