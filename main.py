@@ -7904,12 +7904,16 @@ async def db_health():
     return out
 
 
-@app.get("/healthz")
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 def healthz():
     """Cheap liveness probe. Used by keep-warm pingers (Railway
     cron, UptimeRobot) to prevent the container from parking
     between user visits, and by monitoring to detect outages.
-    Returns 200 with a compact payload — no DB or Kalshi calls."""
+    Returns 200 with a compact payload — no DB or Kalshi calls.
+
+    Accepts HEAD as well as GET so free-tier UptimeRobot monitors
+    (which default to HEAD and can't be changed without a paid plan)
+    don't get a spurious 405."""
     return {
         "ok": True,
         "cache_age_s": int(time.time() - _cache.get("ts", 0)) if _cache.get("ts") else None,
