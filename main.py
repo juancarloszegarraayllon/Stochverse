@@ -1911,9 +1911,21 @@ def get_events(
                     _subtab_valid = True
                     break
             elif r.get("_is_sport"):
-                if (r.get("_subcat") or "") == soccer_comp:
-                    _subtab_valid = True
-                    break
+                # Mirror the filter logic below: SPORT_SUBTABS-bucketed
+                # sports validate via SERIES_TO_SUBTAB lookup; sports
+                # without hardcoded buckets validate by direct _subcat.
+                sp = r.get("_sport") or ""
+                tabs_def = SPORT_SUBTABS.get(sp, [])
+                if tabs_def:
+                    lk = SERIES_TO_SUBTAB.get(sp, {})
+                    series_up = (r.get("series_ticker") or "").upper()
+                    if lk.get(series_up, "Other") == soccer_comp:
+                        _subtab_valid = True
+                        break
+                else:
+                    if (r.get("_subcat") or "") == soccer_comp:
+                        _subtab_valid = True
+                        break
             else:
                 # Non-sport keyword bucket — assume valid; the keyword
                 # filter below already does best-effort matching.
@@ -1999,13 +2011,23 @@ def get_events(
             if sport == "Soccer" or r["_sport"] == "Soccer":
                 if r["_soccer_comp"] != soccer_comp: continue
             elif sport and r["_is_sport"]:
-                # Non-soccer sport subtab filter — compare directly to
-                # the record's _subcat (now sourced from /series.title
-                # / ticker fallback). Skipped automatically when the
-                # subtab name doesn't appear in the dataset (stale
-                # selection), so events never silently vanish.
-                if (r.get("_subcat") or "") != soccer_comp:
-                    continue
+                # Non-soccer sport subtab filter. Sports with hardcoded
+                # SPORT_SUBTABS use the broad bucket (NBA Games / NBA
+                # Awards / etc.) via the SERIES_TO_SUBTAB lookup —
+                # mirrors Kalshi's curated league-level grouping.
+                # Sports without hardcoded buckets compare _subcat
+                # directly so dynamically-classified sports (Table
+                # Tennis, etc.) still filter correctly.
+                sp = r["_sport"]
+                tabs_def = SPORT_SUBTABS.get(sp, [])
+                if tabs_def:
+                    lk = SERIES_TO_SUBTAB.get(sp, {})
+                    series = r.get("series_ticker", "").upper()
+                    subtab = lk.get(series, "Other")
+                    if subtab != soccer_comp: continue
+                else:
+                    if (r.get("_subcat") or "") != soccer_comp:
+                        continue
             else:
                 # Non-sport category keyword filter
                 KEYWORD_MAP = {
@@ -3609,17 +3631,25 @@ def get_sports(live: bool = False):
     for k, v in sport_counts.items():
         # Build subtabs for this sport. Soccer keeps its own
         # _soccer_comp-driven path (specialized league names + cup
-        # competitions). All other sports derive subtabs from each
-        # record's _subcat — which is now sourced from Kalshi's per-
-        # event sub_title, then /series.title, then a ticker-derived
-        # fallback. This mirrors Kalshi's own UI: per-tournament tabs
-        # like "ATP Madrid" / "WTA Madrid" / "ITF" instead of broad
-        # bucketed groupings ("ATP Matches" / "WTA Matches").
+        # competitions). For other sports, prefer the hardcoded
+        # SPORT_SUBTABS buckets (NBA Games / NBA Awards / WNBA /
+        # NCAAB / etc.) since those are the curated league-level
+        # groupings. Dynamically-classified sports without a
+        # SPORT_SUBTABS entry (Table Tennis, etc.) fall back to the
+        # auto-derived _subcat strings so they still get a subtab
+        # strip without a code change.
         subtabs = []
         if k == "Soccer":
             subtabs = sorted(soccer_comps)
         else:
-            subtabs = sorted(sport_subcats.get(k, set()))
+            tabs_def = SPORT_SUBTABS.get(k, [])
+            if tabs_def:
+                present = sport_series.get(k, set())
+                for tab_name, series_list in tabs_def:
+                    if any(s in present for s in series_list):
+                        subtabs.append(tab_name)
+            else:
+                subtabs = sorted(sport_subcats.get(k, set()))
         sports.append({
             "name": k,
             "count": v,
