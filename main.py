@@ -1657,14 +1657,35 @@ def _build_cache():
             if _sport == "Soccer":
                 _soccer_comp = SOCCER_COMP.get(series, "")
                 if not _soccer_comp:
-                    # Auto-generate league label from the series ticker
-                    # for unknown soccer leagues. Strip KX prefix and
-                    # GAME/MATCH suffix, then humanize. E.g.:
-                    #   KXBOLPDIVGAME → BOLPDIV → "Bolpdiv"
-                    # Also auto-register it in SOCCER_COMP so the nav
-                    # subtab appears and future events use the same label.
+                    # Prefix-match: many soccer competitions ship new
+                    # market-type variants over time (KXUCLCORNERS,
+                    # KXUCLTCORNERS, KXEPLREDCARDS, etc.) that aren't
+                    # in SOCCER_COMP individually. Find the longest
+                    # SOCCER_COMP key that prefixes this series — for
+                    # KXUCLCORNERS that's "KXUCL" → "Champions League".
+                    # Eliminates ugly auto-labels like "Uclcorners".
+                    best_prefix = ""
+                    for known in SOCCER_COMP:
+                        if series.startswith(known) and len(known) > len(best_prefix):
+                            best_prefix = known
+                    if best_prefix:
+                        _soccer_comp = SOCCER_COMP[best_prefix]
+                        SOCCER_COMP[series] = _soccer_comp
+                if not _soccer_comp:
+                    # Try Kalshi's /series.title (dynamic) before the
+                    # ticker auto-label. Friendly tournament names
+                    # for genuinely-new leagues, no code change needed.
+                    _dyn = _resolve_series_subcat_dynamic(series)
+                    if _dyn:
+                        _soccer_comp = _dyn
+                        SOCCER_COMP[series] = _soccer_comp
+                if not _soccer_comp:
+                    # Last resort: auto-generate league label from the
+                    # series ticker. Strip KX prefix and known suffix,
+                    # title-case. E.g. KXBOLPDIVGAME → "Bolpdiv".
                     base = series
-                    for sfx in ("GAME", "MATCH", "1H", "SPREAD", "TOTAL", "BTTS"):
+                    for sfx in ("GAME", "MATCH", "1H", "SPREAD", "TOTAL", "BTTS",
+                                "CORNERS", "TCORNERS", "REDCARDS", "YELLOWCARDS"):
                         if base.endswith(sfx):
                             base = base[:-len(sfx)]
                             break
