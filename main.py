@@ -1703,15 +1703,19 @@ def _build_cache():
             if _sport == "Soccer" and _soccer_comp and _soccer_comp not in ("Other", ""):
                 _subcat = _soccer_comp
             else:
-                # Per-event sub_title — Kalshi's own tournament/race
-                # label, e.g. "ATP Madrid", "WTA French Open", "2028
-                # Presidential Election". This is what Kalshi groups
-                # by in its own UI and is more granular than per-series
-                # data. Falls back to /series.title (dynamic) and then
-                # _auto_label(ticker) when sub_title is blank.
-                _sub_title = str(ev.get("sub_title") or "").strip()
-                _subcat = _sub_title
-                if not _subcat and _sport and _sport != "Soccer":
+                # Tournament/category label. Kalshi's per-event
+                # `sub_title` turns out to be the match name in many
+                # series (e.g. "Lepchenko vs Pigossi (Apr 28)") not a
+                # tournament label, so it's NOT used here — that
+                # produced subtabs full of individual match names.
+                #
+                # Priority:
+                #   1. Per-series cached label (SERIES_TO_SUBTAB)
+                #   2. Kalshi's /series.title (dynamic, authoritative
+                #      tournament name when populated)
+                #   3. _auto_label(ticker) — string-derive fallback
+                _subcat = ""
+                if _sport and _sport != "Soccer":
                     _subcat = SERIES_TO_SUBTAB.get(_sport, {}).get(series, "")
                 if not _subcat and series:
                     _subcat = _resolve_series_subcat_dynamic(series) or _auto_label(series)
@@ -2369,19 +2373,30 @@ def get_events(
                     pass
         # Market-settling lifecycle: sport event whose expected
         # expiration has passed, with no live-feed FINAL signal and
-        # Kalshi hasn't yet settled the markets. Without this flag the
-        # card sits in the upcoming feed for hours showing stale "—"
-        # prices and the kickoff time. Frontend renders a "Market
-        # settling" pill in place of the date so it's visually
+        # Kalshi hasn't yet settled the markets. Frontend renders a
+        # "Market settling" pill in place of the date so it's visually
         # distinguished from genuinely-upcoming events.
+        #
+        # Strict gating to avoid false positives on upcoming matches
+        # whose Kalshi expected_expiration_time is set loosely (some
+        # ITF/Challenger tennis tickets have exp_dt in the past even
+        # for matches scheduled tomorrow, because Kalshi sets it
+        # against the entire-tournament settlement window):
+        #   • If the live feed has any state ("pre"/"in"/"post"),
+        #     trust it — no settling pill while feed knows what's up.
+        #   • Otherwise require BOTH kickoff_dt AND exp_dt to be in
+        #     the past. Future kickoff is a hard veto.
         if rc.get("category") == "Sports":
             _ls_state = (rc.get("_live_state") or {}).get("state")
-            if _ls_state != "post":
+            if _ls_state not in ("pre", "in", "post"):
+                _kdt_iso = rc.get("_kickoff_dt")
                 _exp_iso = rc.get("_exp_dt")
-                if _exp_iso:
+                if _kdt_iso and _exp_iso:
                     try:
+                        _kdt = datetime.fromisoformat(_kdt_iso.replace("Z", "+00:00"))
                         _exp = datetime.fromisoformat(_exp_iso.replace("Z", "+00:00"))
-                        if datetime.now(timezone.utc) > _exp:
+                        _now = datetime.now(timezone.utc)
+                        if _now > _kdt and _now > _exp:
                             rc["_market_settling"] = True
                     except Exception:
                         pass
