@@ -1702,30 +1702,26 @@ def _build_cache():
 
             if _sport == "Soccer" and _soccer_comp and _soccer_comp not in ("Other", ""):
                 _subcat = _soccer_comp
-            elif _sport and _sport != "Soccer":
-                _subcat = SERIES_TO_SUBTAB.get(_sport, {}).get(series, "")
-                if not _subcat and series:
-                    # Prefer Kalshi's /series.title (dynamic) over the
-                    # raw-ticker auto-label. Falls back if the dynamic
-                    # cache has no useful title (network failure or
-                    # empty title).
-                    _subcat = _resolve_series_subcat_dynamic(series) or _auto_label(series)
-                    if _subcat:
-                        SERIES_TO_SUBTAB.setdefault(_sport, {})[series] = _subcat
             else:
-                # Non-sport event (Politics, Crypto, Weather, etc.).
-                # Use Kalshi's /series.title when available — much
-                # nicer than _auto_label("KXPRESELECTION") = "Preselection".
-                _subcat = ""
-                cat_key = category
-                _series_to_cat_sub = _cache.setdefault("_series_to_cat_sub", {})
-                _cat_bucket = _series_to_cat_sub.setdefault(cat_key, {})
-                if series in _cat_bucket:
-                    _subcat = _cat_bucket[series]
-                elif series:
+                # Per-event sub_title — Kalshi's own tournament/race
+                # label, e.g. "ATP Madrid", "WTA French Open", "2028
+                # Presidential Election". This is what Kalshi groups
+                # by in its own UI and is more granular than per-series
+                # data. Falls back to /series.title (dynamic) and then
+                # _auto_label(ticker) when sub_title is blank.
+                _sub_title = str(ev.get("sub_title") or "").strip()
+                _subcat = _sub_title
+                if not _subcat and _sport and _sport != "Soccer":
+                    _subcat = SERIES_TO_SUBTAB.get(_sport, {}).get(series, "")
+                if not _subcat and series:
                     _subcat = _resolve_series_subcat_dynamic(series) or _auto_label(series)
-                    if _subcat:
-                        _cat_bucket[series] = _subcat
+                if _subcat and _sport and _sport != "Soccer":
+                    SERIES_TO_SUBTAB.setdefault(_sport, {}).setdefault(series, _subcat)
+                if _subcat and not _sport:
+                    cat_key = category
+                    _series_to_cat_sub = _cache.setdefault("_series_to_cat_sub", {})
+                    _cat_bucket = _series_to_cat_sub.setdefault(cat_key, {})
+                    _cat_bucket.setdefault(series, _subcat)
 
             r = {
                 "event_ticker": str(ev.get("event_ticker", "")),
@@ -1950,14 +1946,15 @@ def get_events(
             if sport == "Soccer" or r["_sport"] == "Soccer":
                 if r["_soccer_comp"] != soccer_comp: continue
             elif sport and r["_is_sport"]:
-                # Non-soccer sport subtab filter
-                sp = r["_sport"]
-                tabs_def = SPORT_SUBTABS.get(sp, [])
-                if tabs_def:
-                    lk = SERIES_TO_SUBTAB.get(sp, {})
-                    series = r.get("series_ticker", "").upper()
-                    subtab = lk.get(series, "Other")
-                    if subtab != soccer_comp: continue
+                # Non-soccer sport subtab filter — compare directly to
+                # the record's _subcat (now sourced from sub_title /
+                # /series.title / ticker fallback). Was previously
+                # gated on SPORT_SUBTABS having an entry for the sport;
+                # dropping that gate so dynamically-classified sports
+                # (Table Tennis, future onboarded sports) can be
+                # filtered through the same UI affordance.
+                if (r.get("_subcat") or "") != soccer_comp:
+                    continue
             else:
                 # Non-sport category keyword filter
                 KEYWORD_MAP = {
@@ -3548,24 +3545,19 @@ def get_sports(live: bool = False):
 
     sports = []
     for k, v in sport_counts.items():
-        # Build subtabs for this sport
+        # Build subtabs for this sport. Soccer keeps its own
+        # _soccer_comp-driven path (specialized league names + cup
+        # competitions). All other sports derive subtabs from each
+        # record's _subcat — which is now sourced from Kalshi's per-
+        # event sub_title, then /series.title, then a ticker-derived
+        # fallback. This mirrors Kalshi's own UI: per-tournament tabs
+        # like "ATP Madrid" / "WTA Madrid" / "ITF" instead of broad
+        # bucketed groupings ("ATP Matches" / "WTA Matches").
         subtabs = []
         if k == "Soccer":
             subtabs = sorted(soccer_comps)
         else:
-            tabs_def = SPORT_SUBTABS.get(k, [])
-            if tabs_def:
-                present = sport_series.get(k, set())
-                for tab_name, series_list in tabs_def:
-                    if any(s in present for s in series_list):
-                        subtabs.append(tab_name)
-            else:
-                # Sports without a hardcoded SPORT_SUBTABS entry
-                # (Table Tennis, etc.) — derive subtabs from the
-                # auto-generated _subcat strings each record carries.
-                # Lets newly-classified sports surface league/category
-                # subtabs without a code change.
-                subtabs = sorted(sport_subcats.get(k, set()))
+            subtabs = sorted(sport_subcats.get(k, set()))
         sports.append({
             "name": k,
             "count": v,
