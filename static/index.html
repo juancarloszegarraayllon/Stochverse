@@ -4166,11 +4166,31 @@ async function hydrateGameStats(evTicker) {
   if (!panel) return;
   // Store evTicker for lazy-loaded tabs (H2H, Standings, News).
   panel.dataset.ticker = evTicker;
+  // Skeleton-first: paint a tab-strip-shaped placeholder within ~50 ms
+  // so the panel doesn't look empty while /stats fetches. Replaces
+  // the previous 1-2 s blank wait that made Detailed Event Stats
+  // feel like the click did nothing. Real content overwrites this
+  // when /stats lands.
+  panel.innerHTML = ''
+    + '<div class="ed-sb-tabs ed-sb-main-tabs">'
+    + '<button class="ed-sb-tab active" disabled>Match</button>'
+    + '<button class="ed-sb-tab" disabled>H2H</button>'
+    + '<button class="ed-sb-tab" disabled>Standings</button>'
+    + '<button class="ed-sb-tab" disabled>News</button>'
+    + '</div>'
+    + '<div class="ed-stats-loading" style="padding:32px 0;text-align:center;color:var(--text-dim)">'
+    + 'Loading match details…</div>';
+  // Fire capabilities in parallel but DON'T block on it — it's
+  // module-cached after first call and only used for Standings
+  // sub-tabs. _capStandingTypes falls back to the canonical
+  // team-sport defaults when sportCaps is null, so we can render
+  // immediately with whatever's already cached. First event in a
+  // session uses the defaults; subsequent events get exact caps
+  // because the cache populated in the background.
+  fetchCapabilities();
   try {
-    var statsResp = fetch("/api/event/" + encodeURIComponent(evTicker) + "/stats")
+    var d = await fetch("/api/event/" + encodeURIComponent(evTicker) + "/stats")
       .then(function(r) { return r.json(); });
-    var pair = await Promise.all([statsResp, fetchCapabilities()]);
-    var d = pair[0];
     // If FlashLive can't resolve this Kalshi event to one of its
     // games, every per-event endpoint will return the same error.
     // Hide the whole Background panel rather than render a tab
@@ -4181,7 +4201,7 @@ async function hydrateGameStats(evTicker) {
       else panel.innerHTML = '<div class="ed-stats-loading">' + escH(d.error) + '</div>';
       return;
     }
-    var caps = pair[1] || {};
+    var caps = (typeof _flCaps !== "undefined" && _flCaps) ? _flCaps : {};
     var sport = d.sport || "";
     var sportCaps = caps[sport] || null;
     var home = d.home || "Home";
