@@ -1756,7 +1756,14 @@ function tickLiveClocks() {
     }
     var elapsed = Math.max(0, Math.floor((now - captured) / 1000));
     // Cap drift so a stale capture doesn't run the clock to zero.
-    if (elapsed > 15) elapsed = 15;
+    // Countdown sports (hockey/NBA/NFL) ship minute-precision data
+    // and pause constantly (faceoffs, timeouts, reviews); a loose cap
+    // lets the tick run ahead and snap back on the next poll, producing
+    // visible bouncing. 2 s bounds the bounce to a barely-perceptible
+    // correction. Soccer counts up from STAGE_START_TIME (monotonic),
+    // so it keeps the loose cap.
+    var driftCap = (sport === 'Soccer') ? 15 : 2;
+    if (elapsed > driftCap) elapsed = driftCap;
     var newSecs;
     if (sport === 'Soccer') {
       newSecs = baseSecs + elapsed;
