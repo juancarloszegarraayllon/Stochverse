@@ -165,6 +165,7 @@ html,body{overscroll-behavior:none}
 .live-dot{width:7px;height:7px;border-radius:50%;background:var(--red);box-shadow:0 0 6px rgba(255,51,51,0.9);animation:live-pulse 1.2s infinite ease-in-out}
 .final-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.8px}
 .final-score{color:var(--text);font-weight:700;letter-spacing:0.3px}
+.settling-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.6px;opacity:0.85}
 @keyframes live-pulse{0%,55%{opacity:1;transform:scale(1)}65%,100%{opacity:0.25;transform:scale(0.85)}}
 .cat-tab-live{color:var(--red) !important}
 .cat-tab-live:hover{color:var(--red) !important}
@@ -240,6 +241,7 @@ html,body{overscroll-behavior:none}
   .header-odds-box{padding:0;width:38px}
   .live-badge{font-size:10px;letter-spacing:0.5px}
   .final-badge{font-size:10px;letter-spacing:0.5px}
+  .settling-badge{font-size:10px;letter-spacing:0.4px}
 }
 
 /* ── Small phone ────────────────────────────────────────────────────── */
@@ -1554,6 +1556,15 @@ function renderSeriesPill(ev) {
 }
 
 function renderTimeSlot(ev) {
+  // Market-settling: sport event past its expected expiration with no
+  // live-feed FINAL signal and Kalshi hasn't yet settled the markets.
+  // Backend sets _market_settling=true; frontend renders a dim pill
+  // in place of the upcoming-time text so the card is visually
+  // distinguished from events that haven't started. FINAL still wins
+  // when the live feed has confirmed the result.
+  if (ev._market_settling && !isLive(ev)) {
+    return '<span class="settling-badge">Market settling</span>';
+  }
   if (isLive(ev)) {
     // ESPN says the game has already ended even though Kalshi's
     // market is still open for settlement — show FINAL instead of a
@@ -3938,13 +3949,15 @@ async function hydratePriceCharts() {
 // the live-game state at the section level so the table rows
 // themselves stay neutral — previously we put a red dot on row 0
 // which looked like it was singling out a specific outcome.
-function marketsSectionTitle(live) {
+function marketsSectionTitle(live, ev) {
   var pill = "";
   if (live && live.state === "in") {
     pill = ' <span class="ed-live-pill">'
          + '<span class="ed-live-pill-dot"></span>LIVE</span>';
   } else if (live && live.state === "post") {
     pill = ' <span class="ed-final-pill">FINAL</span>';
+  } else if (ev && ev._market_settling) {
+    pill = ' <span class="ed-final-pill">Market settling</span>';
   }
   var snap = ' <span class="snap-controls" data-snap-section="markets">'
            + '<button class="snap-btn" onclick="window.toggleSnap(this)">'
@@ -6864,7 +6877,7 @@ function renderEventDetail(ev) {
       h += '<div class="ed-section-title">Overview</div>';
       h += summaryStats(g2.outcomes || []);
       h += renderPriceHistoryPanel(g2.event_ticker || ticker, _outcomeLabels(g2.outcomes || []));
-      h += marketsSectionTitle(live);
+      h += marketsSectionTitle(live, ev);
       h += renderMarketsTable(g2.outcomes || [], live);
       h += renderOrderbookSection(g2.outcomes || []);
       h += renderWhaleSentimentSection(g2.outcomes || []);

@@ -2317,6 +2317,24 @@ def get_events(
                     ).isoformat()
                 except Exception:
                     pass
+        # Market-settling lifecycle: sport event whose expected
+        # expiration has passed, with no live-feed FINAL signal and
+        # Kalshi hasn't yet settled the markets. Without this flag the
+        # card sits in the upcoming feed for hours showing stale "—"
+        # prices and the kickoff time. Frontend renders a "Market
+        # settling" pill in place of the date so it's visually
+        # distinguished from genuinely-upcoming events.
+        if rc.get("category") == "Sports":
+            _ls_state = (rc.get("_live_state") or {}).get("state")
+            if _ls_state != "post":
+                _exp_iso = rc.get("_exp_dt")
+                if _exp_iso:
+                    try:
+                        _exp = datetime.fromisoformat(_exp_iso.replace("Z", "+00:00"))
+                        if datetime.now(timezone.utc) > _exp:
+                            rc["_market_settling"] = True
+                    except Exception:
+                        pass
         formatted.append(rc)
     # Re-overlay LIVE_PRICES on every outcome in the response so
     # cards always show current prices, not 5-min-old cache strings.
@@ -2719,6 +2737,22 @@ def get_event_detail(ticker: str):
                         else ("row2" if g.get("tennis_server") == "away" else "")
                     ),
                 }
+
+    # Market-settling lifecycle (mirrors /api/events). Sport event past
+    # its expected expiration with no live-feed FINAL signal — flag so
+    # the detail page header can render the same dim "Market settling"
+    # pill the cards do.
+    if rc.get("category") == "Sports":
+        _ls_state = (rc.get("_live_state") or {}).get("state")
+        if _ls_state != "post":
+            _exp_iso = rc.get("_exp_dt")
+            if _exp_iso:
+                try:
+                    _exp = datetime.fromisoformat(_exp_iso.replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) > _exp:
+                        rc["_market_settling"] = True
+                except Exception:
+                    pass
 
     rc["url"] = _kalshi_url(r.get("series_ticker", ""), r.get("event_ticker", ""))
     return {"event": rc}
