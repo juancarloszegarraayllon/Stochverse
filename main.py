@@ -582,7 +582,112 @@ def get_sport(series_ticker):
     for prefix, sp in _SPORT_PREFIX_FALLBACK:
         if s.startswith(prefix):
             return sp
+    # Dynamic classification via Kalshi /series cache. Populated
+    # lazily by _resolve_series_sport_dynamic when get_data() sees an
+    # unmapped series; cached in-memory for the process lifetime.
+    cached = _SERIES_SPORT_DYNAMIC.get(s)
+    if cached:
+        return cached
     return ""
+
+
+# ── Dynamic sport classifier (Kalshi /series-derived) ────────────────
+# Caches the result of mapping a Kalshi series_ticker → our sport
+# bucket using whatever Kalshi reports on /series/{ticker} (category,
+# tags, title). Replaces the entity-alias fallback as the source of
+# truth for unmapped series — country names like "Hungary" can no
+# longer hijack a table-tennis event into the Soccer tab.
+_SERIES_SPORT_DYNAMIC: dict = {}   # series_ticker (UPPER) → sport name
+_SERIES_SPORT_TRIED: set = set()   # series we've already tried (incl. failures)
+
+# Tag/title keyword → our sport bucket. Order is by descending
+# specificity so "table tennis" wins over "tennis", "american football"
+# wins over "football", etc. The matcher scans concatenated tags +
+# title and returns the longest matching keyword's sport.
+_SPORT_KEYWORDS = [
+    ("Table Tennis",    ["table tennis", "ittf"]),
+    ("Beach Volleyball",["beach volleyball"]),
+    ("Aussie Rules",    ["aussie rules", "australian football", "afl"]),
+    ("Field Hockey",    ["field hockey"]),
+    ("Water Polo",      ["water polo"]),
+    ("Football",        ["american football", "nfl", "ncaa football", "ncaaf", "ufl", "super bowl"]),
+    ("Basketball",      ["basketball", "nba", "wnba", "ncaa basketball"]),
+    ("Baseball",        ["baseball", "mlb", "kbo", "npb"]),
+    ("Hockey",          ["ice hockey", "nhl", "khl", "ahl", "shl"]),
+    ("Tennis",          ["tennis", "atp", "wta", "grand slam"]),
+    ("Golf",            ["golf", "pga", "ryder cup"]),
+    ("MMA",             ["mma", "ufc"]),
+    ("Cricket",         ["cricket", "ipl", "psl", "t20"]),
+    ("Esports",         ["esports", "valorant", "league of legends", "counter-strike", "dota"]),
+    ("Motorsport",      ["motorsport", "formula 1", "f1", "nascar", "indycar", "motogp"]),
+    ("Boxing",          ["boxing"]),
+    ("Rugby",           ["rugby", "nrl"]),
+    ("Lacrosse",        ["lacrosse"]),
+    ("Chess",           ["chess"]),
+    ("Darts",           ["darts"]),
+    ("Volleyball",      ["volleyball"]),
+    ("Handball",        ["handball"]),
+    ("Badminton",       ["badminton"]),
+    ("Snooker",         ["snooker"]),
+    ("Hockey",          ["hockey"]),  # last fallback after ice/field hockey
+    ("Soccer",          ["soccer", "football"]),  # last - "football" overlaps American
+]
+
+
+def _derive_sport_from_kalshi_series(category: str, tags: list, title: str) -> str:
+    """Map Kalshi's /series response fields to one of our sport
+    buckets. Scans tags + title for keyword hits, longest match wins."""
+    if str(category or "").lower() not in ("sports", "sport", ""):
+        # Non-sport category — short-circuit so political/economic
+        # series can't accidentally land in a sport bucket.
+        return ""
+    haystack = " ".join([str(t or "") for t in (tags or [])] + [str(title or "")]).lower()
+    if not haystack.strip():
+        return ""
+    best_sport = ""
+    best_len = 0
+    for sport, keywords in _SPORT_KEYWORDS:
+        for kw in keywords:
+            if len(kw) <= best_len:
+                continue
+            if kw in haystack:
+                best_sport = sport
+                best_len = len(kw)
+    return best_sport
+
+
+def _resolve_series_sport_dynamic(series_ticker: str) -> str:
+    """Look up a series's sport via Kalshi's /series endpoint.
+    Cached in-memory; one network call per series per process. Safe
+    to call from sync code (uses the existing sync Kalshi client)."""
+    s = str(series_ticker or "").upper()
+    if not s:
+        return ""
+    if s in _SERIES_SPORT_DYNAMIC:
+        return _SERIES_SPORT_DYNAMIC[s]
+    if s in _SERIES_SPORT_TRIED:
+        return ""  # already tried, no useful answer — don't spam Kalshi
+    _SERIES_SPORT_TRIED.add(s)
+    try:
+        client = get_client()
+        resp = client.get_series(series_ticker=s)
+        # SDK returns a GetSeriesResponse with .series (the Series model).
+        series_obj = getattr(resp, "series", None) or resp
+        category = getattr(series_obj, "category", "") or ""
+        tags     = getattr(series_obj, "tags", []) or []
+        title    = getattr(series_obj, "title", "") or ""
+        sport = _derive_sport_from_kalshi_series(category, tags, title)
+        if sport:
+            _SERIES_SPORT_DYNAMIC[s] = sport
+            logging.getLogger("stochverse").info(
+                "series-meta: %s → %s (tags=%s)", s, sport, tags[:5]
+            )
+        return sport
+    except Exception as e:
+        logging.getLogger("stochverse").warning(
+            "series-meta lookup failed for %s: %s", s, str(e)[:120]
+        )
+        return ""
 
 
 # ── Game-market grouping ──────────────────────────────────────────────────────
@@ -1484,11 +1589,19 @@ def _build_cache():
             series_ticker_raw = ev.get("series_ticker") or ""
             series = str(series_ticker_raw).upper()
             _sport = get_sport(series)
-            # Fallback: if the hardcoded series_ticker map doesn't
-            # know this prefix, try to infer the sport by matching
-            # team aliases in the event title against our entities
-            # table. Powers automatic classification of new Kalshi
-            # sports/leagues without manual mapping updates.
+            # Dynamic fallback chain for series we haven't hardcoded:
+            # 1) Kalshi /series lookup — authoritative, derived from
+            #    the platform's own tags/title. One network call per
+            #    series per process, cached. Handles new sports
+            #    (table tennis, badminton, water polo, etc.) without
+            #    code changes.
+            # 2) Entity-alias scan — last-resort heuristic, kept for
+            #    cases where /series fails or returns ambiguous tags.
+            #    Known to misfire for cross-sport country names
+            #    (Hungary, Luxembourg, Algeria as soccer nationals);
+            #    only consulted if (1) returns nothing.
+            if not _sport and category == "Sports":
+                _sport = _resolve_series_sport_dynamic(series)
             if not _sport and category == "Sports":
                 try:
                     from db import get_sport_from_entities
