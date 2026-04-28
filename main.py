@@ -1871,6 +1871,34 @@ def get_events(
         _fl_get_added_time = None
 
     # Filter
+    # Pre-check: validate the requested subtab actually exists for this
+    # sport. Without this, a stale subtab selection (left over in the
+    # URL/UI from a previous deploy where _subcat values were named
+    # differently) silently filters every record out and the cards
+    # appear to "disappear". If the subtab doesn't match anything, we
+    # drop the filter and show all events for the sport — the user's
+    # tab selection just becomes a no-op until they click an existing
+    # subtab.
+    _subtab_active = bool(soccer_comp and soccer_comp != "All")
+    _subtab_valid = False
+    if _subtab_active:
+        for r in records:
+            if sport and sport != "All sports" and r.get("_sport") != sport:
+                continue
+            if r.get("_sport") == "Soccer":
+                if r.get("_soccer_comp") == soccer_comp:
+                    _subtab_valid = True
+                    break
+            elif r.get("_is_sport"):
+                if (r.get("_subcat") or "") == soccer_comp:
+                    _subtab_valid = True
+                    break
+            else:
+                # Non-sport keyword bucket — assume valid; the keyword
+                # filter below already does best-effort matching.
+                _subtab_valid = True
+                break
+
     results = []
     for r in records:
         # Category filter
@@ -1946,17 +1974,15 @@ def get_events(
             if r["_sport"] != sport: continue
 
         # Soccer comp / subtab filter
-        if soccer_comp and soccer_comp != "All":
+        if _subtab_active and _subtab_valid:
             if sport == "Soccer" or r["_sport"] == "Soccer":
                 if r["_soccer_comp"] != soccer_comp: continue
             elif sport and r["_is_sport"]:
                 # Non-soccer sport subtab filter — compare directly to
-                # the record's _subcat (now sourced from sub_title /
-                # /series.title / ticker fallback). Was previously
-                # gated on SPORT_SUBTABS having an entry for the sport;
-                # dropping that gate so dynamically-classified sports
-                # (Table Tennis, future onboarded sports) can be
-                # filtered through the same UI affordance.
+                # the record's _subcat (now sourced from /series.title
+                # / ticker fallback). Skipped automatically when the
+                # subtab name doesn't appear in the dataset (stale
+                # selection), so events never silently vanish.
                 if (r.get("_subcat") or "") != soccer_comp:
                     continue
             else:
