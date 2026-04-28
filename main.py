@@ -591,14 +591,21 @@ def get_sport(series_ticker):
     return ""
 
 
-# ── Dynamic sport classifier (Kalshi /series-derived) ────────────────
-# Caches the result of mapping a Kalshi series_ticker → our sport
-# bucket using whatever Kalshi reports on /series/{ticker} (category,
-# tags, title). Replaces the entity-alias fallback as the source of
-# truth for unmapped series — country names like "Hungary" can no
-# longer hijack a table-tennis event into the Soccer tab.
+# ── Dynamic Kalshi /series metadata cache ────────────────────────────
+# Caches Kalshi's authoritative series metadata (category, tags, title)
+# so every classifier — sport bucket for Sports, friendly subcategory
+# label for any category — can pull from one source. One network call
+# per series per process, results cached in-memory; failures captured
+# in _SERIES_META_TRIED so we don't re-spam Kalshi for tickers it has
+# nothing useful for.
+_SERIES_META_DYNAMIC: dict = {}    # series_ticker (UPPER) → {category, tags, title}
+_SERIES_META_TRIED: set = set()    # series we've already tried
+
+# Backward-compat: the old per-sport map kept for any callers that
+# only need the resolved sport. Populated as a side-effect of
+# _resolve_series_meta_dynamic.
 _SERIES_SPORT_DYNAMIC: dict = {}   # series_ticker (UPPER) → sport name
-_SERIES_SPORT_TRIED: set = set()   # series we've already tried (incl. failures)
+_SERIES_SPORT_TRIED: set = _SERIES_META_TRIED  # alias, same semantics
 
 # Tag/title keyword → our sport bucket. Order is by descending
 # specificity so "table tennis" wins over "tennis", "american football"
@@ -656,38 +663,75 @@ def _derive_sport_from_kalshi_series(category: str, tags: list, title: str) -> s
     return best_sport
 
 
-def _resolve_series_sport_dynamic(series_ticker: str) -> str:
-    """Look up a series's sport via Kalshi's /series endpoint.
-    Cached in-memory; one network call per series per process. Safe
-    to call from sync code (uses the existing sync Kalshi client)."""
+def _resolve_series_meta_dynamic(series_ticker: str) -> dict:
+    """Look up a series's full Kalshi /series metadata.
+    Returns {category, tags, title} dict (possibly empty values) on
+    success, or {} on failure. Cached in-memory; one network call per
+    series per process. Safe to call from sync code."""
     s = str(series_ticker or "").upper()
     if not s:
-        return ""
-    if s in _SERIES_SPORT_DYNAMIC:
-        return _SERIES_SPORT_DYNAMIC[s]
-    if s in _SERIES_SPORT_TRIED:
-        return ""  # already tried, no useful answer — don't spam Kalshi
-    _SERIES_SPORT_TRIED.add(s)
+        return {}
+    if s in _SERIES_META_DYNAMIC:
+        return _SERIES_META_DYNAMIC[s]
+    if s in _SERIES_META_TRIED:
+        return {}
+    _SERIES_META_TRIED.add(s)
     try:
         client = get_client()
         resp = client.get_series(series_ticker=s)
-        # SDK returns a GetSeriesResponse with .series (the Series model).
         series_obj = getattr(resp, "series", None) or resp
-        category = getattr(series_obj, "category", "") or ""
-        tags     = getattr(series_obj, "tags", []) or []
-        title    = getattr(series_obj, "title", "") or ""
-        sport = _derive_sport_from_kalshi_series(category, tags, title)
+        meta = {
+            "category": getattr(series_obj, "category", "") or "",
+            "tags":     list(getattr(series_obj, "tags", []) or []),
+            "title":    getattr(series_obj, "title", "") or "",
+        }
+        _SERIES_META_DYNAMIC[s] = meta
+        # Cache the derived sport too so old call sites stay fast.
+        sport = _derive_sport_from_kalshi_series(meta["category"], meta["tags"], meta["title"])
         if sport:
             _SERIES_SPORT_DYNAMIC[s] = sport
-            logging.getLogger("stochverse").info(
-                "series-meta: %s → %s (tags=%s)", s, sport, tags[:5]
-            )
-        return sport
+        logging.getLogger("stochverse").info(
+            "series-meta: %s → cat=%s sport=%s title=%r",
+            s, meta["category"], sport or "-", meta["title"][:60]
+        )
+        return meta
     except Exception as e:
         logging.getLogger("stochverse").warning(
             "series-meta lookup failed for %s: %s", s, str(e)[:120]
         )
+        return {}
+
+
+def _resolve_series_sport_dynamic(series_ticker: str) -> str:
+    """Convenience wrapper — sport-only view of the meta cache. Kept
+    so the existing classifier chain in get_data() stays readable."""
+    s = str(series_ticker or "").upper()
+    if s in _SERIES_SPORT_DYNAMIC:
+        return _SERIES_SPORT_DYNAMIC[s]
+    meta = _resolve_series_meta_dynamic(s)
+    if not meta:
         return ""
+    sport = _derive_sport_from_kalshi_series(meta["category"], meta["tags"], meta["title"])
+    if sport:
+        _SERIES_SPORT_DYNAMIC[s] = sport
+    return sport
+
+
+def _resolve_series_subcat_dynamic(series_ticker: str) -> str:
+    """Friendly subcategory label from Kalshi's /series title. Used as
+    a smarter alternative to _auto_label(ticker) when Kalshi's own
+    title is more readable than the ticker substring. Returns "" if
+    no useful title is available."""
+    meta = _resolve_series_meta_dynamic(series_ticker)
+    if not meta:
+        return ""
+    title = str(meta.get("title") or "").strip()
+    if not title:
+        return ""
+    # Trim noisy prefixes/suffixes Kalshi sometimes ships (e.g.
+    # "Game", "Match" trailing on per-game series titles when the
+    # ticker already implies it).
+    return title[:60]
 
 
 # ── Game-market grouping ──────────────────────────────────────────────────────
@@ -1661,14 +1705,17 @@ def _build_cache():
             elif _sport and _sport != "Soccer":
                 _subcat = SERIES_TO_SUBTAB.get(_sport, {}).get(series, "")
                 if not _subcat and series:
-                    _subcat = _auto_label(series)
+                    # Prefer Kalshi's /series.title (dynamic) over the
+                    # raw-ticker auto-label. Falls back if the dynamic
+                    # cache has no useful title (network failure or
+                    # empty title).
+                    _subcat = _resolve_series_subcat_dynamic(series) or _auto_label(series)
                     if _subcat:
                         SERIES_TO_SUBTAB.setdefault(_sport, {})[series] = _subcat
             else:
                 # Non-sport event (Politics, Crypto, Weather, etc.).
-                # Check hardcoded CAT_TAGS first; if no match, auto-
-                # generate a subtab from the series ticker so every
-                # event gets a label and can be grouped.
+                # Use Kalshi's /series.title when available — much
+                # nicer than _auto_label("KXPRESELECTION") = "Preselection".
                 _subcat = ""
                 cat_key = category
                 _series_to_cat_sub = _cache.setdefault("_series_to_cat_sub", {})
@@ -1676,7 +1723,7 @@ def _build_cache():
                 if series in _cat_bucket:
                     _subcat = _cat_bucket[series]
                 elif series:
-                    _subcat = _auto_label(series)
+                    _subcat = _resolve_series_subcat_dynamic(series) or _auto_label(series)
                     if _subcat:
                         _cat_bucket[series] = _subcat
 
