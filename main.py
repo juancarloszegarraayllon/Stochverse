@@ -2585,17 +2585,17 @@ _ESPN_OVERRIDE_TTL = 30  # seconds — comfortably bounds transient misses
 
 
 def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
-    """If ESPN has a matching game for the given title+sport (and the
-    sport is one of the US stop-clock sports we're upgrading), replace
-    ONLY the clock fields on rc["_live_state"] — display_clock,
-    clock_running, captured_at_ms — with ESPN's values. Period, score,
-    period labels, lineups, etc. all stay from FlashLive.
+    """For US stop-clock sports (Basketball/Hockey/Football),
+    REPLACE all clock + period fields with ESPN's. FL is not
+    consulted for these — its slower poll cadence and missing-STAGE
+    quirks were producing visible drift between FL's period and
+    ESPN's clock. Clean break: when ESPN has data, that's the
+    source. When ESPN doesn't, the badge shows no clock and no
+    period (just "LIVE · score") rather than risk FL leaking through
+    with stale or wrong values.
 
-    On transient ESPN miss (match_game returns None, state isn't "in",
-    display_clock empty), fall back to the last successful ESPN value
-    cached in _ESPN_OVERRIDE_CACHE up to _ESPN_OVERRIDE_TTL seconds
-    old — better than reverting to FL's coarse minute-precision data
-    and producing a visible bounce in the badge."""
+    Score, sub_title, lineups, incidents, etc. still come from FL.
+    Only the clock-related fields are ESPN-territory."""
     if not sport or sport not in _ESPN_CLOCK_SPORTS:
         return
     live = rc.get("_live_state")
@@ -2612,35 +2612,20 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
     espn_ok = (eg is not None and eg.get("state") == "in" and bool(e_clock))
     if espn_ok:
         live["display_clock"] = e_clock
-        # Also overwrite short_detail — frontend liveTimeLabel reads
-        # short_detail first, so leaving FL's coarse "8" in there
-        # caused a brief flash of the wrong number every time the
-        # badge re-rendered before the tick took over.
         live["short_detail"] = e_clock
         live["clock_running"] = bool(eg.get("clock_running", True))
         if eg.get("captured_at_ms"):
             live["captured_at_ms"] = eg["captured_at_ms"]
-        # Period from ESPN as well — same source as the clock means
-        # they're always synchronized. Without this, FL's slower poll
-        # cadence (10 s) lags ESPN's (3 s) at quarter transitions, so
-        # the badge briefly mixed ESPN's new clock with FL's stale
-        # period ("Q3 12:00" when reality was Q4 12:00). FL stays
-        # available as a fallback if ESPN happens to ship period=0.
-        if eg.get("period"):
-            live["period"] = eg["period"]
-        # Mark this clock as ESPN-sourced. Frontend disables tick
-        # interpolation for these so the displayed value is always
-        # ESPN's authoritative reading — no mid-poll drift, no snap-
-        # back when the broadcast clock pauses for a foul/timeout.
-        # Refresh cadence is 3 s (ESPN poll) so the clock visibly
-        # jumps in 3 s steps instead of ticking each second.
+        # Unconditional ESPN period — wipe FL's value even if ESPN's
+        # is 0/missing. ESPN-covered sports don't read FL period.
+        live["period"] = eg.get("period") or 0
         live["clock_source"] = "espn"
         if event_ticker:
             _ESPN_OVERRIDE_CACHE[event_ticker] = {
                 "display_clock": e_clock,
                 "clock_running": live["clock_running"],
                 "captured_at_ms": live["captured_at_ms"],
-                "period":         eg.get("period"),
+                "period":         eg.get("period") or 0,
                 "ts": time.time(),
             }
         return
@@ -2653,20 +2638,19 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
             live["short_detail"] = cached["display_clock"]
             live["clock_running"] = cached["clock_running"]
             live["captured_at_ms"] = cached["captured_at_ms"]
-            if cached.get("period"):
-                live["period"] = cached["period"]
+            live["period"] = cached.get("period") or 0
             live["clock_source"] = "espn"
             return
-    # ESPN missed AND no fresh cache. For ESPN-covered sports, FL's
-    # raw minute-precision GAME_TIME ("8", "10") is misleading next
-    # to the MM:SS values ESPN normally provides — it looks like a
-    # random number to a viewer expecting smooth seconds. Suppress
-    # the clock entirely (both display_clock and short_detail so
-    # frontend liveTimeLabel returns nothing) — badge falls back to
-    # "LIVE · score" with no clock part rather than a confusing
-    # integer.
+    # ESPN truly unavailable (no live match, no recent cache). Clear
+    # ALL clock + period fields so FL's potentially-wrong values
+    # don't leak through. Badge falls back to "LIVE · score" with
+    # nothing else — honest about not knowing the broadcast clock
+    # state. User explicitly asked for ESPN-only on these sports.
     live["display_clock"] = ""
     live["short_detail"] = ""
+    live["period"] = 0
+    live["clock_running"] = False
+    live["clock_source"] = "espn-missing"
 
 
 def _kalshi_url(series_ticker: str, event_ticker: str) -> str:

@@ -1607,9 +1607,16 @@ function renderTimeSlot(ev) {
     var _ts_key = ev.event_ticker || "";
     if (!window._lastLivePeriod) window._lastLivePeriod = {};
     var effectivePeriod = (live && live.period) ? live.period : 0;
+    // ESPN-sourced periods are authoritative — when backend says 0,
+    // it means ESPN explicitly has no period info, and the frontend
+    // cache from a previous render shouldn't override that. For FL-
+    // sourced periods (other sports), the cache is still useful to
+    // bridge transient FL stage drops.
+    var clockSrcLive = (live && live.clock_source) || '';
     if (effectivePeriod && _ts_key) {
       window._lastLivePeriod[_ts_key] = effectivePeriod;
-    } else if (!effectivePeriod && _ts_key && window._lastLivePeriod[_ts_key]) {
+    } else if (!effectivePeriod && _ts_key && window._lastLivePeriod[_ts_key]
+               && clockSrcLive !== 'espn-missing' && clockSrcLive !== 'espn') {
       effectivePeriod = window._lastLivePeriod[_ts_key];
     }
     var attrs = '';
@@ -6771,16 +6778,18 @@ function renderEventDetail(ev) {
     } else {
       detailClock = live.short_detail || "";
     }
-    // Same period-preservation pattern as the card path: cache the
-    // last non-zero period per ticker so an FL flicker poll with
-    // period=0 doesn't strip the badge of its data attrs and freeze
-    // the tick.
+    // Same period-preservation pattern as the card path. ESPN-sourced
+    // periods bypass the frontend cache fallback — when backend says
+    // 0, ESPN is telling us no period info and the cache shouldn't
+    // override that authoritative answer.
     var _det_ts_key = ev.event_ticker || "";
     if (!window._lastLivePeriod) window._lastLivePeriod = {};
     var detailEffectivePeriod = live.period || 0;
+    var detClockSrc = live.clock_source || '';
     if (detailEffectivePeriod && _det_ts_key) {
       window._lastLivePeriod[_det_ts_key] = detailEffectivePeriod;
-    } else if (!detailEffectivePeriod && _det_ts_key && window._lastLivePeriod[_det_ts_key]) {
+    } else if (!detailEffectivePeriod && _det_ts_key && window._lastLivePeriod[_det_ts_key]
+               && detClockSrc !== 'espn-missing' && detClockSrc !== 'espn') {
       detailEffectivePeriod = window._lastLivePeriod[_det_ts_key];
     }
     var detailAttrs = '';
