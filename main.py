@@ -5947,21 +5947,18 @@ async def debug_fl_clock_endpoints(ticker: str):
         "/v1/events/summary-incidents",
     ]
     out = {"fl_event_id": fl_id, "title": title, "sport": sport, "endpoints": {}}
-    import asyncio as _asyncio
-    async def _probe(ep):
+    # Sequential to avoid the asyncio.Lock-bound-to-different-event-
+    # loop error from FL's rate limiter when parallel calls fire from
+    # outside its original loop context.
+    for ep in endpoints:
         try:
             data = await _fl_get(ep, {"event_id": fl_id})
-            return ep, {
+            out["endpoints"][ep] = {
                 "top_keys": list(data.keys()) if isinstance(data, dict) else None,
-                "preview": str(data)[:1500] if data else None,
+                "preview": str(data)[:2000] if data else None,
             }
         except Exception as e:
-            return ep, {"error": str(e)[:200]}
-    results = await _asyncio.gather(*[_probe(ep) for ep in endpoints],
-                                     return_exceptions=True)
-    for r in results:
-        if isinstance(r, tuple):
-            out["endpoints"][r[0]] = r[1]
+            out["endpoints"][ep] = {"error": str(e)[:200]}
     return out
 
 
