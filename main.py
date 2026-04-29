@@ -5844,6 +5844,71 @@ async def debug_fl_capabilities(
     return {**out, "_cache_age_seconds": 0}
 
 
+@app.get("/api/event/{ticker}/debug_clock")
+def debug_clock(ticker: str):
+    """Focused diagnostic for clock display issues. Returns the
+    parsed FlashLive game dict's clock-relevant fields plus the raw
+    keys present on the original FL event payload, so we can tell
+    when FL ships GAME_TIME without STAGE (period=0) and identify
+    any unused fields that might carry better second-precision data.
+
+    Hit /api/event/<ticker>/debug_clock and paste the JSON when a
+    card is misbehaving."""
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = None
+    for r in records:
+        if r.get("event_ticker") == ticker:
+            found = r
+            break
+    if not found:
+        return {"error": f"event {ticker!r} not found in cache"}
+    title = found.get("title", "")
+    sport = found.get("_sport", "")
+    try:
+        from flashlive_feed import (
+            match_game as flash_match, _LAST_PERIOD_CACHE, GAMES,
+        )
+    except Exception as e:
+        return {"error": f"flashlive_feed import failed: {e}"}
+    g = flash_match(title, sport)
+    if not g:
+        return {
+            "match_game_found": False,
+            "title": title,
+            "sport": sport,
+            "games_count": len(GAMES),
+            "last_period_cache_size": len(_LAST_PERIOD_CACHE),
+        }
+    fl_id = g.get("event_id") or ""
+    return {
+        "match_game_found": True,
+        "title": title,
+        "sport": sport,
+        "fl_event_id": fl_id,
+        # Clock-relevant fields on the parsed game dict.
+        "parsed": {
+            "state":           g.get("state"),
+            "display_clock":   g.get("display_clock"),
+            "short_detail":    g.get("short_detail"),
+            "period":          g.get("period"),
+            "stage_start_ms":  g.get("stage_start_ms"),
+            "captured_at_ms":  g.get("captured_at_ms"),
+            "scheduled_kickoff_ms": g.get("scheduled_kickoff_ms"),
+            "home_score":      g.get("home_score"),
+            "away_score":      g.get("away_score"),
+        },
+        # Backend period cache state for this FL event.
+        "period_cache_hit":    fl_id in _LAST_PERIOD_CACHE,
+        "period_cache_value":  _LAST_PERIOD_CACHE.get(fl_id),
+        # Raw FL event keys + a truncated dict preview. Surfaces
+        # any clock/score field we might be ignoring.
+        "fl_raw_keys":      g.get("_raw_keys", []),
+        "fl_raw_preview":   g.get("_raw_preview", "")[:2000],
+    }
+
+
 @app.get("/api/event/{ticker}/debug_fl")
 async def debug_flashlive_data(ticker: str):
     """Debug: show raw FlashLive API responses for all endpoints."""
