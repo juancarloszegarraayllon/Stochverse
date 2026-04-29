@@ -1792,26 +1792,16 @@ function tickLiveClocks() {
       baseSecs = 0;
     }
     var elapsed = Math.max(0, Math.floor((now - captured) / 1000));
-    // ESPN-sourced clocks are second-precision and re-anchored every
-    // 3 s by the backend. Interpolating between polls runs the
-    // displayed value ahead of ESPN's authoritative reading whenever
-    // the broadcast clock pauses for a foul/timeout (mid-poll pauses
-    // sneak past clock_running=true), producing the visible drift
-    // and snap-back. Skip interpolation entirely for ESPN: just
-    // display whatever ESPN last shipped, refreshed each poll.
-    var clockSource = badge.getAttribute('data-live-clock-source') || '';
+    // Cap drift so a stale capture doesn't run the clock to zero.
+    // 15 s safety net. Smoothness comes from interpolating 1 sec per
+    // real sec while the clock runs; pause detection comes from
+    // ESPN's clock_running flag (and FL's data, where applicable).
+    if (elapsed > 15) elapsed = 15;
     var newSecs;
-    if (clockSource === 'espn') {
-      newSecs = baseSecs;
+    if (sport === 'Soccer') {
+      newSecs = baseSecs + elapsed;
     } else {
-      // Cap drift so a stale capture doesn't run the clock to zero.
-      // 15 s is the safety net for FL-only sports (10 s poll cadence).
-      if (elapsed > 15) elapsed = 15;
-      if (sport === 'Soccer') {
-        newSecs = baseSecs + elapsed;
-      } else {
-        newSecs = Math.max(0, baseSecs - elapsed);
-      }
+      newSecs = Math.max(0, baseSecs - elapsed);
     }
     var label = buildLiveLabel(sport, period, newSecs, stageStartMs, addedFor);
     var text = badge.querySelector('.live-text');
