@@ -5945,6 +5945,12 @@ async def debug_fl_clock_endpoints(ticker: str):
         "/v1/events/statistics",
         "/v1/events/summary-results",
         "/v1/events/summary-incidents",
+        # Live-data endpoints we don't currently consume — surfaced
+        # via the FlashLive C# wrapper. /live-update specifically
+        # documents itself as "only new data into live-events" which
+        # might tick at a faster cadence than /v1/events/list.
+        "/v1/events/live-update",
+        "/v1/events/live-list",
     ]
     out = {"fl_event_id": fl_id, "title": title, "sport": sport, "endpoints": {}}
     # Sequential to avoid the asyncio.Lock-bound-to-different-event-
