@@ -2612,6 +2612,11 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
     espn_ok = (eg is not None and eg.get("state") == "in" and bool(e_clock))
     if espn_ok:
         live["display_clock"] = e_clock
+        # Also overwrite short_detail — frontend liveTimeLabel reads
+        # short_detail first, so leaving FL's coarse "8" in there
+        # caused a brief flash of the wrong number every time the
+        # badge re-rendered before the tick took over.
+        live["short_detail"] = e_clock
         live["clock_running"] = bool(eg.get("clock_running", True))
         if eg.get("captured_at_ms"):
             live["captured_at_ms"] = eg["captured_at_ms"]
@@ -2636,6 +2641,7 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
         cached = _ESPN_OVERRIDE_CACHE[event_ticker]
         if (time.time() - cached.get("ts", 0)) < _ESPN_OVERRIDE_TTL:
             live["display_clock"] = cached["display_clock"]
+            live["short_detail"] = cached["display_clock"]
             live["clock_running"] = cached["clock_running"]
             live["captured_at_ms"] = cached["captured_at_ms"]
             live["clock_source"] = "espn"
@@ -2644,9 +2650,12 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
     # raw minute-precision GAME_TIME ("8", "10") is misleading next
     # to the MM:SS values ESPN normally provides — it looks like a
     # random number to a viewer expecting smooth seconds. Suppress
-    # the clock entirely so the badge falls back to "LIVE · score"
-    # with no clock part rather than a confusing integer.
+    # the clock entirely (both display_clock and short_detail so
+    # frontend liveTimeLabel returns nothing) — badge falls back to
+    # "LIVE · score" with no clock part rather than a confusing
+    # integer.
     live["display_clock"] = ""
+    live["short_detail"] = ""
 
 
 def _kalshi_url(series_ticker: str, event_ticker: str) -> str:
