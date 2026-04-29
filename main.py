@@ -5909,6 +5909,62 @@ def debug_clock(ticker: str):
     }
 
 
+@app.get("/api/event/{ticker}/debug_fl_clock_endpoints")
+async def debug_fl_clock_endpoints(ticker: str):
+    """Probe FlashLive endpoints we don't currently consume to see if
+    any of them ship richer live-clock data (clockRunning,
+    secondsRemaining, quarterTime, etc.) than the minute-precision
+    GAME_TIME we use today. Hit this on a live basketball/hockey/NFL
+    game and paste the response — if any endpoint surfaces a useful
+    field we can wire it in."""
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = next((r for r in records if r.get("event_ticker") == ticker), None)
+    if not found:
+        return {"error": f"event {ticker!r} not found in cache"}
+    title = found.get("title", "")
+    sport = found.get("_sport", "")
+    try:
+        from flashlive_feed import match_game as flash_match, _fl_get
+    except Exception as e:
+        return {"error": f"flashlive_feed import failed: {e}"}
+    g = flash_match(title, sport)
+    if not g:
+        return {"error": "match_game found no FL game", "title": title, "sport": sport}
+    fl_id = g.get("event_id") or ""
+    if not fl_id:
+        return {"error": "matched game has no event_id"}
+    # Endpoints worth probing for a live clock signal. We already
+    # consume some of these for stats/standings/etc., but our parsers
+    # don't extract clock-running info from them today.
+    endpoints = [
+        "/v1/events/data",
+        "/v1/events/details",
+        "/v1/events/brief",
+        "/v1/events/statistics",
+        "/v1/events/summary-results",
+        "/v1/events/summary-incidents",
+    ]
+    out = {"fl_event_id": fl_id, "title": title, "sport": sport, "endpoints": {}}
+    import asyncio as _asyncio
+    async def _probe(ep):
+        try:
+            data = await _fl_get(ep, {"event_id": fl_id})
+            return ep, {
+                "top_keys": list(data.keys()) if isinstance(data, dict) else None,
+                "preview": str(data)[:1500] if data else None,
+            }
+        except Exception as e:
+            return ep, {"error": str(e)[:200]}
+    results = await _asyncio.gather(*[_probe(ep) for ep in endpoints],
+                                     return_exceptions=True)
+    for r in results:
+        if isinstance(r, tuple):
+            out["endpoints"][r[0]] = r[1]
+    return out
+
+
 @app.get("/api/event/{ticker}/debug_fl")
 async def debug_flashlive_data(ticker: str):
     """Debug: show raw FlashLive API responses for all endpoints."""
