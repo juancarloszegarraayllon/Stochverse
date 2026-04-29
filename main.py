@@ -5427,6 +5427,11 @@ def _fl_has_data(resp) -> bool:
 _EVENT_CAPS_CACHE: dict = {}
 _EVENT_CAPS_TTL = 300  # seconds
 
+# Per-event scheme cache. Same TTL as caps — both are derived from FL
+# probes that don't change moment-to-moment.
+_EVENT_SCHEME_CACHE: dict = {}
+_EVENT_SCHEME_TTL = 300  # seconds
+
 
 async def _warm_events_async(tickers):
     """Per-event FlashLive refresh for the given Kalshi tickers.
@@ -5621,6 +5626,210 @@ async def event_capabilities(ticker: str):
         }
         _EVENT_CAPS_CACHE[ticker_norm] = {"_ts": time.time(),
                                            "payload": payload}
+        return payload
+    except Exception as e:
+        return {"error": str(e)[:300]}
+
+
+@app.get("/api/event/{ticker}/scheme")
+async def event_scheme(ticker: str):
+    """Build a fully data-driven Detailed Event Stats tab scheme for
+    this event from FlashLive's actual data. Probes every relevant FL
+    endpoint in parallel, groups responses into top-level tabs and
+    Match sub-tabs, returns only the dimensions FL has data for. The
+    frontend renders the tab strip directly from this scheme — no
+    hardcoded tab list, no per-sport deny-list.
+
+    Output shape:
+      {
+        "ticker": "...",
+        "fl_event_id": "...",
+        "sport": "...",
+        "main_tabs": [
+          {
+            "key": "match",
+            "label": "Match",
+            "sub_tabs": [
+              {"key": "summary",     "label": "Summary"},
+              {"key": "stats",       "label": "Stats"},
+              {"key": "lineups",     "label": "Lineups"},
+              {"key": "commentary",  "label": "Commentary"}
+            ]
+          },
+          {"key": "odds",      "label": "Odds"},
+          {"key": "h2h",       "label": "H2H"},
+          {"key": "standings", "label": "Standings",
+           "sub_tabs": [{"key": "overall", "label": "Standings"}, ...]},
+          {"key": "draw",      "label": "Draw"},
+          {"key": "news",      "label": "News"},
+          {"key": "video",     "label": "Video"},
+          {"key": "report",    "label": "Report"}
+        ]
+      }
+
+    Match always renders (every sport has at least period info to
+    show); other top tabs only appear when FL has rows for them.
+    """
+    import asyncio, time
+    ticker_norm = (ticker or "").strip().upper()
+    if not ticker_norm:
+        return {"error": "ticker required"}
+    cached = _EVENT_SCHEME_CACHE.get(ticker_norm)
+    if cached and (time.time() - cached["_ts"]) < _EVENT_SCHEME_TTL:
+        return cached["payload"]
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = next((r for r in records if r.get("event_ticker") == ticker_norm), None)
+    if not found:
+        return {"error": f"event {ticker_norm!r} not found in cache"}
+    try:
+        from flashlive_feed import _fl_get
+        title = found.get("title", "")
+        sport = found.get("_sport", "")
+        g = await _find_fl_game(found)
+        if not g:
+            return {"error": "FlashLive doesn't cover this match yet",
+                    "title": title, "sport": sport,
+                    "main_tabs": []}
+        fl_id = g.get("event_id")
+        stage_id = g.get("tournament_stage_id", "")
+        season_id = g.get("tournament_season_id", "")
+        # Probe every endpoint relevant to one of our tabs / sub-tabs.
+        # Each entry: (key, path, params, target). target is where the
+        # availability flag lands in the scheme — "main_tab:foo" or
+        # "match_sub:foo" or "standings:foo".
+        probes = [
+            # Match sub-tabs
+            ("statistics",        "/v1/events/statistics",        {"event_id": fl_id}, "match_sub:stats"),
+            ("lineups",           "/v1/events/lineups",           {"event_id": fl_id}, "match_sub:lineups"),
+            ("predicted_lineups", "/v1/events/predicted-lineups", {"event_id": fl_id}, "match_sub:predicted_lineups"),
+            ("commentary",        "/v1/events/commentary",        {"event_id": fl_id}, "match_sub:commentary"),
+            ("missing_players",   "/v1/events/missing-players",   {"event_id": fl_id}, "match_sub:missing"),
+            ("player_stats",      "/v1/events/player-stats",      {"event_id": fl_id}, "match_sub:player_stats"),
+            ("summary_incidents", "/v1/events/summary-incidents", {"event_id": fl_id}, "match_sub:summary"),
+            ("summary",           "/v1/events/summary",           {"event_id": fl_id}, "match_sub:summary"),
+            # Top-level tabs
+            ("h2h",               "/v1/events/h2h",               {"event_id": fl_id}, "main_tab:h2h"),
+            ("news",              "/v1/events/news",              {"event_id": fl_id}, "main_tab:news"),
+            ("odds",              "/v1/events/odds",              {"event_id": fl_id}, "main_tab:odds"),
+            ("highlights",        "/v1/events/highlights",        {"event_id": fl_id}, "main_tab:video"),
+            ("report",            "/v1/events/report",            {"event_id": fl_id}, "main_tab:report"),
+        ]
+        # Standings sub-types (each is either a Standings sub-tab or
+        # the dedicated "Draw" top tab — Tennis brackets surface as
+        # standing_type=draw and FlashScore's UI puts that in its own
+        # top tab next to Standings).
+        standing_types = ["overall", "home", "away", "form",
+                          "top_scores", "draw", "overall_live"]
+        if stage_id:
+            for st in standing_types:
+                params = {"tournament_stage_id": stage_id,
+                          "standing_type": st}
+                if season_id:
+                    params["tournament_season_id"] = season_id
+                probes.append((f"standings_{st}",
+                               "/v1/tournaments/standings",
+                               params,
+                               f"standings:{st}"))
+        # Fire everything in parallel.
+        coros = [_fl_get(path, params) for _, path, params, _ in probes]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        # Aggregate availability by target.
+        match_subs_set: set = set()
+        main_tabs_set: set = set()
+        standings_set: set = set()
+        for (_, _, _, target), result in zip(probes, results):
+            has = False if isinstance(result, Exception) else _fl_has_data(result)
+            if not has:
+                continue
+            if target.startswith("match_sub:"):
+                match_subs_set.add(target[len("match_sub:"):])
+            elif target.startswith("main_tab:"):
+                main_tabs_set.add(target[len("main_tab:"):])
+            elif target.startswith("standings:"):
+                standings_set.add(target[len("standings:"):])
+        # ── Compose Match sub-tabs in display order. Summary always
+        #    appears (every sport has period/timeline info via the
+        #    cached game dict, even if FL's summary endpoint was
+        #    blank). Other sub-tabs follow when their endpoint had
+        #    rows.
+        match_sub_order = [
+            ("summary",           "Summary"),
+            ("stats",             "Stats"),
+            ("lineups",           "Lineups"),
+            ("predicted_lineups", "Predicted Lineups"),
+            ("player_stats",      "Player Stats"),
+            ("commentary",        "Commentary"),
+            ("missing",           "Missing"),
+        ]
+        match_sub_tabs = [{"key": "summary", "label": "Summary"}]
+        for k, label in match_sub_order:
+            if k == "summary":
+                continue  # already added unconditionally
+            if k in match_subs_set:
+                match_sub_tabs.append({"key": k, "label": label})
+        # ── Top-level tabs in display order. Match always first.
+        #    Standings and Draw are derived from standings_set: any
+        #    of overall/home/away/form/top_scores → Standings tab
+        #    with sub-tabs; "draw" alone → Draw top tab (FlashScore
+        #    convention).
+        STANDINGS_TYPES_FOR_TAB = ["overall", "home", "away",
+                                   "form", "top_scores", "overall_live"]
+        STANDINGS_LABEL_MAP = {
+            "overall":      "Overall",
+            "home":         "Home",
+            "away":         "Away",
+            "form":         "Form",
+            "top_scores":   "Top Scorers",
+            "overall_live": "Live",
+        }
+        standings_sub_tabs = [
+            {"key": st, "label": STANDINGS_LABEL_MAP.get(st, st.title())}
+            for st in STANDINGS_TYPES_FOR_TAB
+            if st in standings_set
+        ]
+        has_draw = "draw" in standings_set
+        main_tabs: list = [
+            {"key": "match", "label": "Match", "sub_tabs": match_sub_tabs},
+        ]
+        # Order matches FlashScore's own UI: Match · Odds · H2H ·
+        # Standings · Draw · News · Video · Report.
+        if "odds" in main_tabs_set:
+            main_tabs.append({"key": "odds", "label": "Odds"})
+        if "h2h" in main_tabs_set:
+            main_tabs.append({"key": "h2h", "label": "H2H"})
+        if standings_sub_tabs:
+            main_tabs.append({
+                "key": "standings",
+                "label": "Standings",
+                "sub_tabs": standings_sub_tabs,
+            })
+        if has_draw:
+            main_tabs.append({"key": "draw", "label": "Draw"})
+        if "news" in main_tabs_set:
+            main_tabs.append({"key": "news", "label": "News"})
+        if "video" in main_tabs_set:
+            main_tabs.append({"key": "video", "label": "Video"})
+        if "report" in main_tabs_set:
+            main_tabs.append({"key": "report", "label": "Report"})
+        payload = {
+            "ticker": ticker_norm,
+            "fl_event_id": fl_id,
+            "sport": sport,
+            "stage_id": stage_id,
+            "season_id": season_id,
+            "main_tabs": main_tabs,
+            # Surface the raw availability sets too so we can debug
+            # discrepancies between what the scheme exposes and what
+            # FL actually has rows for.
+            "_debug": {
+                "match_subs_with_data":  sorted(match_subs_set),
+                "main_tabs_with_data":   sorted(main_tabs_set),
+                "standings_with_data":   sorted(standings_set),
+            },
+        }
+        _EVENT_SCHEME_CACHE[ticker_norm] = {"_ts": time.time(),
+                                             "payload": payload}
         return payload
     except Exception as e:
         return {"error": str(e)[:300]}
