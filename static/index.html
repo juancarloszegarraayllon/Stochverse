@@ -1458,23 +1458,24 @@ function isLive(ev) {
 // data (covers NBA/NFL/MLB/NHL/major soccer) and falls back to a
 // wall-clock soccer estimate for anything ESPN doesn't match.
 function liveTimeLabel(ev) {
-  // Backend's _live_state.label is built by compact_label — it's a
-  // score string ("BLO 0 - AUG 0"), not a clock, so returning it
-  // here would duplicate score_display in the renderTimeSlot badge
-  // ("LIVE · BLO 0 - AUG 0 · BLO 0 - AUG 0"). Prefer display_clock
-  // over short_detail so the initial render matches what the tick's
-  // buildLiveLabel produces. ESPN's shortDetail for hockey ships
-  // pre-formatted as "18:10 - 2nd" — using that directly would
-  // briefly show "18:10 - 2ND" between renders before the tick
-  // reformatted it to "P2 17:43". Bare display_clock ("18:10") is
-  // what parseClockSecs handles cleanly. Tennis / motorsport / other
-  // clock-less sports leave both empty, so we fall through to null.
+  // Prefer display_clock when it's parseable as MM:SS (the normal
+  // running-clock case — tick reformats it with a period prefix).
+  // When display_clock is an end-of-period sentinel ESPN sometimes
+  // ships ("0.0", "Final", "End of 3rd"), parseClockSecs returns
+  // null and the tick can't produce a Q3/P3 label — falling through
+  // to short_detail gives us ESPN's human-readable description
+  // ("End of 3rd Quarter") which makes more sense on the badge than
+  // a raw "0.0".
   var live = ev && ev._live_state;
   if (live) {
-    var clk = live.display_clock || live.short_detail || "";
-    // Filter generic status strings the badge prefix already conveys
-    // ("LIVE", "In Progress") so we don't render "LIVE · score · LIVE".
-    // Useful clock-like values (Q3 7:32, Set 1, HT, 67') pass through.
+    var dc = (live.display_clock || "").trim();
+    var sd = (live.short_detail || "").trim();
+    var clk;
+    if (dc && parseClockSecs(dc) !== null) {
+      clk = dc;
+    } else {
+      clk = sd || dc;
+    }
     if (clk && !/^(live|in[-_ ]?progress)$/i.test(clk.trim())) return clk;
   }
   if (ev._sport !== "Soccer" || !ev._kickoff_dt) return null;
