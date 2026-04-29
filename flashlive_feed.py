@@ -480,6 +480,18 @@ def _parse_event(ev):
         for w in away_norm.split():
             if len(w) >= 4:
                 away_phrases.append(w)
+        # FL ships official 3-letter shortname codes (e.g., "UCV",
+        # "BAR", "PSG") via SHORTNAME_HOME/AWAY. Kalshi titles for
+        # international fixtures often use these abbreviations
+        # directly ("UCV vs Rosario") without the full team name —
+        # without this, match_game can't link the two and the card
+        # never gets a live state. Lowercased to match _normalize.
+        sh_home = str(ev.get("SHORTNAME_HOME") or "").strip().lower()
+        sh_away = str(ev.get("SHORTNAME_AWAY") or "").strip().lower()
+        if sh_home and len(sh_home) >= 3 and sh_home not in home_phrases:
+            home_phrases.append(sh_home)
+        if sh_away and len(sh_away) >= 3 and sh_away not in away_phrases:
+            away_phrases.append(sh_away)
 
         tournament_id = str(ev.get("_tournament_id") or ev.get("TOURNAMENT_ID") or "")
         tournament_season_id = str(ev.get("_tournament_season_id") or ev.get("TOURNAMENT_SEASON_ID") or "")
