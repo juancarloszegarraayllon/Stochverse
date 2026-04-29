@@ -2925,6 +2925,10 @@ window.exitEventDetail = function() {
   state._prevView = null;
   state._eventTicker = null;
   stopDetailLiveRefresh();
+  // Stop the commentary auto-poll if it was running. Otherwise it'd
+  // keep firing 15-second fetches against an event the user already
+  // closed.
+  if (typeof _stopCommentaryPoll === "function") _stopCommentaryPoll();
   // Drop live-chart cache so we don't redraw into detached DOM.
   if (typeof _liveChartCache !== "undefined") _liveChartCache = {};
   document.getElementById("event-detail").style.display = "none";
@@ -5871,20 +5875,58 @@ window.switchMatchTab = function(btn) {
   for (var j = 0; j < panels.length; j++) {
     panels[j].style.display = (panels[j].getAttribute('data-mt') === target) ? 'block' : 'none';
   }
+  // Switching tabs always stops the commentary auto-poll. The
+  // commentary branch below restarts it if we're switching INTO
+  // commentary; otherwise we want it off so we don't keep polling
+  // while the user is on Stats / Lineups / etc.
+  _stopCommentaryPoll();
   // Lazy-load player-stats and commentary
   var activePanel = main.querySelector('div[data-mt="' + target + '"]');
   if (activePanel) {
     var lazy = activePanel.querySelector('.ed-sb-lazy');
+    var ticker = (main.closest('.ed-stats-panel') || {}).dataset;
+    ticker = ticker ? ticker.ticker : '';
     if (lazy && !lazy.dataset.loaded) {
       lazy.dataset.loaded = '1';
-      var ticker = (main.closest('.ed-stats-panel') || {}).dataset;
-      ticker = ticker ? ticker.ticker : '';
       if (target === 'commentary') _loadCommentary(lazy, ticker);
       else if (target === 'player-stats') _loadPlayerStats(lazy, ticker);
-      else if (target === 'missing-players') _loadMissingPlayers(lazy, ticker); 
+      else if (target === 'missing-players') _loadMissingPlayers(lazy, ticker);
+    }
+    // Auto-poll commentary every 15 s while the tab is open. New
+    // commentary lines (kicks, goals, fouls, sub-50 ms updates from
+    // FL) appear without the user having to click around. Backend
+    // /commentary has no cache so each poll lands fresh data.
+    if (target === 'commentary' && lazy && ticker) {
+      _startCommentaryPoll(lazy, ticker);
     }
   }
 };
+
+// Commentary auto-poll. Single timer at a time — tab switches and
+// detail-page exits clear it.
+var _commentaryPollTimer = null;
+function _startCommentaryPoll(container, ticker) {
+  _stopCommentaryPoll();
+  _commentaryPollTimer = setInterval(function() {
+    // Bail if the detail page is no longer showing this event, or
+    // the container got removed from the DOM.
+    if (!state || !state._eventTicker || state._eventTicker !== ticker) {
+      _stopCommentaryPoll();
+      return;
+    }
+    if (!document.body.contains(container)) {
+      _stopCommentaryPoll();
+      return;
+    }
+    _loadCommentary(container, ticker);
+  }, 15000);
+}
+function _stopCommentaryPoll() {
+  if (_commentaryPollTimer) {
+    clearInterval(_commentaryPollTimer);
+    _commentaryPollTimer = null;
+  }
+}
 
 async function _loadCommentary(container, ticker) {
   container.innerHTML = '<div class="ed-stats-loading">Loading commentary…</div>';

@@ -5632,13 +5632,17 @@ async def event_capabilities(ticker: str):
 
 
 @app.get("/api/event/{ticker}/scheme")
-async def event_scheme(ticker: str):
+async def event_scheme(ticker: str, refresh: bool = False):
     """Build a fully data-driven Detailed Event Stats tab scheme for
     this event from FlashLive's actual data. Probes every relevant FL
     endpoint in parallel, groups responses into top-level tabs and
     Match sub-tabs, returns only the dimensions FL has data for. The
     frontend renders the tab strip directly from this scheme — no
     hardcoded tab list, no per-sport deny-list.
+
+    Pass ?refresh=1 to bust the 5-min cache and force a fresh probe —
+    useful when testing or when FL just added a tournament's bracket
+    and the cached scheme is stale.
 
     Output shape:
       {
@@ -5675,7 +5679,7 @@ async def event_scheme(ticker: str):
     if not ticker_norm:
         return {"error": "ticker required"}
     cached = _EVENT_SCHEME_CACHE.get(ticker_norm)
-    if cached and (time.time() - cached["_ts"]) < _EVENT_SCHEME_TTL:
+    if cached and not refresh and (time.time() - cached["_ts"]) < _EVENT_SCHEME_TTL:
         return cached["payload"]
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
