@@ -2512,7 +2512,23 @@ def get_events(
                         _kdt = datetime.fromisoformat(_kdt_iso.replace("Z", "+00:00"))
                         _exp = datetime.fromisoformat(_exp_iso.replace("Z", "+00:00"))
                         _now = datetime.now(timezone.utc)
-                        if _now > _kdt and _now > _exp:
+                        # Stricter ticker-date gate. Kalshi's
+                        # expected_expiration_time is the trading-
+                        # window close, not necessarily the game-end
+                        # time — for some markets (Colombian DIMAYOR
+                        # weekend matches whose markets close on a
+                        # weekday, ITF/Challenger tennis with loose
+                        # tournament-window expirations, etc.) this
+                        # is in the past while the actual fixture is
+                        # days away. Require ticker_date < today to
+                        # confirm the game is genuinely past.
+                        _ticker_date = parse_game_date_from_ticker(
+                            rc.get("event_ticker", "")
+                        )
+                        _today = _now.date()
+                        _ticker_in_past = (_ticker_date is not None
+                                           and _ticker_date < _today)
+                        if _now > _kdt and _now > _exp and _ticker_in_past:
                             rc["_market_settling"] = True
                     except Exception:
                         pass
@@ -3017,18 +3033,28 @@ def get_event_detail(ticker: str):
                     ),
                 }
 
-    # Market-settling lifecycle (mirrors /api/events). Sport event past
-    # its expected expiration with no live-feed FINAL signal — flag so
-    # the detail page header can render the same dim "Market settling"
-    # pill the cards do.
+    # Market-settling lifecycle (mirrors /api/events with the same
+    # stricter ticker-date gate). Kalshi's exp_dt can be in the past
+    # for trading windows that close before the actual game; require
+    # ticker_date < today so weekend fixtures with weekday market
+    # closes don't trigger a settling pill.
     if rc.get("category") == "Sports":
         _ls_state = (rc.get("_live_state") or {}).get("state")
         if _ls_state != "post":
+            _kdt_iso = rc.get("_kickoff_dt")
             _exp_iso = rc.get("_exp_dt")
-            if _exp_iso:
+            if _kdt_iso and _exp_iso:
                 try:
+                    _kdt = datetime.fromisoformat(_kdt_iso.replace("Z", "+00:00"))
                     _exp = datetime.fromisoformat(_exp_iso.replace("Z", "+00:00"))
-                    if datetime.now(timezone.utc) > _exp:
+                    _now = datetime.now(timezone.utc)
+                    _ticker_date = parse_game_date_from_ticker(
+                        rc.get("event_ticker", "")
+                    )
+                    _today = _now.date()
+                    _ticker_in_past = (_ticker_date is not None
+                                       and _ticker_date < _today)
+                    if _now > _kdt and _now > _exp and _ticker_in_past:
                         rc["_market_settling"] = True
                 except Exception:
                     pass
