@@ -2574,14 +2574,28 @@ def _overlay_live(outcomes, lp):
 # Anything not in this set keeps FL data unchanged.
 _ESPN_CLOCK_SPORTS = {"Basketball", "Hockey", "Football"}
 
+# Last successful ESPN override per Kalshi event_ticker. When a poll's
+# ESPN match_game transiently misses (brief gap in ESPN's data feed,
+# network blip), we'd otherwise fall through to FL's coarse minute-
+# precision value and the badge would visibly revert to "10" mid-tick.
+# Cache lets us keep showing the last good ESPN value until either the
+# next match succeeds or it ages out.
+_ESPN_OVERRIDE_CACHE: dict = {}  # ticker → {display_clock, clock_running, captured_at_ms, ts}
+_ESPN_OVERRIDE_TTL = 30  # seconds — comfortably bounds transient misses
+
 
 def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
     """If ESPN has a matching game for the given title+sport (and the
     sport is one of the US stop-clock sports we're upgrading), replace
     ONLY the clock fields on rc["_live_state"] — display_clock,
     clock_running, captured_at_ms — with ESPN's values. Period, score,
-    period labels, lineups, etc. all stay from FlashLive. No-op when
-    sport isn't in scope, ESPN has no match, or rc has no live state."""
+    period labels, lineups, etc. all stay from FlashLive.
+
+    On transient ESPN miss (match_game returns None, state isn't "in",
+    display_clock empty), fall back to the last successful ESPN value
+    cached in _ESPN_OVERRIDE_CACHE up to _ESPN_OVERRIDE_TTL seconds
+    old — better than reverting to FL's coarse minute-precision data
+    and producing a visible bounce in the badge."""
     if not sport or sport not in _ESPN_CLOCK_SPORTS:
         return
     live = rc.get("_live_state")
@@ -2591,26 +2605,32 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
         from espn_feed import match_game as espn_match
     except Exception:
         return
+    event_ticker = rc.get("event_ticker", "")
     eg = espn_match(title, sport)
-    if not eg:
+    e_clock = (eg.get("display_clock") if eg else "") or ""
+    e_clock = e_clock.strip()
+    espn_ok = (eg is not None and eg.get("state") == "in" and bool(e_clock))
+    if espn_ok:
+        live["display_clock"] = e_clock
+        live["clock_running"] = bool(eg.get("clock_running", True))
+        if eg.get("captured_at_ms"):
+            live["captured_at_ms"] = eg["captured_at_ms"]
+        if event_ticker:
+            _ESPN_OVERRIDE_CACHE[event_ticker] = {
+                "display_clock": e_clock,
+                "clock_running": live["clock_running"],
+                "captured_at_ms": live["captured_at_ms"],
+                "ts": time.time(),
+            }
         return
-    # ESPN only has a meaningful clock when state == "in". Pre-game
-    # ESPN games ship displayClock="0:00" or empty, post-game "Final".
-    # Don't override on those — let FL's data through.
-    if eg.get("state") != "in":
-        return
-    e_clock = (eg.get("display_clock") or "").strip()
-    if not e_clock:
-        return
-    live["display_clock"] = e_clock
-    # ESPN's _annotate_clock_running compares successive polls and
-    # stamps clock_running=False when the clock didn't advance. That's
-    # exactly the pause-detection signal we couldn't get from FL.
-    live["clock_running"] = bool(eg.get("clock_running", True))
-    # Anchor the tick to ESPN's poll timestamp so the frontend's drift
-    # cap math interpolates from a fresh moment.
-    if eg.get("captured_at_ms"):
-        live["captured_at_ms"] = eg["captured_at_ms"]
+    # ESPN missed this poll. Fall back to the last cached good value
+    # if it's still fresh.
+    if event_ticker and event_ticker in _ESPN_OVERRIDE_CACHE:
+        cached = _ESPN_OVERRIDE_CACHE[event_ticker]
+        if (time.time() - cached.get("ts", 0)) < _ESPN_OVERRIDE_TTL:
+            live["display_clock"] = cached["display_clock"]
+            live["clock_running"] = cached["clock_running"]
+            live["captured_at_ms"] = cached["captured_at_ms"]
 
 
 def _kalshi_url(series_ticker: str, event_ticker: str) -> str:
