@@ -2810,6 +2810,15 @@ function showEventDetail(ticker, skipHistory) {
       if (d.event && d.event.event_ticker) {
         hydrateGameStats(d.event.event_ticker);
       }
+      // Live-state refresh loop for the detail page. Without this
+      // the clock freezes within ~3 s of opening the page (drift
+      // cap clamps elapsed-since-capture, so the tick stops moving
+      // once captured_at_ms gets stale). Refetches just the live
+      // portion every 5 s and resets the badge data attributes so
+      // tickLiveClocks has a fresh anchor to interpolate from.
+      if (d.event && d.event.event_ticker && d.event._live_state) {
+        startDetailLiveRefresh(d.event.event_ticker);
+      }
       // Order book + whale sentiment are lazy-loaded when expanded.
     })
     .catch(function(ex) {
@@ -2819,10 +2828,58 @@ function showEventDetail(ticker, skipHistory) {
     });
 }
 
+// Detail-page live-state refresh. Runs while the event detail page
+// is open; refetches /api/event/{ticker} every 5 s and updates the
+// live badge's data attributes so tickLiveClocks has a fresh anchor.
+// Without this the badge freezes after the tick's drift cap clamps
+// elapsed time at 2 s (countdown sports) or 15 s (soccer).
+var _detailLiveRefreshTimer = null;
+function startDetailLiveRefresh(ticker) {
+  stopDetailLiveRefresh();
+  _detailLiveRefreshTimer = setInterval(function() {
+    if (!state._eventTicker || state._eventTicker !== ticker) {
+      stopDetailLiveRefresh();
+      return;
+    }
+    fetch("/api/event/" + encodeURIComponent(ticker))
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (!d || !d.event || !d.event._live_state) return;
+        var live = d.event._live_state;
+        var badge = document.querySelector('#event-detail .live-badge[data-live-sport]');
+        if (!badge) return;
+        if (live.display_clock != null) {
+          badge.setAttribute('data-live-clock-initial', String(live.display_clock));
+        }
+        if (live.captured_at_ms) {
+          badge.setAttribute('data-live-captured', String(live.captured_at_ms));
+        }
+        if (live.period) {
+          badge.setAttribute('data-live-period', String(live.period));
+        }
+        if (live.stage_start_ms) {
+          badge.setAttribute('data-live-stage-start', String(live.stage_start_ms));
+        }
+        badge.setAttribute('data-live-running', live.clock_running ? '1' : '0');
+        // Score also updates so the LIVE pill text rebuilds correctly.
+        var scoreStr = liveScoreString(live);
+        if (scoreStr) badge.setAttribute('data-live-score', scoreStr);
+      })
+      .catch(function() { /* silent — next tick will retry */ });
+  }, 5000);
+}
+function stopDetailLiveRefresh() {
+  if (_detailLiveRefreshTimer) {
+    clearInterval(_detailLiveRefreshTimer);
+    _detailLiveRefreshTimer = null;
+  }
+}
+
 window.exitEventDetail = function() {
   var prev = state._prevView;
   state._prevView = null;
   state._eventTicker = null;
+  stopDetailLiveRefresh();
   // Drop live-chart cache so we don't redraw into detached DOM.
   if (typeof _liveChartCache !== "undefined") _liveChartCache = {};
   document.getElementById("event-detail").style.display = "none";

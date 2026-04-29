@@ -109,6 +109,12 @@ ACTIVE_SPORTS = {
 }
 GAMES: dict = {}    # normalized key → game dict
 
+# Last known non-zero period per event_id. Persists across poll
+# cycles so a basketball card whose STAGE goes missing on one poll
+# keeps its "Q2" prefix instead of dropping back to a raw "9"
+# minute fallback.
+_LAST_PERIOD_CACHE: dict = {}
+
 STATUS = {
     "running": False,
     "last_fetch_ts": None,
@@ -443,6 +449,17 @@ def _parse_event(ev):
                       "OVERTIME": 4, "FIRST_QUARTER": 1, "SECOND_QUARTER": 2,
                       "THIRD_QUARTER": 3, "FOURTH_QUARTER": 4}
         period = period_map.get(stage, 0)
+        # FL sometimes ships GAME_TIME for live games without a
+        # recognizable STAGE (especially basketball when the broadcast
+        # is between possessions/at a timeout). Without period, the
+        # frontend can't compose the "Q2 9:58" label and falls back to
+        # rendering the raw clock string ("9"). Preserve the last
+        # known period for this event so we keep the prefix even when
+        # this poll's stage data is missing.
+        if period > 0 and event_id:
+            _LAST_PERIOD_CACHE[event_id] = period
+        elif period == 0 and state == "in" and event_id and event_id in _LAST_PERIOD_CACHE:
+            period = _LAST_PERIOD_CACHE[event_id]
 
         # Scheduled start
         start_ts = ev.get("START_UTIME") or ev.get("START_TIME") or 0
