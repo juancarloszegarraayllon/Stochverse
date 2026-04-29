@@ -1783,17 +1783,13 @@ function tickLiveClocks() {
     }
     var elapsed = Math.max(0, Math.floor((now - captured) / 1000));
     // Cap drift so a stale capture doesn't run the clock to zero.
-    // ESPN polls every 3 s for the US stop-clock sports we override
-    // (NBA/NHL/NFL/NCAA) and FL polls every 10 s for everything
-    // else. 12 s comfortably covers FL's interval and is well above
-    // ESPN's, so the cap rarely actually fires when data is flowing
-    // — it's a safety net for stale captures. Drift between re-
-    // anchors is naturally bounded by the poll interval (3 s on
-    // ESPN-covered, 10 s on FL-only) regardless of this cap value.
-    // Soccer keeps the wider cap since it counts up via
-    // STAGE_START_TIME (monotonic, no pause issues).
-    var driftCap = (sport === 'Soccer') ? 15 : 12;
-    if (elapsed > driftCap) elapsed = driftCap;
+    // Restored to the pre-FL-primary value (15 s for all sports) —
+    // the tighter caps I introduced for FL's minute-precision data
+    // were corrupting ESPN's smooth MM:SS data on NBA/NHL/NFL. With
+    // ESPN polling at 3 s, captured_at_ms refreshes every 3 s and
+    // the cap rarely fires anyway; it's just a safety net for stale
+    // captures, not a correctness mechanism.
+    if (elapsed > 15) elapsed = 15;
     var newSecs;
     if (sport === 'Soccer') {
       newSecs = baseSecs + elapsed;
