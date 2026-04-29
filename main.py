@@ -4678,7 +4678,14 @@ FL_GAME_NEG_CACHE_TTL = 30 # 30 s for None results — shields the FlashLive
 async def _find_fl_game(found: dict):
     """Find a FlashLive game for a Kalshi event, with on-demand
     search fallback. Cached per ticker for FL_GAME_CACHE_TTL so a
-    single modal open doesn't fan out into N concurrent searches."""
+    single modal open doesn't fan out into N concurrent searches.
+
+    Includes a wrong-date guard: if the matched FL game's scheduled
+    kickoff is more than 18 hours away from the Kalshi event's
+    expected kickoff, the match is rejected. This prevents UCL
+    second-leg / two-leg fixtures (Arsenal vs Atletico May 5 from
+    pulling Atletico vs Arsenal Apr 29's stats) and any other case
+    where two distinct fixtures share the same team names."""
     ticker = found.get("event_ticker") or found.get("ticker") or ""
     now = time.time()
     if ticker:
@@ -4691,6 +4698,22 @@ async def _find_fl_game(found: dict):
     g = flash_match(title, sport)
     if not g:
         g = await search_flashlive_event(title, sport)
+    # Wrong-date guard. Mirrors the existing check in _format_records
+    # so every endpoint that goes through _find_fl_game (scheme, h2h,
+    # standings, stats, news, commentary, etc.) rejects cross-fixture
+    # matches.
+    if g and g.get("scheduled_kickoff_ms"):
+        kdt_str = found.get("_kickoff_dt") or found.get("_sort_ts")
+        if kdt_str:
+            try:
+                fl_dt = datetime.fromtimestamp(
+                    g["scheduled_kickoff_ms"] / 1000, tz=timezone.utc
+                )
+                kalshi_dt = datetime.fromisoformat(kdt_str)
+                if abs((fl_dt - kalshi_dt).total_seconds()) > 18 * 3600:
+                    g = None
+            except Exception:
+                pass
     if ticker:
         ttl = FL_GAME_CACHE_TTL if g else FL_GAME_NEG_CACHE_TTL
         _FL_GAME_CACHE[ticker] = (now + ttl, g)
