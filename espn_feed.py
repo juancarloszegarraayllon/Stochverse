@@ -138,7 +138,15 @@ LEAGUES = [
 ]
 
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/{slug}/scoreboard"
-POLL_INTERVAL = 10  # seconds between full refresh cycles
+POLL_INTERVAL = 3  # seconds between full refresh cycles. Tighter than
+                   # FlashLive's 10 s because ESPN's scoreboard endpoint
+                   # returns all games for a sport in one response (~7
+                   # leagues * 1 req per 3 s = ~2.3 req/s total — well
+                   # below ESPN's tolerance) and a shorter window
+                   # bounds the max clock drift between re-anchors. At
+                   # 3 s polling, the user-visible bounce when the
+                   # broadcast clock pauses mid-window is ≤3 s instead
+                   # of ≤10 s.
 
 ESPN_GAMES: List[Dict[str, Any]] = []
 
