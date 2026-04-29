@@ -1461,14 +1461,17 @@ function liveTimeLabel(ev) {
   // Backend's _live_state.label is built by compact_label — it's a
   // score string ("BLO 0 - AUG 0"), not a clock, so returning it
   // here would duplicate score_display in the renderTimeSlot badge
-  // ("LIVE · BLO 0 - AUG 0 · BLO 0 - AUG 0"). Prefer short_detail /
-  // display_clock which carry the actual clock/period info ESPN
-  // ships when present. Tennis / motorsport / other clock-less sports
-  // leave both empty, so we fall through to null and the badge skips
-  // the clock part entirely.
+  // ("LIVE · BLO 0 - AUG 0 · BLO 0 - AUG 0"). Prefer display_clock
+  // over short_detail so the initial render matches what the tick's
+  // buildLiveLabel produces. ESPN's shortDetail for hockey ships
+  // pre-formatted as "18:10 - 2nd" — using that directly would
+  // briefly show "18:10 - 2ND" between renders before the tick
+  // reformatted it to "P2 17:43". Bare display_clock ("18:10") is
+  // what parseClockSecs handles cleanly. Tennis / motorsport / other
+  // clock-less sports leave both empty, so we fall through to null.
   var live = ev && ev._live_state;
   if (live) {
-    var clk = live.short_detail || live.display_clock || "";
+    var clk = live.display_clock || live.short_detail || "";
     // Filter generic status strings the badge prefix already conveys
     // ("LIVE", "In Progress") so we don't render "LIVE · score · LIVE".
     // Useful clock-like values (Q3 7:32, Set 1, HT, 67') pass through.
