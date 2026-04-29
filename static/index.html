@@ -1596,10 +1596,26 @@ function renderTimeSlot(ev) {
     // tells us whether real play is ongoing — when it's false we
     // freeze the clock instead of counting it down through a
     // commercial / timeout.
+    //
+    // Period preservation: FL sometimes ships GAME_TIME without a
+    // recognizable STAGE on a given poll, so live.period drops to 0
+    // intermittently. Without a non-zero period, the badge can't
+    // render "Q2 9:58" (no prefix and no tick). Cache the last
+    // non-zero period per ticker in the frontend and reuse it when
+    // a poll comes back with period=0 — bulletproof against FL
+    // flicker regardless of whether the backend cache hit.
+    var _ts_key = ev.event_ticker || "";
+    if (!window._lastLivePeriod) window._lastLivePeriod = {};
+    var effectivePeriod = (live && live.period) ? live.period : 0;
+    if (effectivePeriod && _ts_key) {
+      window._lastLivePeriod[_ts_key] = effectivePeriod;
+    } else if (!effectivePeriod && _ts_key && window._lastLivePeriod[_ts_key]) {
+      effectivePeriod = window._lastLivePeriod[_ts_key];
+    }
     var attrs = '';
-    if (live && live.display_clock && live.period && live.captured_at_ms) {
+    if (live && live.display_clock && effectivePeriod && live.captured_at_ms) {
       attrs += ' data-live-sport="' + (ev._sport || '') + '"';
-      attrs += ' data-live-period="' + live.period + '"';
+      attrs += ' data-live-period="' + effectivePeriod + '"';
       attrs += ' data-live-clock-initial="' + String(live.display_clock).replace(/"/g, '') + '"';
       attrs += ' data-live-captured="' + live.captured_at_ms + '"';
       attrs += ' data-live-running="' + (live.clock_running ? '1' : '0') + '"';
@@ -1767,13 +1783,17 @@ function tickLiveClocks() {
     }
     var elapsed = Math.max(0, Math.floor((now - captured) / 1000));
     // Cap drift so a stale capture doesn't run the clock to zero.
-    // Countdown sports (hockey/NBA/NFL) ship minute-precision data
-    // and pause constantly (faceoffs, timeouts, reviews); a loose cap
-    // lets the tick run ahead and snap back on the next poll, producing
-    // visible bouncing. 2 s bounds the bounce to a barely-perceptible
-    // correction. Soccer counts up from STAGE_START_TIME (monotonic),
-    // so it keeps the loose cap.
-    var driftCap = (sport === 'Soccer') ? 15 : 2;
+    // Countdown sports (hockey/NBA/NFL) pause constantly (faceoffs,
+    // timeouts, reviews); a loose cap lets the tick run ahead and
+    // snap back on the next poll. Cap should be slightly more than
+    // the backend refresh interval so the clock can smoothly tick
+    // between polls without freezing. /api/events refreshes the
+    // visible-card live-state every ~5 s; the detail page also
+    // refreshes every 5 s. 6 s gives a small overlap so countdown
+    // sports never hit a "frozen" frame between refreshes. Soccer
+    // counts up from STAGE_START_TIME (monotonic) and uses
+    // computeSoccerMinute, so its drift cap is mostly cosmetic.
+    var driftCap = (sport === 'Soccer') ? 15 : 6;
     if (elapsed > driftCap) elapsed = driftCap;
     var newSecs;
     if (sport === 'Soccer') {
@@ -6746,10 +6766,22 @@ function renderEventDetail(ev) {
     } else {
       detailClock = live.short_detail || "";
     }
+    // Same period-preservation pattern as the card path: cache the
+    // last non-zero period per ticker so an FL flicker poll with
+    // period=0 doesn't strip the badge of its data attrs and freeze
+    // the tick.
+    var _det_ts_key = ev.event_ticker || "";
+    if (!window._lastLivePeriod) window._lastLivePeriod = {};
+    var detailEffectivePeriod = live.period || 0;
+    if (detailEffectivePeriod && _det_ts_key) {
+      window._lastLivePeriod[_det_ts_key] = detailEffectivePeriod;
+    } else if (!detailEffectivePeriod && _det_ts_key && window._lastLivePeriod[_det_ts_key]) {
+      detailEffectivePeriod = window._lastLivePeriod[_det_ts_key];
+    }
     var detailAttrs = '';
-    if (live.display_clock && live.period && live.captured_at_ms) {
+    if (live.display_clock && detailEffectivePeriod && live.captured_at_ms) {
       detailAttrs += ' data-live-sport="' + (ev._sport || '') + '"';
-      detailAttrs += ' data-live-period="' + live.period + '"';
+      detailAttrs += ' data-live-period="' + detailEffectivePeriod + '"';
       detailAttrs += ' data-live-clock-initial="' + String(live.display_clock).replace(/"/g, '') + '"';
       detailAttrs += ' data-live-captured="' + live.captured_at_ms + '"';
       detailAttrs += ' data-live-running="' + (live.clock_running ? '1' : '0') + '"';
