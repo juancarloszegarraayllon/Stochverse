@@ -5971,6 +5971,38 @@ def debug_clock(ticker: str):
         # any clock/score field we might be ignoring.
         "fl_raw_keys":      g.get("_raw_keys", []),
         "fl_raw_preview":   g.get("_raw_preview", "")[:2000],
+        # ESPN side: what (if anything) match_game found, and what
+        # clock values it would override with. Lets us tell if ESPN
+        # is matching the wrong game or shipping bad data.
+        "espn":             _debug_espn_match(title, sport),
+    }
+
+
+def _debug_espn_match(title: str, sport: str) -> dict:
+    """Return ESPN's match_game result + clock fields for a given
+    Kalshi title. Used by /debug_clock to diagnose ESPN-override
+    issues (wrong-game match, stale clock, end-of-period leakage)."""
+    try:
+        from espn_feed import match_game as espn_match, ESPN_GAMES
+    except Exception as e:
+        return {"error": f"espn_feed import failed: {e}"}
+    if not sport:
+        return {"matched": False, "reason": "no sport"}
+    eg = espn_match(title, sport)
+    return {
+        "espn_games_total":    len(ESPN_GAMES),
+        "matched":             eg is not None,
+        "in_scope":            sport in {"Basketball", "Hockey", "Football"},
+        "espn_state":          (eg or {}).get("state"),
+        "espn_display_clock":  (eg or {}).get("display_clock"),
+        "espn_clock_running":  (eg or {}).get("clock_running"),
+        "espn_period":         (eg or {}).get("period"),
+        "espn_home_name":      (eg or {}).get("home_name"),
+        "espn_away_name":      (eg or {}).get("away_name"),
+        "espn_home_score":     (eg or {}).get("home_score"),
+        "espn_away_score":     (eg or {}).get("away_score"),
+        "espn_captured_at_ms": (eg or {}).get("captured_at_ms"),
+        "espn_short_detail":   (eg or {}).get("short_detail"),
     }
 
 
