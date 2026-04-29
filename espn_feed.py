@@ -275,7 +275,26 @@ def _annotate_clock_running(games: List[Dict[str, Any]]):
                 if g.get("sport") == "Soccer":
                     running = diff > 0
                 else:
-                    running = diff < 0
+                    # Countdown sports — clock decreases when running.
+                    # Compare the actual advancement against the wall-
+                    # clock interval since the previous poll. When the
+                    # clock advanced significantly LESS than the
+                    # interval (e.g. only 1 s of game-clock over a 3 s
+                    # poll window — mid-window pause for a foul or
+                    # whistle), treat as paused so the frontend tick
+                    # doesn't run ahead. Threshold: 70% of expected
+                    # advancement is the lower bound for "running" —
+                    # forgiving of small data jitter while catching
+                    # partial pauses that previously slipped past the
+                    # binary "did clock change at all" check.
+                    advanced = -diff  # positive when clock decreased
+                    now_ms = g.get("captured_at_ms", 0)
+                    prev_ms = prev.get("captured_at_ms", 0)
+                    delta_t = max(0.0, (now_ms - prev_ms) / 1000.0)
+                    if delta_t > 0:
+                        running = advanced >= (delta_t * 0.7)
+                    else:
+                        running = diff < 0
         g["clock_running"] = running
         next_obs[key] = {
             "display_clock": clock_str,
