@@ -5714,34 +5714,64 @@ async def event_scheme(ticker: str, refresh: bool = False):
         title = found.get("title", "")
         sport = found.get("_sport", "")
         g = await _find_fl_game(found)
+        # Tournament-level fallback. When FL doesn't have THIS match
+        # yet (future fixture, e.g. Bayern vs PSG 6 days from now),
+        # we can still probe Standings / Draw at the tournament level
+        # by borrowing the tournament_stage_id from a sibling event
+        # in the same series — any other KXUCLGAME event that IS
+        # loaded shares the same UCL stage. Match-specific tabs
+        # (Stats, Lineups, H2H) still can't surface without an
+        # fl_event_id, but the bracket / league table can.
+        sibling_stage_id = ""
+        sibling_season_id = ""
         if not g:
-            return {"error": "FlashLive doesn't cover this match yet",
-                    "title": title, "sport": sport,
-                    "main_tabs": []}
-        fl_id = g.get("event_id")
-        stage_id = g.get("tournament_stage_id", "")
-        season_id = g.get("tournament_season_id", "")
+            sibling_series = (found.get("series_ticker") or "").upper()
+            if sibling_series:
+                for r in records:
+                    if r is found:
+                        continue
+                    if (r.get("series_ticker") or "").upper() != sibling_series:
+                        continue
+                    sib_g = await _find_fl_game(r)
+                    if sib_g and sib_g.get("tournament_stage_id"):
+                        sibling_stage_id = sib_g.get("tournament_stage_id", "")
+                        sibling_season_id = sib_g.get("tournament_season_id", "")
+                        break
+            if not sibling_stage_id:
+                return {"error": "FlashLive doesn't cover this match yet",
+                        "title": title, "sport": sport,
+                        "main_tabs": []}
+        fl_id = (g or {}).get("event_id", "")
+        stage_id = (g or {}).get("tournament_stage_id", "") or sibling_stage_id
+        season_id = (g or {}).get("tournament_season_id", "") or sibling_season_id
         # Probe every endpoint relevant to one of our tabs / sub-tabs.
         # Each entry: (key, path, params, target). target is where the
         # availability flag lands in the scheme — "main_tab:foo" or
         # "match_sub:foo" or "standings:foo".
-        probes = [
-            # Match sub-tabs
-            ("statistics",        "/v1/events/statistics",        {"event_id": fl_id}, "match_sub:stats"),
-            ("lineups",           "/v1/events/lineups",           {"event_id": fl_id}, "match_sub:lineups"),
-            ("predicted_lineups", "/v1/events/predicted-lineups", {"event_id": fl_id}, "match_sub:predicted_lineups"),
-            ("commentary",        "/v1/events/commentary",        {"event_id": fl_id}, "match_sub:commentary"),
-            ("missing_players",   "/v1/events/missing-players",   {"event_id": fl_id}, "match_sub:missing"),
-            ("player_stats",      "/v1/events/player-stats",      {"event_id": fl_id}, "match_sub:player_stats"),
-            ("summary_incidents", "/v1/events/summary-incidents", {"event_id": fl_id}, "match_sub:summary"),
-            ("summary",           "/v1/events/summary",           {"event_id": fl_id}, "match_sub:summary"),
-            # Top-level tabs
-            ("h2h",               "/v1/events/h2h",               {"event_id": fl_id}, "main_tab:h2h"),
-            ("news",              "/v1/events/news",              {"event_id": fl_id}, "main_tab:news"),
-            ("odds",              "/v1/events/odds",              {"event_id": fl_id}, "main_tab:odds"),
-            ("highlights",        "/v1/events/highlights",        {"event_id": fl_id}, "main_tab:video"),
-            ("report",            "/v1/events/report",            {"event_id": fl_id}, "main_tab:report"),
-        ]
+        # Per-event probes only run when we have a specific FL match
+        # (fl_id non-empty). For tournament-level fallback (future
+        # match not yet loaded), we skip these and rely on
+        # tournament_stage_id-driven standings probes for Standings
+        # / Draw.
+        probes = []
+        if fl_id:
+            probes.extend([
+                # Match sub-tabs
+                ("statistics",        "/v1/events/statistics",        {"event_id": fl_id}, "match_sub:stats"),
+                ("lineups",           "/v1/events/lineups",           {"event_id": fl_id}, "match_sub:lineups"),
+                ("predicted_lineups", "/v1/events/predicted-lineups", {"event_id": fl_id}, "match_sub:predicted_lineups"),
+                ("commentary",        "/v1/events/commentary",        {"event_id": fl_id}, "match_sub:commentary"),
+                ("missing_players",   "/v1/events/missing-players",   {"event_id": fl_id}, "match_sub:missing"),
+                ("player_stats",      "/v1/events/player-stats",      {"event_id": fl_id}, "match_sub:player_stats"),
+                ("summary_incidents", "/v1/events/summary-incidents", {"event_id": fl_id}, "match_sub:summary"),
+                ("summary",           "/v1/events/summary",           {"event_id": fl_id}, "match_sub:summary"),
+                # Top-level tabs
+                ("h2h",               "/v1/events/h2h",               {"event_id": fl_id}, "main_tab:h2h"),
+                ("news",              "/v1/events/news",              {"event_id": fl_id}, "main_tab:news"),
+                ("odds",              "/v1/events/odds",              {"event_id": fl_id}, "main_tab:odds"),
+                ("highlights",        "/v1/events/highlights",        {"event_id": fl_id}, "main_tab:video"),
+                ("report",            "/v1/events/report",            {"event_id": fl_id}, "main_tab:report"),
+            ])
         # Standings sub-types (each is either a Standings sub-tab or
         # the dedicated "Draw" top tab — Tennis brackets surface as
         # standing_type=draw and FlashScore's UI puts that in its own
