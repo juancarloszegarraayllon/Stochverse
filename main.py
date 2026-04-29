@@ -2620,6 +2620,14 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
         live["clock_running"] = bool(eg.get("clock_running", True))
         if eg.get("captured_at_ms"):
             live["captured_at_ms"] = eg["captured_at_ms"]
+        # Period fallback: FL drops STAGE intermittently for basketball
+        # (especially between possessions / at timeouts). When that
+        # happens period=0 and the frontend can't render the "Q4"
+        # prefix, so the badge briefly shows just the clock without
+        # the period label. ESPN reliably ships period — use it as a
+        # backstop when FL's is missing.
+        if not live.get("period") and eg.get("period"):
+            live["period"] = eg["period"]
         # Mark this clock as ESPN-sourced. Frontend disables tick
         # interpolation for these so the displayed value is always
         # ESPN's authoritative reading — no mid-poll drift, no snap-
@@ -2632,6 +2640,7 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
                 "display_clock": e_clock,
                 "clock_running": live["clock_running"],
                 "captured_at_ms": live["captured_at_ms"],
+                "period":         eg.get("period"),
                 "ts": time.time(),
             }
         return
@@ -2644,6 +2653,8 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
             live["short_detail"] = cached["display_clock"]
             live["clock_running"] = cached["clock_running"]
             live["captured_at_ms"] = cached["captured_at_ms"]
+            if not live.get("period") and cached.get("period"):
+                live["period"] = cached["period"]
             live["clock_source"] = "espn"
             return
     # ESPN missed AND no fresh cache. For ESPN-covered sports, FL's
