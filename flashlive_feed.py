@@ -208,7 +208,12 @@ def match_game(title: str, sport: str = ""):
 
 
 def compact_label(g: dict) -> str:
-    """Build a short label like 'BOS 3 - NYR 2'."""
+    """Build a short label like 'BOS 3 - NYR 2'.
+
+    Cricket gets sport-specific formatting: "MI 243/5 (20) - SRH
+    249/4 (18.4)" — runs/wickets with overs in parentheses, matching
+    the standard cricket scoreboard convention. Falls back to the
+    plain runs format when wickets/overs aren't available."""
     if not g:
         return ""
     ha = g.get("home_abbr") or g.get("home_name", "")[:3].upper()
@@ -217,6 +222,18 @@ def compact_label(g: dict) -> str:
     as_ = g.get("away_score", "")
     if hs == "" and as_ == "":
         return ""
+    if g.get("sport") == "Cricket":
+        h_w = g.get("cricket_home_wickets") or ""
+        a_w = g.get("cricket_away_wickets") or ""
+        h_o = g.get("cricket_home_overs") or ""
+        a_o = g.get("cricket_away_overs") or ""
+        home_part = f"{hs}/{h_w}" if h_w else str(hs)
+        if h_o:
+            home_part += f" ({h_o})"
+        away_part = f"{as_}/{a_w}" if a_w else str(as_)
+        if a_o:
+            away_part += f" ({a_o})"
+        return f"{ha} {home_part} - {aa} {away_part}"
     return f"{ha} {hs} - {aa} {as_}"
 
 
@@ -529,6 +546,30 @@ def _parse_event(ev):
             # real match in stoppage we'll wire it into the badge.
             "info_notice": (ev.get("INFO_NOTICE") or "").strip(),
         }
+        # Cricket-specific fields. FL ships runs/wickets/overs in
+        # separate fields that need to be combined into the standard
+        # "RUNS/WICKETS (OVERS)" format users expect ("243/5 (20)").
+        # Field naming is asymmetric — home overs lives in
+        # HOME_SCORE_PART_1_OVERS_OUTS_WICKETS while away overs lives
+        # in DP for some matches; check both. PART_2_OVERS_OUTS_WICKETS
+        # carries wickets despite the field name including "OVERS".
+        if sport == "Cricket":
+            result["cricket_home_overs"] = str(
+                ev.get("HOME_SCORE_PART_1_OVERS_OUTS_WICKETS") or ""
+            ).strip()
+            result["cricket_home_wickets"] = str(
+                ev.get("HOME_SCORE_PART_2_OVERS_OUTS_WICKETS") or ""
+            ).strip()
+            result["cricket_away_overs"] = str(
+                ev.get("AWAY_SCORE_PART_1_OVERS_OUTS_WICKETS")
+                or ev.get("DP") or ""
+            ).strip()
+            result["cricket_away_wickets"] = str(
+                ev.get("AWAY_SCORE_PART_2_OVERS_OUTS_WICKETS") or ""
+            ).strip()
+            result["cricket_live_sentence"] = (
+                ev.get("CRICKET_LIVE_SENTENCE") or ""
+            ).strip()
         # Playoff series state. FlashLive ships it as free-text in
         # INFO_NOTICE (observed live: "Kitchener Rangers leads series
         # 2-0." / "Series tied 2-2." / "Boston wins series 4-1.").
