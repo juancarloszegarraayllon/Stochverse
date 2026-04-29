@@ -1590,6 +1590,25 @@ function renderTimeSlot(ev) {
       var addedFor = (live.period === 1) ? live.added_time_1h
                     : (live.period === 2) ? live.added_time_2h : null;
       t = computeSoccerMinute(live.stage_start_ms, live.period, addedFor) || liveTimeLabel(ev);
+    } else if (live && live.display_clock && live.period) {
+      // Compose the SAME label the 500 ms tick will produce. Without
+      // this, each card refresh briefly shows the raw display_clock
+      // ("18:10") before the tick reformats to "P2 17:43" — two
+      // visibly different values in the badge for the same data.
+      // Mirror the tick logic so initial render and post-tick render
+      // are identical: parse display_clock, decrement by elapsed-
+      // since-capture (with cap), call buildLiveLabel.
+      var _initBase = parseClockSecs(live.display_clock);
+      if (_initBase !== null) {
+        var _initElapsed = live.captured_at_ms
+          ? Math.min(15, Math.max(0, Math.floor((Date.now() - live.captured_at_ms) / 1000)))
+          : 0;
+        var _initSecs = (live.clock_running === false) ? _initBase
+          : Math.max(0, _initBase - _initElapsed);
+        t = buildLiveLabel(ev._sport || '', live.period, _initSecs, live.stage_start_ms, null);
+      } else {
+        t = liveTimeLabel(ev);
+      }
     } else {
       t = liveTimeLabel(ev);
     }
@@ -6768,8 +6787,23 @@ function renderEventDetail(ev) {
                        : (live.period === 2) ? live.added_time_2h : null;
     if (ev._sport === 'Soccer' && live.stage_start_ms) {
       detailClock = computeSoccerMinute(live.stage_start_ms, live.period, detailAddedFor) || live.short_detail || "";
+    } else if (live.display_clock && live.period) {
+      // Mirror the tick's buildLiveLabel format on initial render so
+      // the detail page badge doesn't flash a different value before
+      // the tick takes over. Same logic as the card path.
+      var _detBase = parseClockSecs(live.display_clock);
+      if (_detBase !== null) {
+        var _detElapsed = live.captured_at_ms
+          ? Math.min(15, Math.max(0, Math.floor((Date.now() - live.captured_at_ms) / 1000)))
+          : 0;
+        var _detSecs = (live.clock_running === false) ? _detBase
+          : Math.max(0, _detBase - _detElapsed);
+        detailClock = buildLiveLabel(ev._sport || '', live.period, _detSecs, live.stage_start_ms, null);
+      } else {
+        detailClock = live.short_detail || live.display_clock || "";
+      }
     } else {
-      detailClock = live.short_detail || "";
+      detailClock = live.short_detail || live.display_clock || "";
     }
     // Same period-preservation pattern as the card path. ESPN-sourced
     // periods bypass the frontend cache fallback — when backend says
