@@ -2304,7 +2304,20 @@ def get_events(
         title = r.get("title", "")
         g = None
         if sport and title:
-            if flash_match_game is not None:
+            # ESPN-as-primary for US stop-clock sports (NBA/WNBA/
+            # NCAAB/NCAAWB/NHL/NFL/NCAAF). Mirrors the architecture
+            # the user had pre-FlashLive: ESPN provides the live
+            # state directly, no override-on-FL layering. FL stays
+            # as fallback for international leagues ESPN doesn't
+            # cover (EuroLeague, KHL, etc.) and for the score/lineup
+            # data on the detail page.
+            if sport in _ESPN_CLOCK_SPORTS:
+                try:
+                    from espn_feed import match_game as espn_match
+                    g = espn_match(title, sport)
+                except Exception:
+                    g = None
+            if g is None and flash_match_game is not None:
                 g = flash_match_game(title, sport)
         # Enrich soccer 2-leg ties with SofaScore aggregate data
         # when the primary feed (usually ESPN for UCL) didn't
@@ -2406,13 +2419,12 @@ def get_events(
                 "aggregate_winner":   g.get("aggregate_winner", ""),
             }
             # Clock-only ESPN override for stop-clock US sports.
-            # FlashLive ships these at minute precision (LIVEINPUT_MINUTE)
-            # so display_clock can't tick smoothly without UI fakery.
-            # ESPN's displayClock is MM:SS and clock_running is computed
-            # by comparing successive polls. We replace ONLY those two
-            # fields plus captured_at_ms (since the new value is from
-            # ESPN's poll, not FL's). Period/score/etc. stay from FL.
-            _espn_clock_override(rc, title, g.get("sport"))
+            # ESPN-as-primary architecture: when sport is in
+            # _ESPN_CLOCK_SPORTS, g already came from ESPN above (see
+            # match_game selection at the top of the formatter). No
+            # override needed — the live state was built directly
+            # from ESPN's data. For non-ESPN-covered sports, g came
+            # from FL with its native clock/period/score.
             # Parse team names from the Kalshi title ("A vs B")
             # and assign to title_home / title_away using flip.
             import re as _re
@@ -2897,7 +2909,17 @@ def get_event_detail(ticker: str):
     title = r.get("title", "")
     g = None
     if sport and title:
-        if flash_match_game is not None:
+        # ESPN-as-primary for US stop-clock sports — same as the
+        # bulk endpoint. ESPN provides live state directly so the
+        # detail page badge shows ESPN's clock + period without any
+        # FL layering.
+        if sport in _ESPN_CLOCK_SPORTS:
+            try:
+                from espn_feed import match_game as espn_match
+                g = espn_match(title, sport)
+            except Exception:
+                g = None
+        if g is None and flash_match_game is not None:
             g = flash_match_game(title, sport)
     if g and sport == "Soccer":
         g = _enrich_soccer_aggregate(g, title)
@@ -2967,10 +2989,8 @@ def get_event_detail(ticker: str):
             "tournament_name":    g.get("tournament_name", "") or g.get("league", ""),
             "aggregate_winner":   g.get("aggregate_winner", ""),
         }
-        # Clock-only ESPN override for stop-clock US sports
-        # (NBA/WNBA/NCAA Basketball/NHL/NFL/NCAA Football). Mirrors
-        # the bulk-endpoint override above; see comment there.
-        _espn_clock_override(rc, title, g.get("sport"))
+        # ESPN-as-primary handled at the match_game step above for
+        # _ESPN_CLOCK_SPORTS. No override needed here.
         # Tennis: per-set scoreboard data
         if g.get("sport") == "Tennis":
             fl_tennis = g.get("tennis")
