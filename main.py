@@ -5726,6 +5726,9 @@ async def event_scheme(ticker: str, refresh: bool = False):
         sibling_season_id = ""
         if not g:
             sibling_series = (found.get("series_ticker") or "").upper()
+            # Path A: another Kalshi event in the same series that
+            # IS currently in our records and has a successful FL
+            # match. Cheap when present.
             if sibling_series:
                 for r in records:
                     if r is found:
@@ -5737,6 +5740,29 @@ async def event_scheme(ticker: str, refresh: bool = False):
                         sibling_stage_id = sib_g.get("tournament_stage_id", "")
                         sibling_season_id = sib_g.get("tournament_season_id", "")
                         break
+            # Path B: Kalshi already settled and pruned the only
+            # loaded sibling (e.g. Atletico vs Arsenal earlier today,
+            # now gone from records — but FL still has it in GAMES).
+            # Look up the league name via SOCCER_COMP / SERIES_TO_SUBTAB
+            # and find any FL game in that league.
+            if not sibling_stage_id and sibling_series:
+                league_hint = ""
+                if SOCCER_COMP.get(sibling_series):
+                    league_hint = SOCCER_COMP[sibling_series]
+                if league_hint:
+                    try:
+                        from flashlive_feed import GAMES as _FL_GAMES
+                        for fl_g in _FL_GAMES.values():
+                            if not fl_g.get("tournament_stage_id"):
+                                continue
+                            fl_league = (fl_g.get("league") or
+                                         fl_g.get("_league") or "")
+                            if league_hint.lower() in fl_league.lower():
+                                sibling_stage_id = fl_g.get("tournament_stage_id", "")
+                                sibling_season_id = fl_g.get("tournament_season_id", "")
+                                break
+                    except Exception:
+                        pass
             if not sibling_stage_id:
                 return {"error": "FlashLive doesn't cover this match yet",
                         "title": title, "sport": sport,
