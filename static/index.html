@@ -4295,8 +4295,17 @@ async function hydrateGameStats(evTicker) {
   // because the cache populated in the background.
   fetchCapabilities();
   try {
-    var d = await fetch("/api/event/" + encodeURIComponent(evTicker) + "/stats")
+    // Fetch the data-driven scheme alongside the Match-tab content.
+    // /scheme tells us which top-level tabs and Match sub-tabs FL
+    // actually has data for — replaces the hardcoded gates that
+    // missed dimensions like Odds / Video / Draw.
+    var dPromise = fetch("/api/event/" + encodeURIComponent(evTicker) + "/stats")
       .then(function(r) { return r.json(); });
+    var schemePromise = fetch("/api/event/" + encodeURIComponent(evTicker) + "/scheme")
+      .then(function(r) { return r.json(); })
+      .catch(function() { return null; });
+    var d = await dPromise;
+    var scheme = await schemePromise;
     // If FlashLive can't resolve this Kalshi event to one of its
     // games, every per-event endpoint will return the same error.
     // Hide the whole Background panel rather than render a tab
@@ -4320,25 +4329,65 @@ async function hydrateGameStats(evTicker) {
     var hasTimeline = incidents.length > 0;
     var hasLineups = (lineups.home && lineups.home.players && lineups.home.players.length > 0);
 
-    // ── Per-sport gates ─────────────────────────────────────
-    // Sport-level deny-list determines which tabs make sense for
-    // the sport. The /api/event/{ticker}/capabilities probe is
-    // available server-side and used additively elsewhere (e.g.
-    // adding a DRAW sub-tab for tennis tournaments) but we don't
-    // block panel render on it — that probe fires ~17 parallel
-    // FlashLive calls and would delay the user-facing tab strip.
+    // ── Scheme-driven gates ─────────────────────────────────
+    // /api/event/<ticker>/scheme returns main_tabs[] with sub_tabs[]
+    // — fully data-driven from FL's actual response. We index it
+    // here and use the lookup to gate every conditional render. For
+    // resilience: if the scheme fetch failed (network, FL outage),
+    // fall back to the legacy hardcoded gates so the panel still
+    // renders something useful.
+    var schemeTabs = (scheme && Array.isArray(scheme.main_tabs)) ? scheme.main_tabs : null;
+    var hasMainTab = {};
+    var matchSubsSet = {};
+    var schemeStandings = null;
+    if (schemeTabs && schemeTabs.length) {
+      for (var st = 0; st < schemeTabs.length; st++) {
+        var tab = schemeTabs[st];
+        if (!tab || !tab.key) continue;
+        hasMainTab[tab.key] = tab;
+        if (tab.key === "match" && Array.isArray(tab.sub_tabs)) {
+          for (var sti = 0; sti < tab.sub_tabs.length; sti++) {
+            if (tab.sub_tabs[sti] && tab.sub_tabs[sti].key) {
+              matchSubsSet[tab.sub_tabs[sti].key] = tab.sub_tabs[sti].label;
+            }
+          }
+        }
+        if (tab.key === "standings") schemeStandings = tab;
+      }
+    }
+    // Sport deny-list — kept as a SAFETY backstop only when scheme
+    // didn't load. Once /scheme is reliably populating, this can be
+    // removed entirely.
     var INDIVIDUAL_SPORTS = {
       "Tennis": 1, "Golf": 1, "MMA": 1, "Boxing": 1,
       "Darts": 1, "Motorsport": 1,
     };
     var isIndividual = !!INDIVIDUAL_SPORTS[sport];
-    var hasH2H = true;
-    var hasNews = true;
-    var hasCommentary = true;
-    var hasMissingPlayers = !isIndividual;
-    var hasPlayerStats = !isIndividual;
+    // Compute legacy capability flags as a fallback when scheme is
+    // unavailable. Scheme takes precedence when present.
     var stTypes = _capStandingTypes(sportCaps, sport);
-    var hasStandings = stTypes.length > 0;
+    var hasH2H, hasNews, hasCommentary, hasMissingPlayers, hasPlayerStats, hasStandings;
+    if (schemeTabs) {
+      hasH2H            = !!hasMainTab["h2h"];
+      hasNews           = !!hasMainTab["news"];
+      hasStandings      = !!hasMainTab["standings"];
+      hasCommentary     = !!matchSubsSet["commentary"];
+      hasMissingPlayers = !!matchSubsSet["missing"];
+      hasPlayerStats    = !!matchSubsSet["player_stats"];
+      // Scheme is authoritative for hasStats / hasLineups too — but
+      // keep the data-derived flags as a tighter check (the scheme
+      // may say stats endpoint had data but our parser produced
+      // nothing usable for this sport).
+      hasStats          = hasStats || !!matchSubsSet["stats"];
+      hasLineups        = hasLineups || !!matchSubsSet["lineups"];
+    } else {
+      hasH2H            = true;
+      hasNews           = true;
+      hasCommentary     = true;
+      hasMissingPlayers = !isIndividual;
+      hasPlayerStats    = !isIndividual;
+      hasStandings      = stTypes.length > 0;
+    }
     var stHasOverall = stTypes.indexOf("overall") >= 0
                        || stTypes.indexOf("home") >= 0
                        || stTypes.indexOf("away") >= 0;
@@ -4346,15 +4395,26 @@ async function hydrateGameStats(evTicker) {
     var stHasTopScorers = stTypes.indexOf("top_scores") >= 0
                           || stTypes.indexOf("top_scorers") >= 0;
 
-    // ── Main tabs: MATCH | H2H | STANDINGS | NEWS ──
-    // Each non-MATCH tab renders only when the capability map says
-    // the sport actually has data for it. MATCH always renders since
-    // every sport has at least summary/timeline.
+    // ── Main tabs: scheme-driven, in FlashScore display order ─
+    // Match · Odds · H2H · Standings · Draw · News · Video · Report.
+    // New tabs (odds / video / draw / report) render placeholder
+    // panels for now — content renderers ship in follow-up commits.
     var h = '<div class="ed-sb-tabs ed-sb-main-tabs">';
     h += '<button class="ed-sb-tab active" data-main="match" onclick="window.switchMainTab(this)">Match</button>';
-    if (hasH2H) h += '<button class="ed-sb-tab" data-main="h2h" onclick="window.switchMainTab(this)">H2H</button>';
-    if (hasStandings) h += '<button class="ed-sb-tab" data-main="standings" onclick="window.switchMainTab(this)">' + escH(_standingsTabLabel(stTypes)) + '</button>';
-    if (hasNews) h += '<button class="ed-sb-tab" data-main="news" onclick="window.switchMainTab(this)">News</button>';
+    if (hasMainTab["odds"])
+      h += '<button class="ed-sb-tab" data-main="odds" onclick="window.switchMainTab(this)">Odds</button>';
+    if (hasH2H)
+      h += '<button class="ed-sb-tab" data-main="h2h" onclick="window.switchMainTab(this)">H2H</button>';
+    if (hasStandings)
+      h += '<button class="ed-sb-tab" data-main="standings" onclick="window.switchMainTab(this)">' + escH(_standingsTabLabel(stTypes)) + '</button>';
+    if (hasMainTab["draw"])
+      h += '<button class="ed-sb-tab" data-main="draw" onclick="window.switchMainTab(this)">Draw</button>';
+    if (hasNews)
+      h += '<button class="ed-sb-tab" data-main="news" onclick="window.switchMainTab(this)">News</button>';
+    if (hasMainTab["video"])
+      h += '<button class="ed-sb-tab" data-main="video" onclick="window.switchMainTab(this)">Video</button>';
+    if (hasMainTab["report"])
+      h += '<button class="ed-sb-tab" data-main="report" onclick="window.switchMainTab(this)">Report</button>';
     h += '</div>';
 
     // ════════════════════════════════════════════════════
@@ -4362,6 +4422,8 @@ async function hydrateGameStats(evTicker) {
     // ════════════════════════════════════════════════════
     h += '<div class="ed-sb-main active" data-main="match">';
     // Sub-tabs: Summary | Stats | Lineups | Player Stats | Commentary
+    // | Missing — scheme drives visibility for everything except
+    // Summary (always present).
     h += '<div class="ed-sb-tabs ed-sb-sub-tabs" id="match-tabs-' + escH(evTicker) + '">';
     h += '<button class="ed-sb-tab active" data-mt="summary" onclick="window.switchMatchTab(this)">Summary</button>';
     if (hasStats) h += '<button class="ed-sb-tab" data-mt="match-stats" onclick="window.switchMatchTab(this)">Stats</button>';
@@ -4665,6 +4727,33 @@ async function hydrateGameStats(evTicker) {
       h += '</div>';
     }
 
+    // ════════════════════════════════════════════════════
+    // ODDS / DRAW / VIDEO / REPORT — scheme-driven panels.
+    // Content renderers ship in follow-up commits; for now the
+    // panel exists so the tab strip toggles work and the user can
+    // confirm each tab appears for events FL has data for.
+    // ════════════════════════════════════════════════════
+    if (hasMainTab["odds"]) {
+      h += '<div class="ed-sb-main" data-main="odds">';
+      h += '<div class="ed-stats-loading" style="padding:24px 0;text-align:center">Odds renderer coming soon.</div>';
+      h += '</div>';
+    }
+    if (hasMainTab["draw"]) {
+      h += '<div class="ed-sb-main" data-main="draw">';
+      h += '<div class="ed-sb-lazy" data-lazy="draw">Loading bracket…</div>';
+      h += '</div>';
+    }
+    if (hasMainTab["video"]) {
+      h += '<div class="ed-sb-main" data-main="video">';
+      h += '<div class="ed-stats-loading" style="padding:24px 0;text-align:center">Video highlights coming soon.</div>';
+      h += '</div>';
+    }
+    if (hasMainTab["report"]) {
+      h += '<div class="ed-sb-main" data-main="report">';
+      h += '<div class="ed-stats-loading" style="padding:24px 0;text-align:center">Match report coming soon.</div>';
+      h += '</div>';
+    }
+
     panel.innerHTML = h;
     // Async per-event capability probe — sport-level cap-scan only
     // samples 2 events per sport every 24 h, so a tennis match with a
@@ -4766,6 +4855,13 @@ window.switchMainTab = function(btn) {
     var ticker = panel.dataset.ticker;
     if (target === "h2h") _loadH2H(lazy, ticker);
     else if (target === "news") _loadNews(lazy, ticker);
+    // Draw is FL's tournament bracket — same endpoint as standings
+    // with standing_type=draw. Reuses the existing standings
+    // renderer; the result is the bracket grid for cup competitions
+    // / tennis tournaments.
+    else if (target === "draw" && typeof _loadStandingsType === "function") {
+      _loadStandingsType(lazy, ticker, "draw");
+    }
   }
   // Auto-load Standings on first switch into that tab. We probe
   // /standings_tabs first to learn which sub-tabs FlashLive
