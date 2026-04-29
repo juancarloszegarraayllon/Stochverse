@@ -2615,6 +2615,13 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
         live["clock_running"] = bool(eg.get("clock_running", True))
         if eg.get("captured_at_ms"):
             live["captured_at_ms"] = eg["captured_at_ms"]
+        # Mark this clock as ESPN-sourced. Frontend disables tick
+        # interpolation for these so the displayed value is always
+        # ESPN's authoritative reading — no mid-poll drift, no snap-
+        # back when the broadcast clock pauses for a foul/timeout.
+        # Refresh cadence is 3 s (ESPN poll) so the clock visibly
+        # jumps in 3 s steps instead of ticking each second.
+        live["clock_source"] = "espn"
         if event_ticker:
             _ESPN_OVERRIDE_CACHE[event_ticker] = {
                 "display_clock": e_clock,
@@ -2631,6 +2638,7 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
             live["display_clock"] = cached["display_clock"]
             live["clock_running"] = cached["clock_running"]
             live["captured_at_ms"] = cached["captured_at_ms"]
+            live["clock_source"] = "espn"
             return
     # ESPN missed AND no fresh cache. For ESPN-covered sports, FL's
     # raw minute-precision GAME_TIME ("8", "10") is misleading next

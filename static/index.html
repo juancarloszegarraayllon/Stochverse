@@ -1619,6 +1619,9 @@ function renderTimeSlot(ev) {
       attrs += ' data-live-clock-initial="' + String(live.display_clock).replace(/"/g, '') + '"';
       attrs += ' data-live-captured="' + live.captured_at_ms + '"';
       attrs += ' data-live-running="' + (live.clock_running ? '1' : '0') + '"';
+      if (live.clock_source) {
+        attrs += ' data-live-clock-source="' + String(live.clock_source).replace(/"/g, '') + '"';
+      }
     }
     // Soccer's STAGE_START_TIME (Unix ms) lets buildLiveLabel
     // compute the exact match minute + render stoppage time
@@ -1782,19 +1785,26 @@ function tickLiveClocks() {
       baseSecs = 0;
     }
     var elapsed = Math.max(0, Math.floor((now - captured) / 1000));
-    // Cap drift so a stale capture doesn't run the clock to zero.
-    // Restored to the pre-FL-primary value (15 s for all sports) —
-    // the tighter caps I introduced for FL's minute-precision data
-    // were corrupting ESPN's smooth MM:SS data on NBA/NHL/NFL. With
-    // ESPN polling at 3 s, captured_at_ms refreshes every 3 s and
-    // the cap rarely fires anyway; it's just a safety net for stale
-    // captures, not a correctness mechanism.
-    if (elapsed > 15) elapsed = 15;
+    // ESPN-sourced clocks are second-precision and re-anchored every
+    // 3 s by the backend. Interpolating between polls runs the
+    // displayed value ahead of ESPN's authoritative reading whenever
+    // the broadcast clock pauses for a foul/timeout (mid-poll pauses
+    // sneak past clock_running=true), producing the visible drift
+    // and snap-back. Skip interpolation entirely for ESPN: just
+    // display whatever ESPN last shipped, refreshed each poll.
+    var clockSource = badge.getAttribute('data-live-clock-source') || '';
     var newSecs;
-    if (sport === 'Soccer') {
-      newSecs = baseSecs + elapsed;
+    if (clockSource === 'espn') {
+      newSecs = baseSecs;
     } else {
-      newSecs = Math.max(0, baseSecs - elapsed);
+      // Cap drift so a stale capture doesn't run the clock to zero.
+      // 15 s is the safety net for FL-only sports (10 s poll cadence).
+      if (elapsed > 15) elapsed = 15;
+      if (sport === 'Soccer') {
+        newSecs = baseSecs + elapsed;
+      } else {
+        newSecs = Math.max(0, baseSecs - elapsed);
+      }
     }
     var label = buildLiveLabel(sport, period, newSecs, stageStartMs, addedFor);
     var text = badge.querySelector('.live-text');
@@ -6781,6 +6791,9 @@ function renderEventDetail(ev) {
       detailAttrs += ' data-live-captured="' + live.captured_at_ms + '"';
       detailAttrs += ' data-live-running="' + (live.clock_running ? '1' : '0') + '"';
       detailAttrs += ' data-live-noscore="1"';
+      if (live.clock_source) {
+        detailAttrs += ' data-live-clock-source="' + String(live.clock_source).replace(/"/g, '') + '"';
+      }
     }
     if (live.stage_start_ms) {
       detailAttrs += ' data-live-stage-start="' + live.stage_start_ms + '"';
