@@ -490,13 +490,20 @@ def _parse_event(ev):
         away_norm = _normalize(away_name)
         home_phrases = [home_norm]
         away_phrases = [away_norm]
-        # Add short versions for matching
-        for w in home_norm.split():
-            if len(w) >= 4:
-                home_phrases.append(w)
-        for w in away_norm.split():
-            if len(w) >= 4:
-                away_phrases.append(w)
+        # Add short versions for matching. Strip leading/trailing
+        # punctuation per word so abbreviated team names like
+        # "Atl. Madrid" / "St. Louis" produce usable phrases ("atl",
+        # "madrid", "st", "louis") instead of "atl." which can't
+        # substring-match "atletico" in a Kalshi title. Threshold is
+        # 3 chars to align with the matcher's minimum hit length.
+        import string as _string
+        def _add_word_phrases(norm: str, dest: list):
+            for raw in norm.split():
+                clean = raw.strip(_string.punctuation)
+                if len(clean) >= 3 and clean not in dest:
+                    dest.append(clean)
+        _add_word_phrases(home_norm, home_phrases)
+        _add_word_phrases(away_norm, away_phrases)
         # FL ships official 3-letter shortname codes (e.g., "UCV",
         # "BAR", "PSG") via SHORTNAME_HOME/AWAY. Kalshi titles for
         # international fixtures often use these abbreviations
