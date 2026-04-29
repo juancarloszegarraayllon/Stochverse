@@ -2631,6 +2631,14 @@ def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
             live["display_clock"] = cached["display_clock"]
             live["clock_running"] = cached["clock_running"]
             live["captured_at_ms"] = cached["captured_at_ms"]
+            return
+    # ESPN missed AND no fresh cache. For ESPN-covered sports, FL's
+    # raw minute-precision GAME_TIME ("8", "10") is misleading next
+    # to the MM:SS values ESPN normally provides — it looks like a
+    # random number to a viewer expecting smooth seconds. Suppress
+    # the clock entirely so the badge falls back to "LIVE · score"
+    # with no clock part rather than a confusing integer.
+    live["display_clock"] = ""
 
 
 def _kalshi_url(series_ticker: str, event_ticker: str) -> str:
