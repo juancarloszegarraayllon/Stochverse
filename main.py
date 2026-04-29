@@ -81,8 +81,15 @@ async def startup_event():
         logging.getLogger("stochverse").warning("failed to start ws client: %s", e)
     try:
         from espn_feed import run_espn_feed
-        # ESPN feed kept but disabled — FlashLive is primary
-        # asyncio.create_task(run_espn_feed())
+        # ESPN feed re-enabled as a clock-only side source for stop-
+        # clock US sports (NBA/WNBA/NCAA Basketball, NHL, NFL/NCAA
+        # Football). FlashLive ships those at minute precision
+        # (LIVEINPUT_MINUTE) so display_clock can't tick smoothly
+        # without UI fakery; ESPN's displayClock is MM:SS and its
+        # _annotate_clock_running compares successive polls to detect
+        # pauses. We override ONLY clock + clock_running on the
+        # _live_state — score, period, lineups, etc. stay from FL.
+        asyncio.create_task(run_espn_feed())
     except Exception as e:
         logging.getLogger("stochverse").warning("failed to start espn feed: %s", e)
     try:
@@ -2398,6 +2405,14 @@ def get_events(
                 "tournament_name":    g.get("tournament_name", "") or g.get("league", ""),
                 "aggregate_winner":   g.get("aggregate_winner", ""),
             }
+            # Clock-only ESPN override for stop-clock US sports.
+            # FlashLive ships these at minute precision (LIVEINPUT_MINUTE)
+            # so display_clock can't tick smoothly without UI fakery.
+            # ESPN's displayClock is MM:SS and clock_running is computed
+            # by comparing successive polls. We replace ONLY those two
+            # fields plus captured_at_ms (since the new value is from
+            # ESPN's poll, not FL's). Period/score/etc. stay from FL.
+            _espn_clock_override(rc, title, g.get("sport"))
             # Parse team names from the Kalshi title ("A vs B")
             # and assign to title_home / title_away using flip.
             import re as _re
@@ -2550,6 +2565,52 @@ def _overlay_live(outcomes, lp):
             o["no"] = f"{round(na)}¢"
         elif nb is not None:
             o["no"] = f"{round(nb)}¢"
+
+
+# Sports where ESPN's MM:SS displayClock is preferred over FlashLive's
+# minute-precision GAME_TIME. ESPN's coverage is US-leagues-only, but
+# for these specific sports it's the only source with second-precision
+# data + a clock-running flag derived from successive-poll comparison.
+# Anything not in this set keeps FL data unchanged.
+_ESPN_CLOCK_SPORTS = {"Basketball", "Hockey", "Football"}
+
+
+def _espn_clock_override(rc: dict, title: str, sport: str) -> None:
+    """If ESPN has a matching game for the given title+sport (and the
+    sport is one of the US stop-clock sports we're upgrading), replace
+    ONLY the clock fields on rc["_live_state"] — display_clock,
+    clock_running, captured_at_ms — with ESPN's values. Period, score,
+    period labels, lineups, etc. all stay from FlashLive. No-op when
+    sport isn't in scope, ESPN has no match, or rc has no live state."""
+    if not sport or sport not in _ESPN_CLOCK_SPORTS:
+        return
+    live = rc.get("_live_state")
+    if not isinstance(live, dict):
+        return
+    try:
+        from espn_feed import match_game as espn_match
+    except Exception:
+        return
+    eg = espn_match(title, sport)
+    if not eg:
+        return
+    # ESPN only has a meaningful clock when state == "in". Pre-game
+    # ESPN games ship displayClock="0:00" or empty, post-game "Final".
+    # Don't override on those — let FL's data through.
+    if eg.get("state") != "in":
+        return
+    e_clock = (eg.get("display_clock") or "").strip()
+    if not e_clock:
+        return
+    live["display_clock"] = e_clock
+    # ESPN's _annotate_clock_running compares successive polls and
+    # stamps clock_running=False when the clock didn't advance. That's
+    # exactly the pause-detection signal we couldn't get from FL.
+    live["clock_running"] = bool(eg.get("clock_running", True))
+    # Anchor the tick to ESPN's poll timestamp so the frontend's drift
+    # cap math interpolates from a fresh moment.
+    if eg.get("captured_at_ms"):
+        live["captured_at_ms"] = eg["captured_at_ms"]
 
 
 def _kalshi_url(series_ticker: str, event_ticker: str) -> str:
@@ -2866,6 +2927,10 @@ def get_event_detail(ticker: str):
             "tournament_name":    g.get("tournament_name", "") or g.get("league", ""),
             "aggregate_winner":   g.get("aggregate_winner", ""),
         }
+        # Clock-only ESPN override for stop-clock US sports
+        # (NBA/WNBA/NCAA Basketball/NHL/NFL/NCAA Football). Mirrors
+        # the bulk-endpoint override above; see comment there.
+        _espn_clock_override(rc, title, g.get("sport"))
         # Tennis: per-set scoreboard data
         if g.get("sport") == "Tennis":
             fl_tennis = g.get("tennis")
