@@ -5794,6 +5794,48 @@ async def event_normalized(ticker: str, refresh: bool = False):
         league_name = (g or {}).get("league", "") or (g or {}).get("_league", "")
         country = (g or {}).get("country", "") or (g or {}).get("_country", "")
 
+        # Tournament-level fallback. When FL hasn't loaded THIS match
+        # (future fixture), try to derive stage_id from a sibling
+        # event in the same series so we can still surface bracket /
+        # standings. Mirrors the same logic the /scheme endpoint
+        # uses; future refactor will pull both into a shared helper.
+        if not g:
+            sibling_series = (found.get("series_ticker") or "").upper()
+            # Path A: another loaded Kalshi event in the same series.
+            if sibling_series:
+                for r in records:
+                    if r is found:
+                        continue
+                    if (r.get("series_ticker") or "").upper() != sibling_series:
+                        continue
+                    sib_g = await _find_fl_game(r)
+                    if sib_g and sib_g.get("tournament_stage_id"):
+                        stage_id = sib_g.get("tournament_stage_id", "") or stage_id
+                        season_id = sib_g.get("tournament_season_id", "") or season_id
+                        league_name = sib_g.get("league") or sib_g.get("_league") or league_name
+                        country = sib_g.get("country") or sib_g.get("_country") or country
+                        break
+            # Path B: FL GAMES league lookup when Kalshi pruned all
+            # siblings — search by league name from SOCCER_COMP map.
+            if not stage_id and sibling_series:
+                league_hint = SOCCER_COMP.get(sibling_series, "")
+                if league_hint:
+                    try:
+                        from flashlive_feed import GAMES as _FL_GAMES
+                        for fl_g in _FL_GAMES.values():
+                            if not fl_g.get("tournament_stage_id"):
+                                continue
+                            fl_league = (fl_g.get("league") or
+                                         fl_g.get("_league") or "")
+                            if league_hint.lower() in fl_league.lower():
+                                stage_id = fl_g.get("tournament_stage_id", "")
+                                season_id = fl_g.get("tournament_season_id", "")
+                                league_name = league_name or fl_league
+                                country = country or fl_g.get("country", "") or fl_g.get("_country", "")
+                                break
+                    except Exception:
+                        pass
+
         # Probe FL endpoints in parallel to discover capabilities.
         # Same set the /scheme endpoint uses; here we also fetch the
         # data so we can normalize each block.
