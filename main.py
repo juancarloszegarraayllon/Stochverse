@@ -4710,6 +4710,19 @@ FL_GAME_CACHE_TTL = 600    # 10 min — generous; modal sessions are short
 FL_GAME_NEG_CACHE_TTL = 30 # 30 s for None results — shields the FlashLive
                            # search endpoint from hammering on uncovered
                            # events without locking out a ticker for the
+
+# Persistent series→stage cache. When ANY Kalshi event in a given
+# series successfully matches an FL game, we save the FL tournament's
+# stage_id keyed by the Kalshi series_ticker (e.g. KXUCLGAME →
+# UEFA UCL stage_id). Lets future events in the same series — even
+# ones FL hasn't loaded yet, even after Kalshi prunes all loaded
+# siblings — surface tournament-level data (Standings, Draw bracket)
+# by borrowing the cached stage_id. Process-lifetime cache; survives
+# Kalshi cache rebuilds, lost on app restart.
+#
+# Key: series_ticker (UPPER)
+# Value: {stage_id, season_id, league_name, country, ts}
+_SERIES_TO_STAGE_CACHE: dict = {}
                            # full 10-minute window if the first probe was
                            # unlucky (GAMES not yet populated, transient
                            # match_game miss, etc.).
@@ -4734,6 +4747,20 @@ async def _find_fl_game(found: dict):
     if ticker:
         ttl = FL_GAME_CACHE_TTL if g else FL_GAME_NEG_CACHE_TTL
         _FL_GAME_CACHE[ticker] = (now + ttl, g)
+    # Persistent series→stage memory. When the matched FL game has a
+    # tournament_stage_id, remember it under the Kalshi series ticker
+    # so future events in the same series can borrow it (even after
+    # Kalshi prunes the loaded siblings).
+    if g and g.get("tournament_stage_id"):
+        series = (found.get("series_ticker") or "").upper()
+        if series:
+            _SERIES_TO_STAGE_CACHE[series] = {
+                "stage_id":    g.get("tournament_stage_id", ""),
+                "season_id":   g.get("tournament_season_id", ""),
+                "league_name": g.get("league") or g.get("_league") or "",
+                "country":     g.get("country") or g.get("_country") or "",
+                "ts":          now,
+            }
     return g
 
 
@@ -5815,8 +5842,22 @@ async def event_normalized(ticker: str, refresh: bool = False):
                         league_name = sib_g.get("league") or sib_g.get("_league") or league_name
                         country = sib_g.get("country") or sib_g.get("_country") or country
                         break
-            # Path B: FL GAMES league lookup when Kalshi pruned all
-            # siblings — search by league name from SOCCER_COMP map.
+            # Path C: persistent series→stage cache. When any prior
+            # event in this series matched an FL game (within the
+            # current process lifetime), we remembered its
+            # tournament_stage_id. Survives Kalshi pruning loaded
+            # siblings, so future-leg events for tournaments whose
+            # currently-loaded matches all settled today still find
+            # their bracket / standings.
+            if not stage_id and sibling_series:
+                cached_stage = _SERIES_TO_STAGE_CACHE.get(sibling_series)
+                if cached_stage:
+                    stage_id = cached_stage.get("stage_id", "")
+                    season_id = cached_stage.get("season_id", "") or season_id
+                    league_name = league_name or cached_stage.get("league_name", "")
+                    country = country or cached_stage.get("country", "")
+            # Path B: FL GAMES league lookup when both prior paths
+            # failed — search by league name from SOCCER_COMP map.
             if not stage_id and sibling_series:
                 league_hint = SOCCER_COMP.get(sibling_series, "")
                 if league_hint:
@@ -6061,6 +6102,16 @@ async def event_scheme(ticker: str, refresh: bool = False):
                         sibling_stage_id = sib_g.get("tournament_stage_id", "")
                         sibling_season_id = sib_g.get("tournament_season_id", "")
                         break
+            # Path C: persistent series→stage cache. Once any event
+            # in this series ever matched FL during the process
+            # lifetime, we remembered its stage_id. Survives Kalshi
+            # pruning every loaded sibling.
+            if not sibling_stage_id and sibling_series:
+                cached_stage = _SERIES_TO_STAGE_CACHE.get(sibling_series)
+                if cached_stage:
+                    sibling_stage_id = cached_stage.get("stage_id", "")
+                    sibling_season_id = (cached_stage.get("season_id", "")
+                                         or sibling_season_id)
             # Path B: Kalshi already settled and pruned the only
             # loaded sibling (e.g. Atletico vs Arsenal earlier today,
             # now gone from records — but FL still has it in GAMES).
