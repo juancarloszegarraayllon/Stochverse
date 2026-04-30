@@ -6208,28 +6208,36 @@ async def _find_all_stages_for_league(sport: str,
     """Return every stage of FL's master tournaments list whose
     LEAGUE_NAME matches `league_hint`. Used to find the right bracket
     stage when a competition has multiple parallel stages (e.g. UCL
-    has League Phase, Knockout Phase, and Play Offs all distinct)."""
+    has League Phase, Knockout Phase, and Play Offs all distinct).
+
+    Prefers exact LEAGUE_NAME match — substring fallback would pull in
+    "CAF Champions League", "AFC Champions League", "Champions League
+    Women" etc. when the hint is just "Champions League"."""
     sport_id = _SPORT_NAME_TO_FL_ID.get(sport, "")
     if not sport_id or not league_hint:
         return []
     tournaments = await _fl_tournaments_for_sport(sport_id)
-    hint = league_hint.lower()
-    out = []
+    hint = league_hint.lower().strip()
+    exact, fuzzy = [], []
     for t in tournaments:
-        league = (t.get("LEAGUE_NAME") or "").lower()
+        league = (t.get("LEAGUE_NAME") or "").lower().strip()
         if not league:
             continue
-        if league == hint or hint in league or league in hint:
-            sid = t.get("STAGE_ID", "")
-            if sid:
-                out.append({
-                    "stage_id":    sid,
-                    "season_id":   t.get("SEASON_ID", ""),
-                    "stage_name":  t.get("STAGE_NAME", ""),
-                    "league_name": t.get("LEAGUE_NAME", ""),
-                    "country":     t.get("COUNTRY_NAME", ""),
-                })
-    return out
+        sid = t.get("STAGE_ID", "")
+        if not sid:
+            continue
+        entry = {
+            "stage_id":    sid,
+            "season_id":   t.get("SEASON_ID", ""),
+            "stage_name":  t.get("STAGE_NAME", ""),
+            "league_name": t.get("LEAGUE_NAME", ""),
+            "country":     t.get("COUNTRY_NAME", ""),
+        }
+        if league == hint:
+            exact.append(entry)
+        elif hint in league or league in hint:
+            fuzzy.append(entry)
+    return exact or fuzzy
 
 
 @app.get("/api/event/{ticker}/normalized")
