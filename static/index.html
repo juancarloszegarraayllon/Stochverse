@@ -4689,10 +4689,17 @@ async function hydrateGameStats(evTicker) {
 
 async function _augmentEventCapabilities(panel, ticker, sportStTypes) {
   try {
-    var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/capabilities");
-    var d = await r.json();
-    if (!d || d.error) return;
-    var caps = d.capabilities || {};
+    // Fire /capabilities and /normalized in parallel. /capabilities
+    // is the per-event probe but bails for future events where FL
+    // hasn't loaded the match yet. /normalized has tournament-level
+    // fallback and still reports has_bracket / has_standings via
+    // the league's stage data — so for a future Bayern vs PSG, we
+    // still know there's a bracket to expose.
+    var capsPromise = fetch("/api/event/" + encodeURIComponent(ticker) + "/capabilities").then(function(r) { return r.json(); }).catch(function() { return null; });
+    var normPromise = fetch("/api/event/" + encodeURIComponent(ticker) + "/normalized").then(function(r) { return r.json(); }).catch(function() { return null; });
+    var capsRes = await capsPromise;
+    var normRes = await normPromise;
+    var caps = (capsRes && !capsRes.error && capsRes.capabilities) || {};
     var st = caps.standings || {};
     // Preserve canonical render order so a sport that gains "draw"
     // mid-session ends up with the same tab order as a sport that had
@@ -4701,6 +4708,14 @@ async function _augmentEventCapabilities(panel, ticker, sportStTypes) {
     var perEventTypes = [];
     for (var i = 0; i < ORDER.length; i++) {
       if (st[ORDER[i]]) perEventTypes.push(ORDER[i]);
+    }
+    // Fold /normalized's has_bracket / has_standings into the set
+    // even when /capabilities failed. has_bracket → draw sub-tab;
+    // has_standings → overall sub-tab so the user can at least see
+    // the league table for a future fixture.
+    if (normRes && !normRes.error && normRes.capabilities) {
+      if (normRes.capabilities.has_bracket && perEventTypes.indexOf("draw") < 0) perEventTypes.push("draw");
+      if (normRes.capabilities.has_standings && perEventTypes.indexOf("overall") < 0) perEventTypes.unshift("overall");
     }
     if (!perEventTypes.length) return;
     var combined = sportStTypes.slice();
