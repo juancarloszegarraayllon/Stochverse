@@ -4922,7 +4922,13 @@ async def _find_fl_game(found: dict):
 
 @app.get("/api/event/{ticker}/h2h")
 async def get_event_h2h(ticker: str):
-    """Fetch H2H data from FlashLive for this event."""
+    """Fetch H2H data from FlashLive for this event.
+
+    H2H is two-team historical matchups, so the response is identical
+    regardless of which match's event_id we query — only the pair of
+    teams matters. When `_find_fl_game` fails (typical for future
+    fixtures FL hasn't loaded yet), fall back to searching for ANY
+    past event between the same two teams and use its event_id."""
     ticker = (ticker or "").strip().upper()
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
@@ -4934,20 +4940,41 @@ async def get_event_h2h(ticker: str):
     if not found:
         return {"error": "event not found"}
     try:
-        from flashlive_feed import match_game as flash_match, fetch_event_h2h
+        from flashlive_feed import (
+            fetch_event_h2h,
+            search_past_event_for_teams,
+        )
         g = await _find_fl_game(found)
-        if not g:
-            return {"error": "FlashLive doesn't cover this match yet"}
-        fl_id = g.get("event_id")
+        fl_id = (g or {}).get("event_id", "")
+        home_name = (g or {}).get("home_name", "")
+        away_name = (g or {}).get("away_name", "")
         if not fl_id:
-            return {"error": "no FlashLive event ID"}
+            # Future-fixture fallback: parse the Kalshi title for the
+            # team names and ask FL for any past matchup between them.
+            title = found.get("title", "")
+            sport = found.get("_sport", "")
+            import re as _re
+            parts = _re.split(
+                r'\s+(?:vs\.?|v|at)\s+',
+                title, maxsplit=1, flags=_re.IGNORECASE,
+            )
+            if len(parts) == 2:
+                home_name = home_name or parts[0].strip()
+                away_name = away_name or parts[1].strip()
+                past = await search_past_event_for_teams(
+                    home_name, away_name, sport,
+                )
+                if past and past.get("event_id"):
+                    fl_id = past["event_id"]
+        if not fl_id:
+            return {"error": "FlashLive doesn't cover this match yet"}
         data = await fetch_event_h2h(fl_id)
         if not data:
             return {"error": "no H2H data available"}
         return {
             "data": data,
-            "home_name": g.get("home_name", ""),
-            "away_name": g.get("away_name", ""),
+            "home_name": home_name,
+            "away_name": away_name,
             "source": "flashlive",
         }
     except Exception as e:
@@ -5950,21 +5977,69 @@ def _bracket_raw_payload(raw):
     `data.TABS` and `data.ROUNDS` directly, so we strip the outer
     {DATA: [...]} wrapper to match what it expects.
 
+    Also filters out empty TBD-vs-TBD blocks: FL leaves placeholder
+    blocks for not-yet-drawn match slots, and the legacy renderer
+    interprets "no home name + no away name" as a Bye block, surfacing
+    rows of confusing "Bye / Bye" cards. For the post-league-phase
+    knockout we drop those entirely (they'll re-appear once FL fills
+    the slot with real participants).
+
     Returns None when the response shape doesn't match (legacy
     renderer treats null as "no bracket published yet")."""
     if not raw or not isinstance(raw, dict):
         return None
     arr = raw.get("DATA")
+    inner = None
     if isinstance(arr, list) and arr and isinstance(arr[0], dict):
         first = arr[0]
-        # Sometimes FL nests one more level: DATA[0].DATA
         if "DATA" in first and isinstance(first["DATA"], dict):
-            return first["DATA"]
-        if "TABS" in first or "ROUNDS" in first:
-            return first
-    if isinstance(arr, dict):
-        return arr
-    return None
+            inner = first["DATA"]
+        elif "TABS" in first or "ROUNDS" in first:
+            inner = first
+    elif isinstance(arr, dict):
+        inner = arr
+    if not inner:
+        return None
+
+    rounds = inner.get("ROUNDS")
+    if not isinstance(rounds, list):
+        return inner
+    tabs = inner.get("TABS") or {}
+    parts = tabs.get("DRAW_EVENT_PARTICIPANTS") or {}
+
+    def _has_name(ord_val):
+        if ord_val is None or ord_val == "":
+            return False
+        return bool((parts.get(str(ord_val)) or "").strip())
+
+    def _has_real_bye(blk):
+        # FL marks a true bye on the INFO field. We keep those.
+        info = (blk.get("DRAW_EVENT_PARTICIPANT_INFO_HOME") or "") + \
+               (blk.get("DRAW_EVENT_PARTICIPANT_INFO_AWAY") or "")
+        return "(Bye)" in info or "(bye)" in info.lower()
+
+    cleaned_rounds = []
+    for rnd in rounds:
+        if not isinstance(rnd, dict):
+            continue
+        blocks = rnd.get("BLOCKS") or []
+        kept = []
+        for blk in blocks:
+            if not isinstance(blk, dict):
+                continue
+            home_ok = _has_name(blk.get("DRAW_ROUND_HOME_EVENT_PARTICIPANT"))
+            away_ok = _has_name(blk.get("DRAW_ROUND_AWAY_EVENT_PARTICIPANT"))
+            if not home_ok and not away_ok and not _has_real_bye(blk):
+                continue
+            kept.append(blk)
+        if kept:
+            cleaned = dict(rnd)
+            cleaned["BLOCKS"] = kept
+            cleaned_rounds.append(cleaned)
+
+    cleaned_inner = dict(inner)
+    cleaned_inner["ROUNDS"] = cleaned_rounds
+    return cleaned_inner
 
 
 def _compact_bracket(raw):

@@ -916,8 +916,7 @@ def find_flashlive_game(title: str, sport: str = ""):
 
 async def search_flashlive_event(title: str, sport: str = ""):
     """On-demand search when the background feed doesn't have the event
-    (e.g. tomorrow's matches). Uses the search endpoint."""
-    # First try the cached GAMES
+    (e.g. tomorrow's matches). Uses the search endpoint."""    # First try the cached GAMES
     g = match_game(title, sport)
     if g:
         return g
@@ -963,6 +962,68 @@ async def search_flashlive_event(title: str, sport: str = ""):
             "tournament_stage_id": stage_id,
             "tournament_season_id": season_id,
             "state": "pre",
+        }
+    return None
+
+
+async def search_past_event_for_teams(home: str, away: str, sport: str = ""):
+    """Search FL for any past event between these two teams. Used as
+    an H2H fallback for future fixtures FL hasn't loaded yet — H2H
+    history is team-vs-team and identical regardless of which match's
+    event_id we query, so any past matchup between them gives us the
+    right history.
+
+    Returns {"event_id": str, "home_name": str, "away_name": str}
+    or None when no event with BOTH team names is found."""
+    if not home or not away:
+        return None
+    query = f"{home} {away}"
+    data = await _fl_get("/v1/search/multi-search", {"query": query})
+    if not data:
+        return None
+    if isinstance(data, list):
+        results = data
+    elif isinstance(data, dict):
+        results = data.get("DATA") or data.get("data") or []
+    else:
+        return None
+    if not isinstance(results, list):
+        return None
+    h_low = home.lower()
+    a_low = away.lower()
+    # Use a leading word as a looser match key — "Bayern" matches both
+    # "Bayern Munich" and "FC Bayern Munich".
+    h_key = h_low.split()[0] if h_low else ""
+    a_key = a_low.split()[0] if a_low else ""
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if item.get("TYPE") != "event" and item.get("type") != "event":
+            continue
+        ev_home = (item.get("HOME_NAME") or item.get("PARTICIPANT_HOME") or "").lower()
+        ev_away = (item.get("AWAY_NAME") or item.get("PARTICIPANT_AWAY") or "").lower()
+        if not ev_home or not ev_away:
+            continue
+        # Require BOTH team names in the event — avoids returning
+        # "Bayern vs Random Other Team" when our actual pair is
+        # Bayern vs PSG.
+        home_match = h_low in ev_home or h_key in ev_home or ev_home in h_low
+        away_match = a_low in ev_away or a_key in ev_away or ev_away in a_low
+        # Also accept the swapped orientation — FL might list the
+        # historical match with home/away reversed from our Kalshi event.
+        swapped = (
+            (h_low in ev_away or h_key in ev_away) and
+            (a_low in ev_home or a_key in ev_home)
+        )
+        if not (home_match and away_match) and not swapped:
+            continue
+        event_id = item.get("ID") or item.get("EVENT_ID") or ""
+        if not event_id:
+            continue
+        return {
+            "event_id":  event_id,
+            "home_name": item.get("HOME_NAME") or item.get("PARTICIPANT_HOME") or "",
+            "away_name": item.get("AWAY_NAME") or item.get("PARTICIPANT_AWAY") or "",
         }
     return None
 

@@ -1,16 +1,18 @@
 /**
  * Top Scorers block component.
  *
- * Renders `data.standings.top_scorers` from /normalized as a flat
- * goals/assists table with paginated "Show more" / "Show less"
- * buttons.
+ * Single-button pagination, mirroring the H2H "Show more / Show less"
+ * UX in static/index.html:
  *
- * Pagination: starts at PAGE_SIZE rows, each "Show more" click
- * fetches PAGE_SIZE more from the backend (re-issues /normalized
- * with topScorersLimit=N). "Show less" collapses back to the
- * initial PAGE_SIZE and scrolls the table back into view —
- * matches the H2H "Show less" UX so users have a consistent
- * mental model across blocks.
+ *   1. Initial state: 20 rows, button = "Show 20 more (20 of 200)".
+ *   2. Each click loads PAGE_SIZE more rows and updates the button
+ *      label until the full list is on screen.
+ *   3. When all rows are visible, the same button morphs to
+ *      "Show less"; clicking collapses to PAGE_SIZE and scrolls the
+ *      table back into view.
+ *
+ * No second button — there's only ever one action available, the
+ * label tells you what it does.
  */
 import type { TopScorers } from '../types/normalized';
 import { fetchNormalized } from '../api/normalized';
@@ -21,15 +23,14 @@ const STYLE_ID = 'sv-top-scorers-styles';
 const STYLES = `
 .sv-top-scorers{display:flex;flex-direction:column;gap:8px;padding:8px 4px}
 .sv-top-scorers-table{width:100%;border-collapse:collapse;font-size:13px}
-.sv-top-scorers-table th,.sv-top-scorers-table td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--border,#2a2a2a)}
+.sv-top-scorers-table th,.sv-top-scorers-table td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--border,#1a1a1a)}
 .sv-top-scorers-table th{font-size:11px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--text-dim,#888)}
 .sv-top-scorers-table td.num,.sv-top-scorers-table th.num{text-align:right;font-variant-numeric:tabular-nums}
 .sv-top-scorers-rank{width:32px;color:var(--text-dim,#888)}
 .sv-top-scorers-player{font-weight:500}
 .sv-top-scorers-team{color:var(--text-dim,#888);font-size:12px}
-.sv-top-scorers-actions{display:flex;gap:8px;margin-top:8px}
-.sv-top-scorers-btn{padding:8px 12px;font-size:12px;color:var(--accent,#3fb950);background:transparent;border:1px solid var(--border,#2a2a2a);border-radius:6px;cursor:pointer}
-.sv-top-scorers-btn:hover{background:var(--bg-card,#1a1a1a)}
+.sv-top-scorers-btn{margin-top:8px;padding:8px 14px;font-size:12px;font-weight:600;color:var(--green,#00ff00);background:transparent;border:1px solid var(--green,#00ff00);border-radius:6px;cursor:pointer;align-self:flex-start;font-family:inherit;letter-spacing:.3px}
+.sv-top-scorers-btn:hover{background:rgba(0,255,0,.08)}
 .sv-top-scorers-btn:disabled{opacity:.5;cursor:wait}
 .sv-top-scorers-empty{color:var(--text-dim,#888);font-size:13px;padding:20px;text-align:center}
 `;
@@ -97,43 +98,32 @@ export function renderTopScorers(
   table.appendChild(tbody);
   wrap.appendChild(table);
 
-  // Action row holds Show more / Show less side-by-side. Show less
-  // only appears when the user has expanded past the initial page.
-  const actions = document.createElement('div');
-  actions.className = 'sv-top-scorers-actions';
+  // Single-button pagination. has_more=true means more rows exist
+  // server-side; otherwise (fully expanded), button morphs to
+  // "Show less" if we've grown past the initial PAGE_SIZE.
   const shown = data.rows.length;
   const total = data.total;
-
   if (data.has_more) {
     const remaining = total - shown;
     const nextChunk = Math.min(PAGE_SIZE, remaining);
-    const moreBtn = document.createElement('button');
-    moreBtn.className = 'sv-top-scorers-btn';
-    moreBtn.textContent =
+    const btn = document.createElement('button');
+    btn.className = 'sv-top-scorers-btn';
+    btn.textContent =
       `Show ${nextChunk} more (${shown} of ${total})`;
-    moreBtn.addEventListener('click', () =>
-      reload(mount, ticker, shown + PAGE_SIZE, moreBtn),
+    btn.addEventListener('click', () =>
+      reload(mount, ticker, shown + PAGE_SIZE, btn, false),
     );
-    actions.appendChild(moreBtn);
+    wrap.appendChild(btn);
+  } else if (shown > PAGE_SIZE) {
+    const btn = document.createElement('button');
+    btn.className = 'sv-top-scorers-btn';
+    btn.textContent = 'Show less';
+    btn.addEventListener('click', () =>
+      reload(mount, ticker, PAGE_SIZE, btn, true),
+    );
+    wrap.appendChild(btn);
   }
 
-  if (shown > PAGE_SIZE) {
-    const lessBtn = document.createElement('button');
-    lessBtn.className = 'sv-top-scorers-btn';
-    lessBtn.textContent = 'Show less';
-    lessBtn.addEventListener('click', async () => {
-      await reload(mount, ticker, PAGE_SIZE, lessBtn);
-      // Scroll the now-shorter table back into view, otherwise the
-      // user stays scrolled past where the expanded list used to end.
-      // Mirrors the H2H "Show less" UX in static/index.html.
-      if (mount.scrollIntoView) {
-        mount.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-    });
-    actions.appendChild(lessBtn);
-  }
-
-  if (actions.children.length > 0) wrap.appendChild(actions);
   mount.appendChild(wrap);
 }
 
@@ -142,6 +132,7 @@ async function reload(
   ticker: string,
   limit: number,
   triggerBtn: HTMLButtonElement,
+  scrollBackOnDone: boolean,
 ): Promise<void> {
   const original = triggerBtn.textContent;
   triggerBtn.disabled = true;
@@ -152,6 +143,12 @@ async function reload(
       ev.data?.standings as { top_scorers?: TopScorers | null }
     )?.top_scorers;
     renderTopScorers(mount, ts, ticker);
+    if (scrollBackOnDone && mount.scrollIntoView) {
+      // Match H2H "Show less" behavior: scroll the table back into
+      // view so the user isn't left scrolled past where the expanded
+      // list used to end.
+      mount.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   } catch (ex) {
     triggerBtn.disabled = false;
     triggerBtn.textContent = original || 'Retry';
