@@ -5823,6 +5823,13 @@ async def event_normalized(ticker: str, refresh: bool = False):
                     try:
                         from flashlive_feed import GAMES as _FL_GAMES
                         for fl_g in _FL_GAMES.values():
+                            # Sport filter is critical — "Champions
+                            # League" matches both UEFA Champions
+                            # League (Soccer) and Asia Champions
+                            # League (Basketball). Without the sport
+                            # gate, we'd grab the wrong tournament.
+                            if sport and fl_g.get("sport") != sport:
+                                continue
                             if not fl_g.get("tournament_stage_id"):
                                 continue
                             fl_league = (fl_g.get("league") or
@@ -6067,6 +6074,12 @@ async def event_scheme(ticker: str, refresh: bool = False):
                     try:
                         from flashlive_feed import GAMES as _FL_GAMES
                         for fl_g in _FL_GAMES.values():
+                            # Sport filter — "Champions League"
+                            # exists in both Soccer (UEFA) and
+                            # Basketball (Asia). Without this gate
+                            # we'd fall onto the wrong tournament.
+                            if sport and fl_g.get("sport") != sport:
+                                continue
                             if not fl_g.get("tournament_stage_id"):
                                 continue
                             fl_league = (fl_g.get("league") or
