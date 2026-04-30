@@ -702,7 +702,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.2.0" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.3.0" defer></script>
 </head>
 <body>
 <div id="header">
@@ -5711,18 +5711,19 @@ window._bracketJumpToRound = function(btn) {
 };
 
 async function _loadStandingsType(container, ticker, standingType) {
-  // Phase 3 bracket migration: if the TS bundle is loaded, route the
-  // Draw sub-tab through it. The new path uses /normalized which
-  // auto-discovers the right bracket stage_id (post-league knockout
-  // for UCL) and feeds the compact {rounds:[...]} shape into the
-  // Bracket block component. Falls through to the legacy renderer
-  // below when the bundle isn't available.
-  if (standingType === "draw" && window.StochverseBundle && window.StochverseBundle.renderBracket) {
+  // Phase 3: route every standings sub-type through the TS bundle
+  // when available. The new path uses /normalized — same data
+  // source for Overall / Home / Away / Form / Top Scorers / Draw —
+  // which has tournament-level fallback so future fixtures
+  // (Bayern vs PSG a week away) still render their league
+  // standings, top scorers, and bracket. Falls through to the
+  // legacy per-tab fetch below when the bundle isn't loaded.
+  if (window.StochverseBundle && window.StochverseBundle.renderStandingsType) {
     try {
-      await window.StochverseBundle.renderBracket(ticker, container);
+      await window.StochverseBundle.renderStandingsType(ticker, container, standingType);
       return;
     } catch (ex) {
-      console.warn("[stochverse] bracket bundle render failed, falling back", ex);
+      console.warn("[stochverse] standings bundle render failed, falling back", ex);
     }
   }
   container.innerHTML = '<div class="ed-stats-loading">Loading…</div>';
