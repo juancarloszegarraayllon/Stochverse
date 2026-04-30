@@ -6291,10 +6291,14 @@ async def event_normalized(ticker: str, refresh: bool = False,
     ticker_norm = (ticker or "").strip().upper()
     if not ticker_norm:
         return {"error": "ticker required"}
-    cache_key = (ticker_norm, top_scorers_limit)
+    # Cache the full payload (top_scorers always populated to total)
+    # keyed by ticker. Each request slices to the requested limit on
+    # the way out, so a "Show more" click that bumps top_scorers_limit
+    # from 20 to 40 hits the cache instead of re-probing 17 FL endpoints.
+    cache_key = ticker_norm
     cached = _EVENT_NORMALIZED_CACHE.get(cache_key)
     if cached and not refresh and (time.time() - cached["_ts"]) < _EVENT_NORMALIZED_TTL:
-        return cached["payload"]
+        return _slice_top_scorers(cached["payload"], top_scorers_limit)
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
     found = next((r for r in records if r.get("event_ticker") == ticker_norm), None)
@@ -6584,9 +6588,12 @@ async def event_normalized(ticker: str, refresh: bool = False,
                 "away":         _compact_standings(raw_by_key.get("standings_away")),
                 "form":         _compact_standings(raw_by_key.get("standings_form")),
                 "overall_live": _compact_standings(raw_by_key.get("standings_overall_live")),
+                # Always compute the full list at compactor time;
+                # _slice_top_scorers applies the per-request limit on
+                # output so different "Show more" calls share a cache.
                 "top_scorers":  _compact_top_scorers(
                     raw_by_key.get("standings_top_scores"),
-                    limit=top_scorers_limit),
+                    limit=0),
             },
             "bracket":          _compact_bracket(raw_by_key.get("standings_draw")),
             # Raw FL draw response from the resolved bracket stage. The
@@ -6613,14 +6620,37 @@ async def event_normalized(ticker: str, refresh: bool = False,
             "capabilities":        capabilities,
             "data":                data_block,
         }
-        # Cache key includes top_scorers_limit so a "show more" re-fetch
-        # at limit=0 doesn't return the cached limit=20 payload.
-        _EVENT_NORMALIZED_CACHE[(ticker_norm, top_scorers_limit)] = {
+        _EVENT_NORMALIZED_CACHE[ticker_norm] = {
             "_ts": time.time(), "payload": payload
         }
-        return payload
+        return _slice_top_scorers(payload, top_scorers_limit)
     except Exception as e:
         return {"error": str(e)[:400]}
+
+
+def _slice_top_scorers(payload: dict, limit: int) -> dict:
+    """Apply a per-request top_scorers_limit to a cached payload
+    without mutating it. The cache stores the full list (limit=0); the
+    HTTP layer slices on the way out so successive "Show more" clicks
+    don't trigger 17 FL re-probes per pagination step.
+
+    limit <= 0 → return all rows. has_more reflects whether the slice
+    truncated the cached list."""
+    ts = (payload.get("data") or {}).get("standings", {}).get("top_scorers")
+    if not ts or not isinstance(ts.get("rows"), list):
+        return payload
+    rows = ts["rows"]
+    total = ts.get("total", len(rows))
+    if limit and limit > 0 and total > limit:
+        sliced = {"rows": rows[:limit], "total": total, "has_more": True}
+    else:
+        sliced = {"rows": rows, "total": total, "has_more": False}
+    # Shallow-copy down to the field we changed so we don't poison the cache.
+    out = dict(payload)
+    out["data"] = dict(payload["data"])
+    out["data"]["standings"] = dict(payload["data"]["standings"])
+    out["data"]["standings"]["top_scorers"] = sliced
+    return out
 
 
 _EVENT_NORMALIZED_CACHE: dict = {}
