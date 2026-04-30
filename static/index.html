@@ -697,6 +697,12 @@ body.has-shared-banner #header{top:40px}
   .ed-series-summary{flex:1 1 100%;text-align:center;order:3}
 }
 </style>
+<!-- Bundled TypeScript modules (block components for Detailed Event
+     Stats etc.). Loaded as a deferred ES module so it doesn't block
+     the existing inline JS or initial render. The bundle is built
+     locally via `npm run build` and committed to static/dist/ so
+     Railway deploys don't need Node. -->
+<script type="module" src="/static/dist/main.js" defer></script>
 </head>
 <body>
 <div id="header">

@@ -1,0 +1,16 @@
+{
+  "name": "stochverse-frontend",
+  "version": "1.0.0",
+  "description": "TypeScript modules for Stochverse frontend block components.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}

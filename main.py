@@ -32,6 +32,20 @@ if _SENTRY_DSN:
 
 app = FastAPI(title="Stochverse API")
 
+# Static file mount for the frontend bundle (static/dist/main.js) and
+# any other assets we add to static/. The bundle is built locally
+# via `npm run build` and committed to the repo so Railway deploys
+# don't need a Node toolchain. The root index.html itself is served
+# by the @app.get("/") handler below (it does template substitution
+# for analytics), so we only need /static/* served verbatim.
+from fastapi.staticfiles import StaticFiles
+import os as _static_os
+_static_dir = _static_os.path.join(
+    _static_os.path.dirname(_static_os.path.abspath(__file__)), "static"
+)
+if _static_os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
 
 def _all_market_tickers():
     """Return every market ticker from the current REST snapshot, used
@@ -5655,6 +5669,261 @@ async def event_capabilities(ticker: str):
         return payload
     except Exception as e:
         return {"error": str(e)[:300]}
+
+
+# ── Detailed Event Stats normalizer ──────────────────────────────────
+# Single source of truth for the per-event payload the frontend
+# Detailed Event Stats panel reads. Probes FlashLive's relevant
+# endpoints in parallel, then collapses the results into a stable
+# internal shape:
+#
+#   {
+#     "ticker", "fl_event_id", "sport",
+#     "format": "league" | "knockout" | "tournament" | "single" | "playoff",
+#     "state":  "scheduled" | "live" | "final",
+#     "participants": [{"side", "name", "abbrev", "score"}],
+#     "scoreboard": {...},
+#     "league": {"name", "country"},
+#     "tournament_stage_id", "tournament_season_id",
+#     "capabilities": {"has_summary", "has_stats", "has_lineups",
+#                      "has_h2h", "has_news", "has_odds", "has_video",
+#                      "has_report", "has_standings", "has_bracket",
+#                      "has_commentary", "has_player_stats",
+#                      "has_missing_players", "has_predicted_lineups"},
+#     "data": {
+#         "summary":   [...incident timeline...],
+#         "stats":     [...statistic groups...],
+#         "lineups":   {home, away},
+#         "commentary":[...],
+#         "h2h":       [...],
+#         "standings": [...],
+#         "bracket":   {...},
+#         "news":      [...],
+#         "odds":      [...],
+#     }
+#   }
+#
+# Sport- and format-specific fields are nested under `data` so the
+# top-level shape stays identical across sports. Frontend renderers
+# read capability flags to decide which blocks to render.
+_FORMAT_FROM_TOURNAMENT_TYPE = {
+    "p": "league",        # plain round-robin (Premier League, NBA regular season)
+    "c": "knockout",      # cup / knockout bracket (FA Cup, UCL knockout)
+    "playoff": "playoff",
+}
+
+
+def _infer_format_from_series(series_ticker: str) -> str:
+    """Heuristic format inference from Kalshi series ticker. Used as
+    fallback when FL doesn't expose tournament_type."""
+    s = (series_ticker or "").upper()
+    # Cup / knockout series typically have "CUP", "FINAL", "PLAYOFF"
+    # in the prefix. Round-robin leagues ship as plain *GAME.
+    if any(tag in s for tag in ("CUP", "FINAL", "KNOCKOUT", "BRACKET")):
+        return "knockout"
+    if "PLAYOFF" in s:
+        return "playoff"
+    if any(tag in s for tag in ("MATCH", "GAME")):
+        return "league"
+    return "single"
+
+
+def _normalized_state(g: dict) -> str:
+    s = (g.get("state") or "").lower()
+    if s == "in":
+        return "live"
+    if s == "post":
+        return "final"
+    return "scheduled"
+
+
+def _capabilities_from_probes(probe_results: dict) -> dict:
+    """Collapse the per-endpoint probe map into clean has_* flags."""
+    return {
+        "has_summary":           probe_results.get("summary", False)
+                                  or probe_results.get("summary_incidents", False),
+        "has_stats":             probe_results.get("statistics", False),
+        "has_lineups":           probe_results.get("lineups", False),
+        "has_predicted_lineups": probe_results.get("predicted_lineups", False),
+        "has_player_stats":      probe_results.get("player_stats", False),
+        "has_missing_players":   probe_results.get("missing_players", False),
+        "has_commentary":        probe_results.get("commentary", False),
+        "has_h2h":               probe_results.get("h2h", False),
+        "has_news":              probe_results.get("news", False),
+        "has_odds":              probe_results.get("odds", False),
+        "has_video":             probe_results.get("highlights", False),
+        "has_report":            probe_results.get("report", False),
+        "has_standings":         any(probe_results.get(f"standings_{t}", False)
+                                      for t in ("overall", "home", "away",
+                                                 "form", "top_scores",
+                                                 "overall_live")),
+        "has_bracket":           probe_results.get("standings_draw", False),
+    }
+
+
+@app.get("/api/event/{ticker}/normalized")
+async def event_normalized(ticker: str, refresh: bool = False):
+    """Normalized per-event payload — single source of truth for the
+    Detailed Event Stats panel. Stitches together multiple FL
+    endpoints, parses them, and returns a stable internal shape.
+    Frontend block components read this exclusively, never raw FL
+    responses.
+
+    Pass ?refresh=1 to bust the 5-min cache."""
+    import asyncio, time
+    ticker_norm = (ticker or "").strip().upper()
+    if not ticker_norm:
+        return {"error": "ticker required"}
+    cached = _EVENT_NORMALIZED_CACHE.get(ticker_norm)
+    if cached and not refresh and (time.time() - cached["_ts"]) < _EVENT_NORMALIZED_TTL:
+        return cached["payload"]
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = next((r for r in records if r.get("event_ticker") == ticker_norm), None)
+    if not found:
+        return {"error": f"event {ticker_norm!r} not found in cache"}
+    title = found.get("title", "")
+    sport = found.get("_sport", "")
+    series = (found.get("series_ticker") or "").upper()
+    try:
+        from flashlive_feed import _fl_get
+        g = await _find_fl_game(found)
+        fl_id = (g or {}).get("event_id", "")
+        stage_id = (g or {}).get("tournament_stage_id", "")
+        season_id = (g or {}).get("tournament_season_id", "")
+        league_name = (g or {}).get("league", "") or (g or {}).get("_league", "")
+        country = (g or {}).get("country", "") or (g or {}).get("_country", "")
+
+        # Probe FL endpoints in parallel to discover capabilities.
+        # Same set the /scheme endpoint uses; here we also fetch the
+        # data so we can normalize each block.
+        probes = []
+        if fl_id:
+            probes = [
+                ("statistics",        "/v1/events/statistics",        {"event_id": fl_id}),
+                ("lineups",           "/v1/events/lineups",           {"event_id": fl_id}),
+                ("predicted_lineups", "/v1/events/predicted-lineups", {"event_id": fl_id}),
+                ("commentary",        "/v1/events/commentary",        {"event_id": fl_id}),
+                ("missing_players",   "/v1/events/missing-players",   {"event_id": fl_id}),
+                ("player_stats",      "/v1/events/player-stats",      {"event_id": fl_id}),
+                ("summary_incidents", "/v1/events/summary-incidents", {"event_id": fl_id}),
+                ("summary",           "/v1/events/summary",           {"event_id": fl_id}),
+                ("h2h",               "/v1/events/h2h",               {"event_id": fl_id}),
+                ("news",              "/v1/events/news",              {"event_id": fl_id}),
+                ("odds",              "/v1/events/odds",              {"event_id": fl_id}),
+                ("highlights",        "/v1/events/highlights",        {"event_id": fl_id}),
+                ("report",            "/v1/events/report",            {"event_id": fl_id}),
+            ]
+        standing_types = ["overall", "home", "away", "form",
+                          "top_scores", "draw", "overall_live"]
+        if stage_id:
+            for st in standing_types:
+                params = {"tournament_stage_id": stage_id,
+                          "standing_type": st}
+                if season_id:
+                    params["tournament_season_id"] = season_id
+                probes.append((f"standings_{st}",
+                               "/v1/tournaments/standings", params))
+        # Fan out.
+        coros = [_fl_get(path, params) for _, path, params in probes]
+        raw_results = await asyncio.gather(*coros, return_exceptions=True)
+        raw_by_key: dict = {}
+        availability: dict = {}
+        for (key, _, _), result in zip(probes, raw_results):
+            data = None if isinstance(result, Exception) else result
+            raw_by_key[key] = data
+            availability[key] = _fl_has_data(data)
+
+        # Compose the normalized event.
+        capabilities = _capabilities_from_probes(availability)
+        # Format inference: prefer FL's tournament_type when present.
+        fmt = "single"
+        if g:
+            tt = (g.get("tournament_type") or "").lower().strip()
+            if tt in _FORMAT_FROM_TOURNAMENT_TYPE:
+                fmt = _FORMAT_FROM_TOURNAMENT_TYPE[tt]
+        if fmt == "single":
+            fmt = _infer_format_from_series(series)
+        # Bracket presence promotes single → knockout.
+        if capabilities["has_bracket"] and fmt in ("single", "league"):
+            fmt = "knockout"
+
+        # Participants — keep it simple, just home/away with scores.
+        participants = []
+        if g:
+            participants.append({
+                "side":   "home",
+                "name":   g.get("home_name") or g.get("home_display") or "",
+                "abbrev": g.get("home_abbr") or "",
+                "score":  str(g.get("home_score") or ""),
+            })
+            participants.append({
+                "side":   "away",
+                "name":   g.get("away_name") or g.get("away_display") or "",
+                "abbrev": g.get("away_abbr") or "",
+                "score":  str(g.get("away_score") or ""),
+            })
+
+        scoreboard = {
+            "home_score":     (g or {}).get("home_score", ""),
+            "away_score":     (g or {}).get("away_score", ""),
+            "period":         (g or {}).get("period", 0),
+            "display_clock":  (g or {}).get("display_clock", ""),
+            "clock_running":  (g or {}).get("clock_running"),
+            "stage_start_ms": (g or {}).get("stage_start_ms", 0),
+        }
+
+        # `data` block — raw FL responses keyed by dimension. Frontend
+        # block components can run their own light parsers on these
+        # (e.g. StatsTable reads data.stats, BracketView reads
+        # data.bracket). Each entry is None if the probe didn't
+        # populate.
+        data_block = {
+            "summary":          raw_by_key.get("summary"),
+            "summary_incidents": raw_by_key.get("summary_incidents"),
+            "stats":            raw_by_key.get("statistics"),
+            "lineups":          raw_by_key.get("lineups"),
+            "predicted_lineups": raw_by_key.get("predicted_lineups"),
+            "commentary":       raw_by_key.get("commentary"),
+            "missing_players":  raw_by_key.get("missing_players"),
+            "player_stats":     raw_by_key.get("player_stats"),
+            "h2h":              raw_by_key.get("h2h"),
+            "news":             raw_by_key.get("news"),
+            "odds":             raw_by_key.get("odds"),
+            "video":            raw_by_key.get("highlights"),
+            "report":           raw_by_key.get("report"),
+            "standings": {
+                t: raw_by_key.get(f"standings_{t}")
+                for t in standing_types
+            },
+            "bracket":          raw_by_key.get("standings_draw"),
+        }
+
+        payload = {
+            "ticker":              ticker_norm,
+            "fl_event_id":         fl_id,
+            "sport":               sport,
+            "format":              fmt,
+            "state":               _normalized_state(g or {}),
+            "title":               title,
+            "league":              {"name": league_name, "country": country},
+            "tournament_stage_id": stage_id,
+            "tournament_season_id": season_id,
+            "participants":        participants,
+            "scoreboard":          scoreboard,
+            "capabilities":        capabilities,
+            "data":                data_block,
+        }
+        _EVENT_NORMALIZED_CACHE[ticker_norm] = {
+            "_ts": time.time(), "payload": payload
+        }
+        return payload
+    except Exception as e:
+        return {"error": str(e)[:400]}
+
+
+_EVENT_NORMALIZED_CACHE: dict = {}
+_EVENT_NORMALIZED_TTL = 300  # seconds
 
 
 @app.get("/api/event/{ticker}/scheme")
