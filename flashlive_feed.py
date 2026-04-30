@@ -65,16 +65,31 @@ LIVE_POLL_INTERVAL = int(os.environ.get("FLASHLIVE_LIVE_POLL_INTERVAL", "10"))
 # through _fl_throttle() so the two paths share one rate budget.
 # 200 ms min gap = 5 req/sec sustained, which keeps us comfortably
 # under 10/sec even when both paths are active.
-_FL_THROTTLE_LOCK = None
+_FL_THROTTLE_LOCKS: dict = {}
 _FL_LAST_CALL_TS = 0.0
 _FL_MIN_GAP_S = float(os.environ.get("FLASHLIVE_MIN_GAP_S", "0.20"))
 
 
 async def _fl_throttle():
-    global _FL_THROTTLE_LOCK, _FL_LAST_CALL_TS
-    if _FL_THROTTLE_LOCK is None:
-        _FL_THROTTLE_LOCK = asyncio.Lock()
-    async with _FL_THROTTLE_LOCK:
+    """Rate-limit FlashLive HTTP calls. asyncio.Lock is bound to the
+    event loop that created it, so we keep one lock PER LOOP rather
+    than a single module-level instance — when calls come in from a
+    different loop (uvicorn worker swap, debug endpoint that runs in
+    a child loop, etc.) the original lock raises 'bound to a different
+    event loop' and cascades that error into the response. Per-loop
+    locks bypass the issue while keeping the shared rate budget via
+    the global _FL_LAST_CALL_TS."""
+    global _FL_LAST_CALL_TS
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+    loop_key = id(loop)
+    lock = _FL_THROTTLE_LOCKS.get(loop_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _FL_THROTTLE_LOCKS[loop_key] = lock
+    async with lock:
         now = time.time()
         gap = now - _FL_LAST_CALL_TS
         if gap < _FL_MIN_GAP_S:
