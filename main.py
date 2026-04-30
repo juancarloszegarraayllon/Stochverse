@@ -6063,9 +6063,10 @@ def _compact_bracket(raw):
                 winner = "home"
             elif winner_overall == "A":
                 winner = "away"
-            elif legs and agg_home is not None and agg_away is not None and agg_home == agg_away:
-                winner = "draw"
             else:
+                # KO ties go to penalties / another leg, never end as
+                # draws — so a tied aggregate just means the match is
+                # pending or in progress. Report null, not "draw".
                 winner = None
 
             # Skip TBD-vs-TBD placeholder slots — they have no slugs and no
