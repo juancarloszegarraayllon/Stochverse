@@ -4723,6 +4723,99 @@ FL_GAME_NEG_CACHE_TTL = 30 # 30 s for None results — shields the FlashLive
 # Key: series_ticker (UPPER)
 # Value: {stage_id, season_id, league_name, country, ts}
 _SERIES_TO_STAGE_CACHE: dict = {}
+
+# FL tournaments-list cache. /v1/tournaments/list?sport_id=N returns
+# every tournament FL knows for that sport regardless of whether
+# any match is currently loaded — the right answer for "find UCL
+# stage_id when there's no UCL match in /v1/events/list right now."
+# Per-sport-id cache, hours-long TTL since the tournament inventory
+# barely changes across a season.
+_FL_TOURNAMENTS_CACHE: dict = {}
+_FL_TOURNAMENTS_TTL = 6 * 3600  # 6 hours
+
+# Internal sport name → FL sport_id, for tournaments-list lookup.
+_SPORT_NAME_TO_FL_ID = {
+    "Soccer": "1", "Tennis": "2", "Basketball": "3", "Hockey": "4",
+    "Football": "5", "Baseball": "6", "Rugby": "8",
+    "Cricket": "13", "Darts": "14", "Boxing": "16",
+    "Aussie Rules": "18", "Golf": "23", "Table Tennis": "25",
+    "MMA": "28", "Motorsport": "31", "Esports": "36",
+}
+
+
+async def _fl_tournaments_for_sport(sport_id: str) -> list:
+    """Return FL's tournament list for a given sport_id, cached for
+    _FL_TOURNAMENTS_TTL. Each entry is the raw FL tournament dict
+    (TOURNAMENT_ID, TOURNAMENT_STAGE_ID, NAME, NAME_PART_1,
+    NAME_PART_2, COUNTRY_NAME, etc.)."""
+    if not sport_id:
+        return []
+    cached = _FL_TOURNAMENTS_CACHE.get(sport_id)
+    if cached and (time.time() - cached["ts"]) < _FL_TOURNAMENTS_TTL:
+        return cached["tournaments"]
+    try:
+        from flashlive_feed import _fl_get
+        resp = await _fl_get("/v1/tournaments/list",
+                              {"sport_id": sport_id,
+                               "locale": "en_INT"})
+        tournaments: list = []
+        if isinstance(resp, dict):
+            data = resp.get("DATA") or []
+            if isinstance(data, list):
+                for entry in data:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("TOURNAMENT_STAGE_ID"):
+                        tournaments.append(entry)
+                    nested = entry.get("TOURNAMENTS") or entry.get("EVENTS")
+                    if isinstance(nested, list):
+                        tournaments.extend(
+                            t for t in nested if isinstance(t, dict)
+                        )
+        _FL_TOURNAMENTS_CACHE[sport_id] = {
+            "tournaments": tournaments,
+            "ts": time.time(),
+        }
+        return tournaments
+    except Exception:
+        return []
+
+
+async def _find_stage_via_tournaments_list(sport: str,
+                                             league_hint: str) -> dict:
+    """Look up tournament_stage_id from FL's master tournament list.
+    Last-ditch fallback when no current FL match in the league is
+    loaded. Returns {stage_id, season_id, league_name, country} or
+    empty dict when nothing matches."""
+    sport_id = _SPORT_NAME_TO_FL_ID.get(sport, "")
+    if not sport_id or not league_hint:
+        return {}
+    tournaments = await _fl_tournaments_for_sport(sport_id)
+    hint = league_hint.lower()
+    best = None
+    best_score = 0
+    for t in tournaments:
+        name = (t.get("NAME") or "").lower()
+        np2  = (t.get("NAME_PART_2") or "").lower()
+        score = 0
+        if np2 == hint:
+            score = 100
+        elif np2 and hint in np2:
+            score = 80
+        elif hint in name:
+            score = 50
+        if score > best_score:
+            best_score = score
+            best = t
+    if not best:
+        return {}
+    return {
+        "stage_id":    best.get("TOURNAMENT_STAGE_ID", ""),
+        "season_id":   best.get("TOURNAMENT_SEASON_ID", ""),
+        "league_name": best.get("NAME_PART_2") or best.get("NAME", ""),
+        "country":     best.get("COUNTRY_NAME", "")
+                       or best.get("NAME_PART_1", ""),
+    }
                            # full 10-minute window if the first probe was
                            # unlucky (GAMES not yet populated, transient
                            # match_game miss, etc.).
@@ -5883,6 +5976,33 @@ async def event_normalized(ticker: str, refresh: bool = False):
                                 break
                     except Exception:
                         pass
+            # Path D: FL master tournaments list. Last-resort lookup
+            # that asks FL directly for every tournament in this
+            # sport, then matches by name. Catches the case where FL
+            # has zero matches loaded for the league right now (UCL
+            # between rounds, off-season league fixtures, etc.) but
+            # the tournament itself definitely exists in their data.
+            if not stage_id and sibling_series and sport:
+                league_hint = SOCCER_COMP.get(sibling_series, "")
+                if league_hint:
+                    discovered = await _find_stage_via_tournaments_list(
+                        sport, league_hint
+                    )
+                    if discovered.get("stage_id"):
+                        stage_id = discovered["stage_id"]
+                        season_id = season_id or discovered.get("season_id", "")
+                        league_name = league_name or discovered.get("league_name", "")
+                        country = country or discovered.get("country", "")
+                        # Populate the persistent series→stage cache
+                        # too so subsequent requests in the same
+                        # series don't re-hit /tournaments/list.
+                        _SERIES_TO_STAGE_CACHE[sibling_series] = {
+                            "stage_id":    stage_id,
+                            "season_id":   season_id,
+                            "league_name": league_name,
+                            "country":     country,
+                            "ts":          time.time(),
+                        }
 
         # Probe FL endpoints in parallel to discover capabilities.
         # Same set the /scheme endpoint uses; here we also fetch the
