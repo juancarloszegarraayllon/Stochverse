@@ -5983,7 +5983,10 @@ def _compact_bracket(raw):
     if not container:
         return None
 
-    round_labels = container.get("DRAW_ROUNDS") or {}
+    # Round labels live in a sibling TABS container, not on the same node
+    # as ROUNDS. Walk the tree to find DRAW_ROUNDS regardless.
+    labels_owner = find_first(raw, "DRAW_ROUNDS") or {}
+    round_labels = labels_owner.get("DRAW_ROUNDS") or {}
     rounds_in = container.get("ROUNDS") or []
     if not isinstance(rounds_in, list):
         return None
@@ -6065,6 +6068,11 @@ def _compact_bracket(raw):
             else:
                 winner = None
 
+            # Skip TBD-vs-TBD placeholder slots — they have no slugs and no
+            # legs and just inflate the response. Keep half-known pairs so
+            # the bracket still shows e.g. "Arsenal vs ?" before the draw.
+            if not home_slug and not away_slug and not legs:
+                continue
             pairs_out.append({
                 "home":      home_slug,
                 "away":      away_slug,
@@ -6082,6 +6090,68 @@ def _compact_bracket(raw):
         })
 
     return {"rounds": rounds_out} if rounds_out else None
+
+
+def _compact_standings(raw):
+    """Strip FL standings to the fields the frontend actually renders.
+    Returns {"groups": [{"name": str, "rows": [{rank, name, team_id,
+    played, wins, goals, points, qualification}]}]} or None."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    groups_in = raw.get("DATA")
+    if not isinstance(groups_in, list):
+        return None
+    groups_out = []
+    for grp in groups_in:
+        if not isinstance(grp, dict):
+            continue
+        rows_out = []
+        for r in (grp.get("ROWS") or []):
+            if not isinstance(r, dict):
+                continue
+            rows_out.append({
+                "rank":          r.get("RANKING"),
+                "name":          r.get("TEAM_NAME"),
+                "team_id":       r.get("TEAM_ID"),
+                "played":        r.get("MATCHES_PLAYED"),
+                "wins":          r.get("WINS"),
+                "goals":         r.get("GOALS"),
+                "points":        r.get("POINTS"),
+                "qualification": r.get("TEAM_QUALIFICATION"),
+            })
+        if rows_out:
+            groups_out.append({
+                "name": grp.get("GROUP") or "Main",
+                "rows": rows_out,
+            })
+    return {"groups": groups_out} if groups_out else None
+
+
+def _compact_top_scorers(raw):
+    """Strip FL top-scorer rows to {rank, name, team, goals, assists}.
+    Handles both wrapped ({DATA: [{ROWS: [...]}]}) and direct ({ROWS:
+    [...]}) shapes since FL's response varies."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    rows = raw.get("ROWS")
+    if not rows:
+        data = raw.get("DATA")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            rows = data[0].get("ROWS")
+    if not isinstance(rows, list):
+        return None
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        out.append({
+            "rank":    r.get("TS_RANK"),
+            "name":    r.get("TS_PLAYER_NAME_PA") or r.get("TS_PLAYER_NAME"),
+            "team":    r.get("TEAM_NAME"),
+            "goals":   r.get("TS_PLAYER_GOALS"),
+            "assists": r.get("TS_PLAYER_ASISTS"),
+        })
+    return {"rows": out} if out else None
 
 
 @app.get("/api/event/{ticker}/normalized")
@@ -6305,9 +6375,15 @@ async def event_normalized(ticker: str, refresh: bool = False):
             "odds":             raw_by_key.get("odds"),
             "video":            raw_by_key.get("highlights"),
             "report":           raw_by_key.get("report"),
+            # Compact standings to flat rows; drop standings_draw because
+            # it's the same data as the bracket compactor's input.
             "standings": {
-                t: raw_by_key.get(f"standings_{t}")
-                for t in standing_types
+                "overall":      _compact_standings(raw_by_key.get("standings_overall")),
+                "home":         _compact_standings(raw_by_key.get("standings_home")),
+                "away":         _compact_standings(raw_by_key.get("standings_away")),
+                "form":         _compact_standings(raw_by_key.get("standings_form")),
+                "overall_live": _compact_standings(raw_by_key.get("standings_overall_live")),
+                "top_scorers":  _compact_top_scorers(raw_by_key.get("standings_top_scores")),
             },
             "bracket":          _compact_bracket(raw_by_key.get("standings_draw")),
         }
