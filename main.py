@@ -6127,8 +6127,12 @@ def _compact_standings(raw):
     return {"groups": groups_out} if groups_out else None
 
 
-def _compact_top_scorers(raw):
+def _compact_top_scorers(raw, limit=20):
     """Strip FL top-scorer rows to {rank, name, team, goals, assists}.
+    Caps the list at `limit` and returns {rows, total, has_more} so the
+    frontend can show a "more" button without bloating the default
+    payload. Pass limit=0 for unlimited.
+
     Handles both wrapped ({DATA: [{ROWS: [...]}]}) and direct ({ROWS:
     [...]}) shapes since FL's response varies."""
     if not raw or not isinstance(raw, dict):
@@ -6151,11 +6155,86 @@ def _compact_top_scorers(raw):
             "goals":   r.get("TS_PLAYER_GOALS"),
             "assists": r.get("TS_PLAYER_ASISTS"),
         })
-    return {"rows": out} if out else None
+    if not out:
+        return None
+    total = len(out)
+    if limit and limit > 0 and total > limit:
+        return {"rows": out[:limit], "total": total, "has_more": True}
+    return {"rows": out, "total": total, "has_more": False}
+
+
+def _standings_team_ids(raw):
+    """Pull TEAM_IDs from a raw FL standings response. Used to
+    fingerprint a league so we can match brackets against it."""
+    if not raw or not isinstance(raw, dict):
+        return set()
+    tids = set()
+    for grp in (raw.get("DATA") or []):
+        if not isinstance(grp, dict):
+            continue
+        for r in (grp.get("ROWS") or []):
+            if isinstance(r, dict):
+                tid = r.get("TEAM_ID")
+                if tid:
+                    tids.add(tid)
+    return tids
+
+
+def _bracket_team_ids(raw):
+    """Pull participant TEAM/PARTICIPANT IDs from a raw FL draw
+    response. Walks the tree because FL nests the participant map
+    differently per response variant (TABS vs DRAW vs root)."""
+    if not raw:
+        return set()
+    tids = set()
+    def walk(o):
+        if isinstance(o, dict):
+            v = o.get("DRAW_PARTICIPANT_IDS")
+            if isinstance(v, dict):
+                for pid in v.values():
+                    if isinstance(pid, str) and pid:
+                        tids.add(pid)
+            for child in o.values():
+                walk(child)
+        elif isinstance(o, list):
+            for child in o:
+                walk(child)
+    walk(raw)
+    return tids
+
+
+async def _find_all_stages_for_league(sport: str,
+                                        league_hint: str) -> list:
+    """Return every stage of FL's master tournaments list whose
+    LEAGUE_NAME matches `league_hint`. Used to find the right bracket
+    stage when a competition has multiple parallel stages (e.g. UCL
+    has League Phase, Knockout Phase, and Play Offs all distinct)."""
+    sport_id = _SPORT_NAME_TO_FL_ID.get(sport, "")
+    if not sport_id or not league_hint:
+        return []
+    tournaments = await _fl_tournaments_for_sport(sport_id)
+    hint = league_hint.lower()
+    out = []
+    for t in tournaments:
+        league = (t.get("LEAGUE_NAME") or "").lower()
+        if not league:
+            continue
+        if league == hint or hint in league or league in hint:
+            sid = t.get("STAGE_ID", "")
+            if sid:
+                out.append({
+                    "stage_id":    sid,
+                    "season_id":   t.get("SEASON_ID", ""),
+                    "stage_name":  t.get("STAGE_NAME", ""),
+                    "league_name": t.get("LEAGUE_NAME", ""),
+                    "country":     t.get("COUNTRY_NAME", ""),
+                })
+    return out
 
 
 @app.get("/api/event/{ticker}/normalized")
-async def event_normalized(ticker: str, refresh: bool = False):
+async def event_normalized(ticker: str, refresh: bool = False,
+                            top_scorers_limit: int = 20):
     """Normalized per-event payload — single source of truth for the
     Detailed Event Stats panel. Stitches together multiple FL
     endpoints, parses them, and returns a stable internal shape.
@@ -6167,7 +6246,8 @@ async def event_normalized(ticker: str, refresh: bool = False):
     ticker_norm = (ticker or "").strip().upper()
     if not ticker_norm:
         return {"error": "ticker required"}
-    cached = _EVENT_NORMALIZED_CACHE.get(ticker_norm)
+    cache_key = (ticker_norm, top_scorers_limit)
+    cached = _EVENT_NORMALIZED_CACHE.get(cache_key)
     if cached and not refresh and (time.time() - cached["_ts"]) < _EVENT_NORMALIZED_TTL:
         return cached["payload"]
     get_data()
@@ -6178,6 +6258,9 @@ async def event_normalized(ticker: str, refresh: bool = False):
     title = found.get("title", "")
     sport = found.get("_sport", "")
     series = (found.get("series_ticker") or "").upper()
+    # League name we'll use for the sibling-stage bracket fanout
+    # downstream. Set in the discovery branches below.
+    effective_league_hint = ""
     try:
         from flashlive_feed import _fl_get
         g = await _find_fl_game(found)
@@ -6186,6 +6269,7 @@ async def event_normalized(ticker: str, refresh: bool = False):
         season_id = (g or {}).get("tournament_season_id", "")
         league_name = (g or {}).get("league", "") or (g or {}).get("_league", "")
         country = (g or {}).get("country", "") or (g or {}).get("_country", "")
+        effective_league_hint = league_name or SOCCER_COMP.get(series, "")
 
         # Tournament-level fallback. When FL hasn't loaded THIS match
         # (future fixture), try to derive stage_id from a sibling
@@ -6226,6 +6310,7 @@ async def event_normalized(ticker: str, refresh: bool = False):
             # failed — search by league name from SOCCER_COMP map.
             if not stage_id and sibling_series:
                 league_hint = SOCCER_COMP.get(sibling_series, "")
+                effective_league_hint = effective_league_hint or league_hint
                 if league_hint:
                     try:
                         from flashlive_feed import GAMES as _FL_GAMES
@@ -6257,6 +6342,7 @@ async def event_normalized(ticker: str, refresh: bool = False):
             # the tournament itself definitely exists in their data.
             if not stage_id and sibling_series and sport:
                 league_hint = SOCCER_COMP.get(sibling_series, "")
+                effective_league_hint = effective_league_hint or league_hint
                 if league_hint:
                     discovered = await _find_stage_via_tournaments_list(
                         sport, league_hint
@@ -6316,6 +6402,61 @@ async def event_normalized(ticker: str, refresh: bool = False):
             data = None if isinstance(result, Exception) else result
             raw_by_key[key] = data
             availability[key] = _fl_has_data(data)
+
+        # Bracket-stage fanout. FL exposes a separate STAGE_ID per
+        # competition phase (UCL has League Phase, Knockout Phase, and
+        # Play Offs as distinct stages with the same LEAGUE_NAME). Our
+        # primary stage_id is picked for the event itself, which usually
+        # matches the league-phase standings — but its standings_draw
+        # response is then the qualifying-playoff bracket, not the main
+        # competition KO bracket users actually want for a Bayern vs PSG
+        # match. Detect that mismatch (low overlap between the bracket's
+        # participants and the league's standings TEAM_IDs) and re-probe
+        # standings_draw against sibling stages to find the right one.
+        bracket_stage_id = stage_id
+        bracket_stage_name = ""
+        if stage_id and effective_league_hint and sport:
+            standings_tids = _standings_team_ids(
+                raw_by_key.get("standings_overall"))
+            primary_overlap = len(standings_tids & _bracket_team_ids(
+                raw_by_key.get("standings_draw")))
+            # Fewer than 4 league teams in the bracket → it's almost
+            # certainly the wrong bracket (qualifying / a different
+            # cup). Cup competitions have ≥16 teams in their KO.
+            if standings_tids and primary_overlap < 4:
+                siblings = await _find_all_stages_for_league(
+                    sport, effective_league_hint)
+                sib_probes = [
+                    (s, {"tournament_stage_id":  s["stage_id"],
+                         "tournament_season_id": s["season_id"],
+                         "standing_type":        "draw"}
+                     if s["season_id"] else
+                     {"tournament_stage_id": s["stage_id"],
+                      "standing_type":       "draw"})
+                    for s in siblings if s["stage_id"] != stage_id
+                ]
+                if sib_probes:
+                    sib_results = await asyncio.gather(
+                        *[_fl_get("/v1/tournaments/standings", p)
+                          for _, p in sib_probes],
+                        return_exceptions=True,
+                    )
+                    best_overlap = primary_overlap
+                    best = None
+                    for (s, _), result in zip(sib_probes, sib_results):
+                        if isinstance(result, Exception) or not result:
+                            continue
+                        sib_tids = _bracket_team_ids(result)
+                        ov = len(standings_tids & sib_tids)
+                        if ov > best_overlap:
+                            best_overlap = ov
+                            best = (s, result)
+                    if best:
+                        raw_by_key["standings_draw"] = best[1]
+                        availability["standings_draw"] = _fl_has_data(
+                            best[1])
+                        bracket_stage_id = best[0]["stage_id"]
+                        bracket_stage_name = best[0]["stage_name"]
 
         # Compose the normalized event.
         capabilities = _capabilities_from_probes(availability)
@@ -6383,7 +6524,9 @@ async def event_normalized(ticker: str, refresh: bool = False):
                 "away":         _compact_standings(raw_by_key.get("standings_away")),
                 "form":         _compact_standings(raw_by_key.get("standings_form")),
                 "overall_live": _compact_standings(raw_by_key.get("standings_overall_live")),
-                "top_scorers":  _compact_top_scorers(raw_by_key.get("standings_top_scores")),
+                "top_scorers":  _compact_top_scorers(
+                    raw_by_key.get("standings_top_scores"),
+                    limit=top_scorers_limit),
             },
             "bracket":          _compact_bracket(raw_by_key.get("standings_draw")),
         }
@@ -6398,12 +6541,16 @@ async def event_normalized(ticker: str, refresh: bool = False):
             "league":              {"name": league_name, "country": country},
             "tournament_stage_id": stage_id,
             "tournament_season_id": season_id,
+            "bracket_stage_id":    bracket_stage_id,
+            "bracket_stage_name":  bracket_stage_name,
             "participants":        participants,
             "scoreboard":          scoreboard,
             "capabilities":        capabilities,
             "data":                data_block,
         }
-        _EVENT_NORMALIZED_CACHE[ticker_norm] = {
+        # Cache key includes top_scorers_limit so a "show more" re-fetch
+        # at limit=0 doesn't return the cached limit=20 payload.
+        _EVENT_NORMALIZED_CACHE[(ticker_norm, top_scorers_limit)] = {
             "_ts": time.time(), "payload": payload
         }
         return payload
