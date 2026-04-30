@@ -5944,6 +5944,146 @@ def _capabilities_from_probes(probe_results: dict) -> dict:
     }
 
 
+def _compact_bracket(raw):
+    """Flatten FL's nested standing_type=draw response into a compact
+    shape the frontend can render directly:
+
+      {"rounds": [{"round_num": 4, "label": "1/8-finals",
+                   "pairs": [{"home": "ludogorets", "away": "din-minsk",
+                              "legs": [{"home":1,"away":0},{"home":2,"away":2}],
+                              "winner": "home"|"away"|"draw"|None,
+                              "agg_home": 3, "agg_away": 2,
+                              "starts_at": 1752691500}, ...]}, ...]}
+
+    Team slugs come from FL's `DRAW_ROUND_EVENT_IDS` strings, formatted
+    as "event_id;home_ord;away_ord;ts;H:A;winner_ord;home_slug;away_slug".
+    Returns None if the input doesn't look like a bracket payload.
+    """
+    if not raw:
+        return None
+
+    def find_first(obj, key):
+        # Depth-first search for a dict carrying this key — the FL
+        # wrapper depth varies (DATA[].GROUPS[]., DATA[]., raw).
+        if isinstance(obj, dict):
+            if key in obj:
+                return obj
+            for v in obj.values():
+                r = find_first(v, key)
+                if r is not None:
+                    return r
+        elif isinstance(obj, list):
+            for v in obj:
+                r = find_first(v, key)
+                if r is not None:
+                    return r
+        return None
+
+    container = find_first(raw, "ROUNDS") or find_first(raw, "DRAW_ROUNDS")
+    if not container:
+        return None
+
+    round_labels = container.get("DRAW_ROUNDS") or {}
+    rounds_in = container.get("ROUNDS") or []
+    if not isinstance(rounds_in, list):
+        return None
+
+    rounds_out = []
+    for rnd in rounds_in:
+        if not isinstance(rnd, dict):
+            continue
+        round_num = rnd.get("DRAW_ROUND")
+        label = round_labels.get(str(round_num)) if round_num is not None else None
+        pairs_out = []
+        for blk in (rnd.get("BLOCKS") or []):
+            if not isinstance(blk, dict):
+                continue
+
+            home_slug = away_slug = None
+            legs = []
+            # The bracket's home/away perspective is fixed by the block's
+            # DRAW_ROUND_HOME_EVENT_PARTICIPANT. Second-leg event_ids list
+            # the host first, so we flip the score when leg-home != block-home.
+            block_home_ord = str(blk.get("DRAW_ROUND_HOME_EVENT_PARTICIPANT") or "")
+            event_ids = blk.get("DRAW_ROUND_EVENT_IDS") or []
+            for eid in event_ids:
+                if not isinstance(eid, str):
+                    continue
+                parts = eid.split(";")
+                if len(parts) < 8:
+                    continue
+                leg_home_ord = parts[1]
+                score_str = parts[4] or ""
+                if ":" in score_str:
+                    h, a = score_str.split(":", 1)
+                    try:
+                        h_int, a_int = int(h), int(a)
+                        if block_home_ord and leg_home_ord != block_home_ord:
+                            h_int, a_int = a_int, h_int
+                        legs.append({"home": h_int, "away": a_int})
+                    except ValueError:
+                        pass
+                if home_slug is None:
+                    if block_home_ord and leg_home_ord != block_home_ord:
+                        home_slug = parts[7] or None
+                        away_slug = parts[6] or None
+                    else:
+                        home_slug = parts[6] or None
+                        away_slug = parts[7] or None
+
+            home_results = blk.get("DRAW_ROUND_HOME_RESULTS") or []
+            away_results = blk.get("DRAW_ROUND_AWAY_RESULTS") or []
+            if not legs and (home_results or away_results):
+                # Single-leg or pre-aggregated form.
+                for h, a in zip(home_results, away_results):
+                    try:
+                        legs.append({"home": int(h), "away": int(a)})
+                    except (ValueError, TypeError):
+                        pass
+
+            def _sum(seq):
+                tot = 0
+                for v in seq:
+                    try:
+                        tot += int(v)
+                    except (ValueError, TypeError):
+                        pass
+                return tot
+
+            agg_home = _sum(home_results) if home_results else (
+                sum(l["home"] for l in legs) if legs else None)
+            agg_away = _sum(away_results) if away_results else (
+                sum(l["away"] for l in legs) if legs else None)
+
+            winner_overall = blk.get("DRAW_ROUND_EVENT_WINNER_OVERALL")
+            if winner_overall == "H":
+                winner = "home"
+            elif winner_overall == "A":
+                winner = "away"
+            elif legs and agg_home is not None and agg_away is not None and agg_home == agg_away:
+                winner = "draw"
+            else:
+                winner = None
+
+            pairs_out.append({
+                "home":      home_slug,
+                "away":      away_slug,
+                "legs":      legs,
+                "winner":    winner,
+                "agg_home":  agg_home,
+                "agg_away":  agg_away,
+                "starts_at": blk.get("DRAW_ROUND_EVENT_START") or blk.get("DRAW_TIME"),
+            })
+
+        rounds_out.append({
+            "round_num": round_num,
+            "label":     label,
+            "pairs":     pairs_out,
+        })
+
+    return {"rounds": rounds_out} if rounds_out else None
+
+
 @app.get("/api/event/{ticker}/normalized")
 async def event_normalized(ticker: str, refresh: bool = False):
     """Normalized per-event payload — single source of truth for the
@@ -6169,7 +6309,7 @@ async def event_normalized(ticker: str, refresh: bool = False):
                 t: raw_by_key.get(f"standings_{t}")
                 for t in standing_types
             },
-            "bracket":          raw_by_key.get("standings_draw"),
+            "bracket":          _compact_bracket(raw_by_key.get("standings_draw")),
         }
 
         payload = {
@@ -6482,15 +6622,12 @@ async def event_scheme(ticker: str, refresh: bool = False):
 @app.get("/api/debug_fl_tournaments")
 async def debug_fl_tournaments(sport_id: str = "1"):
     """Probe FL's /v1/tournaments/list?sport_id=N and return the raw
-    response. Lets us inspect the actual response shape and confirm
-    UCL / EPL / etc. are in there, plus what NAME / NAME_PART_2
-    fields each tournament uses (so we can tune the league-name
-    matching in _find_stage_via_tournaments_list)."""
+    response. Now uses the same parser as _fl_tournaments_for_sport
+    so its output reflects what the production code path sees."""
     try:
         from flashlive_feed import _fl_get
         resp = await _fl_get("/v1/tournaments/list",
                               {"sport_id": sport_id, "locale": "en_INT"})
-        # Also report what we'd extract.
         flat = []
         if isinstance(resp, dict):
             data = resp.get("DATA") or []
@@ -6498,32 +6635,36 @@ async def debug_fl_tournaments(sport_id: str = "1"):
                 for entry in data:
                     if not isinstance(entry, dict):
                         continue
-                    if entry.get("TOURNAMENT_STAGE_ID"):
+                    league_name = entry.get("LEAGUE_NAME") or ""
+                    country_name = entry.get("COUNTRY_NAME") or ""
+                    season_id = (entry.get("ACTUAL_TOURNAMENT_SEASON_ID")
+                                 or entry.get("TOURNAMENT_SEASON_ID")
+                                 or "")
+                    stages = entry.get("STAGES") or []
+                    if not isinstance(stages, list):
+                        continue
+                    for stage in stages:
+                        if not isinstance(stage, dict):
+                            continue
+                        stage_id = stage.get("STAGE_ID")
+                        if not stage_id:
+                            continue
                         flat.append({
-                            k: entry.get(k) for k in (
-                                "NAME", "NAME_PART_1", "NAME_PART_2",
-                                "TOURNAMENT_ID", "TOURNAMENT_STAGE_ID",
-                                "TOURNAMENT_SEASON_ID",
-                                "COUNTRY_NAME", "TOURNAMENT_TYPE",
-                            )
+                            "LEAGUE_NAME":  league_name,
+                            "COUNTRY_NAME": country_name,
+                            "SEASON_ID":    season_id,
+                            "STAGE_ID":     stage_id,
+                            "STAGE_NAME":   stage.get("STAGE_NAME") or "",
                         })
-                    nested = entry.get("TOURNAMENTS") or entry.get("EVENTS")
-                    if isinstance(nested, list):
-                        for t in nested:
-                            if isinstance(t, dict):
-                                flat.append({
-                                    k: t.get(k) for k in (
-                                        "NAME", "NAME_PART_1", "NAME_PART_2",
-                                        "TOURNAMENT_ID", "TOURNAMENT_STAGE_ID",
-                                        "TOURNAMENT_SEASON_ID",
-                                        "COUNTRY_NAME", "TOURNAMENT_TYPE",
-                                    )
-                                })
+        # Surface UCL-likely matches up front for quick eyeball.
+        ucl_hits = [t for t in flat if "champions league" in
+                     (t.get("LEAGUE_NAME") or "").lower()]
         return {
-            "sport_id":   sport_id,
+            "sport_id":        sport_id,
             "extracted_count": len(flat),
             "raw_top_keys":    list(resp.keys()) if isinstance(resp, dict) else None,
             "raw_data_first":  (resp.get("DATA") or [None])[0] if isinstance(resp, dict) else None,
+            "ucl_hits":        ucl_hits,
             "extracted":       flat[:80],
         }
     except Exception as e:
