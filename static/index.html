@@ -5696,6 +5696,20 @@ window._bracketJumpToRound = function(btn) {
 };
 
 async function _loadStandingsType(container, ticker, standingType) {
+  // Phase 3 bracket migration: if the TS bundle is loaded, route the
+  // Draw sub-tab through it. The new path uses /normalized which
+  // auto-discovers the right bracket stage_id (post-league knockout
+  // for UCL) and feeds the compact {rounds:[...]} shape into the
+  // Bracket block component. Falls through to the legacy renderer
+  // below when the bundle isn't available.
+  if (standingType === "draw" && window.StochverseBundle && window.StochverseBundle.renderBracket) {
+    try {
+      await window.StochverseBundle.renderBracket(ticker, container);
+      return;
+    } catch (ex) {
+      console.warn("[stochverse] bracket bundle render failed, falling back", ex);
+    }
+  }
   container.innerHTML = '<div class="ed-stats-loading">Loading…</div>';
   try {
     var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/standings?standing_type=" + encodeURIComponent(standingType));

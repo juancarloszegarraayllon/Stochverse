@@ -5984,9 +5984,16 @@ def _compact_bracket(raw):
         return None
 
     # Round labels live in a sibling TABS container, not on the same node
-    # as ROUNDS. Walk the tree to find DRAW_ROUNDS regardless.
+    # as ROUNDS. Walk the tree to find DRAW_ROUNDS regardless. Same for
+    # the participant lookup maps — DRAW_EVENT_PARTICIPANTS gives display
+    # names, DRAW_PARTICIPANT_IDS gives FL team IDs (cross-referenceable
+    # with standings rows for logos / colors / linking).
     labels_owner = find_first(raw, "DRAW_ROUNDS") or {}
     round_labels = labels_owner.get("DRAW_ROUNDS") or {}
+    names_owner = find_first(raw, "DRAW_EVENT_PARTICIPANTS") or {}
+    name_by_ord = names_owner.get("DRAW_EVENT_PARTICIPANTS") or {}
+    ids_owner = find_first(raw, "DRAW_PARTICIPANT_IDS") or {}
+    id_by_ord = ids_owner.get("DRAW_PARTICIPANT_IDS") or {}
     rounds_in = container.get("ROUNDS") or []
     if not isinstance(rounds_in, list):
         return None
@@ -6071,17 +6078,23 @@ def _compact_bracket(raw):
 
             # Skip TBD-vs-TBD placeholder slots — they have no slugs and no
             # legs and just inflate the response. Keep half-known pairs so
-            # the bracket still shows e.g. "Arsenal vs ?" before the draw.
+            # the bracket still shows e.g. "Arsenal vs ?".
             if not home_slug and not away_slug and not legs:
                 continue
+            home_ord = str(blk.get("DRAW_ROUND_HOME_EVENT_PARTICIPANT") or "")
+            away_ord = str(blk.get("DRAW_ROUND_AWAY_EVENT_PARTICIPANT") or "")
             pairs_out.append({
-                "home":      home_slug,
-                "away":      away_slug,
-                "legs":      legs,
-                "winner":    winner,
-                "agg_home":  agg_home,
-                "agg_away":  agg_away,
-                "starts_at": blk.get("DRAW_ROUND_EVENT_START") or blk.get("DRAW_TIME"),
+                "home":         home_slug,
+                "away":         away_slug,
+                "home_name":    name_by_ord.get(home_ord) or None,
+                "away_name":    name_by_ord.get(away_ord) or None,
+                "home_team_id": id_by_ord.get(home_ord) or None,
+                "away_team_id": id_by_ord.get(away_ord) or None,
+                "legs":         legs,
+                "winner":       winner,
+                "agg_home":     agg_home,
+                "agg_away":     agg_away,
+                "starts_at":    blk.get("DRAW_ROUND_EVENT_START") or blk.get("DRAW_TIME"),
             })
 
         rounds_out.append({
