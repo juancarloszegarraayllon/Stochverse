@@ -6416,6 +6416,57 @@ async def event_scheme(ticker: str, refresh: bool = False):
         return {"error": str(e)[:300]}
 
 
+@app.get("/api/debug_fl_tournaments")
+async def debug_fl_tournaments(sport_id: str = "1"):
+    """Probe FL's /v1/tournaments/list?sport_id=N and return the raw
+    response. Lets us inspect the actual response shape and confirm
+    UCL / EPL / etc. are in there, plus what NAME / NAME_PART_2
+    fields each tournament uses (so we can tune the league-name
+    matching in _find_stage_via_tournaments_list)."""
+    try:
+        from flashlive_feed import _fl_get
+        resp = await _fl_get("/v1/tournaments/list",
+                              {"sport_id": sport_id, "locale": "en_INT"})
+        # Also report what we'd extract.
+        flat = []
+        if isinstance(resp, dict):
+            data = resp.get("DATA") or []
+            if isinstance(data, list):
+                for entry in data:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("TOURNAMENT_STAGE_ID"):
+                        flat.append({
+                            k: entry.get(k) for k in (
+                                "NAME", "NAME_PART_1", "NAME_PART_2",
+                                "TOURNAMENT_ID", "TOURNAMENT_STAGE_ID",
+                                "TOURNAMENT_SEASON_ID",
+                                "COUNTRY_NAME", "TOURNAMENT_TYPE",
+                            )
+                        })
+                    nested = entry.get("TOURNAMENTS") or entry.get("EVENTS")
+                    if isinstance(nested, list):
+                        for t in nested:
+                            if isinstance(t, dict):
+                                flat.append({
+                                    k: t.get(k) for k in (
+                                        "NAME", "NAME_PART_1", "NAME_PART_2",
+                                        "TOURNAMENT_ID", "TOURNAMENT_STAGE_ID",
+                                        "TOURNAMENT_SEASON_ID",
+                                        "COUNTRY_NAME", "TOURNAMENT_TYPE",
+                                    )
+                                })
+        return {
+            "sport_id":   sport_id,
+            "extracted_count": len(flat),
+            "raw_top_keys":    list(resp.keys()) if isinstance(resp, dict) else None,
+            "raw_data_first":  (resp.get("DATA") or [None])[0] if isinstance(resp, dict) else None,
+            "extracted":       flat[:80],
+        }
+    except Exception as e:
+        return {"error": str(e)[:300]}
+
+
 @app.get("/api/debug_fl_sports_list")
 async def debug_fl_sports_list():
     """Probe FlashLive's /v1/sports/list to discover the full ID→name
