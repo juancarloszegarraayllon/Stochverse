@@ -4745,9 +4745,31 @@ _SPORT_NAME_TO_FL_ID = {
 
 async def _fl_tournaments_for_sport(sport_id: str) -> list:
     """Return FL's tournament list for a given sport_id, cached for
-    _FL_TOURNAMENTS_TTL. Each entry is the raw FL tournament dict
-    (TOURNAMENT_ID, TOURNAMENT_STAGE_ID, NAME, NAME_PART_1,
-    NAME_PART_2, COUNTRY_NAME, etc.)."""
+    _FL_TOURNAMENTS_TTL.
+
+    /v1/tournaments/list response shape (verified via probe):
+      {
+        "DATA": [
+          {
+            "LEAGUE_NAME": "Champions League",
+            "COUNTRY_NAME": "Europe",
+            "ACTUAL_TOURNAMENT_SEASON_ID": "YJYK8L05",
+            "GROUP_ID": "8bP2bXmH",
+            "STAGES": [
+              {"STAGE_ID": "...", "STAGE_NAME": "Group Stage", "OUT": "2"},
+              {"STAGE_ID": "...", "STAGE_NAME": "Knockout", ...},
+              ...
+            ]
+          },
+          ...
+        ]
+      }
+
+    We flatten this into one entry per (league, stage) so the
+    matcher can score stage names alongside league names — for cup
+    competitions we want the knockout stage_id, not the qualification
+    one.
+    """
     if not sport_id:
         return []
     cached = _FL_TOURNAMENTS_CACHE.get(sport_id)
@@ -4765,13 +4787,27 @@ async def _fl_tournaments_for_sport(sport_id: str) -> list:
                 for entry in data:
                     if not isinstance(entry, dict):
                         continue
-                    if entry.get("TOURNAMENT_STAGE_ID"):
-                        tournaments.append(entry)
-                    nested = entry.get("TOURNAMENTS") or entry.get("EVENTS")
-                    if isinstance(nested, list):
-                        tournaments.extend(
-                            t for t in nested if isinstance(t, dict)
-                        )
+                    league_name = entry.get("LEAGUE_NAME") or ""
+                    country_name = entry.get("COUNTRY_NAME") or ""
+                    season_id = (entry.get("ACTUAL_TOURNAMENT_SEASON_ID")
+                                 or entry.get("TOURNAMENT_SEASON_ID")
+                                 or "")
+                    stages = entry.get("STAGES") or []
+                    if not isinstance(stages, list):
+                        continue
+                    for stage in stages:
+                        if not isinstance(stage, dict):
+                            continue
+                        stage_id = stage.get("STAGE_ID")
+                        if not stage_id:
+                            continue
+                        tournaments.append({
+                            "LEAGUE_NAME":  league_name,
+                            "COUNTRY_NAME": country_name,
+                            "SEASON_ID":    season_id,
+                            "STAGE_ID":     stage_id,
+                            "STAGE_NAME":   stage.get("STAGE_NAME") or "",
+                        })
         _FL_TOURNAMENTS_CACHE[sport_id] = {
             "tournaments": tournaments,
             "ts": time.time(),
@@ -4786,35 +4822,62 @@ async def _find_stage_via_tournaments_list(sport: str,
     """Look up tournament_stage_id from FL's master tournament list.
     Last-ditch fallback when no current FL match in the league is
     loaded. Returns {stage_id, season_id, league_name, country} or
-    empty dict when nothing matches."""
+    empty dict when nothing matches.
+
+    Scoring layered:
+      Tier 1 (league match): exact LEAGUE_NAME == hint best,
+                             substring match acceptable.
+      Tier 2 (stage match):  among matching leagues, prefer stages
+                             named "Knockout" / "Round" / "Final"
+                             over "Qualification" / "Preliminary".
+    """
     sport_id = _SPORT_NAME_TO_FL_ID.get(sport, "")
     if not sport_id or not league_hint:
         return {}
     tournaments = await _fl_tournaments_for_sport(sport_id)
     hint = league_hint.lower()
+    # Stage-name preference ranking. Higher = preferred. Knockout /
+    # final-round stages carry the bracket data we want for cup
+    # competitions; qualification rounds rarely do.
+    def _stage_rank(stage_name: str) -> int:
+        s = (stage_name or "").lower()
+        if any(kw in s for kw in ("final", "knockout", "round of")):
+            return 50
+        if any(kw in s for kw in ("group", "league phase", "league stage")):
+            return 40
+        if "playoff" in s or "play-off" in s or "play off" in s:
+            return 35
+        if "qualif" in s or "preliminary" in s or "qualifying" in s:
+            return 10
+        return 25  # neutral / unrecognized
     best = None
-    best_score = 0
+    best_score = (0, 0)  # (league_score, stage_score)
     for t in tournaments:
-        name = (t.get("NAME") or "").lower()
-        np2  = (t.get("NAME_PART_2") or "").lower()
-        score = 0
-        if np2 == hint:
-            score = 100
-        elif np2 and hint in np2:
-            score = 80
-        elif hint in name:
-            score = 50
+        league = (t.get("LEAGUE_NAME") or "").lower()
+        stage  = t.get("STAGE_NAME") or ""
+        if not league:
+            continue
+        if league == hint:
+            league_score = 100
+        elif hint in league:
+            league_score = 80
+        elif league in hint:
+            league_score = 60
+        else:
+            continue
+        stage_score = _stage_rank(stage)
+        score = (league_score, stage_score)
         if score > best_score:
             best_score = score
             best = t
     if not best:
         return {}
     return {
-        "stage_id":    best.get("TOURNAMENT_STAGE_ID", ""),
-        "season_id":   best.get("TOURNAMENT_SEASON_ID", ""),
-        "league_name": best.get("NAME_PART_2") or best.get("NAME", ""),
-        "country":     best.get("COUNTRY_NAME", "")
-                       or best.get("NAME_PART_1", ""),
+        "stage_id":    best.get("STAGE_ID", ""),
+        "season_id":   best.get("SEASON_ID", ""),
+        "league_name": best.get("LEAGUE_NAME", ""),
+        "country":     best.get("COUNTRY_NAME", ""),
+        "stage_name":  best.get("STAGE_NAME", ""),
     }
                            # full 10-minute window if the first probe was
                            # unlucky (GAMES not yet populated, transient
