@@ -6410,20 +6410,27 @@ async def event_normalized(ticker: str, refresh: bool = False,
         # matches the league-phase standings — but its standings_draw
         # response is then the qualifying-playoff bracket, not the main
         # competition KO bracket users actually want for a Bayern vs PSG
-        # match. Detect that mismatch (low overlap between the bracket's
-        # participants and the league's standings TEAM_IDs) and re-probe
-        # standings_draw against sibling stages to find the right one.
+        # match. Detect that mismatch via "purity" (overlap / total
+        # participants) and re-probe sibling stages to find the right one.
+        #
+        # Why purity, not raw overlap: the qualifying bracket has ~55
+        # participants and ~7 happen to also be in the league standings
+        # (the teams that survived qualifying), so absolute overlap looks
+        # respectable. But purity is ~13% (7/55) for qualifying vs ~100%
+        # for the real KO of league teams, which is an unambiguous signal.
         bracket_stage_id = stage_id
         bracket_stage_name = ""
         if stage_id and effective_league_hint and sport:
             standings_tids = _standings_team_ids(
                 raw_by_key.get("standings_overall"))
-            primary_overlap = len(standings_tids & _bracket_team_ids(
-                raw_by_key.get("standings_draw")))
-            # Fewer than 4 league teams in the bracket → it's almost
-            # certainly the wrong bracket (qualifying / a different
-            # cup). Cup competitions have ≥16 teams in their KO.
-            if standings_tids and primary_overlap < 4:
+            primary_bracket_tids = _bracket_team_ids(
+                raw_by_key.get("standings_draw"))
+            primary_overlap = len(standings_tids & primary_bracket_tids)
+            primary_purity = (primary_overlap / len(primary_bracket_tids)
+                              if primary_bracket_tids else 0)
+            # Below 50% purity → the bracket is dominated by non-league
+            # teams (qualifying / different competition). Fan out.
+            if standings_tids and primary_purity < 0.5:
                 siblings = await _find_all_stages_for_league(
                     sport, effective_league_hint)
                 sib_probes = [
@@ -6441,14 +6448,22 @@ async def event_normalized(ticker: str, refresh: bool = False,
                           for _, p in sib_probes],
                         return_exceptions=True,
                     )
+                    best_purity = primary_purity
                     best_overlap = primary_overlap
                     best = None
                     for (s, _), result in zip(sib_probes, sib_results):
                         if isinstance(result, Exception) or not result:
                             continue
                         sib_tids = _bracket_team_ids(result)
+                        if not sib_tids:
+                            continue
                         ov = len(standings_tids & sib_tids)
-                        if ov > best_overlap:
+                        purity = ov / len(sib_tids)
+                        # Strictly higher purity wins, ties broken by
+                        # larger absolute overlap (more KO matches shown).
+                        if purity > best_purity or (
+                                purity == best_purity and ov > best_overlap):
+                            best_purity = purity
                             best_overlap = ov
                             best = (s, result)
                     if best:
