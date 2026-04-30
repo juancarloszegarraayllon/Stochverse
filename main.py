@@ -5944,6 +5944,29 @@ def _capabilities_from_probes(probe_results: dict) -> dict:
     }
 
 
+def _bracket_raw_payload(raw):
+    """Extract FL's draw-response inner DATA dict for the legacy
+    _renderBracket() in static/index.html. The legacy renderer reads
+    `data.TABS` and `data.ROUNDS` directly, so we strip the outer
+    {DATA: [...]} wrapper to match what it expects.
+
+    Returns None when the response shape doesn't match (legacy
+    renderer treats null as "no bracket published yet")."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    arr = raw.get("DATA")
+    if isinstance(arr, list) and arr and isinstance(arr[0], dict):
+        first = arr[0]
+        # Sometimes FL nests one more level: DATA[0].DATA
+        if "DATA" in first and isinstance(first["DATA"], dict):
+            return first["DATA"]
+        if "TABS" in first or "ROUNDS" in first:
+            return first
+    if isinstance(arr, dict):
+        return arr
+    return None
+
+
 def _compact_bracket(raw):
     """Flatten FL's nested standing_type=draw response into a compact
     shape the frontend can render directly:
@@ -6566,6 +6589,11 @@ async def event_normalized(ticker: str, refresh: bool = False,
                     limit=top_scorers_limit),
             },
             "bracket":          _compact_bracket(raw_by_key.get("standings_draw")),
+            # Raw FL draw response from the resolved bracket stage. The
+            # legacy _renderBracket() in static/index.html consumes this
+            # shape directly (TABS + ROUNDS + DRAW_*); the compact
+            # `bracket` field above is for new TS components.
+            "bracket_raw":      _bracket_raw_payload(raw_by_key.get("standings_draw")),
         }
 
         payload = {

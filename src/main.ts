@@ -18,21 +18,24 @@ declare global {
     StochverseBundle?: {
       version: string;
       loadedAt: number;
-      // Render the bracket into `mount`. Fetches /normalized internally.
       renderBracket?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
-      // Render any standings sub-type (overall / home / away / form /
-      // top_scores / draw / overall_live) from /normalized. Inline JS
-      // dispatches `standingType` from the existing sub-tab strip;
-      // this hook owns the rendering for all of them.
       renderStandingsType?: (
         ticker: string,
         mount: HTMLElement,
         standingType: string,
       ) => Promise<void>;
     };
+    // Legacy bracket renderer defined inline in static/index.html.
+    // We delegate to it for the visual style users prefer, while
+    // still feeding it data from the right stage_id via /normalized.
+    _renderBracket?: (
+      container: HTMLElement,
+      data: unknown,
+      currentEventId: string,
+    ) => void;
   }
 }
 
@@ -44,6 +47,18 @@ async function renderBracketByTicker(
     '<div class="ed-stats-loading">Loading bracket…</div>';
   try {
     const ev: NormalizedEvent = await fetchNormalized(ticker);
+    // Prefer the legacy inline renderer — users like its visual style
+    // (round columns, winner highlighting, status badges, current-match
+    // marker). It consumes the raw FL DATA shape, which /normalized
+    // now also exposes via data.bracket_raw using the right stage_id
+    // (post-league-phase Play Offs for UCL, not the qualifying bracket).
+    const raw = (ev.data as Record<string, unknown>)?.bracket_raw;
+    if (raw && typeof window._renderBracket === 'function') {
+      window._renderBracket(mount, raw, ev.fl_event_id || '');
+      return;
+    }
+    // Fallback to the new TS component if the legacy renderer or the
+    // raw payload is missing. Shouldn't fire in practice.
     renderBracket(mount, ev.data?.bracket || null);
   } catch (ex) {
     const msg = ex instanceof Error ? ex.message : String(ex);
@@ -63,7 +78,13 @@ async function renderStandingsTypeByTicker(
   try {
     const ev: NormalizedEvent = await fetchNormalized(ticker);
     if (standingType === 'draw') {
-      renderBracket(mount, ev.data?.bracket || null);
+      // Delegate to the legacy inline renderer — better visual style.
+      const raw = (ev.data as Record<string, unknown>)?.bracket_raw;
+      if (raw && typeof window._renderBracket === 'function') {
+        window._renderBracket(mount, raw, ev.fl_event_id || '');
+      } else {
+        renderBracket(mount, ev.data?.bracket || null);
+      }
       return;
     }
     if (standingType === 'top_scores' || standingType === 'top_scorers') {
@@ -89,7 +110,7 @@ async function renderStandingsTypeByTicker(
 }
 
 window.StochverseBundle = {
-  version: '0.3.0',
+  version: '0.3.1',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
