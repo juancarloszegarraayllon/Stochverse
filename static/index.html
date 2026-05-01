@@ -1915,6 +1915,25 @@ function buildScoreMap(ev) {
   if (ls.state === "in") { hs = hs || "0"; as_ = as_ || "0"; }
   if (hs === "" || hs === undefined || as_ === "" || as_ === undefined) return null;
   if (ls.state !== "in" && ls.state !== "post") return null;
+  // Cricket score formatting: append "/wickets (overs)" to the runs
+  // value so outcome rows show the full "225/6 (20)" convention
+  // instead of just the runs. Mirrors the compact_label format used
+  // for the live-badge title; we have to do it here too because
+  // outcome rows pull from this map, not from compact_label.
+  if (ev._sport === "Cricket") {
+    var hw = ls.cricket_home_wickets || "";
+    var aw = ls.cricket_away_wickets || "";
+    var ho = ls.cricket_home_overs || "";
+    var ao = ls.cricket_away_overs || "";
+    var hsStr = String(hs);
+    if (hw) hsStr += "/" + hw;
+    if (ho) hsStr += " (" + ho + ")";
+    var asStr = String(as_);
+    if (aw) asStr += "/" + aw;
+    if (ao) asStr += " (" + ao + ")";
+    hs = hsStr;
+    as_ = asStr;
+  }
   // Build arrays of lowercase keywords for each side — abbreviation
   // + each word of the display name (e.g. ["mnc","manchester","city"])
   function keywords(abbr, display) {
@@ -7115,9 +7134,22 @@ function renderEventDetail(ev) {
         h += '<div class="ed-scoreboard" style="display:block;padding:10px 20px">' + tennisHtml + '</div>';
       }
     } else {
+      // Cricket: append "/wickets (overs)" to the runs the same way
+      // outcome rows do. Without this the detail-page scoreboard
+      // shows just "225 vs 212" while cards show "225/6 (20)" —
+      // inconsistent and dropping the wickets/overs context users
+      // need to read the match state.
+      var _hScore = String(live.home_score || "0");
+      var _aScore = String(live.away_score || "0");
+      if (ev._sport === "Cricket") {
+        if (live.cricket_home_wickets) _hScore += "/" + live.cricket_home_wickets;
+        if (live.cricket_home_overs) _hScore += " (" + live.cricket_home_overs + ")";
+        if (live.cricket_away_wickets) _aScore += "/" + live.cricket_away_wickets;
+        if (live.cricket_away_overs) _aScore += " (" + live.cricket_away_overs + ")";
+      }
       h += '<div class="ed-scoreboard">';
       h += '<div class="ed-sb-team"><div class="ed-sb-name">' + escH(live.home_display || live.home_abbr || "Home") + '</div>'
-         + '<div class="ed-sb-score">' + escH(live.home_score || "0") + '</div></div>';
+         + '<div class="ed-sb-score">' + escH(_hScore) + '</div></div>';
       // Just "vs" between team scores — the clock used to live
       // here too but the LIVE pill at the top of the page already
       // shows the synchronized minute. A second redundant copy was
@@ -7125,7 +7157,7 @@ function renderEventDetail(ev) {
       // browser clock was offset from the server.
       h += '<div class="ed-sb-team"><div class="ed-sb-sep">vs</div></div>';
       h += '<div class="ed-sb-team"><div class="ed-sb-name">' + escH(live.away_display || live.away_abbr || "Away") + '</div>'
-         + '<div class="ed-sb-score">' + escH(live.away_score || "0") + '</div></div>';
+         + '<div class="ed-sb-score">' + escH(_aScore) + '</div></div>';
       h += '</div>';
     }
   }

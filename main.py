@@ -2433,6 +2433,18 @@ def get_events(
                 "round_name":         g.get("round_name", ""),
                 "tournament_name":    g.get("tournament_name", "") or g.get("league", ""),
                 "aggregate_winner":   g.get("aggregate_winner", ""),
+                # Cricket-specific score parts. When a Cricket match
+                # is live, raw home_score/away_score carry the runs
+                # only ("225", "212"); the wickets+overs portion
+                # ("/6 (20)") lives in these companion fields. The
+                # frontend's buildScoreMap formats the full
+                # "225/6 (20)" for outcome rows when these are
+                # populated.
+                "cricket_home_wickets": g.get("cricket_home_wickets", ""),
+                "cricket_away_wickets": g.get("cricket_away_wickets", ""),
+                "cricket_home_overs":   g.get("cricket_home_overs", ""),
+                "cricket_away_overs":   g.get("cricket_away_overs", ""),
+                "cricket_live_sentence": g.get("cricket_live_sentence", ""),
             }
             # Clock-only ESPN override for stop-clock US sports.
             # ESPN-as-primary architecture: when sport is in
@@ -3241,6 +3253,14 @@ def get_event_detail(ticker: str):
             "round_name":         g.get("round_name", ""),
             "tournament_name":    g.get("tournament_name", "") or g.get("league", ""),
             "aggregate_winner":   g.get("aggregate_winner", ""),
+            # Cricket-specific score parts — see /api/events for
+            # rationale. Mirrors the live state shape so the detail
+            # page renders cricket scores the same way as cards.
+            "cricket_home_wickets": g.get("cricket_home_wickets", ""),
+            "cricket_away_wickets": g.get("cricket_away_wickets", ""),
+            "cricket_home_overs":   g.get("cricket_home_overs", ""),
+            "cricket_away_overs":   g.get("cricket_away_overs", ""),
+            "cricket_live_sentence": g.get("cricket_live_sentence", ""),
         }
         # ESPN-as-primary handled at the match_game step above for
         # _ESPN_CLOCK_SPORTS. No override needed here.
