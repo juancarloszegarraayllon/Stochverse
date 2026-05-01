@@ -248,7 +248,7 @@ async function renderSummaryByTicker(
 }
 
 window.StochverseBundle = {
-  version: '0.4.5',
+  version: '0.4.6',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,

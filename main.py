@@ -132,6 +132,11 @@ async def startup_event():
         asyncio.create_task(run_flashlive_feed())
     except Exception as e:
         logging.getLogger("stochverse").warning("failed to start flashlive feed: %s", e)
+    # Warm-start the series→stage cache from the previous container's
+    # last save. Sub-second, non-blocking. Lets soccer aggregate pills
+    # render from the first request after a redeploy instead of waiting
+    # for fresh Path A→D probes against FL.
+    asyncio.create_task(_load_series_cache_from_db())
     # Phase 4: periodically flush live scores from all feeds to the DB.
     asyncio.create_task(_score_flush_loop())
     # Phase 5: periodically prune old price rows to stay within
@@ -5029,6 +5034,51 @@ FL_GAME_NEG_CACHE_TTL = 30 # 30 s for None results — shields the FlashLive
 # Value: {stage_id, season_id, league_name, country, ts}
 _SERIES_TO_STAGE_CACHE: dict = {}
 
+# Cross-deploy persistence for _SERIES_TO_STAGE_CACHE. The cache is
+# small (a few dozen entries — one per soccer series we've resolved
+# bracket stage IDs for) and changes rarely. Saving it to cache_blobs
+# means a fresh container can derive soccer aggregate pills from the
+# previous container's discoveries instead of re-running Path A→D
+# tournament probes for every Kalshi event on first request. Without
+# this, soccer aggregate pills (UCL, UEL, Conference, women's CL, etc.)
+# don't render until the user opens the relevant detail page and
+# triggers a fresh stage probe.
+_series_cache_last_save_ts: float = 0.0
+_SERIES_CACHE_SAVE_INTERVAL_S: float = 60.0  # at most once per minute
+
+
+def _maybe_save_series_cache():
+    """Throttled save of _SERIES_TO_STAGE_CACHE. Called from each
+    write site. Cheap when not due to save (timestamp compare only).
+    Schedules an async DB write when due, doesn't block the caller."""
+    global _series_cache_last_save_ts
+    now = time.time()
+    if now - _series_cache_last_save_ts < _SERIES_CACHE_SAVE_INTERVAL_S:
+        return
+    _series_cache_last_save_ts = now
+    try:
+        from db import save_cache_blob
+        snapshot = dict(_SERIES_TO_STAGE_CACHE)
+        asyncio.create_task(save_cache_blob("series_to_stage", snapshot))
+    except Exception:
+        pass
+
+
+async def _load_series_cache_from_db():
+    """Restore _SERIES_TO_STAGE_CACHE from the previous container's
+    last save. No-op if DB is unavailable or the row hasn't been
+    written yet (first deploy after this commit lands)."""
+    _log = logging.getLogger("stochverse")
+    try:
+        from db import load_cache_blob
+        prior = await load_cache_blob("series_to_stage")
+        if isinstance(prior, dict) and prior:
+            _SERIES_TO_STAGE_CACHE.update(prior)
+            _log.info("series_to_stage cache warm-start: loaded %d entries",
+                      len(prior))
+    except Exception as e:
+        _log.warning("series_to_stage warm-start failed: %s", e)
+
 # FL tournaments-list cache. /v1/tournaments/list?sport_id=N returns
 # every tournament FL knows for that sport regardless of whether
 # any match is currently loaded — the right answer for "find UCL
@@ -5222,6 +5272,7 @@ async def _find_fl_game(found: dict):
                 "country":     g.get("country") or g.get("_country") or "",
                 "ts":          now,
             }
+            _maybe_save_series_cache()
     return g
 
 
@@ -7100,6 +7151,7 @@ async def event_normalized(ticker: str, refresh: bool = False,
                             "country":     country,
                             "ts":          time.time(),
                         }
+                        _maybe_save_series_cache()
 
         # Probe FL endpoints in parallel to discover capabilities.
         # Same set the /scheme endpoint uses; here we also fetch the

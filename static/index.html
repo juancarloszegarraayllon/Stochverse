@@ -705,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.4.5" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.4.6" defer></script>
 </head>
 <body>
 <div id="header">
@@ -4722,8 +4722,15 @@ async function hydrateGameStats(evTicker) {
     // it reads /normalized.data.incidents, which shares the cross-block
     // 5-min cache. Fallback: the inline timeline above already rendered
     // from /stats, so users on a stale/legacy bundle still see content.
+    //
+    // CRITICAL: query for `div[data-mt="summary"]` not `[data-mt="summary"]`
+    // — the sub-tab button ALSO has data-mt="summary" and comes earlier
+    // in DOM order, so a bare attribute selector hits the button and we'd
+    // end up writing the timeline HTML inside the button (visible as an
+    // unmovable "1st Half" stub above the sub-tab strip that persists
+    // across tab switches).
     if (window.StochverseBundle && window.StochverseBundle.renderSummary) {
-      var sumMount = panel.querySelector('[data-mt="summary"]');
+      var sumMount = panel.querySelector('div[data-mt="summary"]');
       if (sumMount) {
         try { window.StochverseBundle.renderSummary(evTicker, sumMount); }
         catch (e) { /* keep the inline render as fallback */ }
