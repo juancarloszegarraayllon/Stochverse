@@ -13,6 +13,7 @@ import { renderBracket } from './blocks/Bracket';
 import { renderStandings } from './blocks/Standings';
 import { renderTopScorers } from './blocks/TopScorers';
 import { renderStats } from './blocks/Stats';
+import { renderH2H } from './blocks/H2H';
 
 declare global {
   interface Window {
@@ -33,6 +34,15 @@ declare global {
       // directly; the bundle path goes through /normalized so it
       // benefits from the same caching + future-fixture fallbacks.
       renderStats?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      // Render the H2H tab strip + content from /api/event/<t>/h2h.
+      // H2H stays on its dedicated endpoint (not /normalized) because
+      // its FL response shape and past-event fallback chain are
+      // distinct from every other surface — duplicating that logic
+      // into /normalized would be redundant.
+      renderH2H?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
@@ -118,6 +128,16 @@ async function renderStandingsTypeByTicker(
   }
 }
 
+async function renderH2HByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  // The block exports renderH2H(mount, ticker) for symmetry with the
+  // other internal block APIs; the public hook flips to (ticker,
+  // mount) to match StochverseBundle's convention.
+  return renderH2H(mount, ticker);
+}
+
 async function renderStatsByTicker(
   ticker: string,
   mount: HTMLElement,
@@ -136,11 +156,12 @@ async function renderStatsByTicker(
 }
 
 window.StochverseBundle = {
-  version: '0.4.0',
+  version: '0.4.1',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
   renderStats: renderStatsByTicker,
+  renderH2H: renderH2HByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);

@@ -705,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.4.0" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.4.1" defer></script>
 </head>
 <body>
 <div id="header">
@@ -5018,6 +5018,24 @@ async function _ensureH2HCache(ticker) {
 }
 
 async function _loadH2H(container, ticker) {
+  // Phase 3 H2H migration. Bundle owns the entire flow: fetch,
+  // sub-tab strip building (with abbreviation matcher for FL TAB_NAMEs
+  // like "BAY"/"PSG"), focal-team mapping, and the Show more/less
+  // toggle with scroll-back. Falls through to the legacy inline
+  // renderer when the bundle isn't available, so older clients and
+  // stale HTML still work. The lazy mount we receive (.ed-sb-lazy)
+  // sits inside the H2H main panel but the bundle replaces the
+  // surrounding sub-tab strip too, since it owns sub-tab rendering.
+  if (window.StochverseBundle && window.StochverseBundle.renderH2H) {
+    var mainPanelForBundle = container.closest('.ed-sb-main[data-main="h2h"]');
+    var bundleMount = mainPanelForBundle || container;
+    try {
+      await window.StochverseBundle.renderH2H(ticker, bundleMount);
+      return;
+    } catch (ex) {
+      console.warn("[stochverse] h2h bundle render failed, falling back", ex);
+    }
+  }
   container.innerHTML = '<div class="ed-stats-loading">Loading H2H…</div>';
   var cached = await _ensureH2HCache(ticker);
   if (!cached || cached.error) {
