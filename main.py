@@ -5266,18 +5266,32 @@ def _maybe_save_series_cache():
         pass
 
 
+# Series whose previously-cached stage_id resolution is known to be
+# wrong because SOCCER_COMP changed. Entries listed here get evicted
+# from the warm-started series_to_stage cache so they re-resolve from
+# scratch on the next prewarm pass. Add a series when you tighten its
+# SOCCER_COMP value; the entry can be removed after a clean snapshot
+# has been saved in production (i.e. a deploy completes successfully
+# and writes a new cache_blobs row).
+_EVICT_FROM_WARM_START = {
+    # Was "CONCACAF" → matched "CONCACAF Nations League" (wrong
+    # tournament). Tightened to "CONCACAF Champions Cup".
+    "KXCONCACAFCCUPGAME",
+}
+
+
 async def _load_series_cache_from_db():
     """Restore _SERIES_TO_STAGE_CACHE from the previous container's
     last save. No-op if DB is unavailable or the row hasn't been
     written yet (first deploy after this commit lands).
 
-    Validates each cached entry against the current SOCCER_COMP
-    mapping — if SOCCER_COMP[series] has changed since the cache was
-    saved (e.g. KXCONCACAFCCUPGAME's hint was tightened from
-    "CONCACAF" to "CONCACAF Champions Cup" to break a wrong-tournament
-    resolution), the stale entry is dropped so it gets re-resolved
-    on the next prewarm/lazy lookup. Entries whose hint hasn't
-    changed are kept verbatim — full warm-start, no re-resolution."""
+    Targeted eviction via _EVICT_FROM_WARM_START — previous fuzzy
+    eviction (drop entries where SOCCER_COMP value doesn't substring-
+    match the cached league_name) was too aggressive: short-form
+    SOCCER_COMP values like "EPL" never substring-match FL's
+    "Premier League", so every restart evicted-and-re-resolved
+    every EPL series, burning FL bandwidth and slowing user
+    requests during prewarm."""
     _log = logging.getLogger("stochverse")
     try:
         from db import load_cache_blob
@@ -5290,18 +5304,13 @@ async def _load_series_cache_from_db():
             if not isinstance(entry, dict):
                 continue
             series = (series_raw or "").upper()
-            expected = (SOCCER_COMP.get(series) or "").strip().lower()
-            actual = (entry.get("league_name") or "").strip().lower()
-            # Only evict when there's a clear mismatch. If SOCCER_COMP
-            # has no entry (non-soccer or unmapped), trust the cache.
-            if expected and actual and expected != actual \
-                    and expected not in actual and actual not in expected:
+            if series in _EVICT_FROM_WARM_START:
                 evicted += 1
                 continue
             _SERIES_TO_STAGE_CACHE[series] = entry
             loaded += 1
         _log.info(
-            "series_to_stage warm-start: loaded %d, evicted %d stale entries",
+            "series_to_stage warm-start: loaded %d, evicted %d targeted",
             loaded, evicted,
         )
     except Exception as e:
@@ -5503,6 +5512,76 @@ async def _load_tournament_brackets_from_db():
         _log.warning("tournament_brackets warm-start failed: %s", e)
 
 
+async def _multi_stage_discovery_loop():
+    """Background task: for each unique (sport, league_name) pair
+    in _SERIES_TO_STAGE_CACHE, fetch FL's full stage list and warm
+    any brackets we haven't seen. Catches multi-stage cups (UCL
+    qualifying + knockout under one league_name) without competing
+    with user-facing requests for FL bandwidth at startup.
+
+    Aggressively rate-limited: 1 req/s sustained, 30-min cycle.
+    Runs after a 30s grace period so the FL poller and the bracket
+    warm loop's initial pass finish first.
+    """
+    _log = logging.getLogger("stochverse")
+    await asyncio.sleep(30)
+    while True:
+        try:
+            seen: set = set()
+            leagues_to_walk: list = []
+            for series, entry in list(_SERIES_TO_STAGE_CACHE.items()):
+                if not isinstance(entry, dict):
+                    continue
+                league_name = entry.get("league_name") or ""
+                if not league_name:
+                    continue
+                sport = SERIES_SPORT.get(series) or "Soccer"
+                key = (sport, league_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                leagues_to_walk.append((sport, league_name))
+            if leagues_to_walk:
+                _log.info(
+                    "multi-stage discovery: walking %d leagues at 1 req/s",
+                    len(leagues_to_walk),
+                )
+                discovered_total = 0
+                for sport, league_name in leagues_to_walk:
+                    try:
+                        stages = await _find_all_stages_for_league(sport, league_name)
+                    except Exception as e:
+                        _log.warning(
+                            "multi-stage: list-stages for %r failed: %s",
+                            league_name, e,
+                        )
+                        await asyncio.sleep(1.0)
+                        continue
+                    for st in stages:
+                        sid = st.get("stage_id") or ""
+                        if not sid or sid in _TOURNAMENT_BRACKET_CACHE:
+                            continue
+                        try:
+                            ok = await _refresh_tournament_bracket(
+                                sid,
+                                st.get("season_id") or "",
+                                st.get("league_name") or league_name,
+                            )
+                            if ok:
+                                discovered_total += 1
+                        except Exception:
+                            pass
+                        await asyncio.sleep(1.0)
+                    await asyncio.sleep(1.0)
+                _log.info(
+                    "multi-stage discovery: warmed %d new brackets",
+                    discovered_total,
+                )
+        except Exception as e:
+            _log.warning("multi_stage_discovery_loop iter failed: %s", e)
+        await asyncio.sleep(30 * 60)
+
+
 async def _tournament_bracket_warm_loop():
     """Background task: walks _SERIES_TO_STAGE_CACHE and refreshes
     each tournament's bracket every _BRACKET_CACHE_TTL_S. New stage
@@ -5541,60 +5620,49 @@ async def _tournament_bracket_warm_loop():
     #    caching all stages we let _bracket_aggregate_for_event walk
     #    them and find the bracket that actually contains the team
     #    pair.
-    sem = asyncio.Semaphore(5)  # ≤5 concurrent FL fetches
+    # ── Initial pass: only refresh brackets for stage_ids the
+    #    cache already knows about. Cheap (no FL discovery), gets
+    #    soccer aggregate pills rendering from the very first
+    #    request after a redeploy. Multi-stage discovery moved to
+    #    a slow-paced background loop below so it doesn't compete
+    #    with user-facing /normalized requests for FL bandwidth at
+    #    startup.
+    sem = asyncio.Semaphore(2)  # ≤2 concurrent FL fetches at startup
 
     async def warm_one(stage_id, season_id, league_name=""):
         async with sem:
             return await _refresh_tournament_bracket(stage_id, season_id, league_name)
 
-    discovered: dict = {}  # stage_id → (season_id, league_name)
-    seen_per_sport_league = set()  # (sport, league_name) tuples
+    initial_tasks = []
+    now = time.time()
     for series, entry in list(_SERIES_TO_STAGE_CACHE.items()):
         if not isinstance(entry, dict):
             continue
         stage_id = entry.get("stage_id") or ""
-        league_name = entry.get("league_name") or ""
-        if stage_id and stage_id not in discovered:
-            discovered[stage_id] = (entry.get("season_id") or "", league_name)
-        # Sport-agnostic stage discovery: derive the sport from the
-        # series ticker so non-soccer 2-leg knockouts (handball cup
-        # ties, rugby cups, etc.) get the same multi-stage warm
-        # treatment without a code change. Falls back to Soccer when
-        # the series isn't in SERIES_SPORT (the only sport currently
-        # known to use 2-leg aggregates, so this is the right default).
-        sport = SERIES_SPORT.get(series) or "Soccer"
-        league_key = (sport, league_name)
-        if league_name and league_key not in seen_per_sport_league:
-            seen_per_sport_league.add(league_key)
-            try:
-                stages = await _find_all_stages_for_league(sport, league_name)
-                for st in stages:
-                    sid = st.get("stage_id") or ""
-                    if sid and sid not in discovered:
-                        discovered[sid] = (
-                            st.get("season_id") or "",
-                            st.get("league_name") or league_name,
-                        )
-            except Exception as e:
-                _log.warning(
-                    "warm-loop: list-stages for %r failed: %s",
-                    league_name, e,
-                )
-
-    now = time.time()
-    initial_tasks = []
-    for sid, (season_id, league_name) in discovered.items():
-        cached = _TOURNAMENT_BRACKET_CACHE.get(sid)
+        if not stage_id:
+            continue
+        cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
         if cached and (now - (cached.get("ts") or 0)) < _BRACKET_CACHE_TTL_S:
-            continue  # already fresh from warm-start or prior pass
-        initial_tasks.append(warm_one(sid, season_id, league_name))
+            continue  # warm-started from cache_blobs already
+        season_id = entry.get("season_id") or ""
+        league_name = entry.get("league_name") or ""
+        initial_tasks.append(warm_one(stage_id, season_id, league_name))
     if initial_tasks:
         results = await asyncio.gather(*initial_tasks, return_exceptions=True)
         ok_count = sum(1 for r in results if r is True)
         _log.info(
-            "bracket warm-loop: initial pass refreshed %d/%d brackets across %d leagues",
-            ok_count, len(initial_tasks), len(seen_per_sport_league),
+            "bracket warm-loop: initial pass refreshed %d/%d cached-stage brackets",
+            ok_count, len(initial_tasks),
         )
+
+    # ── Multi-stage discovery — runs OUT of the hot path so it
+    #    doesn't starve user requests. Walks each unique league_name
+    #    in _SERIES_TO_STAGE_CACHE, fetches the full stage list (1
+    #    HTTP per league), and warms any newly-discovered brackets.
+    #    This is what catches UCL qualifying-vs-knockout, etc.
+    #    Sequential with 1s spacing → at most 1 req/s. Re-runs
+    #    every 30 min so newly-listed cup stages get caught.
+    asyncio.create_task(_multi_stage_discovery_loop())
 
     # ── Steady-state refresh loop. Each pass refreshes any stage
     #    whose bracket entry has aged past TTL; passes run every
