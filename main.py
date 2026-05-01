@@ -6697,10 +6697,22 @@ async def event_normalized(ticker: str, refresh: bool = False,
             if not stage_id and sibling_series:
                 cached_stage = _SERIES_TO_STAGE_CACHE.get(sibling_series)
                 if cached_stage:
-                    stage_id = cached_stage.get("stage_id", "")
-                    season_id = cached_stage.get("season_id", "") or season_id
-                    league_name = league_name or cached_stage.get("league_name", "")
-                    country = country or cached_stage.get("country", "")
+                    # Validate the cached entry's league name matches
+                    # what we expect for this series. A prior request
+                    # could have populated the cache with the wrong
+                    # league (e.g. "Champions League Women" leaking
+                    # into the men's UCL series via Path B's old
+                    # substring matcher). Evict on mismatch so we
+                    # re-discover via Path B/D.
+                    expected = SOCCER_COMP.get(sibling_series, "").strip().lower()
+                    cached_lg = (cached_stage.get("league_name") or "").strip().lower()
+                    if not expected or cached_lg == expected:
+                        stage_id = cached_stage.get("stage_id", "")
+                        season_id = cached_stage.get("season_id", "") or season_id
+                        league_name = league_name or cached_stage.get("league_name", "")
+                        country = country or cached_stage.get("country", "")
+                    else:
+                        _SERIES_TO_STAGE_CACHE.pop(sibling_series, None)
             # Path B: FL GAMES league lookup when both prior paths
             # failed — search by league name from SOCCER_COMP map.
             if not stage_id and sibling_series:
@@ -6709,24 +6721,36 @@ async def event_normalized(ticker: str, refresh: bool = False,
                 if league_hint:
                     try:
                         from flashlive_feed import GAMES as _FL_GAMES
+                        # Exact league-name match only. The previous
+                        # `league_hint in fl_league` substring matcher
+                        # silently grabbed wrong-pair leagues that
+                        # share words: "Champions League" matched
+                        # "Champions League Women" (same sport,
+                        # same continent, distinct competition with
+                        # different team_ids). When that women's
+                        # match was the first hit in GAMES, the
+                        # entire fixture inherited the women's
+                        # stage_id — standings, top_scorers, and
+                        # bracket all surfaced women's data.
+                        chosen = None
+                        hint_low = league_hint.strip().lower()
                         for fl_g in _FL_GAMES.values():
-                            # Sport filter is critical — "Champions
-                            # League" matches both UEFA Champions
-                            # League (Soccer) and Asia Champions
-                            # League (Basketball). Without the sport
-                            # gate, we'd grab the wrong tournament.
                             if sport and fl_g.get("sport") != sport:
                                 continue
                             if not fl_g.get("tournament_stage_id"):
                                 continue
-                            fl_league = (fl_g.get("league") or
-                                         fl_g.get("_league") or "")
-                            if league_hint.lower() in fl_league.lower():
-                                stage_id = fl_g.get("tournament_stage_id", "")
-                                season_id = fl_g.get("tournament_season_id", "")
-                                league_name = league_name or fl_league
-                                country = country or fl_g.get("country", "") or fl_g.get("_country", "")
+                            fl_league = (fl_g.get("league")
+                                         or fl_g.get("_league") or "")
+                            if fl_league.strip().lower() == hint_low:
+                                chosen = fl_g
                                 break
+                        if chosen:
+                            stage_id = chosen.get("tournament_stage_id", "")
+                            season_id = chosen.get("tournament_season_id", "")
+                            league_name = league_name or (chosen.get("league")
+                                or chosen.get("_league") or "")
+                            country = country or (chosen.get("country")
+                                or chosen.get("_country") or "")
                     except Exception:
                         pass
             # Path D: FL master tournaments list. Last-resort lookup
