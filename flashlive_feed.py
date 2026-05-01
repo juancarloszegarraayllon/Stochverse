@@ -475,22 +475,30 @@ def _parse_event(ev):
         home_abbr = ev.get("SHORTNAME_HOME") or (home_name[:3].upper() if home_name else "")
         away_abbr = ev.get("SHORTNAME_AWAY") or (away_name[:3].upper() if away_name else "")
 
-        # Period from stage
-        period_map = {"FIRST_HALF": 1, "SECOND_HALF": 2, "HALFTIME": 1,
+        # Period from stage. HALFTIME is intentionally NOT mapped to a
+        # numeric period — at halftime FL ships STAGE_START_TIME at
+        # the halftime whistle, and the frontend's computeSoccerMinute
+        # would happily render "1H 8:56" (Date.now() - halftimeStart)
+        # if we left period=1. We surface is_halftime instead so the
+        # frontend can short-circuit to "HT".
+        period_map = {"FIRST_HALF": 1, "SECOND_HALF": 2,
                       "FIRST_PERIOD": 1, "SECOND_PERIOD": 2, "THIRD_PERIOD": 3,
                       "OVERTIME": 4, "FIRST_QUARTER": 1, "SECOND_QUARTER": 2,
                       "THIRD_QUARTER": 3, "FOURTH_QUARTER": 4}
         period = period_map.get(stage, 0)
+        is_halftime = (stage == "HALFTIME")
         # FL sometimes ships GAME_TIME for live games without a
         # recognizable STAGE (especially basketball when the broadcast
         # is between possessions/at a timeout). Without period, the
         # frontend can't compose the "Q2 9:58" label and falls back to
         # rendering the raw clock string ("9"). Preserve the last
         # known period for this event so we keep the prefix even when
-        # this poll's stage data is missing.
+        # this poll's stage data is missing — but skip this restore
+        # at halftime, where the cached period (1) would re-trigger
+        # the wrong "1H X:YY" computation on the frontend.
         if period > 0 and event_id:
             _LAST_PERIOD_CACHE[event_id] = period
-        elif period == 0 and state == "in" and event_id and event_id in _LAST_PERIOD_CACHE:
+        elif period == 0 and state == "in" and event_id and event_id in _LAST_PERIOD_CACHE and not is_halftime:
             period = _LAST_PERIOD_CACHE[event_id]
 
         # Scheduled start
@@ -554,7 +562,21 @@ def _parse_event(ev):
             "display_clock": display_clock,
             "short_detail": short_detail,
             "period": period,
-            "stage_start_ms": stage_start_ms,
+            "is_halftime": is_halftime,
+            # Explicit clock_running. Was implicit (default True)
+            # before this commit, which meant the 500 ms tick loop
+            # tried to interpolate the clock during halftime, period
+            # breaks, post-final, and pre-kickoff states. Now: True
+            # only when actually mid-half/mid-period; False otherwise.
+            # ESPN still overrides this value for stop-clock US sports
+            # in main.py:2658, where its per-poll comparator is more
+            # accurate at detecting timeouts and possession changes.
+            "clock_running": (state == "in" and not is_halftime),
+            # Zero the stage anchor at halftime so any frontend path
+            # that doesn't consult is_halftime still falls back to
+            # display_clock="Halftime" rather than computing minutes
+            # off the halftime-whistle timestamp.
+            "stage_start_ms": 0 if is_halftime else stage_start_ms,
             "scheduled_kickoff_ms": start_ms,
             "home_phrases": home_phrases,
             "away_phrases": away_phrases,
