@@ -2501,6 +2501,52 @@ def get_events(
                     ).isoformat()
                 except Exception:
                     pass
+        # Knockout-tie aggregate enrichment from /normalized's bracket
+        # cache. For future-fixture knockout legs FL hasn't loaded
+        # yet, the primary path above (g + _enrich_soccer_aggregate)
+        # misses because g is None. The bracket compactor in
+        # /normalized has the leg-1 score from the league's draw
+        # response — same data, different endpoint. Reads from the
+        # in-memory cache so this is essentially free when the panel
+        # has been opened in the same process. Across visits, anyone
+        # who's clicked into a knockout match's stats panel populates
+        # the cache for ALL fixtures in that league.
+        if rc.get("_sport") == "Soccer":
+            _live_now = rc.get("_live_state") or {}
+            _has_agg = (_live_now.get("is_two_leg")
+                        and _live_now.get("aggregate_home") is not None
+                        and _live_now.get("aggregate_away") is not None)
+            if not _has_agg:
+                _norm_cached = _EVENT_NORMALIZED_CACHE.get(
+                    (rc.get("event_ticker") or "").upper()
+                )
+                if _norm_cached:
+                    _bracket = ((_norm_cached.get("payload") or {}).get("data") or {}).get("bracket")
+                    import re as _re_agg_e
+                    _parts_e = _re_agg_e.split(
+                        r'\s+(?:vs\.?|v|at)\s+',
+                        rc.get("title") or "",
+                        maxsplit=1, flags=_re_agg_e.IGNORECASE,
+                    )
+                    if len(_parts_e) == 2:
+                        _agg_e = _aggregate_from_bracket(
+                            _bracket, _parts_e[0].strip(), _parts_e[1].strip()
+                        )
+                        if _agg_e:
+                            if not rc.get("_live_state"):
+                                _h_full_e = _parts_e[0].strip()
+                                _a_full_e = _parts_e[1].strip()
+                                rc["_live_state"] = {
+                                    "state":        "pre",
+                                    "home_abbr":    _h_full_e[:3].upper(),
+                                    "away_abbr":    _a_full_e[:3].upper(),
+                                    "home_display": _h_full_e,
+                                    "away_display": _a_full_e,
+                                    "home_score":   "",
+                                    "away_score":   "",
+                                }
+                            for _k_e, _v_e in _agg_e.items():
+                                rc["_live_state"][_k_e] = _v_e
         # Market-settling lifecycle: sport event whose expected
         # expiration has passed, with no live-feed FINAL signal and
         # Kalshi hasn't yet settled the markets. Frontend renders a
