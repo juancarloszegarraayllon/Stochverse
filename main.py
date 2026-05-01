@@ -132,17 +132,20 @@ async def startup_event():
         asyncio.create_task(run_flashlive_feed())
     except Exception as e:
         logging.getLogger("stochverse").warning("failed to start flashlive feed: %s", e)
-    # Warm-start the series→stage cache from the previous container's
-    # last save. Sub-second, non-blocking. Lets soccer aggregate pills
-    # render from the first request after a redeploy instead of waiting
-    # for fresh Path A→D probes against FL.
-    asyncio.create_task(_load_series_cache_from_db())
-    # Same for the tournament-level bracket cache — warm-start from
-    # cache_blobs, then run the periodic refresh loop. Bracket-as-
-    # source-of-truth: aggregate pills derive from this cache, not
-    # from per-fixture FL state, so future fixtures get pills the
-    # moment a tournament's bracket is loaded.
-    asyncio.create_task(_load_tournament_brackets_from_db())
+    # Warm-start the series→stage and tournament-bracket caches from
+    # cache_blobs BEFORE accepting traffic. Each load is a single DB
+    # SELECT — sub-100ms in practice — and ensures the very first
+    # /api/events request after a redeploy has populated caches to
+    # derive aggregate pills from. Without these awaits, the warm
+    # loop would be racing the first user request and aggregates
+    # would briefly be missing.
+    try:
+        await _load_series_cache_from_db()
+        await _load_tournament_brackets_from_db()
+    except Exception as e:
+        logging.getLogger("stochverse").warning(
+            "cache warm-start failed: %s", e
+        )
     asyncio.create_task(_tournament_bracket_warm_loop())
     # Phase 4: periodically flush live scores from all feeds to the DB.
     asyncio.create_task(_score_flush_loop())
@@ -5332,14 +5335,54 @@ async def _tournament_bracket_warm_loop():
     each tournament's bracket every _BRACKET_CACHE_TTL_S. New stage
     IDs that get added during the day (when a user opens a detail
     page or _find_fl_game resolves a new series) are picked up on
-    the next loop iteration. Sleeps long between full passes so we
-    don't hammer FL — bracket data changes only when matches play,
-    so 5-minute granularity is plenty fresh."""
+    the next loop iteration.
+
+    Initial pass runs in parallel (bounded by a semaphore so we
+    don't burst past FL's 10 req/s rate limiter), so a fresh
+    container with a dozen-plus tournaments gets every bracket
+    loaded in ~1 second instead of the sequential 0.3s/stage.
+
+    Steady-state passes (every 60s after the first) keep the per-
+    stage spacing because there's nothing to gain from bursting
+    when only a few entries have aged past TTL."""
     _log = logging.getLogger("stochverse")
-    # Stagger: wait a few seconds before first run so the rest of
-    # startup can finish (Kalshi snapshot, FL warm-start, etc.).
-    await asyncio.sleep(5)
+
+    # ── Initial pass: parallel-warm anything that doesn't already
+    #    have fresh bracket data from the cache_blobs warm-start.
+    sem = asyncio.Semaphore(5)  # ≤5 concurrent FL fetches
+
+    async def warm_one(stage_id, season_id):
+        async with sem:
+            return await _refresh_tournament_bracket(stage_id, season_id)
+
+    initial_tasks = []
+    now = time.time()
+    for series, entry in list(_SERIES_TO_STAGE_CACHE.items()):
+        if not isinstance(entry, dict):
+            continue
+        stage_id = entry.get("stage_id") or ""
+        if not stage_id:
+            continue
+        cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
+        if cached and (now - (cached.get("ts") or 0)) < _BRACKET_CACHE_TTL_S:
+            continue  # warm-start already populated this stage
+        season_id = entry.get("season_id") or ""
+        initial_tasks.append(warm_one(stage_id, season_id))
+    if initial_tasks:
+        results = await asyncio.gather(*initial_tasks, return_exceptions=True)
+        ok_count = sum(1 for r in results if r is True)
+        _log.info(
+            "bracket warm-loop: initial pass refreshed %d/%d brackets",
+            ok_count, len(initial_tasks),
+        )
+
+    # ── Steady-state refresh loop. Each pass refreshes any stage
+    #    whose bracket entry has aged past TTL; passes run every
+    #    60s so a freshly-added stage_id starts populating within
+    #    a minute. Sequential with small spacing here is fine —
+    #    there's no urgency, just bounded background freshness.
     while True:
+        await asyncio.sleep(60)
         try:
             now = time.time()
             for series, entry in list(_SERIES_TO_STAGE_CACHE.items()):
@@ -5357,16 +5400,11 @@ async def _tournament_bracket_warm_loop():
                     _log.debug("bracket refreshed: series=%s stage=%s",
                                series, stage_id)
                 # Small spacing so we don't burst the FL rate limiter
-                # when a fresh container has dozens of stage IDs to
-                # warm in one pass.
+                # when several stages happen to expire at the same
+                # tick.
                 await asyncio.sleep(0.3)
         except Exception as e:
             _log.warning("tournament_bracket_warm_loop iter failed: %s", e)
-        # Sleep between full passes. Each pass refreshes any stage
-        # whose bracket entry has aged past TTL; passes run every
-        # 60s so a freshly-added stage_id starts populating within
-        # a minute.
-        await asyncio.sleep(60)
 
 
 def _derive_basketball_series_state(records):
