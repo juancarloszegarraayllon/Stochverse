@@ -4963,8 +4963,21 @@ window.switchStFilter = function(btn) {
 // H2H: shared cache on the h2h main panel so all sub-tabs use one fetch
 var _h2hCache = {};        // ticker → {tabs, homeName, awayName}
 var _h2hPending = {};      // ticker → in-flight Promise (dedup parallel clicks)
+// Pin the cache to the deployed bundle version. Any new deploy
+// changes window.StochverseBundle.version, which invalidates the
+// session-scoped cache so users don't keep seeing pre-deploy
+// responses (e.g. wrong home/away orientation on H2H tabs).
+var _h2hCacheBundleVersion = (window.StochverseBundle && window.StochverseBundle.version) || "";
 
 async function _ensureH2HCache(ticker) {
+  // Re-evaluate bundle version each call so cache invalidates if
+  // the bundle hot-reloads mid-session.
+  var ver = (window.StochverseBundle && window.StochverseBundle.version) || "";
+  if (ver !== _h2hCacheBundleVersion) {
+    _h2hCache = {};
+    _h2hPending = {};
+    _h2hCacheBundleVersion = ver;
+  }
   if (_h2hCache[ticker]) return _h2hCache[ticker];
   if (_h2hPending[ticker]) return _h2hPending[ticker];
   _h2hPending[ticker] = (async function() {
