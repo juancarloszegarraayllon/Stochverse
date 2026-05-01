@@ -5047,10 +5047,11 @@ async function _loadH2H(container, ticker) {
 }
 
 function _rebuildH2HSubTabs(mainPanel, cached) {
-  console.log("[stochverse] h2h-rebuild v2", {
+  var _tabNames = (cached.tabs || []).map(function(t) { return t && t.TAB_NAME; });
+  console.log("[stochverse] h2h-rebuild v3", {
     home: cached.homeName,
     away: cached.awayName,
-    tabNames: (cached.tabs || []).map(function(t) { return t && t.TAB_NAME; }),
+    tabNames: JSON.stringify(_tabNames),
   });
   // Expose the latest H2H cache for ad-hoc console inspection.
   window._h2hLastCached = cached;
@@ -5072,10 +5073,21 @@ function _rebuildH2HSubTabs(mainPanel, cached) {
   var aLow = (cached.awayName || "").toLowerCase();
   var hKey = hLow.split(" ")[0];
   var aKey = aLow.split(" ")[0];
-  var matchesTeam = function(rawLow, full, key) {
+  // 3-letter prefix fallback: FL sometimes ships TAB_NAME with the
+  // team's broadcast short form ("BAY" for Bayern Munich, "MUN" for
+  // Manchester United) rather than the full name. None of "bayern
+  // munich" / "bayern" is a substring of "bay", so the strict
+  // matchers miss it. Drop to the first 3 chars of the team's
+  // first word — wide enough to catch "BAY"/"PSG" while still
+  // being narrow enough to avoid cross-team collisions in the same
+  // fixture.
+  var hPrefix = (hKey || hLow).substring(0, 3);
+  var aPrefix = (aKey || aLow).substring(0, 3);
+  var matchesTeam = function(rawLow, full, key, prefix) {
     if (!full) return false;
-    if (rawLow.indexOf(full) >= 0) return true;
-    return !!(key && rawLow.indexOf(key) >= 0);
+    if (full && rawLow.indexOf(full) >= 0) return true;
+    if (key && rawLow.indexOf(key) >= 0) return true;
+    return !!(prefix && prefix.length >= 3 && rawLow.indexOf(prefix) >= 0);
   };
   var overallIdx = -1, homeIdx = -1, awayIdx = -1;
   var classified = {};
@@ -5084,8 +5096,8 @@ function _rebuildH2HSubTabs(mainPanel, cached) {
     if (overallIdx < 0 && (raw === "overall" || raw === "all" || raw === "")) {
       overallIdx = ti; classified[ti] = 1; continue;
     }
-    var mH = matchesTeam(raw, hLow, hKey);
-    var mA = matchesTeam(raw, aLow, aKey);
+    var mH = matchesTeam(raw, hLow, hKey, hPrefix);
+    var mA = matchesTeam(raw, aLow, aKey, aPrefix);
     if (mH && !mA && homeIdx < 0) { homeIdx = ti; classified[ti] = 1; }
     else if (mA && !mH && awayIdx < 0) { awayIdx = ti; classified[ti] = 1; }
   }
