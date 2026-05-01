@@ -5548,7 +5548,7 @@ async def _tournament_bracket_warm_loop():
             return await _refresh_tournament_bracket(stage_id, season_id, league_name)
 
     discovered: dict = {}  # stage_id → (season_id, league_name)
-    seen_leagues = set()
+    seen_per_sport_league = set()  # (sport, league_name) tuples
     for series, entry in list(_SERIES_TO_STAGE_CACHE.items()):
         if not isinstance(entry, dict):
             continue
@@ -5556,13 +5556,18 @@ async def _tournament_bracket_warm_loop():
         league_name = entry.get("league_name") or ""
         if stage_id and stage_id not in discovered:
             discovered[stage_id] = (entry.get("season_id") or "", league_name)
-        if league_name and league_name not in seen_leagues:
-            seen_leagues.add(league_name)
+        # Sport-agnostic stage discovery: derive the sport from the
+        # series ticker so non-soccer 2-leg knockouts (handball cup
+        # ties, rugby cups, etc.) get the same multi-stage warm
+        # treatment without a code change. Falls back to Soccer when
+        # the series isn't in SERIES_SPORT (the only sport currently
+        # known to use 2-leg aggregates, so this is the right default).
+        sport = SERIES_SPORT.get(series) or "Soccer"
+        league_key = (sport, league_name)
+        if league_name and league_key not in seen_per_sport_league:
+            seen_per_sport_league.add(league_key)
             try:
-                # Sport: assume Soccer for now (it's the only sport
-                # currently using bracket aggregates). Generalizing to
-                # other sports would just pass `entry["sport"]` here.
-                stages = await _find_all_stages_for_league("Soccer", league_name)
+                stages = await _find_all_stages_for_league(sport, league_name)
                 for st in stages:
                     sid = st.get("stage_id") or ""
                     if sid and sid not in discovered:
@@ -5588,7 +5593,7 @@ async def _tournament_bracket_warm_loop():
         ok_count = sum(1 for r in results if r is True)
         _log.info(
             "bracket warm-loop: initial pass refreshed %d/%d brackets across %d leagues",
-            ok_count, len(initial_tasks), len(seen_leagues),
+            ok_count, len(initial_tasks), len(seen_per_sport_league),
         )
 
     # ── Steady-state refresh loop. Each pass refreshes any stage
