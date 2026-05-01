@@ -15,6 +15,7 @@ import { renderTopScorers } from './blocks/TopScorers';
 import { renderStats } from './blocks/Stats';
 import { renderH2H } from './blocks/H2H';
 import { renderLineups } from './blocks/Lineups';
+import { renderCommentary, stopCommentaryPoll } from './blocks/Commentary';
 
 declare global {
   interface Window {
@@ -47,6 +48,14 @@ declare global {
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
+      // Commentary is unique among blocks because it auto-polls.
+      // The block owns the timer; the inline JS calls stopCommentary
+      // on tab switch to release the interval.
+      renderCommentary?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      stopCommentary?: (mount: HTMLElement) => void;
       // Render the H2H tab strip + content from /api/event/<t>/h2h.
       // H2H stays on its dedicated endpoint (not /normalized) because
       // its FL response shape and past-event fallback chain are
@@ -196,14 +205,27 @@ async function renderStatsByTicker(
   }
 }
 
+async function renderCommentaryByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  // The block exports renderCommentary(mount, ticker) for symmetry
+  // with the other internal block APIs (mount-first); the public
+  // hook flips to (ticker, mount) to match StochverseBundle's
+  // convention.
+  return renderCommentary(mount, ticker);
+}
+
 window.StochverseBundle = {
-  version: '0.4.2',
+  version: '0.4.3',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
   renderStats: renderStatsByTicker,
   renderH2H: renderH2HByTicker,
   renderLineups: renderLineupsByTicker,
+  renderCommentary: renderCommentaryByTicker,
+  stopCommentary: stopCommentaryPoll,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);

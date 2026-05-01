@@ -705,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.4.2" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.4.3" defer></script>
 </head>
 <body>
 <div id="header">
@@ -6051,6 +6051,17 @@ window.switchMatchTab = function(btn) {
   // commentary; otherwise we want it off so we don't keep polling
   // while the user is on Stats / Lineups / etc.
   _stopCommentaryPoll();
+  // Also stop the bundle-driven commentary poll when switching away.
+  // The bundle's stopCommentary clears the interval per-mount; safe
+  // to call even if the bundle wasn't running its own poll.
+  try {
+    if (window.StochverseBundle && window.StochverseBundle.stopCommentary) {
+      var allCommMounts = main.querySelectorAll('[data-lazy="commentary"]');
+      for (var ci = 0; ci < allCommMounts.length; ci++) {
+        window.StochverseBundle.stopCommentary(allCommMounts[ci]);
+      }
+    }
+  } catch (e) {}
   // Lazy-load player-stats and commentary
   var activePanel = main.querySelector('div[data-mt="' + target + '"]');
   if (activePanel) {
@@ -6059,7 +6070,15 @@ window.switchMatchTab = function(btn) {
     ticker = ticker ? ticker.ticker : '';
     if (lazy && !lazy.dataset.loaded) {
       lazy.dataset.loaded = '1';
-      if (target === 'commentary') _loadCommentary(lazy, ticker);
+      if (target === 'commentary' && window.StochverseBundle && window.StochverseBundle.renderCommentary) {
+        // Phase 3 commentary migration. Bundle owns the poll loop
+        // entirely — the legacy _startCommentaryPoll path below is
+        // bypassed when the bundle is loaded. Falls through to the
+        // inline _loadCommentary + _startCommentaryPoll if the
+        // bundle isn't available (older client / cached HTML).
+        window.StochverseBundle.renderCommentary(ticker, lazy);
+      }
+      else if (target === 'commentary') _loadCommentary(lazy, ticker);
       else if (target === 'player-stats') _loadPlayerStats(lazy, ticker);
       else if (target === 'missing-players') _loadMissingPlayers(lazy, ticker);
       else if (target === 'lineups' && window.StochverseBundle && window.StochverseBundle.renderLineups) {
@@ -6079,7 +6098,11 @@ window.switchMatchTab = function(btn) {
     // commentary lines (kicks, goals, fouls, sub-50 ms updates from
     // FL) appear without the user having to click around. Backend
     // /commentary has no cache so each poll lands fresh data.
-    if (target === 'commentary' && lazy && ticker) {
+    // Skip when the bundle is driving commentary — its renderCommentary
+    // already runs its own 15s poll, and starting both would
+    // double the request rate against /commentary.
+    var _bundleHasComm = !!(window.StochverseBundle && window.StochverseBundle.renderCommentary);
+    if (target === 'commentary' && lazy && ticker && !_bundleHasComm) {
       _startCommentaryPoll(lazy, ticker);
     }
   }
