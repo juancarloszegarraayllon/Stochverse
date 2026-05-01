@@ -1121,6 +1121,34 @@ async def run_flashlive_feed():
     log.info("FlashLive feed starting (live poll: %ds, idle poll: %ds)",
              LIVE_POLL_INTERVAL, POLL_INTERVAL)
 
+    # Born-warm: load the GAMES dict from the previous container's
+    # last save. Lets cards render LIVE pills + scores from the very
+    # first request after a redeploy, even before this container's
+    # first poll completes. Failure is non-fatal — empty dict is the
+    # status quo without the cache.
+    try:
+        from db import load_cache_blob as _load_cache_blob
+        prior = await _load_cache_blob("flashlive_games")
+        if isinstance(prior, dict) and prior:
+            # prior is {key: game_dict}. Filter out anything older
+            # than 10 min to mirror the in-process stale sweep — a
+            # container that's been off for hours shouldn't surface
+            # stale scores as if they were fresh.
+            stale_cutoff_ms = int((time.time() - 600) * 1000)
+            for k, g in prior.items():
+                if isinstance(g, dict) and (g.get("captured_at_ms") or 0) >= stale_cutoff_ms:
+                    GAMES[k] = g
+            if GAMES:
+                STATUS["ready"] = True
+                STATUS["ready_at_ts"] = time.time()
+                STATUS["games"] = len(GAMES)
+                log.info("FlashLive warm-start: loaded %d games from cache_blobs", len(GAMES))
+    except Exception as e:
+        log.warning("FlashLive warm-start failed: %s", e)
+
+    _last_save_ts = 0.0
+    _SAVE_INTERVAL_S = 30  # save at most every 30s — bound DB write rate
+
     while True:
         try:
             # Mega tier: fetch today + tomorrow on every poll for full
@@ -1174,6 +1202,19 @@ async def run_flashlive_feed():
             if parsed:
                 log.info("FlashLive: %d games across all sports (kept %d, swept %d stale)",
                          parsed, len(GAMES), len(stale_keys))
+            # Persist GAMES so the next container starts warm. Throttled
+            # to one save per _SAVE_INTERVAL_S so we don't hammer the
+            # DB during fast-cadence live polling.
+            _now = time.time()
+            if parsed and _now - _last_save_ts >= _SAVE_INTERVAL_S:
+                try:
+                    from db import save_cache_blob as _save_cache_blob
+                    # Snapshot — dict() copy so a concurrent update
+                    # doesn't mutate the payload mid-serialize.
+                    asyncio.create_task(_save_cache_blob("flashlive_games", dict(GAMES)))
+                    _last_save_ts = _now
+                except Exception as e:
+                    log.warning("FlashLive cache save scheduling failed: %s", e)
         except Exception as e:
             STATUS["last_error"] = str(e)[:200]
             log.error("FlashLive poll error: %s", e)

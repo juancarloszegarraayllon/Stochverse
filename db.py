@@ -628,3 +628,98 @@ def get_sport_from_entities(title: str) -> str:
         best_len = len(alias)
         best_sport = sport
     return best_sport
+
+
+# ───────────────────────────────────────────────────────────────────
+# Cross-deploy cache persistence
+#
+# Each Railway redeploy spins up a fresh container with empty in-process
+# state — flashlive_feed.GAMES (live scores), _SERIES_TO_STAGE_CACHE
+# (soccer aggregate stage IDs), etc. Until the new container's first
+# poll completes (~10-30s for FL), users see no LIVE pills and no
+# aggregate pills. The healthcheck-gate approach failed because Kalshi
+# warmup time was too variable for Railway's healthcheck timeout.
+#
+# Instead we persist the hot caches to Postgres on a slow timer + on
+# every poll completion, and read them on container startup. The new
+# container is born warm — the cold-start window disappears for users
+# even if its own poll hasn't completed yet.
+#
+# Schema is intentionally generic — one table holds all cache blobs
+# keyed by name. Each blob is JSONB so we can inspect it from psql
+# during debugging, and so it's portable across Postgres providers.
+# ───────────────────────────────────────────────────────────────────
+
+_cache_blobs_table_ensured = False
+
+
+async def _ensure_cache_blobs_table():
+    """Idempotently create the cache_blobs table. Same self-heal
+    pattern as _ensure_snapshots_table — safe to call repeatedly."""
+    global _cache_blobs_table_ensured
+    if _cache_blobs_table_ensured or engine is None:
+        return None
+    ddl = """
+    CREATE TABLE IF NOT EXISTS cache_blobs (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    """
+    try:
+        from sqlalchemy import text as _text
+        async with engine.begin() as conn:
+            await conn.execute(_text(ddl))
+        _cache_blobs_table_ensured = True
+        log.info("cache_blobs table ensured")
+        return None
+    except Exception as e:
+        log.warning("ensure cache_blobs table failed: %s", e)
+        return str(e)[:400]
+
+
+async def save_cache_blob(key: str, data) -> bool:
+    """Upsert a cache blob. Returns True on success, False on failure
+    (logged). Failure is non-fatal — caller continues with in-process
+    state, the next save attempt will retry."""
+    if not DATABASE_URL or async_session is None or engine is None:
+        return False
+    err = await _ensure_cache_blobs_table()
+    if err:
+        return False
+    try:
+        from sqlalchemy import text as _text
+        sql = _text(
+            "INSERT INTO cache_blobs (key, data, updated_at) "
+            "VALUES (:key, CAST(:data AS JSONB), NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET "
+            "data = EXCLUDED.data, updated_at = NOW()"
+        )
+        import json as _json
+        async with engine.begin() as conn:
+            await conn.execute(sql, {"key": key, "data": _json.dumps(data)})
+        return True
+    except Exception as e:
+        log.warning("save_cache_blob(%s) failed: %s", key, e)
+        return False
+
+
+async def load_cache_blob(key: str):
+    """Return the stored JSON value for `key`, or None if missing /
+    DB unavailable. Caller decides what to do with None — typically
+    fall through to building cache from scratch."""
+    if not DATABASE_URL or engine is None:
+        return None
+    err = await _ensure_cache_blobs_table()
+    if err:
+        return None
+    try:
+        from sqlalchemy import text as _text
+        sql = _text("SELECT data FROM cache_blobs WHERE key = :key")
+        async with engine.begin() as conn:
+            r = await conn.execute(sql, {"key": key})
+            row = r.first()
+            return row[0] if row else None
+    except Exception as e:
+        log.warning("load_cache_blob(%s) failed: %s", key, e)
+        return None
