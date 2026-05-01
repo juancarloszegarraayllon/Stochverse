@@ -5319,32 +5319,34 @@ async def _prewarm_series_stages():
                 if series in _SERIES_TO_STAGE_CACHE:
                     continue  # already resolved
                 unresolved.append(r)
-            # Bound concurrency so we don't burst FL's rate limiter
-            # if dozens of series need resolution at once.
-            sem = asyncio.Semaphore(3)
-
-            async def _resolve_one(found):
-                async with sem:
+            # Sequential, 1 req/s. Bursting parallel resolves was
+            # competing with the FL poller and the bracket warm loop
+            # for FL's 10 req/s rate limit, causing bracket fetches
+            # to fail and aggregate pills to disappear. 1 req/s
+            # leaves 9 req/s headroom for everything else.
+            if unresolved:
+                # Extra delay so the bracket warm loop's initial
+                # parallel pass finishes first — its UCL/UEL/etc.
+                # fetches matter more than this lazy backfill.
+                await asyncio.sleep(15)
+                _log.info("prewarm: resolving stage_id for %d series sequentially",
+                          len(unresolved))
+                resolved = 0
+                for r in unresolved:
                     try:
-                        await _find_fl_game(found)
+                        await _find_fl_game(r)
+                        if (r.get("series_ticker") or "").upper() in _SERIES_TO_STAGE_CACHE:
+                            resolved += 1
                     except Exception:
                         pass
-            if unresolved:
-                _log.info("prewarm: resolving stage_id for %d soccer series",
-                          len(unresolved))
-                await asyncio.gather(
-                    *(_resolve_one(r) for r in unresolved),
-                    return_exceptions=True,
-                )
-                _log.info("prewarm: %d/%d series resolved",
-                          sum(1 for r in unresolved
-                              if (r.get("series_ticker") or "").upper()
-                              in _SERIES_TO_STAGE_CACHE),
-                          len(unresolved))
+                    await asyncio.sleep(1.0)
+                _log.info("prewarm: %d/%d series resolved", resolved, len(unresolved))
         except Exception as e:
-            _log.warning("prewarm_soccer_series_stages iter failed: %s", e)
-        # Re-run every 5 min so newly-listed series get warmed too.
-        await asyncio.sleep(300)
+            _log.warning("prewarm_series_stages iter failed: %s", e)
+        # Re-run hourly. Newly-listed series mid-day still get
+        # resolved via the existing lazy path on detail-page click;
+        # this loop just catches everything else on the next pass.
+        await asyncio.sleep(3600)
 
 
 # ─────────────────────────────────────────────────────────────────
