@@ -2533,12 +2533,11 @@ def get_events(
                     ).isoformat()
                 except Exception:
                     pass
-        # Basketball playoff series enrichment — Kalshi-derived,
-        # independent of ESPN. If the ticker belongs to a multi-game
-        # series clustered by sibling tickers, fill in is_playoff /
-        # series_game_number / series_home_wins / series_away_wins.
-        # We only WRITE values that aren't already set (ESPN's data
-        # wins when present); we never override.
+        # Multi-game series enrichment — Kalshi-derived, independent
+        # of ESPN. Fires for any sport whose tickers Kalshi names
+        # *GAME-DDMMMDDABBABB and that runs multi-game series:
+        # NBA, NHL, MLB, NFL. ESPN's series_summary stays as the
+        # primary signal when populated; we only fill the gaps.
         _bs = _basketball_series_by_ticker.get(rc.get("event_ticker") or "")
         if _bs:
             if not rc.get("_live_state"):
@@ -5330,6 +5329,11 @@ def _derive_basketball_series_state(records):
     chronologically, assign Game N from position, count series
     wins from settled prior games' outcomes. Independent of feeds.
 
+    Sport-agnostic despite the name: NBA, NHL, MLB, NFL all use the
+    same `*GAME-DDMMMDDABBABB` ticker shape. As long as a sport runs
+    multi-game series and Kalshi names them this way, this derivation
+    fills the gap when ESPN's per-event series state is missing.
+
     Returns: {ticker: {is_playoff, series_game_number,
                        series_home_wins, series_away_wins}}
     Only emits entries for groups with 2+ games (a single game
@@ -5337,17 +5341,19 @@ def _derive_basketball_series_state(records):
     overriding values that ESPN/FL already supplied.
     """
     out: dict = {}
+    # Sports for which we enable series derivation. Adding a sport
+    # here is enough — no other code change required.
+    series_sports = {"Basketball", "Hockey", "Baseball", "Football"}
     # ticker suffix shape after the series prefix: "26MAY04MINSAS"
-    # = year(2) + month(3) + day(2) + team_a(3) + team_b(3). Some
-    # series use 2-letter codes (rare) — accept 6-7 char team
-    # blocks for robustness.
+    # = year(2) + month(3) + day(2) + team_a(2-3) + team_b(2-3).
+    # Some sports use 2-letter codes; accept both for robustness.
     pat = re.compile(
         r"^(\d{2}[A-Z]{3}\d{2})([A-Z]{2,3})([A-Z]{2,3})$"
     )
     groups: dict = {}
     for r in records:
         sport = r.get("_sport") or ""
-        if sport != "Basketball":
+        if sport not in series_sports:
             continue
         ticker = r.get("event_ticker") or ""
         if "-" not in ticker:
@@ -5361,6 +5367,8 @@ def _derive_basketball_series_state(records):
         date_part, home_abbr, away_abbr = m.group(1), m.group(2), m.group(3)
         # Group key: sorted pair so DET-vs-ORL and ORL-vs-DET
         # cluster together regardless of which side is home.
+        # Series prefix is part of the key so a regular-season
+        # NBAGAME doesn't get glued to a playoff EUROLEAGUEGAME.
         pair_key = (series, tuple(sorted([home_abbr, away_abbr])))
         groups.setdefault(pair_key, []).append(
             (date_part, ticker, r, home_abbr, away_abbr)
