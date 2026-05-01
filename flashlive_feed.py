@@ -967,75 +967,108 @@ async def search_flashlive_event(title: str, sport: str = ""):
 
 
 async def search_past_event_for_teams(home: str, away: str, sport: str = ""):
-    """Search FL for any past event between these two teams. Used as
-    an H2H fallback for future fixtures FL hasn't loaded yet — H2H
-    history is team-vs-team and identical regardless of which match's
-    event_id we query, so any past matchup between them gives us the
-    right history.
+    """Find a past event between two teams to use as an H2H source for
+    future fixtures FL hasn't loaded yet. The H2H endpoint needs an
+    event_id and requires it to be a real past match — but H2H rows
+    are team-vs-team and identical regardless of which event we query.
 
-    Tries the joined "home away" query first (most specific); if that
-    returns no event with BOTH teams, retries with each team's name
-    alone since FL's search ranks by relevance and a single popular
-    team name may surface a recent matchup against the other team in
-    its top results.
+    FL doesn't expose a direct two-team H2H lookup. The working chain is:
+      1. /v1/search/multi-search?query=<team name> → participant IDs
+      2. /v1/teams/results?team_id=<A>&sport_id=N → past matches with
+         home/away participant IDs per event
+      3. Walk results for an event involving team B
 
     Returns {"event_id": str, "home_name": str, "away_name": str}
-    or None when no event involving BOTH team names is found."""
+    or None when no past matchup is found."""
     if not home or not away:
         return None
-    h_low = home.lower()
-    a_low = away.lower()
-    h_key = h_low.split()[0] if h_low else ""
-    a_key = a_low.split()[0] if a_low else ""
 
-    def _team_match(side_name: str, target_low: str, target_key: str) -> bool:
-        s = (side_name or "").lower()
-        if not s:
-            return False
-        if target_low in s or s in target_low:
-            return True
-        return bool(target_key and target_key == s.split()[0])
+    # Step 1 — resolve participant IDs for both team names. The
+    # multi-search endpoint surfaces participants for a team-name
+    # query, with the most-relevant id first.
+    sport_id = _sport_id_from_name(sport)
+    team_a = await _resolve_team_id(home)
+    team_b = await _resolve_team_id(away)
+    if not team_a or not team_b or team_a == team_b:
+        return None
 
-    queries = [f"{home} {away}"]
-    # Retry with single-team queries if the joint one fails.
-    queries.extend([home, away])
-
-    for q in queries:
-        data = await _fl_get("/v1/search/multi-search", {"query": q})
-        if not data:
+    # Step 2/3 — fetch team A's recent results, walk for any event
+    # whose opponent is team B. Try team A first, fall back to team B
+    # if A's results don't have the matchup loaded (FL only keeps a
+    # rolling window per team).
+    for primary, opponent in ((team_a, team_b), (team_b, team_a)):
+        params = {"team_id": primary, "locale": "en_INT"}
+        if sport_id:
+            params["sport_id"] = sport_id
+        data = await _fl_get("/v1/teams/results", params)
+        if not isinstance(data, dict):
             continue
-        if isinstance(data, list):
-            results = data
-        elif isinstance(data, dict):
-            results = data.get("DATA") or data.get("data") or []
-        else:
-            continue
-        if not isinstance(results, list):
-            continue
-        for item in results:
-            if not isinstance(item, dict):
+        for grp in (data.get("DATA") or []):
+            if not isinstance(grp, dict):
                 continue
-            if item.get("TYPE") != "event" and item.get("type") != "event":
-                continue
-            ev_home = (item.get("HOME_NAME") or item.get("PARTICIPANT_HOME") or "")
-            ev_away = (item.get("AWAY_NAME") or item.get("PARTICIPANT_AWAY") or "")
-            home_in_home = _team_match(ev_home, h_low, h_key)
-            away_in_away = _team_match(ev_away, a_low, a_key)
-            home_in_away = _team_match(ev_away, h_low, h_key)
-            away_in_home = _team_match(ev_home, a_low, a_key)
-            # Require BOTH teams in the event (any orientation).
-            if not ((home_in_home and away_in_away) or
-                    (home_in_away and away_in_home)):
-                continue
-            event_id = item.get("ID") or item.get("EVENT_ID") or ""
-            if not event_id:
-                continue
-            return {
-                "event_id":  event_id,
-                "home_name": ev_home,
-                "away_name": ev_away,
-            }
+            for ev in (grp.get("EVENTS") or []):
+                if not isinstance(ev, dict):
+                    continue
+                home_ids = ev.get("HOME_PARTICIPANT_IDS") or []
+                away_ids = ev.get("AWAY_PARTICIPANT_IDS") or []
+                if (opponent in home_ids and primary in away_ids) or \
+                   (opponent in away_ids and primary in home_ids):
+                    eid = ev.get("EVENT_ID")
+                    if eid:
+                        return {
+                            "event_id":  eid,
+                            "home_name": ev.get("HOME_NAME") or "",
+                            "away_name": ev.get("AWAY_NAME") or "",
+                        }
     return None
+
+
+async def _resolve_team_id(team_name: str) -> str:
+    """First participant-type result for a team-name query. FL's
+    /v1/search/multi-search returns participants ranked by relevance,
+    so the first hit is reliably the canonical team. Empty string
+    when nothing matches."""
+    if not team_name:
+        return ""
+    data = await _fl_get("/v1/search/multi-search", {"query": team_name})
+    if not data:
+        return ""
+    if isinstance(data, list):
+        results = data
+    elif isinstance(data, dict):
+        results = data.get("DATA") or data.get("data") or []
+    else:
+        return ""
+    for it in (results or []):
+        if not isinstance(it, dict):
+            continue
+        t = it.get("TYPE") or it.get("type") or ""
+        if t in ("participants", "participant"):
+            tid = it.get("ID") or it.get("EVENT_ID") or ""
+            if tid:
+                return tid
+    return ""
+
+
+# Map our sport names to FL sport_ids. Mirrors the one in main.py
+# but kept local so callers in this module don't have to import.
+_SPORT_NAME_TO_FL_ID_LOCAL = {
+    "Soccer":      "1",
+    "Tennis":      "2",
+    "Basketball":  "3",
+    "Hockey":      "4",
+    "Baseball":    "6",
+    "Football":    "5",
+    "Cricket":     "12",
+    "Table Tennis": "27",
+    "Volleyball":  "13",
+    "MMA":         "31",
+    "Boxing":      "32",
+}
+
+
+def _sport_id_from_name(sport_name: str) -> str:
+    return _SPORT_NAME_TO_FL_ID_LOCAL.get((sport_name or "").strip(), "")
 
 
 async def run_flashlive_feed():
