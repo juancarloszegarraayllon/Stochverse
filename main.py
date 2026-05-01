@@ -5192,8 +5192,13 @@ async def get_event_h2h(ticker: str):
                 )
                 if past and past.get("event_id"):
                     fl_id = past["event_id"]
-                    home_name = past.get("home_name") or title_home
-                    away_name = past.get("away_name") or title_away
+                    # Keep the current Kalshi fixture's orientation
+                    # for the response — frontend tab labels read
+                    # home_name / away_name and we want them to match
+                    # the fixture (Bayern home / PSG away), not the
+                    # past matchup we sourced the H2H rows from.
+                    home_name = title_home
+                    away_name = title_away
 
         if not fl_id:
             return {"error": "FlashLive doesn't cover this match yet"}
