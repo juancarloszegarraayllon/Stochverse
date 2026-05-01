@@ -10273,28 +10273,29 @@ def healthz():
 
 @app.api_route("/readyz", methods=["GET", "HEAD"])
 def readyz(response: Response):
-    """Readiness probe — returns 503 until both the Kalshi REST
-    snapshot and the FlashLive feed have completed their first
-    cycle. Wired into Railway's deploy healthcheck so traffic stays
-    on the old container until the new one's caches are warm.
+    """Readiness probe — returns 503 until the Kalshi REST snapshot
+    has been built. Wired into Railway's deploy healthcheck so traffic
+    stays on the old container until the new one's primary cache is
+    warm.
 
     Without this gate every redeploy briefly exposes a window where
-    GAMES (FL live state) is empty, soccer aggregates haven't been
-    derived, and FL-driven sports show no LIVE pill. Holding traffic
-    until ready makes redeploys visually invisible.
+    /api/events returns no records. The Kalshi snapshot is the load-
+    bearing dependency: with it warm, every other path either returns
+    cached data or degrades gracefully.
 
-    The Kalshi snapshot warm is the bigger user-facing dependency
-    (no events to display without it). FL warm is gated on a
-    successful poll producing at least one game so we don't flip
-    ready on transient empty responses."""
+    FlashLive readiness is reported in the body but not blocking. FL
+    is gated on its own internal state (STATUS["ready"]) which can
+    take 10-30s to flip on a fresh container, and locking the deploy
+    behind that introduces a hard failure mode for transient FL API
+    issues. The cold-start LIVE-pill flicker is a softer regression
+    to take than failed deploys; we'll add a gentler FL gate (with a
+    grace-period fallback) in a follow-up once this gate is proven."""
     kalshi_ready = _cache.get("data") is not None
-    fl_ready = False
     fl_status = {}
     try:
         from flashlive_feed import STATUS as _FL_STATUS
-        fl_ready = bool(_FL_STATUS.get("ready"))
         fl_status = {
-            "ready":         fl_ready,
+            "ready":         bool(_FL_STATUS.get("ready")),
             "polls":         _FL_STATUS.get("polls", 0),
             "games":         _FL_STATUS.get("games", 0),
             "started_at_ts": _FL_STATUS.get("started_at_ts"),
@@ -10303,7 +10304,7 @@ def readyz(response: Response):
         }
     except Exception as e:
         fl_status = {"error": str(e)[:200]}
-    ready = kalshi_ready and fl_ready
+    ready = kalshi_ready
     if not ready:
         response.status_code = 503
     return {
