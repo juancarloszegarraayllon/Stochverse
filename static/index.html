@@ -5041,23 +5041,68 @@ function _rebuildH2HSubTabs(mainPanel, cached) {
   // with one panel per actual TAB_NAME.
   var existingPanels = mainPanel.querySelectorAll(':scope > .ed-sb-panel');
   for (var ep = 0; ep < existingPanels.length; ep++) existingPanels[ep].remove();
+
+  // FL ships TAB_NAME pre-formatted with the queried event's
+  // home/away orientation built in (e.g. "PSG - Home" because the
+  // past Bayern-vs-PSG event we sourced the H2H from had PSG at
+  // home). For future fixtures we want the CURRENT fixture's
+  // orientation (Bayern home, PSG away). Match each tab's TAB_NAME
+  // against the title teams, then render in fixture order:
+  //   Overall → home team's tab → away team's tab.
+  var hLow = (cached.homeName || "").toLowerCase();
+  var aLow = (cached.awayName || "").toLowerCase();
+  var hKey = hLow.split(" ")[0];
+  var aKey = aLow.split(" ")[0];
+  var matchesTeam = function(rawLow, full, key) {
+    if (!full) return false;
+    if (rawLow.indexOf(full) >= 0) return true;
+    return !!(key && rawLow.indexOf(key) >= 0);
+  };
+  var overallIdx = -1, homeIdx = -1, awayIdx = -1;
+  var classified = {};
+  for (var ti = 0; ti < cached.tabs.length; ti++) {
+    var raw = ((cached.tabs[ti] && cached.tabs[ti].TAB_NAME) || "").toLowerCase();
+    if (overallIdx < 0 && (raw === "overall" || raw === "all" || raw === "")) {
+      overallIdx = ti; classified[ti] = 1; continue;
+    }
+    var mH = matchesTeam(raw, hLow, hKey);
+    var mA = matchesTeam(raw, aLow, aKey);
+    if (mH && !mA && homeIdx < 0) { homeIdx = ti; classified[ti] = 1; }
+    else if (mA && !mH && awayIdx < 0) { awayIdx = ti; classified[ti] = 1; }
+  }
+  // Tab 0 is reliably "Overall" in every FL response we've observed
+  // — fall back to that when the regex matchers don't catch it.
+  if (overallIdx < 0 && cached.tabs.length > 0) {
+    overallIdx = 0; classified[0] = 1;
+  }
+
+  var displayOrder = [];
+  if (overallIdx >= 0) displayOrder.push({idx: overallIdx, label: "Overall"});
+  if (homeIdx >= 0)    displayOrder.push({idx: homeIdx,    label: (cached.homeName || "Home") + " - Home"});
+  if (awayIdx >= 0)    displayOrder.push({idx: awayIdx,    label: (cached.awayName || "Away") + " - Away"});
+  // Append any remaining tabs in their original order so we don't
+  // hide sport-specific surfaces (tennis Clay/Hard/Grass, etc.).
+  for (var ti2 = 0; ti2 < cached.tabs.length; ti2++) {
+    if (classified[ti2]) continue;
+    var raw2 = (cached.tabs[ti2] && cached.tabs[ti2].TAB_NAME) || ("Tab " + (ti2 + 1));
+    displayOrder.push({idx: ti2, label: raw2});
+  }
+
   var btnHtml = '';
   var panelHtml = '';
-  for (var ti = 0; ti < cached.tabs.length; ti++) {
-    var tab = cached.tabs[ti];
-    var raw = (tab && tab.TAB_NAME) || ("Tab " + (ti + 1));
-    // Keep the friendlier "TeamName - Home/Away" labels for the
-    // soccer-style convention while passing everything else through.
-    var label = raw;
-    if (raw === "Home" && cached.homeName) label = cached.homeName + " - Home";
-    else if (raw === "Away" && cached.awayName) label = cached.awayName + " - Away";
-    var key = "h2h-tab-" + ti;
-    var active = (ti === 0) ? ' active' : '';
-    btnHtml += '<button class="ed-sb-tab' + active + '" data-panel="' + key + '" data-tab-idx="' + ti + '" onclick="window.switchSBTab(this)">' + escH(label) + '</button>';
+  for (var di = 0; di < displayOrder.length; di++) {
+    var entry = displayOrder[di];
+    var key = "h2h-tab-" + entry.idx;
+    var active = (di === 0) ? ' active' : '';
+    btnHtml += '<button class="ed-sb-tab' + active + '" data-panel="' + key + '" data-tab-idx="' + entry.idx + '" onclick="window.switchSBTab(this)">' + escH(entry.label) + '</button>';
     panelHtml += '<div class="ed-sb-panel' + active + '" data-panel="' + key + '"><div class="ed-sb-lazy" data-lazy="' + key + '"></div></div>';
   }
   tabsRow.innerHTML = btnHtml;
   tabsRow.insertAdjacentHTML('afterend', panelHtml);
+  // Cache the home/away tab idx so _renderH2HTab can pick the right
+  // focal team without hardcoding ti===1/ti===2.
+  mainPanel._h2hHomeTabIdx = homeIdx;
+  mainPanel._h2hAwayTabIdx = awayIdx;
 }
 
 async function _loadH2HSubTab(container, ticker, tabIdx) {
@@ -5161,11 +5206,18 @@ function _renderH2HTab(container, allTabs, tabIdx, homeName, awayName) {
   }
   if (!sections.length) { container.innerHTML = '<div class="ed-stats-loading">No matches found.</div>'; return; }
   // Tab → focal team for the result-badge perspective in head-to-head
-  // rows: HOME tab = home team, AWAY tab = away team. Overall (tabIdx 0)
-  // has no clear focal, so leave empty — H2H rows render without badges
-  // there, matching what FlashLive ships.
+  // rows. _rebuildH2HSubTabs caches the FL tab index for each side
+  // on the main panel because the home/away tabs aren't reliably at
+  // FL indices 1/2 anymore: when the H2H is sourced from a past
+  // event with flipped home/away (e.g. PSG hosted Bayern previously
+  // but the current fixture has Bayern at home), we re-order the
+  // display tabs while keeping FL's original indices for content
+  // lookup. Use those cached indices instead of a hardcoded 1/2.
   var focalTeam = "";
-  if (tabIdx === 1) focalTeam = homeName;
+  var mp = container.closest && container.closest('.ed-sb-main[data-main="h2h"]');
+  if (mp && tabIdx === mp._h2hHomeTabIdx) focalTeam = homeName;
+  else if (mp && tabIdx === mp._h2hAwayTabIdx) focalTeam = awayName;
+  else if (tabIdx === 1) focalTeam = homeName;  // legacy fallback
   else if (tabIdx === 2) focalTeam = awayName;
   container._h2hSections = sections;
   container._h2hHome = homeName;
