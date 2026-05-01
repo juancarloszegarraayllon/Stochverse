@@ -14,6 +14,7 @@ import { renderStandings } from './blocks/Standings';
 import { renderTopScorers } from './blocks/TopScorers';
 import { renderStats } from './blocks/Stats';
 import { renderH2H } from './blocks/H2H';
+import { renderLineups } from './blocks/Lineups';
 
 declare global {
   interface Window {
@@ -34,6 +35,15 @@ declare global {
       // directly; the bundle path goes through /normalized so it
       // benefits from the same caching + future-fixture fallbacks.
       renderStats?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      // Render the Match → Lineups sub-tab from /normalized.data.lineups.
+      // Sport-aware: defaults to soccer-style formation + Starting XI /
+      // Substitutes / Coach layout. /normalized's compactor parses
+      // FL's lineup response into a clean shape so the block doesn't
+      // re-do FL parsing.
+      renderLineups?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
@@ -128,6 +138,37 @@ async function renderStandingsTypeByTicker(
   }
 }
 
+async function renderLineupsByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  mount.innerHTML =
+    '<div class="ed-stats-loading">Loading lineups…</div>';
+  try {
+    const ev: NormalizedEvent = await fetchNormalized(ticker);
+    // Parse home/away from the title — /normalized populates
+    // participants[] only for live/loaded matches; for the lineups
+    // section we just need labels for the per-side headers, and
+    // the title reliably has them in fixture order.
+    const title = ev.title || '';
+    const parts = title.split(/\s+(?:vs\.?|v|at)\s+/i);
+    const homeName = parts[0]?.trim() || 'Home';
+    const awayName = parts[1]?.trim() || 'Away';
+    renderLineups(
+      mount,
+      (ev.data as { lineups?: unknown }).lineups as Parameters<typeof renderLineups>[1],
+      homeName,
+      awayName,
+    );
+  } catch (ex) {
+    const msg = ex instanceof Error ? ex.message : String(ex);
+    mount.innerHTML =
+      '<div class="ed-stats-loading">Lineups failed to load: ' +
+      msg.replace(/[<>&]/g, '') +
+      '</div>';
+  }
+}
+
 async function renderH2HByTicker(
   ticker: string,
   mount: HTMLElement,
@@ -156,12 +197,13 @@ async function renderStatsByTicker(
 }
 
 window.StochverseBundle = {
-  version: '0.4.1',
+  version: '0.4.2',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
   renderStats: renderStatsByTicker,
   renderH2H: renderH2HByTicker,
+  renderLineups: renderLineupsByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);

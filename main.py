@@ -7227,7 +7227,7 @@ async def event_normalized(ticker: str, refresh: bool = False,
             "stats":            _parse_flashlive_stats(
                 raw_by_key.get("statistics"), title, sport
             ) if raw_by_key.get("statistics") else None,
-            "lineups":          raw_by_key.get("lineups"),
+            "lineups":          _parse_flashlive_lineups(raw_by_key.get("lineups")) if raw_by_key.get("lineups") else None,
             "predicted_lineups": raw_by_key.get("predicted_lineups"),
             "commentary":       raw_by_key.get("commentary"),
             "missing_players":  raw_by_key.get("missing_players"),

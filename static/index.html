@@ -705,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.4.1" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.4.2" defer></script>
 </head>
 <body>
 <div id="header">
@@ -4529,6 +4529,17 @@ async function hydrateGameStats(evTicker) {
     // incidents as inline icons after the name — same layout
     // FlashScore uses.
     if (hasLineups) {
+      // Phase 3 migration: when the TS bundle is loaded, route Match →
+      // Lineups through it. The bundle reads /normalized which now
+      // ships data.lineups parsed (via _parse_flashlive_lineups in
+      // main.py), so the block consumes a clean shape. Falls through
+      // to the legacy inline build below when the bundle isn't loaded.
+      var _hasBundleLineups = !!(window.StochverseBundle && window.StochverseBundle.renderLineups);
+      if (_hasBundleLineups) {
+        h += '<div data-mt="lineups" style="display:none">';
+        h += '<div class="ed-sb-lazy" data-lazy="lineups">Loading lineups…</div>';
+        h += '</div>';
+      } else {
       var incidentIcon = function(code) {
         switch (code) {
           case 1: return '<span class="ed-lu-inc ed-lu-inc-yc" title="Yellow card">▢</span>';
@@ -4612,6 +4623,7 @@ async function hydrateGameStats(evTicker) {
         }
       }
       h += '</div>';
+      }  // end legacy-fallback else for lineups
     }
     // ── Player Stats panel (lazy-loaded) ──────────────────
     if (hasPlayerStats) {
@@ -6050,6 +6062,9 @@ window.switchMatchTab = function(btn) {
       if (target === 'commentary') _loadCommentary(lazy, ticker);
       else if (target === 'player-stats') _loadPlayerStats(lazy, ticker);
       else if (target === 'missing-players') _loadMissingPlayers(lazy, ticker);
+      else if (target === 'lineups' && window.StochverseBundle && window.StochverseBundle.renderLineups) {
+        window.StochverseBundle.renderLineups(ticker, lazy);
+      }
       else if (target === 'match-stats' && window.StochverseBundle && window.StochverseBundle.renderStats) {
         // Phase 3 stats migration. The bundle's renderStats fetches
         // /normalized and renders into the lazy placeholder — same
