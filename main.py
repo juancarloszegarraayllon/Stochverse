@@ -2519,44 +2519,51 @@ def get_events(
                         and _live_now.get("aggregate_home") is not None
                         and _live_now.get("aggregate_away") is not None)
             if not _has_agg:
-                _norm_cached = _EVENT_NORMALIZED_CACHE.get(
-                    (rc.get("event_ticker") or "").upper()
+                # Sibling cards (1H / Spread / Total / BTTS / etc.)
+                # for the same fixture all resolve to one canonical
+                # GAME ticker — that's the only cache entry we
+                # populate, and every related card reads from it.
+                # NBA's playoff series pill propagates the same way
+                # (each ticker matches the same FL game via
+                # match_game), so this brings soccer to parity for
+                # future fixtures FL hasn't loaded yet.
+                _canonical_t = _canonical_game_ticker(
+                    rc.get("event_ticker") or "", records
                 )
-                # Schedule cache warming when missing. The first
-                # /api/events call won't have aggregates for soccer
-                # cards (cache is empty); the background task fires
-                # event_normalized() async, populating the cache so
-                # the NEXT /api/events call enriches the card.
-                #
-                # Auto-detection — fire for any Soccer event whose
-                # series ticker looks like a per-fixture market
-                # (Kalshi convention is "*GAME" suffix: KXUCLGAME,
-                # KXUCLWGAME, KXEPLGAME, KXBRASILEIROGAME, …). No
-                # SOCCER_COMP membership required, so newly-listed
-                # competitions (women's leagues, continental cups,
-                # second-tier comps) get the aggregate pill without
-                # a code change. /normalized's stage discovery uses
-                # SOCCER_COMP for the league hint when available, but
-                # also has its own dynamic fallbacks for cases where
-                # SOCCER_COMP is missing — so warming + discovery
-                # both work for unmapped series, just less optimally.
-                _series = (rc.get("series_ticker") or "").upper()
+                _norm_cached = _EVENT_NORMALIZED_CACHE.get(_canonical_t)
+                # Schedule cache warming when missing. Always warm
+                # against the canonical GAME ticker — populating the
+                # GAME ticker's cache automatically lights up every
+                # sibling card on the next /api/events call. Auto-
+                # detected: fire for any Soccer event whose canonical
+                # ticker ends in "GAME". No SOCCER_COMP membership
+                # required, so newly-listed competitions (women's
+                # leagues, continental cups, second-tier comps) get
+                # the aggregate pill without a code change.
                 _looks_like_fixture = bool(
-                    _series and _series.endswith("GAME")
+                    _canonical_t and _canonical_t.split("-", 1)[0].endswith("GAME")
                     and rc.get("_sport") == "Soccer"
                 )
                 if (not _norm_cached and background_tasks is not None
                         and _looks_like_fixture):
                     background_tasks.add_task(
                         _warm_normalized_cache,
-                        rc.get("event_ticker"),
+                        _canonical_t,
                     )
                 if _norm_cached:
-                    _bracket = ((_norm_cached.get("payload") or {}).get("data") or {}).get("bracket")
+                    _payload_e = _norm_cached.get("payload") or {}
+                    _bracket = (_payload_e.get("data") or {}).get("bracket")
+                    # Parse home/away from the GAME ticker's clean
+                    # title ("Bayern Munich vs PSG") rather than the
+                    # sibling's market-suffixed one ("Bayern Munich
+                    # vs PSG: Both Teams to Score") — the regex would
+                    # leave the suffix glued to the away team and the
+                    # bracket matcher would miss.
+                    _title_e = _payload_e.get("title") or rc.get("title") or ""
                     import re as _re_agg_e
                     _parts_e = _re_agg_e.split(
                         r'\s+(?:vs\.?|v|at)\s+',
-                        rc.get("title") or "",
+                        _title_e,
                         maxsplit=1, flags=_re_agg_e.IGNORECASE,
                     )
                     if len(_parts_e) == 2:
@@ -2796,6 +2803,45 @@ async def _warm_normalized_cache(ticker: str) -> None:
         await event_normalized(ticker)
     except Exception:
         pass
+
+
+def _canonical_game_ticker(event_ticker: str, records: list) -> str:
+    """Return the GAME-suffix sibling ticker for any market ticker
+    sharing the same fixture suffix. Lets us look up one cache
+    entry per fixture instead of one per market — so KXUCLBTTS-…,
+    KXUCLSPREAD-…, KXUCL1H-… etc. all resolve to KXUCLGAME-…'s
+    /normalized payload (and the bracket / aggregate fields it
+    carries).
+
+    Returns the original ticker if it already ends in GAME or no
+    sibling is found in records. Records are scanned in the live
+    Kalshi cache, so this only matches actual co-existing markets
+    on the same fixture date+teams.
+
+    Pattern observed across Kalshi soccer/basketball:
+      KXUCLGAME-26MAY06BMUPSG   ← the one we want
+      KXUCL1H-26MAY06BMUPSG
+      KXUCLSPREAD-26MAY06BMUPSG
+      KXUCLTOTAL-26MAY06BMUPSG
+      KXUCLBTTS-26MAY06BMUPSG
+    Same shape for KXNBA{GAME,SPREAD,TOTAL,STL,REB,PTS,TEAMTOTAL}-
+    and every other Kalshi sports market family we've seen."""
+    et = (event_ticker or "").upper()
+    if not et or "-" not in et:
+        return et
+    series, _, fixture = et.partition("-")
+    if not fixture:
+        return et
+    if series.endswith("GAME"):
+        return et  # already canonical
+    for r in (records or []):
+        rt = (r.get("event_ticker") or "").upper()
+        if "-" not in rt:
+            continue
+        rs, _, rf = rt.partition("-")
+        if rs.endswith("GAME") and rf == fixture:
+            return rt
+    return et  # no sibling — caller should treat as no-op
 
 
 def _aggregate_from_bracket(bracket_data, title_home: str, title_away: str):
@@ -3265,15 +3311,25 @@ def get_event_detail(ticker: str):
                     and _live_now.get("aggregate_home") is not None
                     and _live_now.get("aggregate_away") is not None)
         if not _has_agg:
-            _norm_cached = _EVENT_NORMALIZED_CACHE.get(
-                (rc.get("event_ticker") or "").upper()
+            # Sibling-market detail page (Spreads / Totals / BTTS /
+            # 1H / etc.) shares one cache with the canonical GAME
+            # ticker so every market detail page surfaces the same
+            # aggregate panel. Mirrors the /api/events fix for cards.
+            _canonical_t = _canonical_game_ticker(
+                rc.get("event_ticker") or "", records_all
             )
+            _norm_cached = _EVENT_NORMALIZED_CACHE.get(_canonical_t)
             if _norm_cached:
-                _bracket = ((_norm_cached.get("payload") or {}).get("data") or {}).get("bracket")
+                _payload = _norm_cached.get("payload") or {}
+                _bracket = (_payload.get("data") or {}).get("bracket")
+                # Use the GAME ticker's clean title (cached payload)
+                # so the parser doesn't trip on ": Spreads" / ":
+                # Both Teams to Score" suffixes the sibling carries.
+                _title_eff = _payload.get("title") or rc.get("title") or ""
                 import re as _re_agg
                 _parts = _re_agg.split(
                     r'\s+(?:vs\.?|v|at)\s+',
-                    rc.get("title") or "",
+                    _title_eff,
                     maxsplit=1, flags=_re_agg.IGNORECASE,
                 )
                 if len(_parts) == 2:
