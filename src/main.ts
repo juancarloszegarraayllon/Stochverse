@@ -18,6 +18,7 @@ import { renderLineups } from './blocks/Lineups';
 import { renderCommentary, stopCommentaryPoll } from './blocks/Commentary';
 import { renderNews } from './blocks/News';
 import { renderSummary } from './blocks/Summary';
+import { renderPlayerStats } from './blocks/PlayerStats';
 
 declare global {
   interface Window {
@@ -70,6 +71,13 @@ declare global {
       // Backend pre-parses FL summary-incidents into our timeline shape
       // so the block doesn't repeat that work.
       renderSummary?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      // Render the Match → Player Stats sub-tab from
+      // /normalized.data.player_stats. Reads the raw FL payload and
+      // groups players by team, with category tabs across the top.
+      renderPlayerStats?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
@@ -247,8 +255,15 @@ async function renderSummaryByTicker(
   return renderSummary(mount, ticker);
 }
 
+async function renderPlayerStatsByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  return renderPlayerStats(mount, ticker);
+}
+
 window.StochverseBundle = {
-  version: '0.4.6',
+  version: '0.4.7',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
@@ -259,6 +274,7 @@ window.StochverseBundle = {
   stopCommentary: stopCommentaryPoll,
   renderNews: renderNewsByTicker,
   renderSummary: renderSummaryByTicker,
+  renderPlayerStats: renderPlayerStatsByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);

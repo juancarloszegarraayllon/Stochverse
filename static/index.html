@@ -705,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.4.6" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.4.7" defer></script>
 </head>
 <body>
 <div id="header">
@@ -6263,6 +6263,17 @@ async function _loadMissingPlayers(container, ticker) {
 // / Goalkeeping / General). Mirrors the FlashScore Player Stats tab
 // structure rather than collapsing everything into one fixed table.
 async function _loadPlayerStats(container, ticker) {
+  // Prefer the TS bundle's PlayerStats block — reads /normalized so
+  // it shares the cross-block cache. Falls back to the inline path
+  // below if the bundle didn't load (legacy / network issue).
+  if (window.StochverseBundle && window.StochverseBundle.renderPlayerStats) {
+    try {
+      await window.StochverseBundle.renderPlayerStats(ticker, container);
+      return;
+    } catch (e) {
+      // Fall through to legacy renderer.
+    }
+  }
   container.innerHTML = '<div class="ed-stats-loading">Loading player stats…</div>';
   try {
     var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/player-stats");
