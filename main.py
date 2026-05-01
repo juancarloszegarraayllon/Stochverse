@@ -8296,6 +8296,117 @@ async def event_scheme(ticker: str, refresh: bool = False):
         return {"error": str(e)[:300]}
 
 
+@app.get("/api/debug_aggregate/{ticker}")
+async def debug_aggregate(ticker: str):
+    """Diagnostic-only: walks the aggregate-pill enrichment pipeline
+    for a single Kalshi ticker and reports what each step sees. No
+    business-logic changes; this is a window into the live in-memory
+    caches so we can tell at a glance where the pill rendering chain
+    breaks down (missing series→stage mapping, missing bracket,
+    matcher miss, etc.).
+
+    Output shape:
+      {
+        "ticker": "...",
+        "found_in_cache": true,
+        "series_ticker": "KXUCLGAME",
+        "title": "Arsenal vs Atletico",
+        "title_home": "Arsenal", "title_away": "Atletico",
+        "stage_entry": {stage_id, season_id, league_name, ts}
+                       | "MISSING — _SERIES_TO_STAGE_CACHE has no entry",
+        "bracket_cached": true|false,
+        "bracket_age_s": <float>|null,
+        "bracket_summary": [{"round": "Semi-finals",
+                             "pairs": [{"home_name", "home_slug",
+                                        "away_name", "away_slug",
+                                        "agg_home", "agg_away"}, ...]}],
+        "matcher_result": {is_two_leg, aggregate_home, ...}|null,
+        "candidate_pairs": [near-misses, with hit_len per side]
+      }
+    """
+    ticker_norm = (ticker or "").strip().upper()
+    if not ticker_norm:
+        return {"error": "ticker required"}
+    out: dict = {"ticker": ticker_norm}
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = next((r for r in records if r.get("event_ticker") == ticker_norm), None)
+    if not found:
+        out["found_in_cache"] = False
+        return out
+    out["found_in_cache"] = True
+    out["series_ticker"] = (found.get("series_ticker") or "").upper()
+    out["sport"] = found.get("_sport") or ""
+    title = found.get("title") or ""
+    out["title"] = title
+    parts = re.split(r"\s+(?:vs\.?|v|at)\s+", title, maxsplit=1)
+    if len(parts) == 2:
+        out["title_home"] = parts[0].strip()
+        out["title_away"] = parts[1].strip()
+    else:
+        out["title_home"] = ""
+        out["title_away"] = ""
+
+    # Step 1: series → stage_id
+    stage_entry = _SERIES_TO_STAGE_CACHE.get(out["series_ticker"])
+    if not stage_entry:
+        out["stage_entry"] = "MISSING — _SERIES_TO_STAGE_CACHE has no entry for this series"
+        return out
+    out["stage_entry"] = dict(stage_entry)
+
+    # Step 2: stage_id → bracket
+    stage_id = stage_entry.get("stage_id") or ""
+    if not stage_id:
+        out["bracket_cached"] = False
+        out["bracket_error"] = "stage_entry has no stage_id"
+        return out
+    cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
+    out["bracket_cached"] = cached is not None
+    if not cached:
+        out["bracket_error"] = "_TOURNAMENT_BRACKET_CACHE has no entry for this stage_id"
+        return out
+    out["bracket_age_s"] = round(time.time() - (cached.get("ts") or 0), 1)
+    bracket = cached.get("bracket") or {}
+
+    # Step 3: bracket summary so we can see what's actually there
+    rounds_summary = []
+    for rnd in bracket.get("rounds") or []:
+        if not isinstance(rnd, dict):
+            continue
+        pairs_summary = []
+        for pair in (rnd.get("pairs") or []):
+            if not isinstance(pair, dict):
+                continue
+            pairs_summary.append({
+                "home_name": pair.get("home_name"),
+                "home_slug": pair.get("home"),
+                "away_name": pair.get("away_name"),
+                "away_slug": pair.get("away"),
+                "agg_home":  pair.get("agg_home"),
+                "agg_away":  pair.get("agg_away"),
+                "winner":    pair.get("winner"),
+                "legs":      pair.get("legs"),
+            })
+        rounds_summary.append({
+            "round_num": rnd.get("round_num"),
+            "label":     rnd.get("label"),
+            "pairs":     pairs_summary,
+        })
+    out["bracket_summary"] = rounds_summary
+
+    # Step 4: run the matcher and report
+    if out["title_home"] and out["title_away"]:
+        agg = _aggregate_from_bracket(
+            bracket, out["title_home"], out["title_away"]
+        )
+        out["matcher_result"] = agg
+    else:
+        out["matcher_result"] = None
+        out["matcher_error"] = "couldn't parse title_home/title_away from title"
+
+    return out
+
+
 @app.get("/api/debug_fl_tournaments")
 async def debug_fl_tournaments(sport_id: str = "1"):
     """Probe FL's /v1/tournaments/list?sport_id=N and return the raw
