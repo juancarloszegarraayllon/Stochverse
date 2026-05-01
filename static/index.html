@@ -4322,6 +4322,18 @@ async function hydrateGameStats(evTicker) {
   // session uses the defaults; subsequent events get exact caps
   // because the cache populated in the background.
   fetchCapabilities();
+  // Eager-warm /normalized in parallel with the /stats fetch below.
+  // The bundle's sub-tab renderers (Stats, Lineups, Player Stats,
+  // Missing, Summary, News, etc.) all read from /normalized — that
+  // endpoint probes ~20 FL endpoints in parallel and is cached for
+  // 5 minutes. Kicking it off here means by the time the user
+  // clicks any sub-tab, the cache is already populated and the
+  // sub-tab renders instantly. Fire-and-forget; failures don't
+  // block the inline /stats path that drives the initial layout.
+  try {
+    fetch("/api/event/" + encodeURIComponent(evTicker) + "/normalized")
+      .catch(function() { /* swallow — block renderers handle their own errors */ });
+  } catch (e) {}
   try {
     var d = await fetch("/api/event/" + encodeURIComponent(evTicker) + "/stats")
       .then(function(r) { return r.json(); });
