@@ -132,8 +132,22 @@ _LAST_PERIOD_CACHE: dict = {}
 
 STATUS = {
     "running": False,
+    # Ready flag — flips True after the first successful poll
+    # completes (events fetched and parsed). Used by /readyz so
+    # Railway's deploy healthcheck holds traffic on the old
+    # container until the new container's GAMES dict is warm —
+    # eliminates the cold-start window where FL-driven sports
+    # (Tennis/Soccer/Cricket) showed no live state right after a
+    # redeploy.
+    "ready": False,
+    "started_at_ts": None,
+    "ready_at_ts": None,
     "last_fetch_ts": None,
     "games": 0,
+    # Per-sport game counts on the latest poll. Lets /api/flashlive_status
+    # show "Tennis: 47, Soccer: 132, Cricket: 8" so when one sport
+    # silently drops we can tell at a glance.
+    "games_by_sport": {},
     "last_error": None,
     "polls": 0,
 }
@@ -1103,6 +1117,7 @@ async def run_flashlive_feed():
         return
 
     STATUS["running"] = True
+    STATUS["started_at_ts"] = time.time()
     log.info("FlashLive feed starting (live poll: %ds, idle poll: %ds)",
              LIVE_POLL_INTERVAL, POLL_INTERVAL)
 
@@ -1114,12 +1129,15 @@ async def run_flashlive_feed():
             events = await _fetch_live_events(days=("0", "1"))
             parsed = 0
             new_games = {}
+            games_by_sport: dict = {}
             for ev in events:
                 g = _parse_event(ev)
                 if g and g.get("home_name") and g.get("away_name"):
                     key = f"{g['sport']}:{_normalize(g['home_name'])}:{_normalize(g['away_name'])}"
                     new_games[key] = g
                     parsed += 1
+                    sp = g.get("sport") or "?"
+                    games_by_sport[sp] = games_by_sport.get(sp, 0) + 1
             # Merge into GAMES rather than clear+update — that earlier
             # clear left GAMES briefly empty between the two lines (any
             # /api/events request landing in the gap saw no _live_state
@@ -1142,8 +1160,17 @@ async def run_flashlive_feed():
             for eid in stale_event_ids:
                 _ADDED_TIME_CACHE.pop(eid, None)
             STATUS["games"] = len(GAMES)
+            STATUS["games_by_sport"] = games_by_sport
             STATUS["last_fetch_ts"] = time.time()
             STATUS["polls"] += 1
+            STATUS["last_error"] = None
+            # First successful poll — flip ready so /readyz starts
+            # returning 200 and Railway swaps traffic to this container.
+            if not STATUS["ready"] and parsed > 0:
+                STATUS["ready"] = True
+                STATUS["ready_at_ts"] = time.time()
+                _elapsed = STATUS["ready_at_ts"] - (STATUS["started_at_ts"] or STATUS["ready_at_ts"])
+                log.info("FlashLive ready: %d games warmed in %.1fs", parsed, _elapsed)
             if parsed:
                 log.info("FlashLive: %d games across all sports (kept %d, swept %d stale)",
                          parsed, len(GAMES), len(stale_keys))

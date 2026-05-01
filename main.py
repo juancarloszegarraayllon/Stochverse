@@ -10269,3 +10269,45 @@ def healthz():
         "cache_age_s": int(time.time() - _cache.get("ts", 0)) if _cache.get("ts") else None,
         "cache_ready": _cache.get("data") is not None,
     }
+
+
+@app.api_route("/readyz", methods=["GET", "HEAD"])
+def readyz(response: Response):
+    """Readiness probe — returns 503 until both the Kalshi REST
+    snapshot and the FlashLive feed have completed their first
+    cycle. Wired into Railway's deploy healthcheck so traffic stays
+    on the old container until the new one's caches are warm.
+
+    Without this gate every redeploy briefly exposes a window where
+    GAMES (FL live state) is empty, soccer aggregates haven't been
+    derived, and FL-driven sports show no LIVE pill. Holding traffic
+    until ready makes redeploys visually invisible.
+
+    The Kalshi snapshot warm is the bigger user-facing dependency
+    (no events to display without it). FL warm is gated on a
+    successful poll producing at least one game so we don't flip
+    ready on transient empty responses."""
+    kalshi_ready = _cache.get("data") is not None
+    fl_ready = False
+    fl_status = {}
+    try:
+        from flashlive_feed import STATUS as _FL_STATUS
+        fl_ready = bool(_FL_STATUS.get("ready"))
+        fl_status = {
+            "ready":         fl_ready,
+            "polls":         _FL_STATUS.get("polls", 0),
+            "games":         _FL_STATUS.get("games", 0),
+            "started_at_ts": _FL_STATUS.get("started_at_ts"),
+            "ready_at_ts":   _FL_STATUS.get("ready_at_ts"),
+            "last_error":    _FL_STATUS.get("last_error"),
+        }
+    except Exception as e:
+        fl_status = {"error": str(e)[:200]}
+    ready = kalshi_ready and fl_ready
+    if not ready:
+        response.status_code = 503
+    return {
+        "ready":    ready,
+        "kalshi":   {"ready": kalshi_ready, "ts": _cache.get("ts")},
+        "flashlive": fl_status,
+    }
