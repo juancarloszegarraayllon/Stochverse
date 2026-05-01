@@ -142,6 +142,14 @@ async def startup_event():
     asyncio.create_task(_load_series_cache_from_db())
     asyncio.create_task(_load_tournament_brackets_from_db())
     asyncio.create_task(_tournament_bracket_warm_loop())
+    # Prewarm series→stage_id for EVERY sport series in get_data(),
+    # not just the ones users have clicked into. This is what was
+    # missing for CONCACAF / Copa Sudamericana / smaller cups: their
+    # bracket existed in FL but our cache had no stage_id for them
+    # because no one had opened a detail page yet. Sport-agnostic so
+    # any future 2-leg-tie sport gets pills automatically once FL
+    # ships its bracket data.
+    asyncio.create_task(_prewarm_series_stages())
     # Phase 4: periodically flush live scores from all feeds to the DB.
     asyncio.create_task(_score_flush_loop())
     # Phase 5: periodically prune old price rows to stay within
@@ -4239,19 +4247,32 @@ def get_sports(live: bool = False):
             if r.get("_is_live"):
                 filtered.append(r)
             elif r.get("_is_sport"):
+                # Mirror the /api/events Live filter exactly: today's
+                # ticker, currently in kickoff-to-end window, OR
+                # kicking off within the next 24 hours. Without the
+                # upcoming_24h leg, the left-menu league counts
+                # disagree with the events grid (events show but
+                # their league doesn't appear in the sidebar).
                 ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
                 in_window = False
+                upcoming_24h = False
                 kdt = r.get("_kickoff_dt")
                 gdt = r.get("_game_end_dt")
-                if kdt and gdt:
+                if kdt:
                     try:
                         k = _dt.fromisoformat(kdt)
-                        g = _dt.fromisoformat(gdt)
-                        in_window = k <= now_utc < g
+                        if gdt:
+                            try:
+                                g_end = _dt.fromisoformat(gdt)
+                                in_window = k <= now_utc < g_end
+                            except Exception:
+                                pass
+                        if k > now_utc:
+                            upcoming_24h = (k - now_utc).total_seconds() <= 86400
                     except Exception:
                         pass
                 is_today = ticker_date and ticker_date == now_utc.date()
-                if is_today or in_window:
+                if is_today or in_window or upcoming_24h:
                     filtered.append(r)
                 continue
             else:
@@ -5248,6 +5269,84 @@ async def _load_series_cache_from_db():
         _log.warning("series_to_stage warm-start failed: %s", e)
 
 
+async def _prewarm_series_stages():
+    """Walk every sport record in get_data() and proactively resolve
+    its series → tournament_stage_id mapping in the background.
+
+    Sport-agnostic: covers Soccer (UCL, UEL, Conference, CONCACAF Cup,
+    Copa Sudamericana, every domestic cup), plus any other sport whose
+    FL coverage ships a tournament_stage_id. The aggregate / bracket
+    cache then derives pills automatically for any 2-leg knockout the
+    feed knows about, without needing per-sport gating.
+
+    Without this, _SERIES_TO_STAGE_CACHE only fills lazily as users
+    navigate to detail pages. Series that never get clicked stay
+    unresolved, and their /api/events records can't pick up an
+    aggregate pill from the bracket cache no matter how warm it is.
+
+    Sleeps until FL has polled at least once so match_game has data
+    to find the games. Uses _find_fl_game which writes to
+    _SERIES_TO_STAGE_CACHE on success; the bracket warm loop picks
+    up the new stage_ids on its next iteration (≤60s).
+
+    One pass at startup, then re-runs every 5 min so newly-listed
+    series (Kalshi adds a new tournament mid-day) also get warmed."""
+    _log = logging.getLogger("stochverse")
+    while True:
+        try:
+            # Wait for FL to have at least one cycle of games loaded.
+            try:
+                from flashlive_feed import STATUS as _FL_STATUS
+                for _ in range(60):  # up to 30s at 0.5s ticks
+                    if _FL_STATUS.get("ready"):
+                        break
+                    await asyncio.sleep(0.5)
+            except Exception:
+                pass
+            records = _cache.get("data_all") or _cache.get("data") or []
+            seen_series = set()
+            unresolved = []
+            for r in records:
+                # Any sport — the bracket cache will harmlessly return
+                # None for sports whose feeds don't ship 2-leg-tie
+                # data, so generalizing here is free.
+                if not r.get("_is_sport"):
+                    continue
+                series = (r.get("series_ticker") or "").upper()
+                if not series or series in seen_series:
+                    continue
+                seen_series.add(series)
+                if series in _SERIES_TO_STAGE_CACHE:
+                    continue  # already resolved
+                unresolved.append(r)
+            # Bound concurrency so we don't burst FL's rate limiter
+            # if dozens of series need resolution at once.
+            sem = asyncio.Semaphore(3)
+
+            async def _resolve_one(found):
+                async with sem:
+                    try:
+                        await _find_fl_game(found)
+                    except Exception:
+                        pass
+            if unresolved:
+                _log.info("prewarm: resolving stage_id for %d soccer series",
+                          len(unresolved))
+                await asyncio.gather(
+                    *(_resolve_one(r) for r in unresolved),
+                    return_exceptions=True,
+                )
+                _log.info("prewarm: %d/%d series resolved",
+                          sum(1 for r in unresolved
+                              if (r.get("series_ticker") or "").upper()
+                              in _SERIES_TO_STAGE_CACHE),
+                          len(unresolved))
+        except Exception as e:
+            _log.warning("prewarm_soccer_series_stages iter failed: %s", e)
+        # Re-run every 5 min so newly-listed series get warmed too.
+        await asyncio.sleep(300)
+
+
 # ─────────────────────────────────────────────────────────────────
 # Tournament bracket cache — bracket-as-source-of-truth for soccer
 # 2-leg aggregate pills.
@@ -5551,16 +5650,22 @@ def _derive_basketball_series_state(records):
 
 
 def _bracket_aggregate_for_event(found: dict):
-    """Return the bracket-derived aggregate dict for a soccer event,
-    or None if not applicable. Uses the persistent
-    _TOURNAMENT_BRACKET_CACHE — independent of per-event FL state
-    and /normalized cache.
+    """Return the bracket-derived aggregate dict for any event whose
+    series has a resolved tournament_stage_id, or None if not
+    applicable.
 
-    Caller shape: `found` is a Kalshi event record from the cache,
-    must have `_sport == "Soccer"` and `series_ticker` resolved to
-    a stage_id via _SERIES_TO_STAGE_CACHE."""
-    if (found.get("_sport") or "") != "Soccer":
-        return None
+    Sport-agnostic. Soccer is the primary user (UCL / UEL / Conference /
+    domestic cups + women's variants), but the function returns
+    aggregate metadata for any sport where FL ships a bracket payload
+    with agg_home / agg_away fields — which is the right shape for
+    any 2-leg knockout, regardless of sport. _aggregate_from_bracket
+    returns None when the bracket pair doesn't carry aggregate fields
+    (e.g., NBA-style best-of-N series brackets), so generalizing here
+    is safe — the gate is the data, not the sport name.
+
+    Caller shape: `found` is a Kalshi event record from the cache.
+    series_ticker → _SERIES_TO_STAGE_CACHE → stage_id → bracket cache.
+    """
     series = (found.get("series_ticker") or "").upper()
     if not series:
         return None
