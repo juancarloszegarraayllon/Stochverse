@@ -705,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.4.7" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.4.8" defer></script>
 </head>
 <body>
 <div id="header">
@@ -6210,6 +6210,17 @@ async function _loadCommentary(container, ticker) {
   }
 }
 async function _loadMissingPlayers(container, ticker) {
+  // Prefer the TS bundle's MissingPlayers block — reads /normalized
+  // so it shares the cross-block cache. Falls back to the inline
+  // path below if the bundle didn't load.
+  if (window.StochverseBundle && window.StochverseBundle.renderMissingPlayers) {
+    try {
+      await window.StochverseBundle.renderMissingPlayers(ticker, container);
+      return;
+    } catch (e) {
+      // Fall through to legacy renderer.
+    }
+  }
   container.innerHTML = '<div class="ed-stats-loading">Loading missing players…</div>';
   try {
     var r = await fetch("/api/event/" + encodeURIComponent(ticker) + "/missing-players");

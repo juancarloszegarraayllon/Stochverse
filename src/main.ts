@@ -19,6 +19,7 @@ import { renderCommentary, stopCommentaryPoll } from './blocks/Commentary';
 import { renderNews } from './blocks/News';
 import { renderSummary } from './blocks/Summary';
 import { renderPlayerStats } from './blocks/PlayerStats';
+import { renderMissingPlayers } from './blocks/MissingPlayers';
 
 declare global {
   interface Window {
@@ -78,6 +79,13 @@ declare global {
       // /normalized.data.player_stats. Reads the raw FL payload and
       // groups players by team, with category tabs across the top.
       renderPlayerStats?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      // Render the Match → Missing sub-tab from
+      // /normalized.data.missing_players. Per-team list of unavailable
+      // players with chance-to-play color tag.
+      renderMissingPlayers?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
@@ -262,8 +270,15 @@ async function renderPlayerStatsByTicker(
   return renderPlayerStats(mount, ticker);
 }
 
+async function renderMissingPlayersByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  return renderMissingPlayers(mount, ticker);
+}
+
 window.StochverseBundle = {
-  version: '0.4.7',
+  version: '0.4.8',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
@@ -275,6 +290,7 @@ window.StochverseBundle = {
   renderNews: renderNewsByTicker,
   renderSummary: renderSummaryByTicker,
   renderPlayerStats: renderPlayerStatsByTicker,
+  renderMissingPlayers: renderMissingPlayersByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);
