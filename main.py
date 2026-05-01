@@ -8696,7 +8696,13 @@ def debug_match(title: str, sport: str = "Soccer"):
     whether any ESPN game matches, and if not, show candidate ESPN
     games for the sport whose team phrases match as whole words
     (same rules as the real matcher). Useful for figuring out why a
-    specific live event isn't getting its score."""
+    specific live event isn't getting its score.
+
+    Also reports the FlashLive matcher's view of the same title —
+    matched game (if any), or near-miss candidates ranked by per-side
+    substring hit length. For sports where FL is the primary feed
+    (Tennis, Cricket, Golf, MMA, Boxing, etc.) the FL block is the
+    one that actually drives the LIVE pill; ESPN coverage is empty."""
     try:
         from espn_feed import ESPN_GAMES, match_game, _normalize, _phrase_in_title
         matched = match_game(title, sport)
@@ -8713,23 +8719,86 @@ def debug_match(title: str, sport: str = "Soccer"):
                 "short_detail": matched.get("short_detail"),
                 "state": matched.get("state"),
             }
-            return out
-        tl = _normalize(title)
-        cands = []
-        for g in ESPN_GAMES:
-            if g.get("sport") != sport:
-                continue
-            home_hit = next((p for p in g.get("home_phrases", []) if _phrase_in_title(p, tl)), None)
-            away_hit = next((p for p in g.get("away_phrases", []) if _phrase_in_title(p, tl)), None)
-            if home_hit or away_hit:
-                cands.append({
-                    "league": g.get("league"),
-                    "home_display": g.get("home_display"),
-                    "away_display": g.get("away_display"),
-                    "home_hit": home_hit,
-                    "away_hit": away_hit,
-                })
-        out["candidates"] = cands[:15]
+        else:
+            tl = _normalize(title)
+            cands = []
+            for g in ESPN_GAMES:
+                if g.get("sport") != sport:
+                    continue
+                home_hit = next((p for p in g.get("home_phrases", []) if _phrase_in_title(p, tl)), None)
+                away_hit = next((p for p in g.get("away_phrases", []) if _phrase_in_title(p, tl)), None)
+                if home_hit or away_hit:
+                    cands.append({
+                        "league": g.get("league"),
+                        "home_display": g.get("home_display"),
+                        "away_display": g.get("away_display"),
+                        "home_hit": home_hit,
+                        "away_hit": away_hit,
+                    })
+            out["candidates"] = cands[:15]
+
+        # FlashLive view of the same title. Self-contained block so
+        # the existing ESPN section above is untouched.
+        try:
+            from flashlive_feed import (
+                GAMES as _FL_GAMES,
+                match_game as _fl_match,
+                _normalize as _fl_norm,
+            )
+            fl_matched = _fl_match(title, sport)
+            fl_block = {"matched": None, "candidates": []}
+            if fl_matched:
+                fl_block["matched"] = {
+                    "event_id":     fl_matched.get("event_id"),
+                    "league":       fl_matched.get("league"),
+                    "home_name":    fl_matched.get("home_name"),
+                    "away_name":    fl_matched.get("away_name"),
+                    "home_phrases": fl_matched.get("home_phrases"),
+                    "away_phrases": fl_matched.get("away_phrases"),
+                    "home_score":   fl_matched.get("home_score"),
+                    "away_score":   fl_matched.get("away_score"),
+                    "state":        fl_matched.get("state"),
+                    "display_clock": fl_matched.get("display_clock"),
+                    "tournament_stage_id": fl_matched.get("tournament_stage_id"),
+                }
+            else:
+                norm_t = _fl_norm(title)
+                cands = []
+                for g in _FL_GAMES.values():
+                    if sport and g.get("sport") != sport:
+                        continue
+                    h_phr = g.get("home_phrases", []) or []
+                    a_phr = g.get("away_phrases", []) or []
+                    h_hit = max(
+                        (len(p) for p in h_phr if p and p in norm_t),
+                        default=0,
+                    )
+                    a_hit = max(
+                        (len(p) for p in a_phr if p and p in norm_t),
+                        default=0,
+                    )
+                    # Show any side-hit so single-side overlaps are
+                    # visible too (those don't qualify for the matcher
+                    # but make the diagnosis obvious).
+                    if h_hit or a_hit:
+                        cands.append({
+                            "league":      g.get("league"),
+                            "home_name":   g.get("home_name"),
+                            "away_name":   g.get("away_name"),
+                            "home_phrases": h_phr,
+                            "away_phrases": a_phr,
+                            "home_hit_len": h_hit,
+                            "away_hit_len": a_hit,
+                            "state":       g.get("state"),
+                        })
+                # Best near-misses first.
+                cands.sort(key=lambda c: -(c["home_hit_len"] + c["away_hit_len"]))
+                fl_block["candidates"] = cands[:15]
+                fl_block["normalized_title"] = norm_t
+            out["flashlive"] = fl_block
+        except Exception as e:
+            out["flashlive"] = {"error": str(e)}
+
         return out
     except Exception as e:
         return {"error": str(e)}

@@ -170,12 +170,30 @@ SPORT_MAP = {
 
 
 def _normalize(s: str) -> str:
-    """Normalize a team/player name for matching."""
+    """Normalize a team/player name for matching.
+
+    Folds smart punctuation (curly quotes, em/en-dashes) to ASCII so
+    a Kalshi title typed with a curly apostrophe ("O'Connell") still
+    substring-matches an FL phrase typed with a straight one
+    ("o'connell") — and vice versa. Without this, names like
+    O'Connell, N'Goran, D'Angelo silently fail to match and the
+    card never gets a live state.
+    """
     import unicodedata
     if not s:
         return ""
     s = unicodedata.normalize("NFD", str(s).lower())
     s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    # Smart-quote / dash folding. Both sides of the matcher run
+    # through _normalize, so as long as we collapse to a canonical
+    # ASCII form here the substring check will line up.
+    s = (s
+         .replace("‘", "'").replace("’", "'")
+         .replace("‚", "'").replace("‛", "'")
+         .replace("“", '"').replace("”", '"')
+         .replace("„", '"').replace("‟", '"')
+         .replace("–", "-").replace("—", "-")
+         .replace("−", "-"))
     for rm in (" fc", " sc", " cf", " afc", " united", " city"):
         s = s.replace(rm, "")
     return s.strip()
