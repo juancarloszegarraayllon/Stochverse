@@ -16,6 +16,7 @@ import { renderStats } from './blocks/Stats';
 import { renderH2H } from './blocks/H2H';
 import { renderLineups } from './blocks/Lineups';
 import { renderCommentary, stopCommentaryPoll } from './blocks/Commentary';
+import { renderNews } from './blocks/News';
 
 declare global {
   interface Window {
@@ -56,6 +57,14 @@ declare global {
         mount: HTMLElement,
       ) => Promise<void>;
       stopCommentary?: (mount: HTMLElement) => void;
+      // Render the News tab from /normalized.data.news. Going through
+      // /normalized (vs the dedicated /api/event/<t>/news endpoint)
+      // shares the cross-block 5-min cache; news refreshes infrequently
+      // so the TTL doesn't shadow updates.
+      renderNews?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
       // Render the H2H tab strip + content from /api/event/<t>/h2h.
       // H2H stays on its dedicated endpoint (not /normalized) because
       // its FL response shape and past-event fallback chain are
@@ -216,8 +225,15 @@ async function renderCommentaryByTicker(
   return renderCommentary(mount, ticker);
 }
 
+async function renderNewsByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  return renderNews(mount, ticker);
+}
+
 window.StochverseBundle = {
-  version: '0.4.3',
+  version: '0.4.4',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
@@ -226,6 +242,7 @@ window.StochverseBundle = {
   renderLineups: renderLineupsByTicker,
   renderCommentary: renderCommentaryByTicker,
   stopCommentary: stopCommentaryPoll,
+  renderNews: renderNewsByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);
