@@ -5035,6 +5035,13 @@ async function _loadH2H(container, ticker) {
 }
 
 function _rebuildH2HSubTabs(mainPanel, cached) {
+  console.log("[stochverse] h2h-rebuild v2", {
+    home: cached.homeName,
+    away: cached.awayName,
+    tabNames: (cached.tabs || []).map(function(t) { return t && t.TAB_NAME; }),
+  });
+  // Expose the latest H2H cache for ad-hoc console inspection.
+  window._h2hLastCached = cached;
   var tabsRow = mainPanel.querySelector('.ed-sb-tabs, .ed-sb-sub-tabs');
   if (!tabsRow) return;
   // Drop the hardcoded Overall/Home/Away panels — we'll replace them
