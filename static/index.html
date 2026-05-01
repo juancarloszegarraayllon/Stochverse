@@ -705,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.3.5" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.4.0" defer></script>
 </head>
 <body>
 <div id="header">
@@ -4456,7 +4456,18 @@ async function hydrateGameStats(evTicker) {
     // FlashScore exposes. If stats_grouped is empty (parser fallback
     // or older event), fall back to the flat list.
     if (hasStats) {
+      // Phase 3 migration: when the TS bundle is loaded, route Match →
+      // Stats through it. The bundle reads /normalized which already
+      // returns stats in the parsed shape this block expected, plus we
+      // get the same future-fixture / cache benefits the other blocks
+      // have. Falls through to the legacy inline renderer below when
+      // the bundle isn't available.
+      var _hasBundleStats = !!(window.StochverseBundle && window.StochverseBundle.renderStats);
       h += '<div data-mt="match-stats" style="display:none">';
+      if (_hasBundleStats) {
+        h += '<div class="ed-sb-lazy" data-lazy="match-stats">Loading stats…</div>';
+        h += '</div>';
+      } else {
       h += '<div class="ed-stats-teams">';
       h += '<div class="ed-stats-team">' + escH(home) + '</div>';
       h += '<div class="ed-stats-team">' + escH(away) + '</div>';
@@ -4508,6 +4519,7 @@ async function hydrateGameStats(evTicker) {
         }
       }
       h += '</div>';
+      }  // end legacy-fallback else
     }
     // ── Lineups panel ────────────────────────────────────────
     // FlashLive ships per-player match rating (LPR), top-performer
@@ -6008,6 +6020,15 @@ window.switchMatchTab = function(btn) {
       if (target === 'commentary') _loadCommentary(lazy, ticker);
       else if (target === 'player-stats') _loadPlayerStats(lazy, ticker);
       else if (target === 'missing-players') _loadMissingPlayers(lazy, ticker);
+      else if (target === 'match-stats' && window.StochverseBundle && window.StochverseBundle.renderStats) {
+        // Phase 3 stats migration. The bundle's renderStats fetches
+        // /normalized and renders into the lazy placeholder — same
+        // pattern as Standings / Bracket. If the bundle isn't loaded
+        // (older client / cached HTML), we never injected the lazy
+        // placeholder in the first place; the inline panel rendered
+        // at hydrateGameStats time still shows.
+        window.StochverseBundle.renderStats(ticker, lazy);
+      }
     }
     // Auto-poll commentary every 15 s while the tab is open. New
     // commentary lines (kicks, goals, fouls, sub-50 ms updates from

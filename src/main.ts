@@ -12,6 +12,7 @@ import { fetchNormalized } from './api/normalized';
 import { renderBracket } from './blocks/Bracket';
 import { renderStandings } from './blocks/Standings';
 import { renderTopScorers } from './blocks/TopScorers';
+import { renderStats } from './blocks/Stats';
 
 declare global {
   interface Window {
@@ -26,6 +27,14 @@ declare global {
         ticker: string,
         mount: HTMLElement,
         standingType: string,
+      ) => Promise<void>;
+      // Render the Match → Stats sub-tab from /normalized.data.stats.
+      // Replaces the legacy inline renderer that read /api/event/<t>/stats
+      // directly; the bundle path goes through /normalized so it
+      // benefits from the same caching + future-fixture fallbacks.
+      renderStats?: (
+        ticker: string,
+        mount: HTMLElement,
       ) => Promise<void>;
     };
     // Legacy bracket renderer defined inline in static/index.html.
@@ -109,11 +118,29 @@ async function renderStandingsTypeByTicker(
   }
 }
 
+async function renderStatsByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  mount.innerHTML = '<div class="ed-stats-loading">Loading stats…</div>';
+  try {
+    const ev: NormalizedEvent = await fetchNormalized(ticker);
+    renderStats(mount, ev.data?.stats as Parameters<typeof renderStats>[1]);
+  } catch (ex) {
+    const msg = ex instanceof Error ? ex.message : String(ex);
+    mount.innerHTML =
+      '<div class="ed-stats-loading">Stats failed to load: ' +
+      msg.replace(/[<>&]/g, '') +
+      '</div>';
+  }
+}
+
 window.StochverseBundle = {
-  version: '0.3.5',
+  version: '0.4.0',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
+  renderStats: renderStatsByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);
