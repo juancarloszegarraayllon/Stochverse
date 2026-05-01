@@ -6206,14 +6206,21 @@ def _compact_bracket(raw):
 
 def _compact_standings(raw):
     """Strip FL standings to the fields the frontend actually renders.
-    Returns {"groups": [{"name": str, "rows": [{rank, name, team_id,
-    played, wins, goals, points, qualification}]}]} or None."""
+    Returns {"groups": [...], "meta": {...}} or None.
+
+    Per-row fields: rank, name, team_id, image_url, played, wins,
+    goals, points, qualification (q1/q2/null), tuc (color code).
+
+    Top-level meta carries the qualification legend (color → label
+    map) and tie-breaker note(s) — both originate from FL's META
+    block per standing_type and are rendered as the table footer."""
     if not raw or not isinstance(raw, dict):
         return None
     groups_in = raw.get("DATA")
     if not isinstance(groups_in, list):
         return None
     groups_out = []
+    meta_out = {}
     for grp in groups_in:
         if not isinstance(grp, dict):
             continue
@@ -6225,18 +6232,48 @@ def _compact_standings(raw):
                 "rank":          r.get("RANKING"),
                 "name":          r.get("TEAM_NAME"),
                 "team_id":       r.get("TEAM_ID"),
+                "image_url":     r.get("TEAM_IMAGE_PATH") or "",
                 "played":        r.get("MATCHES_PLAYED"),
                 "wins":          r.get("WINS"),
                 "goals":         r.get("GOALS"),
                 "points":        r.get("POINTS"),
                 "qualification": r.get("TEAM_QUALIFICATION"),
+                "tuc":           r.get("TUC") or "",
             })
         if rows_out:
             groups_out.append({
                 "name": grp.get("GROUP") or "Main",
                 "rows": rows_out,
             })
-    return {"groups": groups_out} if groups_out else None
+        # Group-level META is the same across groups in practice;
+        # taking the first non-empty wins.
+        meta = grp.get("META") or {}
+        if not meta_out and isinstance(meta, dict):
+            qi = meta.get("QUALIFICATION_INFO") or {}
+            legend = []
+            if isinstance(qi, dict):
+                for color, info in qi.items():
+                    # FL shape: {"004682": ["q1", "Promotion - …", "004682"]}
+                    if isinstance(info, list) and info:
+                        legend.append({
+                            "color": color,
+                            "qualification": info[0] if len(info) > 0 else "",
+                            "label":         info[1] if len(info) > 1 else "",
+                        })
+            decisions = meta.get("DECISIONS") or []
+            if not isinstance(decisions, list):
+                decisions = []
+            if legend or decisions:
+                meta_out = {
+                    "qualification_legend": legend,
+                    "decisions":            [str(x) for x in decisions if x],
+                }
+    if not groups_out:
+        return None
+    out = {"groups": groups_out}
+    if meta_out:
+        out["meta"] = meta_out
+    return out
 
 
 def _compact_top_scorers(raw, limit=20):

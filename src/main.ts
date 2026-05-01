@@ -110,7 +110,7 @@ async function renderStandingsTypeByTicker(
 }
 
 window.StochverseBundle = {
-  version: '0.3.3',
+  version: '0.3.4',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
