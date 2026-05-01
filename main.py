@@ -2294,6 +2294,12 @@ def get_events(
                 flipped.append(p)
         return " ".join(flipped)
 
+    # Pre-compute basketball series state across the full record set
+    # (not just `page`). The derivation needs sibling tickers from the
+    # same series — Game 6 in `page` may rely on Games 1-5 sitting in
+    # `records` outside this page. One pass per /api/events request.
+    _basketball_series_by_ticker = _derive_basketball_series_state(records)
+
     formatted = []
     for r in page:
         # Defense-in-depth: in Game View, skip any record whose
@@ -2527,6 +2533,42 @@ def get_events(
                     ).isoformat()
                 except Exception:
                     pass
+        # Basketball playoff series enrichment — Kalshi-derived,
+        # independent of ESPN. If the ticker belongs to a multi-game
+        # series clustered by sibling tickers, fill in is_playoff /
+        # series_game_number / series_home_wins / series_away_wins.
+        # We only WRITE values that aren't already set (ESPN's data
+        # wins when present); we never override.
+        _bs = _basketball_series_by_ticker.get(rc.get("event_ticker") or "")
+        if _bs:
+            if not rc.get("_live_state"):
+                # No FL/ESPN match — synthesize a minimal live_state
+                # so the pill renders. Abbrevs come from the ticker
+                # itself (e.g. KXNBAGAME-26MAY04MINSAS → MIN at SAS).
+                _bt = (rc.get("event_ticker") or "").upper()
+                _bsuffix = _bt.split("-", 1)[1] if "-" in _bt else ""
+                _bm = re.match(
+                    r"^(\d{2}[A-Z]{3}\d{2})([A-Z]{2,3})([A-Z]{2,3})$",
+                    _bsuffix,
+                )
+                _h_abbr = _bm.group(2) if _bm else ""
+                _a_abbr = _bm.group(3) if _bm else ""
+                rc["_live_state"] = {
+                    "state":      "pre",
+                    "home_abbr":  _h_abbr,
+                    "away_abbr":  _a_abbr,
+                    "home_score": "",
+                    "away_score": "",
+                }
+            ls = rc["_live_state"]
+            for _bk, _bv in _bs.items():
+                if ls.get(_bk) in (None, "", 0, False) or _bk == "is_playoff":
+                    # is_playoff: if any source flips it True, keep True.
+                    # numeric/string fields: only fill when missing/empty.
+                    if _bk == "is_playoff":
+                        ls[_bk] = bool(ls.get(_bk)) or _bv
+                    else:
+                        ls[_bk] = _bv
         # Knockout-tie aggregate enrichment from /normalized's bracket
         # cache. For future-fixture knockout legs FL hasn't loaded
         # yet, the primary path above (g + _enrich_soccer_aggregate)
@@ -5274,6 +5316,89 @@ async def _tournament_bracket_warm_loop():
         # 60s so a freshly-added stage_id starts populating within
         # a minute.
         await asyncio.sleep(60)
+
+
+def _derive_basketball_series_state(records):
+    """Derive playoff series metadata from Kalshi sibling tickers.
+
+    The classic failure mode: ESPN ships series_summary only for an
+    in-progress series, so Game 1 of Spurs-Wolves before the series
+    starts gets no pill, and Games 2-4 stay blank until each one
+    plays. The data we need is right there in the sibling tickers
+    though — KXNBAGAME-26MAY04MINSAS, KXNBAGAME-26MAY06MINSAS,
+    KXNBAGAME-26MAY08SASMIN, etc. Group by sorted team pair, sort
+    chronologically, assign Game N from position, count series
+    wins from settled prior games' outcomes. Independent of feeds.
+
+    Returns: {ticker: {is_playoff, series_game_number,
+                       series_home_wins, series_away_wins}}
+    Only emits entries for groups with 2+ games (a single game
+    isn't a series). Caller merges into _live_state without
+    overriding values that ESPN/FL already supplied.
+    """
+    out: dict = {}
+    # ticker suffix shape after the series prefix: "26MAY04MINSAS"
+    # = year(2) + month(3) + day(2) + team_a(3) + team_b(3). Some
+    # series use 2-letter codes (rare) — accept 6-7 char team
+    # blocks for robustness.
+    pat = re.compile(
+        r"^(\d{2}[A-Z]{3}\d{2})([A-Z]{2,3})([A-Z]{2,3})$"
+    )
+    groups: dict = {}
+    for r in records:
+        sport = r.get("_sport") or ""
+        if sport != "Basketball":
+            continue
+        ticker = r.get("event_ticker") or ""
+        if "-" not in ticker:
+            continue
+        series, _, suffix = ticker.partition("-")
+        if not series.endswith("GAME"):
+            continue
+        m = pat.match(suffix.upper())
+        if not m:
+            continue
+        date_part, home_abbr, away_abbr = m.group(1), m.group(2), m.group(3)
+        # Group key: sorted pair so DET-vs-ORL and ORL-vs-DET
+        # cluster together regardless of which side is home.
+        pair_key = (series, tuple(sorted([home_abbr, away_abbr])))
+        groups.setdefault(pair_key, []).append(
+            (date_part, ticker, r, home_abbr, away_abbr)
+        )
+
+    for pair_key, items in groups.items():
+        if len(items) < 2:
+            continue  # single game = not a series
+        items.sort(key=lambda x: x[0])
+        # Walking team_wins forward: each game contributes to the
+        # next game's series state once it settles.
+        team_wins: dict = {}
+        for idx, (_dp, ticker, r, h_abbr, a_abbr) in enumerate(items):
+            home_wins = team_wins.get(h_abbr, 0)
+            away_wins = team_wins.get(a_abbr, 0)
+            out[ticker] = {
+                "is_playoff":         True,
+                "series_game_number": idx + 1,
+                "series_home_wins":   home_wins,
+                "series_away_wins":   away_wins,
+            }
+            # Settled-outcome detection — Kalshi flips one outcome's
+            # _result to "yes" when the market resolves. Match its
+            # title against the abbrevs so we can credit the win to
+            # the right team. Fail-soft: if neither side matches
+            # (unusual outcome label format), skip without crashing.
+            for o in (r.get("outcomes") or []):
+                if str(o.get("_result") or "").lower() != "yes":
+                    continue
+                label = (o.get("title") or o.get("label") or "").upper()
+                # Prefer 3-char abbrev hits; fall back to first-word
+                # of full team name when abbrevs aren't in the label.
+                if h_abbr and h_abbr in label:
+                    team_wins[h_abbr] = team_wins.get(h_abbr, 0) + 1
+                elif a_abbr and a_abbr in label:
+                    team_wins[a_abbr] = team_wins.get(a_abbr, 0) + 1
+                break
+    return out
 
 
 def _bracket_aggregate_for_event(found: dict):
