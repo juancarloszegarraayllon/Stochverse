@@ -2985,41 +2985,36 @@ def _aggregate_from_bracket(bracket_data, title_home: str, title_away: str):
     h_prefix = (h_key or h_low)[:3] if (h_key or h_low) else ""
     a_prefix = (a_key or a_low)[:3] if (a_key or a_low) else ""
 
-    def _matches(name: str, slug: str, full: str, key: str, prefix: str) -> bool:
+    def _match_score(name: str, slug: str, full: str, key: str, prefix: str) -> int:
         """Match the title's home/away against a bracket pair's name
-        AND slug. Handles three cases:
+        AND slug, returning a quality score (0 = no match, higher =
+        stronger). Multi-tier so we can rank candidate pairs and pick
+        the strongest match — important when several pairs partially
+        match (Toluca played Los Angeles Galaxy in QFs *and* Los
+        Angeles FC in SFs; "los angeles f" is a substring of FC but
+        only a prefix of Galaxy, so FC wins).
 
-        1. Substring (full / key / prefix) — covers Atletico-style
-           where Kalshi's short form ("Atletico") is a prefix of FL's
-           full name ("Atletico Madrid").
-        2. Slug match (home/away slug is "psg", "bayern-munich") —
-           covers cases where FL's short canonical id matches Kalshi's
-           short form directly.
-        3. Acronym match — Kalshi uses "PSG" but FL ships
-           "Paris Saint-Germain" with no substring overlap. The 3-char
-           Kalshi form is the initials of the FL words. Also catches
-           BVB/Borussia Dortmund-style first-letter-of-each-word cases.
+        Tiers:
+          100 — full title token is substring of name/slug
+                ("los angeles f" ⊂ "los angeles fc")
+           50 — first-word "key" matches as substring
+                ("atl" key in "atletico-madrid")
+           30 — acronym match (PSG → Paris Saint-Germain initials)
+           10 — short prefix matches (3-char prefix as substring)
+            0 — no match
         """
         if not full:
-            return False
+            return 0
 
-        def _hit(n: str) -> bool:
+        def _tiered(n: str) -> int:
             if not n:
-                return False
+                return 0
             n = n.lower()
             if full in n:
-                return True
-            if key and key in n:
-                return True
-            if prefix and len(prefix) >= 3 and prefix in n:
-                return True
-            # Acronym fallback. Only fires for short Kalshi forms
-            # (2-4 alphanumeric chars) — longer queries fall through
-            # to the substring matchers above. Compares the query
-            # against the first letter of each space/hyphen-separated
-            # word in the candidate name. Short tokens (1-2 chars,
-            # like "SG" inside "Paris SG") get expanded letter-by-
-            # letter so we still catch "PSG" against "Paris SG".
+                return 100
+            # Acronym before key — for short tokens we'd rather treat
+            # "psg" as initials of "Paris Saint-Germain" (acronym=30)
+            # than as a 3-char prefix substring (=10).
             if 2 <= len(full) <= 4 and full.isalnum():
                 words = (
                     n.replace("-", " ")
@@ -3036,15 +3031,24 @@ def _aggregate_from_bracket(bracket_data, title_home: str, title_away: str):
                             expanded.append(w)
                     initials = "".join(w[0] for w in expanded if w)
                     if initials and full == initials:
-                        return True
-            return False
+                        return 30
+            if key and key != full and len(key) >= 4 and key in n:
+                return 50
+            if prefix and len(prefix) >= 3 and prefix in n:
+                return 10
+            return 0
 
-        if _hit(name):
-            return True
+        s = _tiered(name)
         if slug:
-            return _hit(slug.replace("-", " ").replace("_", " "))
-        return False
+            s = max(s, _tiered(slug.replace("-", " ").replace("_", " ")))
+        return s
 
+    # Collect every candidate pair with its match score and
+    # active/finished status, then pick the best. "Best" = highest
+    # combined home+away score, with a bonus for active pairs
+    # (winner == None) so the in-progress fixture wins over an
+    # earlier completed round between the same teams.
+    candidates: list = []
     for rnd in rounds:
         if not isinstance(rnd, dict):
             continue
@@ -3055,42 +3059,51 @@ def _aggregate_from_bracket(bracket_data, title_home: str, title_away: str):
             p_away_name = pair.get("away_name") or ""
             p_home_slug = pair.get("home") or ""
             p_away_slug = pair.get("away") or ""
-            same = (
-                _matches(p_home_name, p_home_slug, h_low, h_key, h_prefix)
-                and _matches(p_away_name, p_away_slug, a_low, a_key, a_prefix)
-            )
-            swapped = (
-                _matches(p_home_name, p_home_slug, a_low, a_key, a_prefix)
-                and _matches(p_away_name, p_away_slug, h_low, h_key, h_prefix)
-            )
-            if not (same or swapped):
-                continue
-            agg_h = pair.get("agg_home")
-            agg_a = pair.get("agg_away")
-            if agg_h is None or agg_a is None:
-                # Pair found but no aggregate yet (round not played).
-                return None
-            if same:
-                fixture_agg_home, fixture_agg_away = int(agg_h), int(agg_a)
-            else:
-                fixture_agg_home, fixture_agg_away = int(agg_a), int(agg_h)
-            legs_played = len(pair.get("legs") or [])
-            leg_number = max(1, min(2, legs_played + 1))
-            agg_winner = None
-            w = pair.get("winner")
-            if w == "home":
-                agg_winner = "home" if same else "away"
-            elif w == "away":
-                agg_winner = "away" if same else "home"
-            return {
-                "is_two_leg":       True,
-                "aggregate_home":   fixture_agg_home,
-                "aggregate_away":   fixture_agg_away,
-                "leg_number":       leg_number,
-                "round_name":       rnd.get("label") or "",
-                "aggregate_winner": agg_winner,
-            }
-    return None
+            same_h = _match_score(p_home_name, p_home_slug, h_low, h_key, h_prefix)
+            same_a = _match_score(p_away_name, p_away_slug, a_low, a_key, a_prefix)
+            swap_h = _match_score(p_home_name, p_home_slug, a_low, a_key, a_prefix)
+            swap_a = _match_score(p_away_name, p_away_slug, h_low, h_key, h_prefix)
+            if same_h and same_a:
+                candidates.append(
+                    (same_h + same_a, "same", rnd, pair)
+                )
+            if swap_h and swap_a:
+                candidates.append(
+                    (swap_h + swap_a, "swapped", rnd, pair)
+                )
+    if not candidates:
+        return None
+    # Sort: highest score first; among equal scores, prefer pairs
+    # whose winner is still null (active fixture) over decided ones.
+    candidates.sort(
+        key=lambda c: (-c[0], 0 if c[3].get("winner") is None else 1)
+    )
+    _score, orientation, rnd, pair = candidates[0]
+    same = (orientation == "same")
+    agg_h = pair.get("agg_home")
+    agg_a = pair.get("agg_away")
+    if agg_h is None or agg_a is None:
+        return None
+    if same:
+        fixture_agg_home, fixture_agg_away = int(agg_h), int(agg_a)
+    else:
+        fixture_agg_home, fixture_agg_away = int(agg_a), int(agg_h)
+    legs_played = len(pair.get("legs") or [])
+    leg_number = max(1, min(2, legs_played + 1))
+    agg_winner = None
+    w = pair.get("winner")
+    if w == "home":
+        agg_winner = "home" if same else "away"
+    elif w == "away":
+        agg_winner = "away" if same else "home"
+    return {
+        "is_two_leg":       True,
+        "aggregate_home":   fixture_agg_home,
+        "aggregate_away":   fixture_agg_away,
+        "leg_number":       leg_number,
+        "round_name":       rnd.get("label") or "",
+        "aggregate_winner": agg_winner,
+    }
 
 
 def _enrich_soccer_aggregate(g, title):
