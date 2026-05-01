@@ -8562,7 +8562,16 @@ def root():
         _INDEX_HTML_CACHE["mtime"] = mtime
     return HTMLResponse(
         _INDEX_HTML_CACHE["html"],
-        headers={"Cache-Control": "public, max-age=60, must-revalidate"},
+        # no-cache (revalidate before reuse) so users always pick up
+        # the latest inline JS — the previous max-age=60 + must-
+        # revalidate left us with stale HTML for several minutes
+        # after a deploy because intermediate proxies and the
+        # browser's heuristic refreshing didn't always kick in
+        # within that window. The bundle (static/dist/main.js) has
+        # its own ?v= query-string cache-bust, but the inline JS
+        # in index.html had no such mechanism — hence the H2H
+        # tab-relabel fix taking longer than expected to propagate.
+        headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
 
