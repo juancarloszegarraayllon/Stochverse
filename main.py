@@ -4920,6 +4920,95 @@ async def _find_fl_game(found: dict):
     return g
 
 
+@app.get("/api/event/{ticker}/debug_h2h")
+async def debug_event_h2h(ticker: str):
+    """Diagnostic endpoint: walks the H2H lookup chain and reports
+    where each step landed. Helps debug "no H2H showing" without
+    guessing — shows what _find_fl_game returned, what title parsing
+    produced, what FL's multi-search saw for each query attempted,
+    and whether the final fetch_event_h2h call succeeded."""
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = None
+    for r in records:
+        if r.get("event_ticker") == ticker:
+            found = r
+            break
+    if not found:
+        return {"error": "event not found", "ticker": ticker}
+    out: dict = {"ticker": ticker, "title": found.get("title", ""),
+                 "sport": found.get("_sport", "")}
+    try:
+        from flashlive_feed import _fl_get, fetch_event_h2h
+        title = found.get("title", "")
+        sport = found.get("_sport", "")
+        import re as _re
+        parts = _re.split(
+            r'\s+(?:vs\.?|v|at)\s+', title, maxsplit=1, flags=_re.IGNORECASE,
+        )
+        title_home = parts[0].strip() if len(parts) == 2 else ""
+        title_away = parts[1].strip() if len(parts) == 2 else ""
+        out["parsed"] = {"home": title_home, "away": title_away}
+
+        g = await _find_fl_game(found)
+        out["find_fl_game"] = {
+            "found": bool(g),
+            "event_id": (g or {}).get("event_id", ""),
+            "home_name": (g or {}).get("home_name", ""),
+            "away_name": (g or {}).get("away_name", ""),
+        }
+
+        # Probe each search query and report the first 3 event-type
+        # results so we can see exactly what FL is returning.
+        out["search_attempts"] = []
+        for q in [f"{title_home} {title_away}", title_home, title_away]:
+            if not q.strip():
+                continue
+            data = await _fl_get("/v1/search/multi-search", {"query": q})
+            results = []
+            if isinstance(data, list):
+                results = data
+            elif isinstance(data, dict):
+                results = data.get("DATA") or data.get("data") or []
+            events = [
+                {
+                    "id":       it.get("ID") or it.get("EVENT_ID") or "",
+                    "type":     it.get("TYPE") or it.get("type") or "",
+                    "home":     it.get("HOME_NAME") or it.get("PARTICIPANT_HOME") or "",
+                    "away":     it.get("AWAY_NAME") or it.get("PARTICIPANT_AWAY") or "",
+                    "tournament": it.get("TOURNAMENT_NAME") or it.get("LEAGUE") or "",
+                }
+                for it in (results or [])
+                if isinstance(it, dict)
+            ][:5]
+            out["search_attempts"].append({"query": q, "events": events})
+
+        # Try the actual past-event lookup and report the result.
+        from flashlive_feed import search_past_event_for_teams
+        past = await search_past_event_for_teams(title_home, title_away, sport)
+        out["search_past"] = past
+
+        # Try the actual H2H fetch with whichever event_id we'd use.
+        chosen = (g or {}).get("event_id", "") or (past or {}).get("event_id", "")
+        out["chosen_event_id"] = chosen
+        if chosen:
+            h2h = await fetch_event_h2h(chosen)
+            out["h2h_data_keys"] = (
+                list(h2h.keys()) if isinstance(h2h, dict) else None
+            )
+            out["h2h_top_count"] = (
+                len(h2h.get("DATA") or h2h.get("data") or [])
+                if isinstance(h2h, dict) else 0
+            )
+        return out
+    except Exception as e:
+        import traceback as _tb
+        out["error"] = str(e)
+        out["traceback"] = _tb.format_exc()[:1500]
+        return out
+
+
 @app.get("/api/event/{ticker}/h2h")
 async def get_event_h2h(ticker: str):
     """Fetch H2H data from FlashLive for this event.
