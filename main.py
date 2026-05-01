@@ -5861,25 +5861,27 @@ def _bracket_aggregate_for_event(found: dict):
                 return agg
 
     # Cached stage missed. The series→stage mapping may have locked
-    # in the wrong sub-stage (UCL qualifying instead of knockout
-    # phase, or CONCACAF Nations League instead of Champions Cup).
-    # Walk every other cached bracket — preferring same league_name —
-    # and return the first one that contains the team pair. When we
-    # find a hit, update _SERIES_TO_STAGE_CACHE so future lookups
-    # skip the miss-and-walk dance.
+    # in the wrong sub-stage of the SAME tournament (UCL qualifying
+    # instead of knockout phase). Walk other brackets WITHIN THE SAME
+    # league_name — never across leagues, otherwise a regular-league
+    # series like Argentinian Primera (which has no bracket at all)
+    # would pick up false positives from a Copa Sudamericana pair
+    # that happens to contain both teams.
+    if not league_hint:
+        return None
     fallback_candidates = []
     for sid, entry in _TOURNAMENT_BRACKET_CACHE.items():
         if stage_entry and sid == stage_entry.get("stage_id"):
             continue
-        bracket = entry.get("bracket") if isinstance(entry, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        bracket = entry.get("bracket")
         if not bracket:
             continue
         ent_league = (entry.get("league_name") or "").strip().lower()
-        # Prefer same-league candidates; fall back to any league.
-        if league_hint and ent_league == league_hint:
-            fallback_candidates.insert(0, (sid, entry))
-        else:
-            fallback_candidates.append((sid, entry))
+        if ent_league != league_hint:
+            continue  # only same-league fallback
+        fallback_candidates.append((sid, entry))
     for sid, entry in fallback_candidates:
         bracket = entry.get("bracket")
         agg = _aggregate_from_bracket(bracket, title_home, title_away)
