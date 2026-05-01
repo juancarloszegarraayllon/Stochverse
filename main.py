@@ -2527,12 +2527,26 @@ def get_events(
                 # cards (cache is empty); the background task fires
                 # event_normalized() async, populating the cache so
                 # the NEXT /api/events call enriches the card.
-                # Scoped to events in known knockout series via
-                # SOCCER_COMP — those are the only ones that benefit
-                # from aggregate enrichment, and limiting the warm
-                # set keeps us under FL's rate limit.
+                #
+                # Auto-detection — fire for any Soccer event whose
+                # series ticker looks like a per-fixture market
+                # (Kalshi convention is "*GAME" suffix: KXUCLGAME,
+                # KXUCLWGAME, KXEPLGAME, KXBRASILEIROGAME, …). No
+                # SOCCER_COMP membership required, so newly-listed
+                # competitions (women's leagues, continental cups,
+                # second-tier comps) get the aggregate pill without
+                # a code change. /normalized's stage discovery uses
+                # SOCCER_COMP for the league hint when available, but
+                # also has its own dynamic fallbacks for cases where
+                # SOCCER_COMP is missing — so warming + discovery
+                # both work for unmapped series, just less optimally.
+                _series = (rc.get("series_ticker") or "").upper()
+                _looks_like_fixture = bool(
+                    _series and _series.endswith("GAME")
+                    and rc.get("_sport") == "Soccer"
+                )
                 if (not _norm_cached and background_tasks is not None
-                        and rc.get("series_ticker") in SOCCER_COMP):
+                        and _looks_like_fixture):
                     background_tasks.add_task(
                         _warm_normalized_cache,
                         rc.get("event_ticker"),
