@@ -7258,6 +7258,12 @@ async def event_normalized(ticker: str, refresh: bool = False,
         data_block = {
             "summary":          raw_by_key.get("summary"),
             "summary_incidents": raw_by_key.get("summary_incidents"),
+            # Pre-parsed incidents shaped like /api/event/<t>/stats →
+            # incidents[]. Lets the Summary/Timeline block read straight
+            # from /normalized instead of running its own FL parser.
+            "incidents":        _parse_flashlive_incidents(
+                raw_by_key.get("summary_incidents")
+            ) if raw_by_key.get("summary_incidents") else [],
             "stats":            _parse_flashlive_stats(
                 raw_by_key.get("statistics"), title, sport
             ) if raw_by_key.get("statistics") else None,

@@ -17,6 +17,7 @@ import { renderH2H } from './blocks/H2H';
 import { renderLineups } from './blocks/Lineups';
 import { renderCommentary, stopCommentaryPoll } from './blocks/Commentary';
 import { renderNews } from './blocks/News';
+import { renderSummary } from './blocks/Summary';
 
 declare global {
   interface Window {
@@ -62,6 +63,13 @@ declare global {
       // shares the cross-block 5-min cache; news refreshes infrequently
       // so the TTL doesn't shadow updates.
       renderNews?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      // Render the Match → Summary timeline from /normalized.data.incidents.
+      // Backend pre-parses FL summary-incidents into our timeline shape
+      // so the block doesn't repeat that work.
+      renderSummary?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
@@ -232,8 +240,15 @@ async function renderNewsByTicker(
   return renderNews(mount, ticker);
 }
 
+async function renderSummaryByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  return renderSummary(mount, ticker);
+}
+
 window.StochverseBundle = {
-  version: '0.4.4',
+  version: '0.4.5',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
@@ -243,6 +258,7 @@ window.StochverseBundle = {
   renderCommentary: renderCommentaryByTicker,
   stopCommentary: stopCommentaryPoll,
   renderNews: renderNewsByTicker,
+  renderSummary: renderSummaryByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);

@@ -705,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.4.4" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.4.5" defer></script>
 </head>
 <body>
 <div id="header">
@@ -4718,6 +4718,17 @@ async function hydrateGameStats(evTicker) {
     }
 
     panel.innerHTML = h;
+    // Hand the Summary timeline off to the TS bundle when available —
+    // it reads /normalized.data.incidents, which shares the cross-block
+    // 5-min cache. Fallback: the inline timeline above already rendered
+    // from /stats, so users on a stale/legacy bundle still see content.
+    if (window.StochverseBundle && window.StochverseBundle.renderSummary) {
+      var sumMount = panel.querySelector('[data-mt="summary"]');
+      if (sumMount) {
+        try { window.StochverseBundle.renderSummary(evTicker, sumMount); }
+        catch (e) { /* keep the inline render as fallback */ }
+      }
+    }
     // Async per-event capability probe — sport-level cap-scan only
     // samples 2 events per sport every 24 h, so a tennis match with a
     // published bracket can be missed if neither sample happened to
