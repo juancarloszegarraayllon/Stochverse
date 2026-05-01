@@ -78,7 +78,8 @@ function renderTeam(name: string, list: MissingPlayer[]): string {
     escHTML(name) +
     '</div>';
   for (const p of list) {
-    const chance = p.CHANCE_TO_PLAY || '';
+    const chanceRaw = p.CHANCE_TO_PLAY || '';
+    const chanceLabel = chanceTerse(chanceRaw);
     const reason = p.ABSENCE_REASON || '';
     h +=
       '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px">';
@@ -92,12 +93,15 @@ function renderTeam(name: string, list: MissingPlayer[]): string {
         escHTML(reason) +
         '</div>';
     }
-    if (chance) {
+    if (chanceLabel) {
       h +=
         '<div style="color:' +
-        chanceColor(chance) +
-        ';font-size:10px;font-weight:700;text-transform:uppercase">' +
-        escHTML(chance) +
+        chanceColor(chanceRaw) +
+        ';font-size:10px;font-weight:700;text-transform:uppercase"' +
+        ' title="' +
+        escHTML(chanceRaw) +
+        '">' +
+        escHTML(chanceLabel) +
         '</div>';
     }
     h += '</div>';
@@ -105,11 +109,44 @@ function renderTeam(name: string, list: MissingPlayer[]): string {
   return h;
 }
 
+function chanceTerse(chance: string): string {
+  /* FL ships verbose sentences ("THERE IS SOME CHANCE OF PLAYING.")
+   * in CHANCE_TO_PLAY. Compress to a terse status pill so cards
+   * read at a glance — full sentence stays in the title attribute
+   * for hover. Falls through to the original text when no known
+   * phrase matches.
+   */
+  const c = String(chance || '').toLowerCase();
+  if (!c) return '';
+  if (c.includes('will not play') || c.includes("won't play")) return 'OUT';
+  if (c.includes('out')) return 'OUT';
+  if (c.includes('miss')) return 'OUT';
+  if (c.includes('some chance') || c.includes('chance of playing')) {
+    return 'DOUBTFUL';
+  }
+  if (c.includes('doubt')) return 'DOUBTFUL';
+  if (c.includes('uncertain')) return 'DOUBTFUL';
+  if (c.includes('expected') || c.includes('likely') || c.includes('will play')) {
+    return 'EXPECTED';
+  }
+  return chance.toUpperCase();
+}
+
 function chanceColor(chance: string): string {
   const c = String(chance || '').toLowerCase();
-  if (c.includes('doubt')) return '#ffb74d';
-  if (c.includes('out') || c.includes('miss')) return '#f44336';
-  if (c.includes('expected') || c.includes('likely')) return '#4caf50';
+  // Order matters: "out" appears as a substring inside other phrases,
+  // and "some chance of playing" should color as doubtful, not out.
+  if (c.includes('some chance') || c.includes('doubt') || c.includes('uncertain')) {
+    return '#ffb74d';
+  }
+  if (c.includes('will not') || c.includes('won’t') || c.includes("won't")) {
+    return '#f44336';
+  }
+  if (c.includes('miss') || c.includes(' out')) return '#f44336';
+  if (c === 'out' || c.startsWith('out')) return '#f44336';
+  if (c.includes('expected') || c.includes('likely') || c.includes('will play')) {
+    return '#4caf50';
+  }
   return 'var(--text-dim)';
 }
 

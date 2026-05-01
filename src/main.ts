@@ -278,7 +278,7 @@ async function renderMissingPlayersByTicker(
 }
 
 window.StochverseBundle = {
-  version: '0.4.8',
+  version: '0.4.9',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,

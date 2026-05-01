@@ -705,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.4.8" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.4.9" defer></script>
 </head>
 <body>
 <div id="header">
@@ -6241,22 +6241,36 @@ async function _loadMissingPlayers(container, ticker) {
     var awayList = players.filter(function(p) { return p.TEAM === 2; });
     function chanceColor(chance) {
       var c = String(chance || "").toLowerCase();
-      if (c.indexOf("doubt") >= 0) return "#ffb74d";
-      if (c.indexOf("out") >= 0 || c.indexOf("miss") >= 0) return "#f44336";
-      if (c.indexOf("expected") >= 0 || c.indexOf("likely") >= 0) return "#4caf50";
+      if (c.indexOf("some chance") >= 0 || c.indexOf("doubt") >= 0 || c.indexOf("uncertain") >= 0) return "#ffb74d";
+      if (c.indexOf("will not") >= 0 || c.indexOf("won't") >= 0) return "#f44336";
+      if (c.indexOf("miss") >= 0) return "#f44336";
+      if (c === "out" || c.indexOf(" out") >= 0 || c.indexOf("out ") === 0) return "#f44336";
+      if (c.indexOf("expected") >= 0 || c.indexOf("likely") >= 0 || c.indexOf("will play") >= 0) return "#4caf50";
       return "var(--text-dim)";
+    }
+    function chanceTerse(chance) {
+      var c = String(chance || "").toLowerCase();
+      if (!c) return "";
+      if (c.indexOf("will not play") >= 0 || c.indexOf("won't play") >= 0) return "OUT";
+      if (c.indexOf("miss") >= 0) return "OUT";
+      if (c === "out" || c.indexOf("out ") === 0) return "OUT";
+      if (c.indexOf("some chance") >= 0 || c.indexOf("chance of playing") >= 0) return "DOUBTFUL";
+      if (c.indexOf("doubt") >= 0 || c.indexOf("uncertain") >= 0) return "DOUBTFUL";
+      if (c.indexOf("expected") >= 0 || c.indexOf("likely") >= 0 || c.indexOf("will play") >= 0) return "EXPECTED";
+      return chance.toUpperCase();
     }
     function renderTeam(name, list) {
       if (!list.length) return '';
       var h = '<div class="ed-stats-title" style="margin-top:14px">' + escH(name) + '</div>';
       for (var i = 0; i < list.length; i++) {
         var p = list[i];
-        var chance = p.CHANCE_TO_PLAY || "";
+        var chanceRaw = p.CHANCE_TO_PLAY || "";
+        var chanceLabel = chanceTerse(chanceRaw);
         var reason = p.ABSENCE_REASON || "";
         h += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px">';
         h += '<div style="flex:1;color:var(--text)">' + escH(p.PLAYER_NAME || "") + '</div>';
         if (reason) h += '<div style="color:var(--text-muted);font-size:10px">' + escH(reason) + '</div>';
-        if (chance) h += '<div style="color:' + chanceColor(chance) + ';font-size:10px;font-weight:700;text-transform:uppercase">' + escH(chance) + '</div>';
+        if (chanceLabel) h += '<div style="color:' + chanceColor(chanceRaw) + ';font-size:10px;font-weight:700;text-transform:uppercase" title="' + escH(chanceRaw) + '">' + escH(chanceLabel) + '</div>';
         h += '</div>';
       }
       return h;
