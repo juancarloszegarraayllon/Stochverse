@@ -2703,6 +2703,88 @@ def _kalshi_url(series_ticker: str, event_ticker: str) -> str:
     return f"https://kalshi.com/markets/{s}/{s.replace('kx', '')}/{event_ticker.lower()}"
 
 
+def _aggregate_from_bracket(bracket_data, title_home: str, title_away: str):
+    """Walk a compact bracket payload for a pair matching the two
+    title teams (in either orientation) and return aggregate / leg
+    metadata in the FIXTURE's home/away orientation.
+
+    Used for future-fixture knockout ties where FL hasn't loaded the
+    upcoming match yet but the league's /v1/tournaments/standings
+    bracket already carries the leg-1 score. The compact bracket the
+    /normalized endpoint produces is the source — we read from its
+    in-memory cache so this is essentially free when the panel has
+    been opened in the same process.
+
+    Returns None when no matching pair is found, or when the matched
+    pair hasn't started yet (no aggregate posted)."""
+    if not bracket_data or not isinstance(bracket_data, dict):
+        return None
+    rounds = bracket_data.get("rounds") or []
+    if not isinstance(rounds, list) or not rounds:
+        return None
+    h_low = (title_home or "").lower()
+    a_low = (title_away or "").lower()
+    h_key = h_low.split()[0] if h_low else ""
+    a_key = a_low.split()[0] if a_low else ""
+    h_prefix = (h_key or h_low)[:3] if (h_key or h_low) else ""
+    a_prefix = (a_key or a_low)[:3] if (a_key or a_low) else ""
+
+    def _matches(name: str, full: str, key: str, prefix: str) -> bool:
+        if not name or not full:
+            return False
+        n = name.lower()
+        if full in n:
+            return True
+        if key and key in n:
+            return True
+        return bool(prefix and len(prefix) >= 3 and prefix in n)
+
+    for rnd in rounds:
+        if not isinstance(rnd, dict):
+            continue
+        for pair in (rnd.get("pairs") or []):
+            if not isinstance(pair, dict):
+                continue
+            p_home = pair.get("home_name") or pair.get("home") or ""
+            p_away = pair.get("away_name") or pair.get("away") or ""
+            same = (
+                _matches(p_home, h_low, h_key, h_prefix)
+                and _matches(p_away, a_low, a_key, a_prefix)
+            )
+            swapped = (
+                _matches(p_home, a_low, a_key, a_prefix)
+                and _matches(p_away, h_low, h_key, h_prefix)
+            )
+            if not (same or swapped):
+                continue
+            agg_h = pair.get("agg_home")
+            agg_a = pair.get("agg_away")
+            if agg_h is None or agg_a is None:
+                # Pair found but no aggregate yet (round not played).
+                return None
+            if same:
+                fixture_agg_home, fixture_agg_away = int(agg_h), int(agg_a)
+            else:
+                fixture_agg_home, fixture_agg_away = int(agg_a), int(agg_h)
+            legs_played = len(pair.get("legs") or [])
+            leg_number = max(1, min(2, legs_played + 1))
+            agg_winner = None
+            w = pair.get("winner")
+            if w == "home":
+                agg_winner = "home" if same else "away"
+            elif w == "away":
+                agg_winner = "away" if same else "home"
+            return {
+                "is_two_leg":       True,
+                "aggregate_home":   fixture_agg_home,
+                "aggregate_away":   fixture_agg_away,
+                "leg_number":       leg_number,
+                "round_name":       rnd.get("label") or "",
+                "aggregate_winner": agg_winner,
+            }
+    return None
+
+
 def _enrich_soccer_aggregate(g, title):
     """Fill in two-leg aggregate data on a soccer match dict that
     ESPN matched first but whose ESPN feed didn't include the
@@ -3072,6 +3154,58 @@ def get_event_detail(ticker: str):
                         rc["_market_settling"] = True
                 except Exception:
                     pass
+
+    # Knockout-tie aggregate enrichment from /normalized's bracket.
+    # For future fixtures FL hasn't loaded, the primary path above
+    # (g + _enrich_soccer_aggregate) misses because g is None. But
+    # the bracket compactor in /normalized has the leg-1 score from
+    # the league's tournaments/standings draw response, so we can
+    # read the aggregate from its in-memory cache and patch the
+    # live state. The cache populates as soon as the user opens the
+    # Detailed Event Stats panel (~1.5s), so subsequent navigations
+    # to the detail page get the "X leads aggregate" pill rendered.
+    if rc.get("_sport") == "Soccer":
+        _live_now = rc.get("_live_state") or {}
+        _has_agg = (_live_now.get("is_two_leg")
+                    and _live_now.get("aggregate_home") is not None
+                    and _live_now.get("aggregate_away") is not None)
+        if not _has_agg:
+            _norm_cached = _EVENT_NORMALIZED_CACHE.get(
+                (rc.get("event_ticker") or "").upper()
+            )
+            if _norm_cached:
+                _bracket = ((_norm_cached.get("payload") or {}).get("data") or {}).get("bracket")
+                import re as _re_agg
+                _parts = _re_agg.split(
+                    r'\s+(?:vs\.?|v|at)\s+',
+                    rc.get("title") or "",
+                    maxsplit=1, flags=_re_agg.IGNORECASE,
+                )
+                if len(_parts) == 2:
+                    _agg = _aggregate_from_bracket(
+                        _bracket, _parts[0].strip(), _parts[1].strip()
+                    )
+                    if _agg:
+                        if not rc.get("_live_state"):
+                            # Synthesize a minimal _live_state so the
+                            # detail page's aggregate panel renders.
+                            # Score 0-0 because no live score yet (the
+                            # match hasn't started). Abbrevs derived
+                            # from title for the "X leads aggregate"
+                            # label.
+                            _h_full = _parts[0].strip()
+                            _a_full = _parts[1].strip()
+                            rc["_live_state"] = {
+                                "state":        "pre",
+                                "home_abbr":    _h_full[:3].upper(),
+                                "away_abbr":    _a_full[:3].upper(),
+                                "home_display": _h_full,
+                                "away_display": _a_full,
+                                "home_score":   "",
+                                "away_score":   "",
+                            }
+                        for _k, _v in _agg.items():
+                            rc["_live_state"][_k] = _v
 
     rc["url"] = _kalshi_url(r.get("series_ticker", ""), r.get("event_ticker", ""))
     return {"event": rc}
