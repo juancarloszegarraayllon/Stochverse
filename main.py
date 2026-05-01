@@ -2967,15 +2967,36 @@ def _aggregate_from_bracket(bracket_data, title_home: str, title_away: str):
     h_prefix = (h_key or h_low)[:3] if (h_key or h_low) else ""
     a_prefix = (a_key or a_low)[:3] if (a_key or a_low) else ""
 
-    def _matches(name: str, full: str, key: str, prefix: str) -> bool:
-        if not name or not full:
+    def _matches(name: str, slug: str, full: str, key: str, prefix: str) -> bool:
+        """Match the title's home/away against a bracket pair's name
+        AND slug. Cards like 'Bayern Munich vs PSG' would otherwise
+        fail: title 'PSG' against full name 'Paris Saint-Germain'
+        has no substring overlap. The slug field (pair['home'] /
+        pair['away']) carries 'psg', 'bayern-munich', 'atletico-madrid'
+        — comparing against that catches the case the full-name
+        matcher misses.
+        """
+        if not full:
             return False
-        n = name.lower()
-        if full in n:
+
+        def _hit(n: str) -> bool:
+            if not n:
+                return False
+            n = n.lower()
+            if full in n:
+                return True
+            if key and key in n:
+                return True
+            return bool(prefix and len(prefix) >= 3 and prefix in n)
+
+        if _hit(name):
             return True
-        if key and key in n:
-            return True
-        return bool(prefix and len(prefix) >= 3 and prefix in n)
+        if slug:
+            # Slugs use hyphens between words ("bayern-munich"); fold
+            # them to spaces so substring matches against full team
+            # names work the same way they do against name fields.
+            return _hit(slug.replace("-", " ").replace("_", " "))
+        return False
 
     for rnd in rounds:
         if not isinstance(rnd, dict):
@@ -2983,15 +3004,17 @@ def _aggregate_from_bracket(bracket_data, title_home: str, title_away: str):
         for pair in (rnd.get("pairs") or []):
             if not isinstance(pair, dict):
                 continue
-            p_home = pair.get("home_name") or pair.get("home") or ""
-            p_away = pair.get("away_name") or pair.get("away") or ""
+            p_home_name = pair.get("home_name") or ""
+            p_away_name = pair.get("away_name") or ""
+            p_home_slug = pair.get("home") or ""
+            p_away_slug = pair.get("away") or ""
             same = (
-                _matches(p_home, h_low, h_key, h_prefix)
-                and _matches(p_away, a_low, a_key, a_prefix)
+                _matches(p_home_name, p_home_slug, h_low, h_key, h_prefix)
+                and _matches(p_away_name, p_away_slug, a_low, a_key, a_prefix)
             )
             swapped = (
-                _matches(p_home, a_low, a_key, a_prefix)
-                and _matches(p_away, h_low, h_key, h_prefix)
+                _matches(p_home_name, p_home_slug, a_low, a_key, a_prefix)
+                and _matches(p_away_name, p_away_slug, h_low, h_key, h_prefix)
             )
             if not (same or swapped):
                 continue
