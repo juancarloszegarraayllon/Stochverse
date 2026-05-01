@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -1886,6 +1886,7 @@ def get_events(
     offset: int = 0,
     limit: int = 24,
     warm: Optional[str] = None,
+    background_tasks: BackgroundTasks = None,
 ):
     # Per-event live refresh — frontend sends the comma-separated
     # tickers of currently-visible cards so the response carries fresh
@@ -2520,6 +2521,21 @@ def get_events(
                 _norm_cached = _EVENT_NORMALIZED_CACHE.get(
                     (rc.get("event_ticker") or "").upper()
                 )
+                # Schedule cache warming when missing. The first
+                # /api/events call won't have aggregates for soccer
+                # cards (cache is empty); the background task fires
+                # event_normalized() async, populating the cache so
+                # the NEXT /api/events call enriches the card.
+                # Scoped to events in known knockout series via
+                # SOCCER_COMP — those are the only ones that benefit
+                # from aggregate enrichment, and limiting the warm
+                # set keeps us under FL's rate limit.
+                if (not _norm_cached and background_tasks is not None
+                        and rc.get("series_ticker") in SOCCER_COMP):
+                    background_tasks.add_task(
+                        _warm_normalized_cache,
+                        rc.get("event_ticker"),
+                    )
                 if _norm_cached:
                     _bracket = ((_norm_cached.get("payload") or {}).get("data") or {}).get("bracket")
                     import re as _re_agg_e
@@ -2747,6 +2763,24 @@ def _kalshi_url(series_ticker: str, event_ticker: str) -> str:
         return ""
     s = series_ticker.lower()
     return f"https://kalshi.com/markets/{s}/{s.replace('kx', '')}/{event_ticker.lower()}"
+
+
+async def _warm_normalized_cache(ticker: str) -> None:
+    """Background task fired by /api/events for soccer fixtures whose
+    card lacks aggregate. Calls event_normalized() purely for its
+    side effect of populating _EVENT_NORMALIZED_CACHE — the next
+    /api/events call reads from that cache and enriches the card's
+    _live_state with the aggregate / leg metadata.
+
+    Errors are swallowed: the worst case is the card stays without
+    a pill, which is the current behavior anyway. Don't let a
+    background failure surface to the user."""
+    try:
+        if not ticker:
+            return
+        await event_normalized(ticker)
+    except Exception:
+        pass
 
 
 def _aggregate_from_bracket(bracket_data, title_home: str, title_away: str):
