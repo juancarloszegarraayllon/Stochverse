@@ -973,58 +973,68 @@ async def search_past_event_for_teams(home: str, away: str, sport: str = ""):
     event_id we query, so any past matchup between them gives us the
     right history.
 
+    Tries the joined "home away" query first (most specific); if that
+    returns no event with BOTH teams, retries with each team's name
+    alone since FL's search ranks by relevance and a single popular
+    team name may surface a recent matchup against the other team in
+    its top results.
+
     Returns {"event_id": str, "home_name": str, "away_name": str}
-    or None when no event with BOTH team names is found."""
+    or None when no event involving BOTH team names is found."""
     if not home or not away:
-        return None
-    query = f"{home} {away}"
-    data = await _fl_get("/v1/search/multi-search", {"query": query})
-    if not data:
-        return None
-    if isinstance(data, list):
-        results = data
-    elif isinstance(data, dict):
-        results = data.get("DATA") or data.get("data") or []
-    else:
-        return None
-    if not isinstance(results, list):
         return None
     h_low = home.lower()
     a_low = away.lower()
-    # Use a leading word as a looser match key — "Bayern" matches both
-    # "Bayern Munich" and "FC Bayern Munich".
     h_key = h_low.split()[0] if h_low else ""
     a_key = a_low.split()[0] if a_low else ""
-    for item in results:
-        if not isinstance(item, dict):
+
+    def _team_match(side_name: str, target_low: str, target_key: str) -> bool:
+        s = (side_name or "").lower()
+        if not s:
+            return False
+        if target_low in s or s in target_low:
+            return True
+        return bool(target_key and target_key == s.split()[0])
+
+    queries = [f"{home} {away}"]
+    # Retry with single-team queries if the joint one fails.
+    queries.extend([home, away])
+
+    for q in queries:
+        data = await _fl_get("/v1/search/multi-search", {"query": q})
+        if not data:
             continue
-        if item.get("TYPE") != "event" and item.get("type") != "event":
+        if isinstance(data, list):
+            results = data
+        elif isinstance(data, dict):
+            results = data.get("DATA") or data.get("data") or []
+        else:
             continue
-        ev_home = (item.get("HOME_NAME") or item.get("PARTICIPANT_HOME") or "").lower()
-        ev_away = (item.get("AWAY_NAME") or item.get("PARTICIPANT_AWAY") or "").lower()
-        if not ev_home or not ev_away:
+        if not isinstance(results, list):
             continue
-        # Require BOTH team names in the event — avoids returning
-        # "Bayern vs Random Other Team" when our actual pair is
-        # Bayern vs PSG.
-        home_match = h_low in ev_home or h_key in ev_home or ev_home in h_low
-        away_match = a_low in ev_away or a_key in ev_away or ev_away in a_low
-        # Also accept the swapped orientation — FL might list the
-        # historical match with home/away reversed from our Kalshi event.
-        swapped = (
-            (h_low in ev_away or h_key in ev_away) and
-            (a_low in ev_home or a_key in ev_home)
-        )
-        if not (home_match and away_match) and not swapped:
-            continue
-        event_id = item.get("ID") or item.get("EVENT_ID") or ""
-        if not event_id:
-            continue
-        return {
-            "event_id":  event_id,
-            "home_name": item.get("HOME_NAME") or item.get("PARTICIPANT_HOME") or "",
-            "away_name": item.get("AWAY_NAME") or item.get("PARTICIPANT_AWAY") or "",
-        }
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            if item.get("TYPE") != "event" and item.get("type") != "event":
+                continue
+            ev_home = (item.get("HOME_NAME") or item.get("PARTICIPANT_HOME") or "")
+            ev_away = (item.get("AWAY_NAME") or item.get("PARTICIPANT_AWAY") or "")
+            home_in_home = _team_match(ev_home, h_low, h_key)
+            away_in_away = _team_match(ev_away, a_low, a_key)
+            home_in_away = _team_match(ev_away, h_low, h_key)
+            away_in_home = _team_match(ev_home, a_low, a_key)
+            # Require BOTH teams in the event (any orientation).
+            if not ((home_in_home and away_in_away) or
+                    (home_in_away and away_in_home)):
+                continue
+            event_id = item.get("ID") or item.get("EVENT_ID") or ""
+            if not event_id:
+                continue
+            return {
+                "event_id":  event_id,
+                "home_name": ev_home,
+                "away_name": ev_away,
+            }
     return None
 
 

@@ -29,7 +29,8 @@ const STYLES = `
 .sv-top-scorers-rank{width:32px;color:var(--text-dim,#888)}
 .sv-top-scorers-player{font-weight:500}
 .sv-top-scorers-team{color:var(--text-dim,#888);font-size:12px}
-.sv-top-scorers-btn{margin-top:8px;padding:8px 14px;font-size:12px;font-weight:600;color:var(--green,#00ff00);background:transparent;border:1px solid var(--green,#00ff00);border-radius:6px;cursor:pointer;align-self:flex-start;font-family:inherit;letter-spacing:.3px}
+.sv-top-scorers-actions{display:flex;justify-content:center;gap:10px;margin-top:10px;flex-wrap:wrap}
+.sv-top-scorers-btn{padding:8px 14px;font-size:12px;font-weight:600;color:var(--green,#00ff00);background:transparent;border:1px solid var(--green,#00ff00);border-radius:6px;cursor:pointer;font-family:inherit;letter-spacing:.3px}
 .sv-top-scorers-btn:hover{background:rgba(0,255,0,.08)}
 .sv-top-scorers-btn:disabled{opacity:.5;cursor:wait}
 .sv-top-scorers-empty{color:var(--text-dim,#888);font-size:13px;padding:20px;text-align:center}
@@ -98,31 +99,36 @@ export function renderTopScorers(
   table.appendChild(tbody);
   wrap.appendChild(table);
 
-  // Single-button pagination. has_more=true means more rows exist
-  // server-side; otherwise (fully expanded), button morphs to
-  // "Show less" if we've grown past the initial PAGE_SIZE.
+  // Centered action row. Show more is shown whenever more rows are
+  // available; Show less is shown whenever the user has grown past
+  // the initial PAGE_SIZE — so when both apply (e.g. 40 of 200
+  // visible), both buttons are visible side-by-side.
   const shown = data.rows.length;
   const total = data.total;
+  const actions = document.createElement('div');
+  actions.className = 'sv-top-scorers-actions';
   if (data.has_more) {
     const remaining = total - shown;
     const nextChunk = Math.min(PAGE_SIZE, remaining);
-    const btn = document.createElement('button');
-    btn.className = 'sv-top-scorers-btn';
-    btn.textContent =
+    const moreBtn = document.createElement('button');
+    moreBtn.className = 'sv-top-scorers-btn';
+    moreBtn.textContent =
       `Show ${nextChunk} more (${shown} of ${total})`;
-    btn.addEventListener('click', () =>
-      reload(mount, ticker, shown + PAGE_SIZE, btn, false),
+    moreBtn.addEventListener('click', () =>
+      reload(mount, ticker, shown + PAGE_SIZE, moreBtn, false),
     );
-    wrap.appendChild(btn);
-  } else if (shown > PAGE_SIZE) {
-    const btn = document.createElement('button');
-    btn.className = 'sv-top-scorers-btn';
-    btn.textContent = 'Show less';
-    btn.addEventListener('click', () =>
-      reload(mount, ticker, PAGE_SIZE, btn, true),
-    );
-    wrap.appendChild(btn);
+    actions.appendChild(moreBtn);
   }
+  if (shown > PAGE_SIZE) {
+    const lessBtn = document.createElement('button');
+    lessBtn.className = 'sv-top-scorers-btn';
+    lessBtn.textContent = 'Show less';
+    lessBtn.addEventListener('click', () =>
+      reload(mount, ticker, PAGE_SIZE, lessBtn, true),
+    );
+    actions.appendChild(lessBtn);
+  }
+  if (actions.children.length > 0) wrap.appendChild(actions);
 
   mount.appendChild(wrap);
 }

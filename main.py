@@ -4926,9 +4926,11 @@ async def get_event_h2h(ticker: str):
 
     H2H is two-team historical matchups, so the response is identical
     regardless of which match's event_id we query — only the pair of
-    teams matters. When `_find_fl_game` fails (typical for future
-    fixtures FL hasn't loaded yet), fall back to searching for ANY
-    past event between the same two teams and use its event_id."""
+    teams matters. When `_find_fl_game` fails OR returns a match that
+    doesn't actually involve both expected teams (its search fallback
+    isn't pair-strict and may grab a one-team-match-only result), fall
+    back to searching for ANY past event between the two teams from
+    the Kalshi title."""
     ticker = (ticker or "").strip().upper()
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
@@ -4944,28 +4946,57 @@ async def get_event_h2h(ticker: str):
             fetch_event_h2h,
             search_past_event_for_teams,
         )
+        title = found.get("title", "")
+        sport = found.get("_sport", "")
+
+        # Parse "Home vs Away" out of the Kalshi title up front so we
+        # have a ground-truth pair to validate against.
+        import re as _re
+        parts = _re.split(
+            r'\s+(?:vs\.?|v|at)\s+',
+            title, maxsplit=1, flags=_re.IGNORECASE,
+        )
+        title_home = parts[0].strip() if len(parts) == 2 else ""
+        title_away = parts[1].strip() if len(parts) == 2 else ""
+
+        def _pair_ok(a: str, b: str) -> bool:
+            if not a or not b:
+                return False
+            al, bl = a.lower(), b.lower()
+            if al == bl or al in bl or bl in al:
+                return True
+            af = al.split()[0] if al else ""
+            bf = bl.split()[0] if bl else ""
+            return bool(af and bf and af == bf)
+
+        def _matches_title(gh: str, ga: str) -> bool:
+            if not title_home or not title_away:
+                return True  # no title to validate against
+            return (
+                (_pair_ok(title_home, gh) and _pair_ok(title_away, ga))
+                or
+                (_pair_ok(title_home, ga) and _pair_ok(title_away, gh))
+            )
+
         g = await _find_fl_game(found)
         fl_id = (g or {}).get("event_id", "")
         home_name = (g or {}).get("home_name", "")
         away_name = (g or {}).get("away_name", "")
-        if not fl_id:
-            # Future-fixture fallback: parse the Kalshi title for the
-            # team names and ask FL for any past matchup between them.
-            title = found.get("title", "")
-            sport = found.get("_sport", "")
-            import re as _re
-            parts = _re.split(
-                r'\s+(?:vs\.?|v|at)\s+',
-                title, maxsplit=1, flags=_re.IGNORECASE,
-            )
-            if len(parts) == 2:
-                home_name = home_name or parts[0].strip()
-                away_name = away_name or parts[1].strip()
+
+        if not fl_id or not _matches_title(home_name, away_name):
+            # Either no match or wrong pair — search FL for any past
+            # event involving BOTH our teams. Pair-strict so we don't
+            # serve Bayern-vs-Some-Other-Team H2H rows for a Bayern
+            # vs PSG fixture.
+            if title_home and title_away:
                 past = await search_past_event_for_teams(
-                    home_name, away_name, sport,
+                    title_home, title_away, sport,
                 )
                 if past and past.get("event_id"):
                     fl_id = past["event_id"]
+                    home_name = past.get("home_name") or title_home
+                    away_name = past.get("away_name") or title_away
+
         if not fl_id:
             return {"error": "FlashLive doesn't cover this match yet"}
         data = await fetch_event_h2h(fl_id)
@@ -4973,8 +5004,8 @@ async def get_event_h2h(ticker: str):
             return {"error": "no H2H data available"}
         return {
             "data": data,
-            "home_name": home_name,
-            "away_name": away_name,
+            "home_name": home_name or title_home,
+            "away_name": away_name or title_away,
             "source": "flashlive",
         }
     except Exception as e:

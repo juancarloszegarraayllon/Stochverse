@@ -346,8 +346,11 @@ html,body{overscroll-behavior:none}
 .h2h-win{background:#4caf50}
 .h2h-loss{background:#f44336}
 .h2h-draw{background:#666}
-.h2h-show-more{display:block;width:100%;padding:8px 0;background:transparent;border:none;color:var(--green);font-family:inherit;font-size:11px;font-weight:600;cursor:pointer;text-align:center;text-decoration:underline;text-underline-offset:2px}
-.h2h-show-more:hover{color:var(--text)}
+/* Wrapper kept block-level so the action row centers itself in the
+   H2H section like the TopScorers actions do. */
+.h2h-show-more-wrap{display:flex;justify-content:center;margin-top:10px}
+.h2h-show-more{padding:8px 14px;background:transparent;border:1px solid var(--green);color:var(--green);font-family:inherit;font-size:12px;font-weight:600;letter-spacing:.3px;border-radius:6px;cursor:pointer}
+.h2h-show-more:hover{background:rgba(0,255,0,.08)}
 .ps-cat-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:8px;overflow-x:auto;scrollbar-width:thin}
 .ps-cat-tabs .ed-sb-tab{flex:0 0 auto;padding:6px 8px;font-size:9px}
 .ps-team-header{display:flex;align-items:center;gap:6px;margin:10px 0 4px;padding:4px 0;border-bottom:1px solid var(--border)}
@@ -702,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.3.4" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.3.5" defer></script>
 </head>
 <body>
 <div id="header">
@@ -5180,7 +5183,7 @@ function _renderH2HTab(container, allTabs, tabIdx, homeName, awayName) {
     }
     h += '</div>';
     if (sec.items.length > 5) {
-      h += '<button class="h2h-show-more" data-expanded="0" onclick="window._h2hShowMore(this,' + si + ')">Show more matches</button>';
+      h += '<div class="h2h-show-more-wrap"><button class="h2h-show-more" data-expanded="0" onclick="window._h2hShowMore(this,' + si + ')">Show more matches</button></div>';
     }
     h += '</div>';
   }
@@ -5192,7 +5195,13 @@ window._h2hShowMore = function(btn, sectionIdx) {
   if (!container || !container._h2hSections) return;
   var sec = container._h2hSections[sectionIdx];
   if (!sec) return;
+  // Button is now wrapped in .h2h-show-more-wrap for centering, so
+  // the rows container is the wrapper's previous sibling, not the
+  // button's. Walk up if we hit the wrap.
   var rowsDiv = btn.previousElementSibling;
+  if (!rowsDiv && btn.parentElement && btn.parentElement.classList.contains("h2h-show-more-wrap")) {
+    rowsDiv = btn.parentElement.previousElementSibling;
+  }
   if (!rowsDiv) return;
   var homeName = container._h2hHome || "";
   var awayName = container._h2hAway || "";
