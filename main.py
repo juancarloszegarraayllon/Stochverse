@@ -5361,8 +5361,27 @@ async def _prewarm_series_stages():
                 for r in unresolved:
                     try:
                         await _find_fl_game(r)
-                        if (r.get("series_ticker") or "").upper() in _SERIES_TO_STAGE_CACHE:
+                        series_key = (r.get("series_ticker") or "").upper()
+                        entry = _SERIES_TO_STAGE_CACHE.get(series_key)
+                        if entry and entry.get("stage_id"):
                             resolved += 1
+                            # Fetch the bracket inline. Without this,
+                            # newly-resolved series have to wait up to
+                            # 60s for the steady-state warm loop to
+                            # pick them up — during that window the
+                            # aggregate pill can't render. One extra
+                            # FL call per resolution is acceptable
+                            # because we're already at 1 req/s.
+                            sid = entry["stage_id"]
+                            if sid not in _TOURNAMENT_BRACKET_CACHE:
+                                try:
+                                    await _refresh_tournament_bracket(
+                                        sid,
+                                        entry.get("season_id", ""),
+                                        entry.get("league_name", ""),
+                                    )
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
                     await asyncio.sleep(1.0)
