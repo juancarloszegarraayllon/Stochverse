@@ -133,19 +133,14 @@ async def startup_event():
     except Exception as e:
         logging.getLogger("stochverse").warning("failed to start flashlive feed: %s", e)
     # Warm-start the series→stage and tournament-bracket caches from
-    # cache_blobs BEFORE accepting traffic. Each load is a single DB
-    # SELECT — sub-100ms in practice — and ensures the very first
-    # /api/events request after a redeploy has populated caches to
-    # derive aggregate pills from. Without these awaits, the warm
-    # loop would be racing the first user request and aggregates
-    # would briefly be missing.
-    try:
-        await _load_series_cache_from_db()
-        await _load_tournament_brackets_from_db()
-    except Exception as e:
-        logging.getLogger("stochverse").warning(
-            "cache warm-start failed: %s", e
-        )
+    # cache_blobs. Fire-and-forget — the warm loop awaits both via
+    # the shared event below before its initial pass, so we don't
+    # need to block startup_event on the DB. Blocking here adds
+    # latency to every redeploy's first served request without
+    # benefit because /api/events also runs in milliseconds and the
+    # caches are populated within ~100ms anyway.
+    asyncio.create_task(_load_series_cache_from_db())
+    asyncio.create_task(_load_tournament_brackets_from_db())
     asyncio.create_task(_tournament_bracket_warm_loop())
     # Phase 4: periodically flush live scores from all feeds to the DB.
     asyncio.create_task(_score_flush_loop())
@@ -2001,19 +1996,31 @@ def get_events(
                     #     (catches late-night games from yesterday that
                     #     are still in progress, e.g. Brazil 9PM local
                     #     = APR11 ticker but now APR12 UTC)
+                    #   - OR kickoff is within the next 24 hours
+                    #     (mirrors how Kalshi/most market UIs surface
+                    #     "starting soon" alongside currently-live;
+                    #     without this, a tomorrow-morning fixture
+                    #     drops off Live until its day flips over).
                     ticker_date = parse_game_date_from_ticker(r.get("event_ticker", ""))
                     in_window = False
+                    upcoming_24h = False
                     kdt = r.get("_kickoff_dt")
                     gdt = r.get("_game_end_dt")
-                    if kdt and gdt:
+                    if kdt:
                         try:
                             k = _dt.fromisoformat(kdt)
-                            g = _dt.fromisoformat(gdt)
-                            in_window = k <= now_utc < g
+                            if gdt:
+                                try:
+                                    g_end = _dt.fromisoformat(gdt)
+                                    in_window = k <= now_utc < g_end
+                                except Exception:
+                                    pass
+                            if k > now_utc:
+                                upcoming_24h = (k - now_utc).total_seconds() <= 86400
                         except Exception:
                             pass
                     is_today = ticker_date and ticker_date == now_utc.date()
-                    if not (is_today or in_window):
+                    if not (is_today or in_window or upcoming_24h):
                         continue
                 else:
                     # Non-sport event (crypto, politics, etc.). Two
@@ -5346,6 +5353,17 @@ async def _tournament_bracket_warm_loop():
     stage spacing because there's nothing to gain from bursting
     when only a few entries have aged past TTL."""
     _log = logging.getLogger("stochverse")
+
+    # Brief wait for the cache_blobs warm-start tasks to land. They
+    # run as separate tasks in startup_event to keep startup_event
+    # non-blocking. Polling here is cheap and bails fast — 50ms ticks
+    # up to 2s ceiling. If they haven't loaded by then, we proceed
+    # anyway (the steady-state loop catches new stage IDs after a
+    # minute regardless).
+    for _ in range(40):  # 40 × 50ms = 2s max
+        if _SERIES_TO_STAGE_CACHE:
+            break
+        await asyncio.sleep(0.05)
 
     # ── Initial pass: parallel-warm anything that doesn't already
     #    have fresh bracket data from the cache_blobs warm-start.
