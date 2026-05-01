@@ -2969,12 +2969,18 @@ def _aggregate_from_bracket(bracket_data, title_home: str, title_away: str):
 
     def _matches(name: str, slug: str, full: str, key: str, prefix: str) -> bool:
         """Match the title's home/away against a bracket pair's name
-        AND slug. Cards like 'Bayern Munich vs PSG' would otherwise
-        fail: title 'PSG' against full name 'Paris Saint-Germain'
-        has no substring overlap. The slug field (pair['home'] /
-        pair['away']) carries 'psg', 'bayern-munich', 'atletico-madrid'
-        — comparing against that catches the case the full-name
-        matcher misses.
+        AND slug. Handles three cases:
+
+        1. Substring (full / key / prefix) — covers Atletico-style
+           where Kalshi's short form ("Atletico") is a prefix of FL's
+           full name ("Atletico Madrid").
+        2. Slug match (home/away slug is "psg", "bayern-munich") —
+           covers cases where FL's short canonical id matches Kalshi's
+           short form directly.
+        3. Acronym match — Kalshi uses "PSG" but FL ships
+           "Paris Saint-Germain" with no substring overlap. The 3-char
+           Kalshi form is the initials of the FL words. Also catches
+           BVB/Borussia Dortmund-style first-letter-of-each-word cases.
         """
         if not full:
             return False
@@ -2987,14 +2993,37 @@ def _aggregate_from_bracket(bracket_data, title_home: str, title_away: str):
                 return True
             if key and key in n:
                 return True
-            return bool(prefix and len(prefix) >= 3 and prefix in n)
+            if prefix and len(prefix) >= 3 and prefix in n:
+                return True
+            # Acronym fallback. Only fires for short Kalshi forms
+            # (2-4 alphanumeric chars) — longer queries fall through
+            # to the substring matchers above. Compares the query
+            # against the first letter of each space/hyphen-separated
+            # word in the candidate name. Short tokens (1-2 chars,
+            # like "SG" inside "Paris SG") get expanded letter-by-
+            # letter so we still catch "PSG" against "Paris SG".
+            if 2 <= len(full) <= 4 and full.isalnum():
+                words = (
+                    n.replace("-", " ")
+                     .replace("_", " ")
+                     .replace(".", " ")
+                     .split()
+                )
+                if words:
+                    expanded = []
+                    for w in words:
+                        if 1 <= len(w) <= 2:
+                            expanded.extend(list(w))
+                        else:
+                            expanded.append(w)
+                    initials = "".join(w[0] for w in expanded if w)
+                    if initials and full == initials:
+                        return True
+            return False
 
         if _hit(name):
             return True
         if slug:
-            # Slugs use hyphens between words ("bayern-munich"); fold
-            # them to spaces so substring matches against full team
-            # names work the same way they do against name fields.
             return _hit(slug.replace("-", " ").replace("_", " "))
         return False
 
