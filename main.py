@@ -3,7 +3,7 @@ from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-import os, time, tempfile, functools, asyncio, threading, logging, hashlib, json
+import os, re, time, tempfile, functools, asyncio, threading, logging, hashlib, json
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -137,6 +137,13 @@ async def startup_event():
     # render from the first request after a redeploy instead of waiting
     # for fresh Path A→D probes against FL.
     asyncio.create_task(_load_series_cache_from_db())
+    # Same for the tournament-level bracket cache — warm-start from
+    # cache_blobs, then run the periodic refresh loop. Bracket-as-
+    # source-of-truth: aggregate pills derive from this cache, not
+    # from per-fixture FL state, so future fixtures get pills the
+    # moment a tournament's bracket is loaded.
+    asyncio.create_task(_load_tournament_brackets_from_db())
+    asyncio.create_task(_tournament_bracket_warm_loop())
     # Phase 4: periodically flush live scores from all feeds to the DB.
     asyncio.create_task(_score_flush_loop())
     # Phase 5: periodically prune old price rows to stay within
@@ -2536,6 +2543,38 @@ def get_events(
                         and _live_now.get("aggregate_home") is not None
                         and _live_now.get("aggregate_away") is not None)
             if not _has_agg:
+                # First try the tournament-bracket cache. This is the
+                # bracket-as-source-of-truth path — independent of
+                # per-fixture FL state and the /normalized cache.
+                # Populated by _tournament_bracket_warm_loop, persisted
+                # across deploys via cache_blobs. As long as the
+                # tournament's bracket is loaded, every event in the
+                # tournament gets its aggregate pill from this single
+                # snapshot — no per-event probes, no warmup races.
+                _agg_t = _bracket_aggregate_for_event(rc)
+                if _agg_t:
+                    if not rc.get("_live_state"):
+                        _t_title = rc.get("title") or ""
+                        _t_parts = re.split(
+                            r'\s+(?:vs\.?|v|at)\s+',
+                            _t_title, maxsplit=1, flags=re.IGNORECASE,
+                        )
+                        if len(_t_parts) == 2:
+                            _h_t, _a_t = _t_parts[0].strip(), _t_parts[1].strip()
+                            rc["_live_state"] = {
+                                "state":        "pre",
+                                "home_abbr":    _h_t[:3].upper(),
+                                "away_abbr":    _a_t[:3].upper(),
+                                "home_display": _h_t,
+                                "away_display": _a_t,
+                                "home_score":   "",
+                                "away_score":   "",
+                            }
+                    if rc.get("_live_state") is not None:
+                        for _k_t, _v_t in _agg_t.items():
+                            rc["_live_state"][_k_t] = _v_t
+                    _has_agg = True
+            if not _has_agg:
                 # Sibling cards (1H / Spread / Total / BTTS / etc.)
                 # for the same fixture all resolve to one canonical
                 # GAME ticker — that's the only cache entry we
@@ -3335,6 +3374,32 @@ def get_event_detail(ticker: str):
         _has_agg = (_live_now.get("is_two_leg")
                     and _live_now.get("aggregate_home") is not None
                     and _live_now.get("aggregate_away") is not None)
+        if not _has_agg:
+            # Bracket-as-source-of-truth path (same as /api/events).
+            # Tournament-level cache, no per-event indirection.
+            _agg_t = _bracket_aggregate_for_event(rc)
+            if _agg_t:
+                if not rc.get("_live_state"):
+                    _t_title = rc.get("title") or ""
+                    _t_parts = re.split(
+                        r'\s+(?:vs\.?|v|at)\s+',
+                        _t_title, maxsplit=1, flags=re.IGNORECASE,
+                    )
+                    if len(_t_parts) == 2:
+                        _h_t, _a_t = _t_parts[0].strip(), _t_parts[1].strip()
+                        rc["_live_state"] = {
+                            "state":        "pre",
+                            "home_abbr":    _h_t[:3].upper(),
+                            "away_abbr":    _a_t[:3].upper(),
+                            "home_display": _h_t,
+                            "away_display": _a_t,
+                            "home_score":   "",
+                            "away_score":   "",
+                        }
+                if rc.get("_live_state") is not None:
+                    for _k_t, _v_t in _agg_t.items():
+                        rc["_live_state"][_k_t] = _v_t
+                _has_agg = True
         if not _has_agg:
             # Sibling-market detail page (Spreads / Totals / BTTS /
             # 1H / etc.) shares one cache with the canonical GAME
@@ -5078,6 +5143,170 @@ async def _load_series_cache_from_db():
                       len(prior))
     except Exception as e:
         _log.warning("series_to_stage warm-start failed: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tournament bracket cache — bracket-as-source-of-truth for soccer
+# 2-leg aggregate pills.
+#
+# Previously the aggregate path was conditional on FL having loaded
+# the individual fixture (per-event aggregate fields) OR on the
+# /normalized cache being warm for that exact ticker (bracket-derived
+# fallback). Both are state-dependent and routinely missing for
+# future fixtures, leading to recurring "no aggregate pill" reports.
+#
+# Now: we hold ONE bracket per tournament_stage_id, refreshed every
+# few minutes by a background task, persisted to cache_blobs. Any
+# /api/events request derives the per-event aggregate from this
+# tournament-level snapshot via _aggregate_from_bracket. No
+# dependency on per-fixture FL state, no dependency on /normalized.
+# Pill renders as long as the bracket exists for the tournament.
+# ─────────────────────────────────────────────────────────────────
+_TOURNAMENT_BRACKET_CACHE: dict = {}  # stage_id → {"bracket": compact, "ts": float}
+_BRACKET_CACHE_TTL_S: float = 300.0   # refresh each entry every 5 min
+_bracket_warm_task_started: bool = False
+
+
+async def _refresh_tournament_bracket(stage_id: str, season_id: str = "") -> bool:
+    """Fetch + compact one tournament's bracket and store it in the
+    cache. Returns True on success. Failure is non-fatal — old cache
+    entry (if any) stays put so transient FL errors don't blank out
+    aggregates. Persists the cache to cache_blobs after a successful
+    refresh so the next container starts with the bracket already
+    loaded."""
+    if not stage_id:
+        return False
+    try:
+        from flashlive_feed import fetch_bracket_draw
+        raw = await fetch_bracket_draw(stage_id, season_id or "")
+        if not raw:
+            return False
+        compact = _compact_bracket(raw)
+        if not compact:
+            return False
+        _TOURNAMENT_BRACKET_CACHE[stage_id] = {
+            "bracket":   compact,
+            "ts":        time.time(),
+            "season_id": season_id or "",
+        }
+        # Throttle persistence — bracket changes are rare, no need to
+        # write on every refresh. Save after every Nth refresh.
+        try:
+            from db import save_cache_blob
+            asyncio.create_task(save_cache_blob(
+                "tournament_brackets", dict(_TOURNAMENT_BRACKET_CACHE)
+            ))
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        logging.getLogger("stochverse").warning(
+            "_refresh_tournament_bracket(%s) failed: %s", stage_id, e
+        )
+        return False
+
+
+async def _load_tournament_brackets_from_db():
+    """Restore _TOURNAMENT_BRACKET_CACHE on container startup. Lets
+    soccer aggregate pills render from the very first /api/events
+    response, instead of waiting for the warm loop's first cycle."""
+    _log = logging.getLogger("stochverse")
+    try:
+        from db import load_cache_blob
+        prior = await load_cache_blob("tournament_brackets")
+        if isinstance(prior, dict) and prior:
+            now = time.time()
+            for sid, entry in prior.items():
+                if not isinstance(entry, dict):
+                    continue
+                # Drop entries older than 24h on warm-start — better to
+                # let the live loop refetch than surface stale bracket
+                # data from a long-stopped container.
+                ts = entry.get("ts") or 0
+                if now - ts > 86400:
+                    continue
+                _TOURNAMENT_BRACKET_CACHE[sid] = entry
+            _log.info(
+                "tournament_brackets warm-start: loaded %d entries",
+                len(_TOURNAMENT_BRACKET_CACHE),
+            )
+    except Exception as e:
+        _log.warning("tournament_brackets warm-start failed: %s", e)
+
+
+async def _tournament_bracket_warm_loop():
+    """Background task: walks _SERIES_TO_STAGE_CACHE and refreshes
+    each tournament's bracket every _BRACKET_CACHE_TTL_S. New stage
+    IDs that get added during the day (when a user opens a detail
+    page or _find_fl_game resolves a new series) are picked up on
+    the next loop iteration. Sleeps long between full passes so we
+    don't hammer FL — bracket data changes only when matches play,
+    so 5-minute granularity is plenty fresh."""
+    _log = logging.getLogger("stochverse")
+    # Stagger: wait a few seconds before first run so the rest of
+    # startup can finish (Kalshi snapshot, FL warm-start, etc.).
+    await asyncio.sleep(5)
+    while True:
+        try:
+            now = time.time()
+            for series, entry in list(_SERIES_TO_STAGE_CACHE.items()):
+                if not isinstance(entry, dict):
+                    continue
+                stage_id = entry.get("stage_id") or ""
+                if not stage_id:
+                    continue
+                cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
+                if cached and (now - (cached.get("ts") or 0)) < _BRACKET_CACHE_TTL_S:
+                    continue  # still fresh
+                season_id = entry.get("season_id") or ""
+                ok = await _refresh_tournament_bracket(stage_id, season_id)
+                if ok:
+                    _log.debug("bracket refreshed: series=%s stage=%s",
+                               series, stage_id)
+                # Small spacing so we don't burst the FL rate limiter
+                # when a fresh container has dozens of stage IDs to
+                # warm in one pass.
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            _log.warning("tournament_bracket_warm_loop iter failed: %s", e)
+        # Sleep between full passes. Each pass refreshes any stage
+        # whose bracket entry has aged past TTL; passes run every
+        # 60s so a freshly-added stage_id starts populating within
+        # a minute.
+        await asyncio.sleep(60)
+
+
+def _bracket_aggregate_for_event(found: dict):
+    """Return the bracket-derived aggregate dict for a soccer event,
+    or None if not applicable. Uses the persistent
+    _TOURNAMENT_BRACKET_CACHE — independent of per-event FL state
+    and /normalized cache.
+
+    Caller shape: `found` is a Kalshi event record from the cache,
+    must have `_sport == "Soccer"` and `series_ticker` resolved to
+    a stage_id via _SERIES_TO_STAGE_CACHE."""
+    if (found.get("_sport") or "") != "Soccer":
+        return None
+    series = (found.get("series_ticker") or "").upper()
+    if not series:
+        return None
+    stage_entry = _SERIES_TO_STAGE_CACHE.get(series)
+    if not stage_entry:
+        return None
+    stage_id = stage_entry.get("stage_id")
+    if not stage_id:
+        return None
+    cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
+    if not cached:
+        return None
+    bracket = cached.get("bracket")
+    if not bracket:
+        return None
+    title = found.get("title") or ""
+    parts = re.split(r"\s+(?:vs\.?|v|at)\s+", title, maxsplit=1)
+    if len(parts) != 2:
+        return None
+    return _aggregate_from_bracket(bracket, parts[0].strip(), parts[1].strip())
 
 # FL tournaments-list cache. /v1/tournaments/list?sport_id=N returns
 # every tournament FL knows for that sport regardless of whether

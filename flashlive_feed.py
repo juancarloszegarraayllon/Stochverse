@@ -937,6 +937,20 @@ async def fetch_top_scorers(tournament_stage_id: str, season_id: str = ""):
     return await _fl_get("/v1/tournaments/standings", params)
 
 
+async def fetch_bracket_draw(tournament_stage_id: str, season_id: str = ""):
+    """Fetch the knockout draw / bracket for a tournament stage. Same
+    underlying endpoint as fetch_standings — different standing_type.
+    Used by the tournament-bracket warm loop to keep aggregate / leg
+    data current for every 2-leg knockout in our universe, independent
+    of whether FL has loaded any individual fixture yet."""
+    if not tournament_stage_id:
+        return None
+    params = {"tournament_stage_id": tournament_stage_id, "standing_type": "draw"}
+    if season_id:
+        params["tournament_season_id"] = season_id
+    return await _fl_get("/v1/tournaments/standings", params)
+
+
 def find_flashlive_event_id(title: str, sport: str = ""):
     """Find the FlashLive EVENT_ID for a game matching the title."""
     g = match_game(title, sport)
