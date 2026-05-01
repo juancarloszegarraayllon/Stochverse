@@ -5406,6 +5406,39 @@ def _derive_basketball_series_state(records):
                 elif a_abbr and a_abbr in label:
                     team_wins[a_abbr] = team_wins.get(a_abbr, 0) + 1
                 break
+
+    # Title-based fallback: Kalshi names playoff games "Game N: ..."
+    # in the title. When we only know about ONE game in a matchup
+    # (because Kalshi hasn't published the other games yet, or only
+    # this game is in our current page-set), the ticker-grouping path
+    # above has nothing to cluster, but the title still tells us
+    # which game number this is.
+    #
+    # Restricted to Game 1 because the series state (0-0) is provably
+    # correct for it. For Game 2+ we'd be guessing — better to leave
+    # those without a pill than render a fake "TIED 0-0" for a series
+    # that's actually 1-0.
+    gn_title_pat = re.compile(r"^\s*Game\s+(\d+)\s*[:.\-]", re.IGNORECASE)
+    for r in records:
+        sport = r.get("_sport") or ""
+        if sport not in series_sports:
+            continue
+        ticker = r.get("event_ticker") or ""
+        if not ticker or ticker in out:
+            continue  # already filled by ticker-grouping path
+        title = r.get("title") or ""
+        m_gn = gn_title_pat.match(title)
+        if not m_gn:
+            continue
+        gn_int = int(m_gn.group(1))
+        if gn_int != 1:
+            continue
+        out[ticker] = {
+            "is_playoff":         True,
+            "series_game_number": 1,
+            "series_home_wins":   0,
+            "series_away_wins":   0,
+        }
     return out
 
 
