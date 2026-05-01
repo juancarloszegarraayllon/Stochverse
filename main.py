@@ -4989,6 +4989,76 @@ async def debug_event_h2h(ticker: str):
         past = await search_past_event_for_teams(title_home, title_away, sport)
         out["search_past"] = past
 
+        # Probe team-level endpoints — FL's multi-search returns
+        # participants (teams) for team-name queries, so we have
+        # team_ids in hand but no event_id. Discover which endpoint
+        # accepts a participant_id / team_id and returns matches.
+        # The first event-shaped response wins.
+        team_ids = [
+            it.get("id") for attempt in out.get("search_attempts", [])
+            for it in attempt.get("events", [])
+            if it.get("id")
+        ]
+        bayern_id = ""
+        psg_id = ""
+        if team_ids:
+            # Heuristic: first id from "Bayern Munich" alone search is
+            # probably Bayern; same for PSG. Already in our attempts.
+            for attempt in out["search_attempts"]:
+                if attempt["query"] == title_home and attempt["events"]:
+                    bayern_id = attempt["events"][0]["id"]
+                if attempt["query"] == title_away and attempt["events"]:
+                    psg_id = attempt["events"][0]["id"]
+        out["team_ids"] = {"home": bayern_id, "away": psg_id}
+
+        team_endpoint_probes = []
+        if bayern_id:
+            for ep, params in [
+                ("/v1/teams/results", {"team_id": bayern_id, "sport_id": "1"}),
+                ("/v1/teams/fixtures", {"team_id": bayern_id, "sport_id": "1"}),
+                ("/v1/teams/squad", {"team_id": bayern_id, "sport_id": "1"}),
+                ("/v1/teams/data", {"team_id": bayern_id}),
+                ("/v1/participants/results", {"participant_id": bayern_id, "sport_id": "1"}),
+                ("/v1/participants/fixtures", {"participant_id": bayern_id, "sport_id": "1"}),
+                ("/v1/teams/last-results", {"team_id": bayern_id, "sport_id": "1"}),
+                ("/v1/teams/next-events", {"team_id": bayern_id, "sport_id": "1"}),
+            ]:
+                try:
+                    r = await _fl_get(ep, params)
+                    team_endpoint_probes.append({
+                        "ep": ep,
+                        "params": params,
+                        "got_data": bool(r),
+                        "top_keys": list(r.keys()) if isinstance(r, dict) else None,
+                        "preview": str(r)[:400] if r else None,
+                    })
+                except Exception as ex:
+                    team_endpoint_probes.append({
+                        "ep": ep, "params": params, "error": str(ex)[:200],
+                    })
+        # Direct two-team H2H probes — try several plausible param names.
+        if bayern_id and psg_id:
+            for ep, params in [
+                ("/v1/events/h2h", {"team_id_1": bayern_id, "team_id_2": psg_id}),
+                ("/v1/events/h2h", {"home_team_id": bayern_id, "away_team_id": psg_id}),
+                ("/v1/teams/h2h", {"team_id_1": bayern_id, "team_id_2": psg_id}),
+                ("/v1/participants/h2h", {"participant_id_1": bayern_id, "participant_id_2": psg_id}),
+            ]:
+                try:
+                    r = await _fl_get(ep, params)
+                    team_endpoint_probes.append({
+                        "ep": ep,
+                        "params": params,
+                        "got_data": bool(r),
+                        "top_keys": list(r.keys()) if isinstance(r, dict) else None,
+                        "preview": str(r)[:400] if r else None,
+                    })
+                except Exception as ex:
+                    team_endpoint_probes.append({
+                        "ep": ep, "params": params, "error": str(ex)[:200],
+                    })
+        out["team_endpoint_probes"] = team_endpoint_probes
+
         # Try the actual H2H fetch with whichever event_id we'd use.
         chosen = (g or {}).get("event_id", "") or (past or {}).get("event_id", "")
         out["chosen_event_id"] = chosen
