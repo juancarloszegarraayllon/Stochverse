@@ -5011,6 +5011,45 @@ async def debug_event_h2h(ticker: str):
                     psg_id = attempt["events"][0]["id"]
         out["team_ids"] = {"home": bayern_id, "away": psg_id}
 
+        # Drill into /v1/teams/results to see its actual event-level
+        # shape — the preview earlier was truncated at tournament
+        # metadata. We need to know the field name for individual
+        # matches and the opposing team's id so we can find a
+        # Bayern-vs-PSG match within Bayern's history.
+        if bayern_id:
+            results_data = await _fl_get(
+                "/v1/teams/results",
+                {"team_id": bayern_id, "sport_id": "1", "locale": "en_INT"},
+            )
+            if isinstance(results_data, dict):
+                groups = results_data.get("DATA") or []
+                drill = []
+                for grp in groups[:3]:
+                    if not isinstance(grp, dict):
+                        continue
+                    drill.append({
+                        "tournament": grp.get("NAME", ""),
+                        "group_keys": list(grp.keys()),
+                        # Look for an events-array under any plausible key.
+                        "events_field": next(
+                            (k for k in grp.keys()
+                             if k in ("EVENTS", "events", "MATCHES",
+                                      "matches", "ROUNDS", "rounds")),
+                            None,
+                        ),
+                        "first_event_keys": (
+                            list((grp.get("EVENTS") or [{}])[0].keys())
+                            if isinstance(grp.get("EVENTS"), list)
+                            and grp.get("EVENTS")
+                            and isinstance(grp.get("EVENTS")[0], dict)
+                            else None
+                        ),
+                        "first_event_preview": str(
+                            (grp.get("EVENTS") or [None])[0]
+                        )[:600],
+                    })
+                out["team_results_drill"] = drill
+
         team_endpoint_probes = []
         if bayern_id:
             for ep, params in [
