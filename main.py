@@ -493,7 +493,7 @@ SOCCER_COMP = {
     "KXFACUP":"FA Cup","KXCOPPAITALIA":"Coppa Italia",
     "KXEFLCHAMPIONSHIPGAME":"EFL Championship","KXEFLCHAMPIONSHIP":"EFL Championship","KXEFLPROMO":"EFL Championship",
     "KXSUPERLIGGAME":"Super Lig","KXSUPERLIG":"Super Lig",
-    "KXCONCACAFCCUPGAME":"CONCACAF",
+    "KXCONCACAFCCUPGAME":"CONCACAF Champions Cup",
     "KXCONMEBOLLIBGAME":"Libertadores","KXCONMEBOLSUDGAME":"Copa Sudamericana",
     "KXUSLGAME":"USL","KXUSL":"USL",
     "KXSCOTTISHPREMGAME":"Scottish Prem",
@@ -5256,15 +5256,41 @@ def _maybe_save_series_cache():
 async def _load_series_cache_from_db():
     """Restore _SERIES_TO_STAGE_CACHE from the previous container's
     last save. No-op if DB is unavailable or the row hasn't been
-    written yet (first deploy after this commit lands)."""
+    written yet (first deploy after this commit lands).
+
+    Validates each cached entry against the current SOCCER_COMP
+    mapping — if SOCCER_COMP[series] has changed since the cache was
+    saved (e.g. KXCONCACAFCCUPGAME's hint was tightened from
+    "CONCACAF" to "CONCACAF Champions Cup" to break a wrong-tournament
+    resolution), the stale entry is dropped so it gets re-resolved
+    on the next prewarm/lazy lookup. Entries whose hint hasn't
+    changed are kept verbatim — full warm-start, no re-resolution."""
     _log = logging.getLogger("stochverse")
     try:
         from db import load_cache_blob
         prior = await load_cache_blob("series_to_stage")
-        if isinstance(prior, dict) and prior:
-            _SERIES_TO_STAGE_CACHE.update(prior)
-            _log.info("series_to_stage cache warm-start: loaded %d entries",
-                      len(prior))
+        if not isinstance(prior, dict) or not prior:
+            return
+        loaded = 0
+        evicted = 0
+        for series_raw, entry in prior.items():
+            if not isinstance(entry, dict):
+                continue
+            series = (series_raw or "").upper()
+            expected = (SOCCER_COMP.get(series) or "").strip().lower()
+            actual = (entry.get("league_name") or "").strip().lower()
+            # Only evict when there's a clear mismatch. If SOCCER_COMP
+            # has no entry (non-soccer or unmapped), trust the cache.
+            if expected and actual and expected != actual \
+                    and expected not in actual and actual not in expected:
+                evicted += 1
+                continue
+            _SERIES_TO_STAGE_CACHE[series] = entry
+            loaded += 1
+        _log.info(
+            "series_to_stage warm-start: loaded %d, evicted %d stale entries",
+            loaded, evicted,
+        )
     except Exception as e:
         _log.warning("series_to_stage warm-start failed: %s", e)
 
@@ -5371,13 +5397,19 @@ _BRACKET_CACHE_TTL_S: float = 300.0   # refresh each entry every 5 min
 _bracket_warm_task_started: bool = False
 
 
-async def _refresh_tournament_bracket(stage_id: str, season_id: str = "") -> bool:
+async def _refresh_tournament_bracket(stage_id: str, season_id: str = "",
+                                       league_name: str = "") -> bool:
     """Fetch + compact one tournament's bracket and store it in the
     cache. Returns True on success. Failure is non-fatal — old cache
     entry (if any) stays put so transient FL errors don't blank out
     aggregates. Persists the cache to cache_blobs after a successful
     refresh so the next container starts with the bracket already
-    loaded."""
+    loaded.
+
+    `league_name` is stored alongside the bracket so the multi-stage
+    fallback in _bracket_aggregate_for_event can group brackets by
+    league when the cached series→stage_id mapping points to the
+    wrong sub-stage (e.g. UCL qualifying vs knockout)."""
     if not stage_id:
         return False
     try:
@@ -5389,9 +5421,10 @@ async def _refresh_tournament_bracket(stage_id: str, season_id: str = "") -> boo
         if not compact:
             return False
         _TOURNAMENT_BRACKET_CACHE[stage_id] = {
-            "bracket":   compact,
-            "ts":        time.time(),
-            "season_id": season_id or "",
+            "bracket":     compact,
+            "ts":          time.time(),
+            "season_id":   season_id or "",
+            "league_name": league_name or "",
         }
         # Throttle persistence — bracket changes are rare, no need to
         # write on every refresh. Save after every Nth refresh.
@@ -5468,31 +5501,62 @@ async def _tournament_bracket_warm_loop():
 
     # ── Initial pass: parallel-warm anything that doesn't already
     #    have fresh bracket data from the cache_blobs warm-start.
+    #    Multi-stage discovery: for each unique league_name, fetch
+    #    EVERY stage with that LEAGUE_NAME (qualifying + knockout +
+    #    play-offs etc. for cups like UCL), not just the cached
+    #    stage_id. The cached stage might be the wrong one (e.g. an
+    #    early-season probe locked in the qualifying bracket); by
+    #    caching all stages we let _bracket_aggregate_for_event walk
+    #    them and find the bracket that actually contains the team
+    #    pair.
     sem = asyncio.Semaphore(5)  # ≤5 concurrent FL fetches
 
-    async def warm_one(stage_id, season_id):
+    async def warm_one(stage_id, season_id, league_name=""):
         async with sem:
-            return await _refresh_tournament_bracket(stage_id, season_id)
+            return await _refresh_tournament_bracket(stage_id, season_id, league_name)
 
-    initial_tasks = []
-    now = time.time()
+    discovered: dict = {}  # stage_id → (season_id, league_name)
+    seen_leagues = set()
     for series, entry in list(_SERIES_TO_STAGE_CACHE.items()):
         if not isinstance(entry, dict):
             continue
         stage_id = entry.get("stage_id") or ""
-        if not stage_id:
-            continue
-        cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
+        league_name = entry.get("league_name") or ""
+        if stage_id and stage_id not in discovered:
+            discovered[stage_id] = (entry.get("season_id") or "", league_name)
+        if league_name and league_name not in seen_leagues:
+            seen_leagues.add(league_name)
+            try:
+                # Sport: assume Soccer for now (it's the only sport
+                # currently using bracket aggregates). Generalizing to
+                # other sports would just pass `entry["sport"]` here.
+                stages = await _find_all_stages_for_league("Soccer", league_name)
+                for st in stages:
+                    sid = st.get("stage_id") or ""
+                    if sid and sid not in discovered:
+                        discovered[sid] = (
+                            st.get("season_id") or "",
+                            st.get("league_name") or league_name,
+                        )
+            except Exception as e:
+                _log.warning(
+                    "warm-loop: list-stages for %r failed: %s",
+                    league_name, e,
+                )
+
+    now = time.time()
+    initial_tasks = []
+    for sid, (season_id, league_name) in discovered.items():
+        cached = _TOURNAMENT_BRACKET_CACHE.get(sid)
         if cached and (now - (cached.get("ts") or 0)) < _BRACKET_CACHE_TTL_S:
-            continue  # warm-start already populated this stage
-        season_id = entry.get("season_id") or ""
-        initial_tasks.append(warm_one(stage_id, season_id))
+            continue  # already fresh from warm-start or prior pass
+        initial_tasks.append(warm_one(sid, season_id, league_name))
     if initial_tasks:
         results = await asyncio.gather(*initial_tasks, return_exceptions=True)
         ok_count = sum(1 for r in results if r is True)
         _log.info(
-            "bracket warm-loop: initial pass refreshed %d/%d brackets",
-            ok_count, len(initial_tasks),
+            "bracket warm-loop: initial pass refreshed %d/%d brackets across %d leagues",
+            ok_count, len(initial_tasks), len(seen_leagues),
         )
 
     # ── Steady-state refresh loop. Each pass refreshes any stage
@@ -5514,7 +5578,8 @@ async def _tournament_bracket_warm_loop():
                 if cached and (now - (cached.get("ts") or 0)) < _BRACKET_CACHE_TTL_S:
                     continue  # still fresh
                 season_id = entry.get("season_id") or ""
-                ok = await _refresh_tournament_bracket(stage_id, season_id)
+                league_name = entry.get("league_name") or ""
+                ok = await _refresh_tournament_bracket(stage_id, season_id, league_name)
                 if ok:
                     _log.debug("bracket refreshed: series=%s stage=%s",
                                series, stage_id)
@@ -5671,23 +5736,67 @@ def _bracket_aggregate_for_event(found: dict):
     series = (found.get("series_ticker") or "").upper()
     if not series:
         return None
-    stage_entry = _SERIES_TO_STAGE_CACHE.get(series)
-    if not stage_entry:
-        return None
-    stage_id = stage_entry.get("stage_id")
-    if not stage_id:
-        return None
-    cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
-    if not cached:
-        return None
-    bracket = cached.get("bracket")
-    if not bracket:
-        return None
     title = found.get("title") or ""
     parts = re.split(r"\s+(?:vs\.?|v|at)\s+", title, maxsplit=1)
     if len(parts) != 2:
         return None
-    return _aggregate_from_bracket(bracket, parts[0].strip(), parts[1].strip())
+    title_home, title_away = parts[0].strip(), parts[1].strip()
+
+    stage_entry = _SERIES_TO_STAGE_CACHE.get(series)
+    league_hint = ((stage_entry or {}).get("league_name") or "").strip().lower()
+
+    # First try the cached stage_id.
+    if stage_entry and stage_entry.get("stage_id"):
+        cached = _TOURNAMENT_BRACKET_CACHE.get(stage_entry["stage_id"])
+        if cached and cached.get("bracket"):
+            agg = _aggregate_from_bracket(
+                cached["bracket"], title_home, title_away
+            )
+            if agg:
+                return agg
+
+    # Cached stage missed. The series→stage mapping may have locked
+    # in the wrong sub-stage (UCL qualifying instead of knockout
+    # phase, or CONCACAF Nations League instead of Champions Cup).
+    # Walk every other cached bracket — preferring same league_name —
+    # and return the first one that contains the team pair. When we
+    # find a hit, update _SERIES_TO_STAGE_CACHE so future lookups
+    # skip the miss-and-walk dance.
+    fallback_candidates = []
+    for sid, entry in _TOURNAMENT_BRACKET_CACHE.items():
+        if stage_entry and sid == stage_entry.get("stage_id"):
+            continue
+        bracket = entry.get("bracket") if isinstance(entry, dict) else None
+        if not bracket:
+            continue
+        ent_league = (entry.get("league_name") or "").strip().lower()
+        # Prefer same-league candidates; fall back to any league.
+        if league_hint and ent_league == league_hint:
+            fallback_candidates.insert(0, (sid, entry))
+        else:
+            fallback_candidates.append((sid, entry))
+    for sid, entry in fallback_candidates:
+        bracket = entry.get("bracket")
+        agg = _aggregate_from_bracket(bracket, title_home, title_away)
+        if not agg:
+            continue
+        # Cache correction — point this series at the stage whose
+        # bracket actually contains it. Persists via the series-cache
+        # save throttle so the fix survives the next deploy.
+        _SERIES_TO_STAGE_CACHE[series] = {
+            "stage_id":    sid,
+            "season_id":   entry.get("season_id", ""),
+            "league_name": entry.get("league_name", "")
+                           or (stage_entry or {}).get("league_name", ""),
+            "country":     (stage_entry or {}).get("country", ""),
+            "ts":          time.time(),
+        }
+        try:
+            _maybe_save_series_cache()
+        except Exception:
+            pass
+        return agg
+    return None
 
 # FL tournaments-list cache. /v1/tournaments/list?sport_id=N returns
 # every tournament FL knows for that sport regardless of whether
