@@ -311,6 +311,26 @@ html,body{overscroll-behavior:none}
 .ed-stats-name{flex:1.2;text-align:center;font-size:11px;color:var(--text-dim);white-space:nowrap}
 .ed-stats-away{flex:1;text-align:right;font-size:12px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
 .ed-stats-loading{text-align:center;font-size:11px;color:var(--text-muted);font-style:italic;padding:20px 0}
+/* Highlights block — video clip grid (Highlights.ts) */
+.ed-hl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;padding:12px 0}
+.ed-hl-clip{display:flex;flex-direction:column;text-decoration:none;color:inherit;border-radius:8px;overflow:hidden;background:var(--bg-card,rgba(255,255,255,0.04));transition:transform .15s ease,background .15s ease}
+.ed-hl-clip:hover{transform:translateY(-2px);background:var(--bg-card-hover,rgba(255,255,255,0.07))}
+.ed-hl-thumb{position:relative;width:100%;aspect-ratio:16/9;background-size:cover;background-position:center;background-color:#000}
+.ed-hl-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:32px;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,.6);opacity:.85;pointer-events:none}
+.ed-hl-meta{padding:8px 10px}
+.ed-hl-title{font-size:12px;font-weight:600;color:var(--text);line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ed-hl-sub{display:flex;gap:8px;align-items:center;margin-top:4px;font-size:10px;color:var(--text-muted)}
+.ed-hl-top{padding:1px 6px;border-radius:3px;background:var(--green,#3a8);color:#fff;font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+.ed-hl-source{color:var(--text-dim)}
+/* Predicted Lineups — reuses .ed-lu-* base classes from Lineups */
+.ed-lu-predicted .ed-lu-side-head{display:flex;justify-content:space-between;align-items:baseline;padding:8px 0}
+.ed-lu-predicted .ed-lu-team{font-size:13px;font-weight:700;color:var(--text)}
+.ed-lu-predicted .ed-lu-formation{font-size:11px;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.ed-lu-predicted .ed-lu-section{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-top:8px;padding-bottom:4px;border-bottom:1px solid var(--border,rgba(255,255,255,0.08))}
+.ed-lu-predicted .ed-lu-roster{padding:4px 0}
+.ed-lu-predicted .ed-lu-player{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12px}
+.ed-lu-predicted .ed-lu-num{display:inline-block;min-width:22px;text-align:center;font-variant-numeric:tabular-nums;color:var(--text-dim);font-weight:600}
+.ed-lu-predicted .ed-lu-name{color:var(--text)}
 .ed-stats-bar{display:flex;height:4px;border-radius:2px;overflow:hidden;margin-top:3px}
 .ed-stats-bar-home{background:var(--green);height:100%}
 .ed-stats-bar-away{background:var(--red);height:100%}
@@ -4919,6 +4939,22 @@ async function _augmentEventCapabilities(panel, ticker, sportStTypes) {
           matchPanelForCaps.insertAdjacentHTML('beforeend', plPanel);
         }
       }
+      // Highlights (video clips) — Soccer / Cricket / Aussie Rules /
+      // Rugby League per probe v2. Last sub-tab in the strip — sits
+      // after live data because it's typically post-match content.
+      if (caps.highlights === true) {
+        var subTabsBar3 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
+        if (subTabsBar3 && !subTabsBar3.querySelector('button[data-mt="highlights"]')) {
+          var hlBtn = '<button class="ed-sb-tab" data-mt="highlights" onclick="window.switchMatchTab(this)">Highlights</button>';
+          subTabsBar3.insertAdjacentHTML('beforeend', hlBtn);
+        }
+        if (!matchPanelForCaps.querySelector('div[data-mt="highlights"]')) {
+          var hlPanel = '<div data-mt="highlights" style="display:none">'
+                      + '<div class="ed-sb-lazy" data-lazy="highlights">Loading highlights…</div>'
+                      + '</div>';
+          matchPanelForCaps.insertAdjacentHTML('beforeend', hlPanel);
+        }
+      }
     }
   } catch (e) { /* augmentation is best-effort — silent on error */ }
 }
@@ -6211,6 +6247,7 @@ window.switchMatchTab = function(btn) {
       else if (target === 'player-stats') _loadPlayerStats(lazy, ticker);
       else if (target === 'missing-players') _loadMissingPlayers(lazy, ticker);
       else if (target === 'predicted-lineups') _loadPredictedLineups(lazy, ticker);
+      else if (target === 'highlights') _loadHighlights(lazy, ticker);
       else if (target === 'lineups' && window.StochverseBundle && window.StochverseBundle.renderLineups) {
         window.StochverseBundle.renderLineups(ticker, lazy);
       }
@@ -6394,6 +6431,21 @@ async function _loadPredictedLineups(container, ticker) {
     }
   }
   container.innerHTML = '<div class="ed-stats-loading">Predicted lineups unavailable.</div>';
+}
+
+// Highlights render: video clip grid (YouTube/etc.) per probe v2
+// inventory — Soccer / Cricket / Aussie Rules / Rugby League. Hits
+// /api/event/<t>/highlights directly. Capability-gated tab.
+async function _loadHighlights(container, ticker) {
+  if (window.StochverseBundle && window.StochverseBundle.renderHighlights) {
+    try {
+      await window.StochverseBundle.renderHighlights(ticker, container);
+      return;
+    } catch (e) {
+      // Fall through to error state.
+    }
+  }
+  container.innerHTML = '<div class="ed-stats-loading">Highlights unavailable.</div>';
 }
 
 // Player Stats render: groups players by team and uses FlashLive's
@@ -6756,6 +6808,7 @@ window.switchSBTab = function(btn) {
       else if (lazyKey === "commentary") _loadCommentary(lazy, ticker);
       else if (lazyKey === "player-stats") _loadPlayerStats(lazy, ticker);
       else if (lazyKey === "predicted-lineups") _loadPredictedLineups(lazy, ticker);
+      else if (lazyKey === "highlights") _loadHighlights(lazy, ticker);
     }
   }
 };

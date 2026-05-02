@@ -21,6 +21,7 @@ import { renderSummary } from './blocks/Summary';
 import { renderPlayerStats } from './blocks/PlayerStats';
 import { renderMissingPlayers } from './blocks/MissingPlayers';
 import { renderPredictedLineups } from './blocks/PredictedLineups';
+import { renderHighlights } from './blocks/Highlights';
 
 declare global {
   interface Window {
@@ -95,6 +96,14 @@ declare global {
       // predicted_lineups isn't part of /normalized fan-out for
       // cold-start latency reasons). Capability-gated tab.
       renderPredictedLineups?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      // Render the Match → Highlights sub-tab from
+      // /api/event/<t>/highlights. Soccer / Cricket / Aussie
+      // Rules / Rugby League per probe v2 inventory.
+      // Capability-gated tab.
+      renderHighlights?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
@@ -388,8 +397,15 @@ async function renderPredictedLineupsByTicker(
   return renderPredictedLineups(mount, ticker);
 }
 
+async function renderHighlightsByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  return renderHighlights(mount, ticker);
+}
+
 window.StochverseBundle = {
-  version: '0.5.4',
+  version: '0.5.5',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
@@ -403,6 +419,7 @@ window.StochverseBundle = {
   renderPlayerStats: renderPlayerStatsByTicker,
   renderMissingPlayers: renderMissingPlayersByTicker,
   renderPredictedLineups: renderPredictedLineupsByTicker,
+  renderHighlights: renderHighlightsByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);

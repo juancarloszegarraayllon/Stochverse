@@ -6605,6 +6605,35 @@ async def get_event_predicted_lineups(ticker: str):
     except Exception as e:
         return {"error": str(e)[:200]}
 
+
+@app.get("/api/event/{ticker}/highlights")
+async def get_event_highlights(ticker: str):
+    """Fetch video highlights from FlashLive for this event. Probe v2
+    inventory showed FL ships highlights for Soccer, Cricket, Aussie
+    Rules, Rugby League. Capability-gated on
+    /capabilities.highlights — sub-tab only injected when data exists.
+    """
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = next((r for r in records if r.get("event_ticker") == ticker), None)
+    if not found:
+        return {"error": "event not found"}
+    try:
+        g = await _find_fl_game(found)
+        if not g:
+            return {"error": "FlashLive doesn't cover this match yet"}
+        fl_id = g.get("event_id")
+        if not fl_id:
+            return {"error": "no FlashLive event ID"}
+        from flashlive_feed import _fl_get
+        data = await _fl_get("/v1/events/highlights", {"event_id": fl_id})
+        if not data:
+            return {"error": "no highlights available"}
+        return {"data": data, "source": "flashlive"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
 # FlashLive uses two distinct kinds of sub-section labels inside a
 # DATA array. We classify them so the frontend can decide what to do
 # with each.
@@ -6979,6 +7008,10 @@ async def event_capabilities(ticker: str):
             "player_stats": ("/v1/events/player-stats", {"event_id": fl_id}),
             "summary_incidents": ("/v1/events/summary-incidents", {"event_id": fl_id}),
             "summary": ("/v1/events/summary", {"event_id": fl_id}),
+            # Highlights (video) — Soccer / Cricket / Aussie Rules /
+            # Rugby League per probe v2 inventory. Gates the
+            # Highlights sub-tab in the Match panel.
+            "highlights": ("/v1/events/highlights", {"event_id": fl_id}),
         }
         # Standings sub-types — one probe per documented
         # standing_type so the frontend can build sub-tabs from
