@@ -116,3 +116,18 @@ _STATS_CACHE_TTL = 10  # seconds
 # ─────────────────────────────────────────────────────────────────
 _EVENT_NORMALIZED_CACHE: dict = {}
 _EVENT_NORMALIZED_TTL = 300  # seconds
+
+
+# ─────────────────────────────────────────────────────────────────
+# /api/event/{ticker}/h2h response cache
+#
+# H2H rows for a fixture rarely change — historical match results
+# don't update mid-day, and the resolution chain (find_fl_game →
+# search_past_event_for_teams → multi-search → team-results) is
+# 5-6 sequential FL calls on cold cache. 5-min TTL eliminates the
+# "sometimes shows, sometimes doesn't" pattern users hit when the
+# sequential chain transiently fails on one of the round trips.
+# Key: ticker (UPPER). Value: {payload, _ts}.
+# ─────────────────────────────────────────────────────────────────
+_H2H_CACHE: dict = {}
+_H2H_CACHE_TTL = 300  # seconds

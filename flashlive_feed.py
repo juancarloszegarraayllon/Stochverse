@@ -1040,8 +1040,8 @@ async def search_past_event_for_teams(home: str, away: str, sport: str = ""):
     # multi-search endpoint surfaces participants for a team-name
     # query, with the most-relevant id first.
     sport_id = _sport_id_from_name(sport)
-    team_a = await _resolve_team_id(home)
-    team_b = await _resolve_team_id(away)
+    team_a = await _resolve_team_id(home, sport_id)
+    team_b = await _resolve_team_id(away, sport_id)
     if not team_a or not team_b or team_a == team_b:
         return None
 
@@ -1076,11 +1076,19 @@ async def search_past_event_for_teams(home: str, away: str, sport: str = ""):
     return None
 
 
-async def _resolve_team_id(team_name: str) -> str:
+async def _resolve_team_id(team_name: str, sport_id: str = "") -> str:
     """First participant-type result for a team-name query. FL's
     /v1/search/multi-search returns participants ranked by relevance,
     so the first hit is reliably the canonical team. Empty string
-    when nothing matches."""
+    when nothing matches.
+
+    sport_id (optional): when provided, prefer participants whose
+    SPORT_ID matches. Without this filter, ambiguous queries like
+    "Central Cordoba" can resolve to "Central Coast Mariners"
+    (Australian A-League) instead of the intended Argentinian Primera
+    team — picking the wrong team_id then makes search_past_event_
+    for_teams walk the wrong team's results and fail.
+    """
     if not team_name:
         return ""
     data = await _fl_get("/v1/search/multi-search", {"query": team_name})
@@ -1092,15 +1100,36 @@ async def _resolve_team_id(team_name: str) -> str:
         results = data.get("DATA") or data.get("data") or []
     else:
         return ""
+    candidates: list = []  # [(team_id, sport_id_str)]
     for it in (results or []):
         if not isinstance(it, dict):
             continue
-        t = it.get("TYPE") or it.get("type") or ""
-        if t in ("participants", "participant"):
-            tid = it.get("ID") or it.get("EVENT_ID") or ""
-            if tid:
+        t = (it.get("TYPE") or it.get("type") or "").lower()
+        if t not in ("participants", "participant"):
+            continue
+        tid = it.get("ID") or it.get("EVENT_ID") or ""
+        if not tid:
+            continue
+        # FL ships sport metadata on participant results under any of
+        # these keys — try each, keep the first non-empty.
+        item_sport = str(
+            it.get("SPORT_ID")
+            or it.get("SPORT")
+            or it.get("sport_id")
+            or it.get("sport")
+            or ""
+        )
+        candidates.append((tid, item_sport))
+    if not candidates:
+        return ""
+    if sport_id:
+        # Prefer a candidate whose sport matches the caller's hint.
+        for tid, isp in candidates:
+            if isp and isp == sport_id:
                 return tid
-    return ""
+    # No sport hint or no match — preserve historical behavior and
+    # return the first participant result (highest FL relevance).
+    return candidates[0][0]
 
 
 # Map our sport names to FL sport_ids. Mirrors the one in main.py

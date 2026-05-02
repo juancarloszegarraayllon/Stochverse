@@ -31,6 +31,8 @@ from caches.state import (
     _STATS_CACHE_TTL,
     _EVENT_NORMALIZED_CACHE,
     _EVENT_NORMALIZED_TTL,
+    _H2H_CACHE,
+    _H2H_CACHE_TTL,
 )
 from enrichment.aggregate import (
     _canonical_game_ticker,
@@ -5998,8 +6000,17 @@ async def get_event_h2h(ticker: str):
     doesn't actually involve both expected teams (its search fallback
     isn't pair-strict and may grab a one-team-match-only result), fall
     back to searching for ANY past event between the two teams from
-    the Kalshi title."""
+    the Kalshi title.
+
+    Cached for _H2H_CACHE_TTL — H2H rows don't change mid-day, and the
+    resolution chain involves 5-6 sequential FL calls on cold cache.
+    Without caching, transient failures on any one round-trip cause
+    the "sometimes shows, sometimes doesn't" pattern users were
+    seeing."""
     ticker = (ticker or "").strip().upper()
+    cached = _H2H_CACHE.get(ticker)
+    if cached and (time.time() - cached["_ts"]) < _H2H_CACHE_TTL:
+        return cached["payload"]
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
     found = None
@@ -6075,12 +6086,14 @@ async def get_event_h2h(ticker: str):
         data = await fetch_event_h2h(fl_id)
         if not data:
             return {"error": "no H2H data available"}
-        return {
+        payload = {
             "data": data,
             "home_name": home_name or title_home,
             "away_name": away_name or title_away,
             "source": "flashlive",
         }
+        _H2H_CACHE[ticker] = {"payload": payload, "_ts": time.time()}
+        return payload
     except Exception as e:
         return {"error": str(e)[:200]}
 
