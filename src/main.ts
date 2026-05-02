@@ -24,6 +24,7 @@ import { renderPredictedLineups } from './blocks/PredictedLineups';
 import { renderHighlights } from './blocks/Highlights';
 import { renderPointsHistory } from './blocks/PointsHistory';
 import { renderDarts } from './blocks/Darts';
+import { renderGolf } from './blocks/Golf';
 
 declare global {
   interface Window {
@@ -122,6 +123,14 @@ declare global {
       // (categorical stats: 180s, checkouts, averages) +
       // throw-by-throw (live progression). Darts-only tab.
       renderDarts?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      // Render the Match → Golf sub-tab from
+      // /api/event/<t>/golf-detail. Tier I sport — uses the
+      // no_duel_event_id + event_id pair, separate endpoint
+      // family. Combined no-duel-data + rounds-results.
+      renderGolf?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
@@ -436,8 +445,15 @@ async function renderDartsByTicker(
   return renderDarts(mount, ticker);
 }
 
+async function renderGolfByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  return renderGolf(mount, ticker);
+}
+
 window.StochverseBundle = {
-  version: '0.5.7',
+  version: '0.5.8',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
@@ -454,6 +470,7 @@ window.StochverseBundle = {
   renderHighlights: renderHighlightsByTicker,
   renderPointsHistory: renderPointsHistoryByTicker,
   renderDarts: renderDartsByTicker,
+  renderGolf: renderGolfByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);

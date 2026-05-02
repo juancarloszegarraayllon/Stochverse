@@ -362,6 +362,22 @@ html,body{overscroll-behavior:none}
 .ed-darts-value{font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
 .ed-darts-score{color:var(--text-dim);font-variant-numeric:tabular-nums}
 .ed-darts-type{color:var(--text-muted);font-size:10px}
+/* Golf block (Golf.ts) — Tier I leaderboard + rounds */
+.ed-golf-wrap{padding:6px 0;font-size:12px}
+.ed-golf-stage{font-size:11px;color:var(--text-muted);font-style:italic;padding:6px 0 10px}
+.ed-golf-section{margin-bottom:16px}
+.ed-golf-head{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border,rgba(255,255,255,0.08))}
+.ed-golf-table{display:flex;flex-direction:column;gap:1px}
+.ed-golf-row{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:4px}
+.ed-golf-row:hover:not(.ed-golf-row-head){background:var(--bg-card,rgba(255,255,255,0.04))}
+.ed-golf-row-head{font-size:10px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;padding-bottom:4px;border-bottom:1px solid var(--border,rgba(255,255,255,0.06))}
+.ed-golf-rank{min-width:28px;text-align:right;font-variant-numeric:tabular-nums;color:var(--text-dim);font-weight:600}
+.ed-golf-name{flex:1;color:var(--text)}
+.ed-golf-country{color:var(--text-muted);font-size:10px;margin-left:4px}
+.ed-golf-score{min-width:60px;text-align:right;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+.ed-golf-thru{min-width:50px;text-align:right;color:var(--text-dim);font-variant-numeric:tabular-nums}
+.ed-golf-round-group{margin-bottom:10px}
+.ed-golf-round-head{font-size:11px;font-weight:600;color:var(--text);margin-bottom:5px}
 .ed-stats-bar{display:flex;height:4px;border-radius:2px;overflow:hidden;margin-top:3px}
 .ed-stats-bar-home{background:var(--green);height:100%}
 .ed-stats-bar-away{background:var(--red);height:100%}
@@ -5031,6 +5047,28 @@ async function _augmentEventCapabilities(panel, ticker, sportStTypes) {
           matchPanelForCaps.insertAdjacentHTML('beforeend', dPanel);
         }
       }
+      // Golf — Tier I, separate endpoint family. /capabilities does
+      // the no_duel_event_id discovery and probes /no-duel-data;
+      // caps.golf is true only when FL has data for this golf event.
+      if (caps.golf === true) {
+        var subTabsBar6 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
+        if (subTabsBar6 && !subTabsBar6.querySelector('button[data-mt="golf"]')) {
+          var gBtn = '<button class="ed-sb-tab" data-mt="golf" onclick="window.switchMatchTab(this)">Leaderboard</button>';
+          // Golf events don't have most other tabs (no Lineups,
+          // no Player Stats), so just insert before any post-match
+          // content tabs or at the end.
+          var gAnchor = subTabsBar6.querySelector('button[data-mt="commentary"]')
+                     || subTabsBar6.querySelector('button[data-mt="highlights"]');
+          if (gAnchor) gAnchor.insertAdjacentHTML('beforebegin', gBtn);
+          else subTabsBar6.insertAdjacentHTML('beforeend', gBtn);
+        }
+        if (!matchPanelForCaps.querySelector('div[data-mt="golf"]')) {
+          var gPanel = '<div data-mt="golf" style="display:none">'
+                     + '<div class="ed-sb-lazy" data-lazy="golf">Loading leaderboard…</div>'
+                     + '</div>';
+          matchPanelForCaps.insertAdjacentHTML('beforeend', gPanel);
+        }
+      }
     }
   } catch (e) { /* augmentation is best-effort — silent on error */ }
 }
@@ -6326,6 +6364,7 @@ window.switchMatchTab = function(btn) {
       else if (target === 'highlights') _loadHighlights(lazy, ticker);
       else if (target === 'points-history') _loadPointsHistory(lazy, ticker);
       else if (target === 'darts') _loadDarts(lazy, ticker);
+      else if (target === 'golf') _loadGolf(lazy, ticker);
       else if (target === 'lineups' && window.StochverseBundle && window.StochverseBundle.renderLineups) {
         window.StochverseBundle.renderLineups(ticker, lazy);
       }
@@ -6555,6 +6594,22 @@ async function _loadDarts(container, ticker) {
     }
   }
   container.innerHTML = '<div class="ed-stats-loading">Darts data unavailable.</div>';
+}
+
+// Golf render: leaderboard (no-duel-data) + per-round results.
+// Tier I sport — separate endpoint family using no_duel_event_id.
+// Backend handles the discovery; frontend just hits
+// /api/event/<t>/golf-detail. Capability-gated.
+async function _loadGolf(container, ticker) {
+  if (window.StochverseBundle && window.StochverseBundle.renderGolf) {
+    try {
+      await window.StochverseBundle.renderGolf(ticker, container);
+      return;
+    } catch (e) {
+      // Fall through to error state.
+    }
+  }
+  container.innerHTML = '<div class="ed-stats-loading">Golf data unavailable.</div>';
 }
 
 // Player Stats render: groups players by team and uses FlashLive's
@@ -6920,6 +6975,7 @@ window.switchSBTab = function(btn) {
       else if (lazyKey === "highlights") _loadHighlights(lazy, ticker);
       else if (lazyKey === "points-history") _loadPointsHistory(lazy, ticker);
       else if (lazyKey === "darts") _loadDarts(lazy, ticker);
+      else if (lazyKey === "golf") _loadGolf(lazy, ticker);
     }
   }
 };

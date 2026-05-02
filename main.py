@@ -6606,6 +6606,67 @@ async def get_event_predicted_lineups(ticker: str):
         return {"error": str(e)[:200]}
 
 
+async def _fl_discover_no_duel_event_id(fl_id: str) -> str:
+    """Walk /v1/events/list for golf (sport_id=23) to find the
+    NO_DUEL_EVENT_ID paired with this event. Golf is the only sport
+    whose endpoints require this pair (probe v4 confirmed
+    /no-duel-data and /rounds-results both 422 without it). Returns
+    "" if not found in the ±1 day window — the golf modal then
+    gracefully reports "no data".
+    """
+    from flashlive_feed import _fl_get
+    for indent in (0, -1, 1, -2, 2):
+        data = await _fl_get("/v1/events/list", {
+            "sport_id": 23, "timezone": "0", "indent_days": indent,
+        })
+        if not isinstance(data, dict):
+            continue
+        for tournament in (data.get("DATA") or []):
+            for ev in (tournament.get("EVENTS") or []):
+                if str(ev.get("EVENT_ID") or "") == fl_id:
+                    return str(ev.get("NO_DUEL_EVENT_ID") or "")
+    return ""
+
+
+@app.get("/api/event/{ticker}/golf-detail")
+async def get_event_golf_detail(ticker: str):
+    """Fetch golf-specific data: /no-duel-data (event metadata,
+    per-participant ranking) + /rounds-results (per-round leaderboard).
+    Both endpoints require the no_duel_event_id + event_id pair —
+    discovered via /v1/events/list because the pair isn't in our
+    cached event records.
+    """
+    import asyncio
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = next((r for r in records if r.get("event_ticker") == ticker), None)
+    if not found:
+        return {"error": "event not found"}
+    try:
+        g = await _find_fl_game(found)
+        if not g:
+            return {"error": "FlashLive doesn't cover this event yet"}
+        fl_id = g.get("event_id")
+        if not fl_id:
+            return {"error": "no FlashLive event ID"}
+        no_duel_id = await _fl_discover_no_duel_event_id(fl_id)
+        if not no_duel_id:
+            return {"error": "golf event pairing not found in FL list"}
+        from flashlive_feed import _fl_get
+        params = {"no_duel_event_id": no_duel_id, "event_id": fl_id}
+        no_duel_d, rounds_d = await asyncio.gather(
+            _fl_get("/v1/events/no-duel-data", params),
+            _fl_get("/v1/events/rounds-results", params),
+        )
+        if not no_duel_d and not rounds_d:
+            return {"error": "no golf data available"}
+        return {"no_duel": no_duel_d, "rounds": rounds_d,
+                "source": "flashlive"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
 @app.get("/api/event/{ticker}/darts-detail")
 async def get_event_darts_detail(ticker: str):
     """Fetch darts-specific data: statistics-alt (categorical stat
@@ -7131,6 +7192,24 @@ async def event_capabilities(ticker: str):
             if _bracket_from_warm_cache(stage_id, _TOURNAMENT_BRACKET_CACHE):
                 standings_caps["draw"] = True
         capabilities["standings"] = standings_caps
+        # Golf — Tier I in DETAILED_EVENT_STATS_SCHEMA.md §1. Different
+        # endpoint family (no_duel_event_id + event_id pair). Done
+        # sequentially after the parallel probes because the no-duel
+        # discovery requires walking /v1/events/list first. Costs one
+        # extra /list call per golf modal open — negligible (golf is
+        # low-traffic and the fetch is rate-limited via _fl_throttle).
+        capabilities["golf"] = False
+        if (sport or "").strip().lower() == "golf":
+            try:
+                no_duel_id = await _fl_discover_no_duel_event_id(fl_id)
+                if no_duel_id:
+                    g_data = await _fl_get(
+                        "/v1/events/no-duel-data",
+                        {"no_duel_event_id": no_duel_id, "event_id": fl_id},
+                    )
+                    capabilities["golf"] = _fl_has_data(g_data)
+            except Exception:
+                pass
         payload = {
             "ticker": ticker_norm,
             "event_id": fl_id,
