@@ -196,12 +196,29 @@ async function renderLineupsByTicker(
     const parts = title.split(/\s+(?:vs\.?|v|at)\s+/i);
     const homeName = parts[0]?.trim() || 'Home';
     const awayName = parts[1]?.trim() || 'Away';
-    renderLineups(
-      mount,
-      (ev.data as { lineups?: unknown }).lineups as Parameters<typeof renderLineups>[1],
-      homeName,
-      awayName,
-    );
+    let lineups = (ev.data as { lineups?: unknown }).lineups as Parameters<
+      typeof renderLineups
+    >[1];
+    // Fallback to dedicated /stats endpoint when /normalized's
+    // lineups probe came back empty (parallel fan-out individual
+    // probe failure under FL pressure). /stats parses lineups into
+    // the same shape, no adapter needed.
+    if (!hasLineupsData(lineups)) {
+      try {
+        const r = await fetch(
+          '/api/event/' + encodeURIComponent(ticker) + '/stats',
+        );
+        if (r.ok) {
+          const d = await r.json();
+          if (d && !d.error && hasLineupsData(d.lineups)) {
+            lineups = d.lineups as Parameters<typeof renderLineups>[1];
+          }
+        }
+      } catch {
+        /* keeps the empty-state in renderLineups */
+      }
+    }
+    renderLineups(mount, lineups, homeName, awayName);
   } catch (ex) {
     const msg = ex instanceof Error ? ex.message : String(ex);
     mount.innerHTML =
@@ -228,13 +245,54 @@ async function renderStatsByTicker(
   mount.innerHTML = '<div class="ed-stats-loading">Loading stats…</div>';
   try {
     const ev: NormalizedEvent = await fetchNormalized(ticker);
-    renderStats(mount, ev.data?.stats as Parameters<typeof renderStats>[1]);
+    let data = ev.data?.stats as Parameters<typeof renderStats>[1];
+    // Fallback to dedicated /stats when /normalized's statistics
+    // probe came back empty (parallel fan-out individual probe
+    // failure under FL pressure).
+    if (!data || !hasStatsData(data)) {
+      const fb = await fetchStatsFallback(ticker);
+      if (fb) data = fb;
+    }
+    renderStats(mount, data);
   } catch (ex) {
     const msg = ex instanceof Error ? ex.message : String(ex);
     mount.innerHTML =
       '<div class="ed-stats-loading">Stats failed to load: ' +
       msg.replace(/[<>&]/g, '') +
       '</div>';
+  }
+}
+
+function hasStatsData(d: unknown): boolean {
+  if (!d || typeof d !== 'object') return false;
+  const o = d as { stats?: unknown[]; stats_grouped?: unknown[] };
+  return (
+    (Array.isArray(o.stats) && o.stats.length > 0) ||
+    (Array.isArray(o.stats_grouped) && o.stats_grouped.length > 0)
+  );
+}
+
+function hasLineupsData(d: unknown): boolean {
+  if (!d || typeof d !== 'object') return false;
+  const o = d as { home?: { players?: unknown[] }; away?: { players?: unknown[] } };
+  const homeN = Array.isArray(o.home?.players) ? o.home!.players!.length : 0;
+  const awayN = Array.isArray(o.away?.players) ? o.away!.players!.length : 0;
+  return homeN > 0 || awayN > 0;
+}
+
+async function fetchStatsFallback(
+  ticker: string,
+): Promise<Parameters<typeof renderStats>[1] | null> {
+  try {
+    const r = await fetch(
+      '/api/event/' + encodeURIComponent(ticker) + '/stats',
+    );
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (!d || d.error) return null;
+    return d as Parameters<typeof renderStats>[1];
+  } catch {
+    return null;
   }
 }
 
@@ -278,7 +336,7 @@ async function renderMissingPlayersByTicker(
 }
 
 window.StochverseBundle = {
-  version: '0.5.1',
+  version: '0.5.2',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,

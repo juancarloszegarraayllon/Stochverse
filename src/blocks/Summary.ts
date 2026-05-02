@@ -49,8 +49,28 @@ export async function renderSummary(
     '<div class="ed-stats-loading">Loading timeline…</div>';
   try {
     const ev: NormalizedEvent = await fetchNormalized(ticker);
-    const incidents = ((ev.data as { incidents?: Incident[] }).incidents ||
+    let incidents = ((ev.data as { incidents?: Incident[] }).incidents ||
       []) as Incident[];
+    // Fallback to dedicated /stats endpoint when /normalized's
+    // summary_incidents probe came back empty (parallel fan-out
+    // individual probe failure under FL pressure). /stats parses
+    // the same FL data into the same shape, so no shape adapter
+    // needed.
+    if (incidents.length === 0) {
+      try {
+        const r = await fetch(
+          '/api/event/' + encodeURIComponent(ticker) + '/stats',
+        );
+        if (r.ok) {
+          const d = await r.json();
+          if (d && !d.error && Array.isArray(d.incidents)) {
+            incidents = d.incidents as Incident[];
+          }
+        }
+      } catch {
+        /* keeps the empty-state below */
+      }
+    }
     renderInto(mount, incidents);
   } catch {
     mount.innerHTML =
