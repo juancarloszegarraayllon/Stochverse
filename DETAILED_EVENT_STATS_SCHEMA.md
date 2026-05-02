@@ -323,14 +323,30 @@ when each sport is in season.
 Tackle in this order. Every item below is backed by real response
 keys from probe v2 inventory or v4 canonical retest.
 
-1. **`/v1/events/player-stats` block** — NEW priority #1 after probe v4.
-   335 KB on canonical, 6 top-level data keys (`TEAMS, PLAYERS,
-   STATS_TYPE_GROUPS, STATS_TYPES, STATS, RATINGS`). This is the
-   single highest-value block in the inventory — per-player tracking
-   we've been missing. Gate render on
-   `/last-change.PLAYER_STATISTICS` hash. Need a per-sport sweep to
-   know which sports populate it; spec hints at major team sports.
-   ~1.5 days (block + capability gating + sport sweep).
+1. **`/v1/events/player-stats` — capability gating + observability**
+   (block already built — see `src/blocks/PlayerStats.ts`,
+   `_loadPlayerStats` in `static/index.html`, and
+   `/api/event/{ticker}/player-stats` route in `main.py:6547`).
+   Why it didn't ship visibly to users before: the sub-tab gate was
+   static (`!isIndividual`) so the tab showed for all team sports
+   regardless of data, and FL returned 404 on most random events →
+   users always saw "No player stats available" empty state.
+
+   Done in this revision:
+   - Sub-tab now hidden by default; injected by
+     `_augmentEventCapabilities` only when
+     `/api/event/{ticker}/capabilities.player_stats === true`
+     (option (a) — capability-driven, no empty state ever shown).
+   - Observability added in `flashlive_feed._fl_get` —
+     `FL_OBS=1 path=… status=… bytes=… event_id=… sport_id=…`
+     log lines for player-stats, player-statistics-alt, commentary,
+     throw-by-throw, scorecard family, live-odds-alt, highlights,
+     predicted-lineups. Aggregating these over real user traffic
+     answers Q1, Q6, Q7 organically.
+
+   Remaining: visual verification against canonical `Sbld5SC5` in dev
+   to confirm the renderer displays the rich 335 KB payload correctly.
+   ~30 min, blocked on local dev environment.
 
 2. **`/v1/events/predicted-lineups` across team sports** — universal
    pre-match block we currently miss. Soccer, Basketball, Hockey,

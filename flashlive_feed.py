@@ -759,6 +759,26 @@ def _parse_event(ev):
         return None
 
 
+# Endpoints we want hit-rate observability on. Probe v4 (2026-05-02)
+# confirmed these return data on the OpenAPI spec's canonical IDs but
+# 404'd on most random events probe v2 sampled. Logging each call
+# builds the per-sport coverage matrix DETAILED_EVENT_STATS_SCHEMA.md
+# §9 Q1/Q6/Q7 still leave open. Prefix-match against the path so all
+# variants (e.g. /commentary, /commentary-alt) are captured.
+_FL_OBSERVE_PATHS = (
+    "/v1/events/player-stats",
+    "/v1/events/player-statistics-alt",
+    "/v1/events/commentary",         # also matches /commentary-alt
+    "/v1/events/throw-by-throw",
+    "/v1/events/scorecard",
+    "/v1/events/fall-of-wickets",
+    "/v1/events/ball-by-ball",
+    "/v1/events/live-odds-alt",
+    "/v1/events/highlights",
+    "/v1/events/predicted-lineups",
+)
+
+
 async def _fl_get(path: str, params: dict = None):
     """Shared GET helper for FlashLive API calls."""
     if not API_KEY or httpx is None:
@@ -770,13 +790,32 @@ async def _fl_get(path: str, params: dict = None):
     # Global rate limiter — shared with the broad-poll loop so warm
     # fan-out + scheduled poll calls can't burst past Mega's cap.
     await _fl_throttle()
+    observe = any(path.startswith(p) for p in _FL_OBSERVE_PATHS)
+    status = 0
+    size = 0
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.get(f"{BASE_URL}{path}", headers=headers, params=params)
-            if r.status_code == 200:
-                return r.json()
+            status = r.status_code
+            if status == 200:
+                body = r.json()
+                size = len(r.content)
+                if observe:
+                    # FL_OBS=1 lines aggregate easily via grep; downstream
+                    # tooling can build per-sport / per-league coverage
+                    # matrices for §9 Q1/Q6/Q7 without a separate probe.
+                    log.info(
+                        "FL_OBS=1 path=%s status=200 bytes=%d event_id=%s sport_id=%s",
+                        path, size, params.get("event_id", ""), params.get("sport_id", ""),
+                    )
+                return body
         except Exception:
             pass
+    if observe:
+        log.info(
+            "FL_OBS=1 path=%s status=%d bytes=0 event_id=%s sport_id=%s",
+            path, status, params.get("event_id", ""), params.get("sport_id", ""),
+        )
     return None
 
 

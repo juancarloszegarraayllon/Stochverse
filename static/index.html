@@ -4402,7 +4402,13 @@ async function hydrateGameStats(evTicker) {
     var hasNews = true;
     var hasCommentary = true;
     var hasMissingPlayers = !isIndividual;
-    var hasPlayerStats = !isIndividual;
+    // Player Stats: hidden by default, injected by
+    // _augmentEventCapabilities once /capabilities confirms the
+    // event has data. Probe v4 (2026-05-02) showed FL returns
+    // /player-stats only for top-tier league events, not the
+    // long tail — gating per-event prevents the empty "No player
+    // stats available" state from appearing on most matches.
+    var hasPlayerStats = false;
     var stTypes = _capStandingTypes(sportCaps, sport);
     var hasStandings = stTypes.length > 0;
     var stHasOverall = stTypes.indexOf("overall") >= 0
@@ -4865,6 +4871,35 @@ async function _augmentEventCapabilities(panel, ticker, sportStTypes) {
       // tab order in the strip.
       var mains = panel.querySelectorAll(".ed-sb-main");
       if (mains.length) mains[mains.length - 1].insertAdjacentHTML("afterend", ph);
+    }
+    // ── Player Stats sub-tab — capability-gated injection ──
+    // Initial render hides the tab (hasPlayerStats=false). When
+    // /capabilities confirms FL has player-stats for this event,
+    // inject the sub-tab button + lazy-load panel into the MATCH
+    // main panel. Mirrors the standings dynamic-injection pattern
+    // above. Empty-state ("No player stats available") never
+    // appears because the tab only exists when data exists.
+    if (caps.player_stats === true) {
+      var matchPanel = panel.querySelector('.ed-sb-main[data-main="match"]');
+      if (matchPanel) {
+        var subTabsBar = matchPanel.querySelector('.ed-sb-sub-tabs');
+        if (subTabsBar && !subTabsBar.querySelector('button[data-mt="player-stats"]')) {
+          var psBtn = '<button class="ed-sb-tab" data-mt="player-stats" onclick="window.switchMatchTab(this)">Player Stats</button>';
+          // Insert before Commentary if present, else before
+          // Missing, else at end — matches the order in the
+          // initial-render strip at the hydrateGameStats site.
+          var anchor = subTabsBar.querySelector('button[data-mt="commentary"]')
+                    || subTabsBar.querySelector('button[data-mt="missing-players"]');
+          if (anchor) anchor.insertAdjacentHTML('beforebegin', psBtn);
+          else subTabsBar.insertAdjacentHTML('beforeend', psBtn);
+        }
+        if (!matchPanel.querySelector('div[data-mt="player-stats"]')) {
+          var psPanel = '<div data-mt="player-stats" style="display:none">'
+                      + '<div class="ed-sb-lazy" data-lazy="player-stats">Loading player stats…</div>'
+                      + '</div>';
+          matchPanel.insertAdjacentHTML('beforeend', psPanel);
+        }
+      }
     }
   } catch (e) { /* augmentation is best-effort — silent on error */ }
 }

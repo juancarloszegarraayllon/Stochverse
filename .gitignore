@@ -7,3 +7,9 @@ __pycache__/
 # only node_modules and TS build cache are ignored.
 node_modules/
 *.tsbuildinfo
+
+# Third-party reference docs (FL API PDF, OpenAPI spec, etc.) —
+# useful to have locally for cross-reference during dev, but not
+# tracked in git. Re-download from RapidAPI / HugeAPI if needed.
+*.pdf
+fl-openapi.json
