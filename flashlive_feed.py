@@ -56,18 +56,21 @@ _ADDED_TIME_INFLIGHT: set = set()  # event_ids currently being fetched (dedup re
 POLL_INTERVAL = int(os.environ.get("FLASHLIVE_POLL_INTERVAL", "60"))
 LIVE_POLL_INTERVAL = int(os.environ.get("FLASHLIVE_LIVE_POLL_INTERVAL", "10"))
 
-# Global FlashLive rate limiter. Mega tier hard-caps at 10 req/sec
-# and we have two concurrent code paths hitting the API: the broad
-# poll's sequential per-sport-day fetch loop, and the per-event warm
-# path that fans out for viewport-visible cards. Each path was paced
-# in isolation but together they spiked above the cap, dropping
-# random sport fetches with HTTP 429s. Run every FL HTTP call
-# through _fl_throttle() so the two paths share one rate budget.
-# 200 ms min gap = 5 req/sec sustained, which keeps us comfortably
-# under 10/sec even when both paths are active.
+# Global FlashLive rate limiter. The default 0.20s gap (5 req/sec
+# sustained) was set when the project was on the 10 req/s consumer
+# tier. With RapidAPI Mega the per-second limit is dramatically
+# higher, and the old 200ms gap was forcing the 6-probe parallel
+# fan-out in /normalized to *serialize* — each panel load was eating
+# ~1s of pure throttle wait that the API itself didn't require.
+#
+# Default now 0.025s (40 req/sec sustained) — tight enough that 6
+# parallel probes finish in real-parallel (~25ms apart), loose enough
+# to absorb both the broad poll and per-event warm path under heavy
+# load. Override via FLASHLIVE_MIN_GAP_S env var if you see 429s
+# (push it back up) or if you switch to a higher tier (push down).
 _FL_THROTTLE_LOCKS: dict = {}
 _FL_LAST_CALL_TS = 0.0
-_FL_MIN_GAP_S = float(os.environ.get("FLASHLIVE_MIN_GAP_S", "0.20"))
+_FL_MIN_GAP_S = float(os.environ.get("FLASHLIVE_MIN_GAP_S", "0.025"))
 
 
 async def _fl_throttle():
