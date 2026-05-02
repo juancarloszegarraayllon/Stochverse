@@ -1,0 +1,32 @@
+name: FL Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/explore-repository-gMYHu]
+    paths:
+      - 'fl_probe/**'
+      - '.github/workflows/fl_probe.yml'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run probe
+        env:
+          FLASHLIVE_API_KEY: ${{ secrets.FLASHLIVE_API_KEY }}
+        run: |
+          if [ -z "$FLASHLIVE_API_KEY" ]; then
+            echo "::error::FLASHLIVE_API_KEY secret is not set on this repo."
+            echo "Add it in: Settings → Secrets and variables → Actions → New repository secret"
+            echo "Name: FLASHLIVE_API_KEY  Value: <paste your RapidAPI key>"
+            exit 1
+          fi
+          python3 fl_probe/probe.py
