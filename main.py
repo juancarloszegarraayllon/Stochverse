@@ -6104,10 +6104,20 @@ async def get_event_standings(ticker: str, standing_type: str = "overall"):
     try:
         from flashlive_feed import match_game as flash_match, _fl_get
         g = await _find_fl_game(found)
-        if not g:
-            return {"error": "FlashLive doesn't cover this match yet"}
-        stage_id = g.get("tournament_stage_id", "")
-        season_id = g.get("tournament_season_id", "")
+        # Fallback to the persistent series→stage cache when FL hasn't
+        # loaded the match yet. Standings + top scorers don't need the
+        # specific event_id — only the tournament stage_id, which we
+        # may already have from a sibling event in the same series.
+        stage_id = (g or {}).get("tournament_stage_id", "")
+        season_id = (g or {}).get("tournament_season_id", "")
+        home_name = (g or {}).get("home_name", "")
+        away_name = (g or {}).get("away_name", "")
+        if not stage_id:
+            series = (found.get("series_ticker") or "").upper()
+            cached = _SERIES_TO_STAGE_CACHE.get(series) if series else None
+            if cached and cached.get("stage_id"):
+                stage_id = cached["stage_id"]
+                season_id = cached.get("season_id", "") or season_id
         if not stage_id:
             return {"error": "no tournament stage ID available"}
         params = {"tournament_stage_id": stage_id, "standing_type": standing_type}
@@ -6119,9 +6129,9 @@ async def get_event_standings(ticker: str, standing_type: str = "overall"):
         return {
             "data": data,
             "standing_type": standing_type,
-            "home_name": g.get("home_name", ""),
-            "away_name": g.get("away_name", ""),
-            "current_event_id": g.get("event_id", ""),
+            "home_name": home_name,
+            "away_name": away_name,
+            "current_event_id": (g or {}).get("event_id", ""),
             "source": "flashlive",
         }
     except Exception as e:
@@ -6144,10 +6154,17 @@ async def get_event_topscorers(ticker: str):
     try:
         from flashlive_feed import match_game as flash_match, fetch_top_scorers
         g = await _find_fl_game(found)
-        if not g:
-            return {"error": "FlashLive doesn't cover this match yet"}
-        stage_id = g.get("tournament_stage_id", "")
-        season_id = g.get("tournament_season_id", "")
+        # Same future-fixture fallback as /standings — top scorers are
+        # tournament-level, not event-level, so the cached stage_id
+        # works even when FL hasn't loaded this specific match yet.
+        stage_id = (g or {}).get("tournament_stage_id", "")
+        season_id = (g or {}).get("tournament_season_id", "")
+        if not stage_id:
+            series = (found.get("series_ticker") or "").upper()
+            cached = _SERIES_TO_STAGE_CACHE.get(series) if series else None
+            if cached and cached.get("stage_id"):
+                stage_id = cached["stage_id"]
+                season_id = cached.get("season_id", "") or season_id
         if not stage_id:
             return {"error": "no tournament stage ID available"}
         data = await fetch_top_scorers(stage_id, season_id)

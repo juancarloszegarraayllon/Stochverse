@@ -159,9 +159,46 @@ async function renderStandingsTypeByTicker(
       return;
     }
     if (standingType === 'top_scores' || standingType === 'top_scorers') {
-      const ts = (
+      let ts = (
         ev.data?.standings as { top_scorers?: import('./types/normalized').TopScorers | null }
       )?.top_scorers;
+      // Fallback to dedicated /topscorers endpoint when /normalized's
+      // probe came back empty (parallel fan-out individual probe
+      // failure under FL pressure, OR cached stage_id was for the
+      // wrong sub-stage and top_scorers live on a different one).
+      if (!ts || !ts.rows || ts.rows.length === 0) {
+        try {
+          const r = await fetch(
+            '/api/event/' + encodeURIComponent(ticker) + '/topscorers',
+          );
+          if (r.ok) {
+            const d = await r.json();
+            if (d && !d.error && d.data) {
+              // Compact the FL response into the {rows, total, has_more}
+              // shape renderTopScorers expects.
+              const rawRows: any[] =
+                d.data.ROWS ||
+                (Array.isArray(d.data.DATA) && d.data.DATA[0]?.ROWS) ||
+                [];
+              if (rawRows.length > 0) {
+                ts = {
+                  rows: rawRows.map((r: any) => ({
+                    rank: r.TS_RANK,
+                    name: r.TS_PLAYER_NAME_PA || r.TS_PLAYER_NAME,
+                    team: r.TEAM_NAME,
+                    goals: r.TS_PLAYER_GOALS,
+                    assists: r.TS_PLAYER_ASISTS,
+                  })),
+                  total: rawRows.length,
+                  has_more: false,
+                };
+              }
+            }
+          }
+        } catch {
+          /* keep the empty-state in renderTopScorers */
+        }
+      }
       renderTopScorers(mount, ts, ticker);
       return;
     }
@@ -336,7 +373,7 @@ async function renderMissingPlayersByTicker(
 }
 
 window.StochverseBundle = {
-  version: '0.5.2',
+  version: '0.5.3',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
