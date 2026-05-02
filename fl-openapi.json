@@ -1,0 +1,4302 @@
+{
+  "openapi": "3.0.2",
+  "info": {
+    "title": "FlashLive Sports",
+    "version": "1.0"
+  },
+  "servers": [
+    {
+      "url": "https://flashlive-sports-api.hgapi.top",
+      "description": "Main server"
+    }
+  ],
+  "paths": {
+    "/v1/search/multi-search": {
+      "get": {
+        "tags": [
+          "search"
+        ],
+        "summary": "Multi Search",
+        "description": "Search teams, tournaments and players. Results are shown as you type.",
+        "operationId": "Multi search",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 50,
+              "description": "Query, search request",
+              "title": "Query"
+            },
+            "description": "Query, search request",
+            "example": "mess"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/rankings/list": {
+      "get": {
+        "tags": [
+          "rankings"
+        ],
+        "summary": "Rankings List",
+        "description": "Get a list of ranking by sport ID",
+        "operationId": "Ranking List",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/rankings/data": {
+      "get": {
+        "tags": [
+          "rankings"
+        ],
+        "summary": "Rankings Data",
+        "description": "Get a ranking data by ranking ID",
+        "operationId": "Ranking Data",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "ranking_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Ranking id, use `Ranking list` endpoint",
+              "title": "Ranking Id"
+            },
+            "description": "Ranking id, use `Ranking list` endpoint",
+            "example": "dSJr14Y8"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sports/list": {
+      "get": {
+        "tags": [
+          "sports"
+        ],
+        "summary": "Sports List",
+        "description": "Get a list of sports",
+        "operationId": "Sports list",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Sports List"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sports/events-count": {
+      "get": {
+        "tags": [
+          "sports"
+        ],
+        "summary": "Sports Events Count",
+        "description": "Get data about the sport and the number of sport events",
+        "operationId": "Number of sport events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "timezone",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 12,
+              "minimum": -12,
+              "description": "Time zone",
+              "title": "Timezone"
+            },
+            "description": "Time zone",
+            "example": -4
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/list": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events List",
+        "description": "Get a list of events by sport_id. \u003Cbr\u003E `STAGE_TYPE` - main event status, `STAGE` - more event status. [List of object statuses:](https://rapidapi.com/tipsters/api/flashlive-sports/tutorials/flashlive-list-of-object-statuses)",
+        "operationId": "List of events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "timezone",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 12,
+              "minimum": -12,
+              "description": "Time zone",
+              "title": "Timezone"
+            },
+            "description": "Time zone",
+            "example": -4
+          },
+          {
+            "name": "indent_days",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 7,
+              "minimum": -7,
+              "description": "Number of days from today. Ex: `-1` yesterday",
+              "title": "Indent Days"
+            },
+            "description": "Number of days from today. Ex: `-1` yesterday",
+            "example": "-1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/live-list": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Live Events Data",
+        "description": "Get list of live events. Use `/live-update` to get changes in live events!",
+        "operationId": "List of live events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "timezone",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 12,
+              "minimum": -12,
+              "description": "Time zone",
+              "title": "Timezone"
+            },
+            "description": "Time zone",
+            "example": -4
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/list-main-odds": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events List Main Odds",
+        "description": "Get a list of main odds by sport and date",
+        "operationId": "List of main odds",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "timezone",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 12,
+              "minimum": -12,
+              "description": "Time zone",
+              "title": "Timezone"
+            },
+            "description": "Time zone",
+            "example": -4
+          },
+          {
+            "name": "indent_days",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 7,
+              "minimum": -7,
+              "description": "Number of days from today. Ex: `-1` yesterday",
+              "title": "Indent Days"
+            },
+            "description": "Number of days from today. Ex: `-1` yesterday",
+            "example": "-1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/brief": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Brief",
+        "description": "Get brief data by event ID. It is better to use Event Details and Event Data Brief endpoints",
+        "operationId": "Event Data Brief",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "MaEBhnGC"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/data": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Data",
+        "description": "Get all event data by event ID",
+        "operationId": "Event Data",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "6ZCocWsb"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/highlights": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Highlights",
+        "description": "Get highlights video by event ID",
+        "operationId": "Event Highlights (video)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "Mss8F4uf"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/summary": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Summary",
+        "description": "Get summary of the event by event ID. Incidents of the match",
+        "operationId": "Event Summary",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "6ZCocWsb"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/odds": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Odds",
+        "description": "Get odds by event ID",
+        "operationId": "Event Odds",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "6ZCocWsb"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/live-odds-alt": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Live Odds Alt",
+        "description": "Get live odds by event ID",
+        "operationId": "Event Odds live (alt)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "bet_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/LiveBetType"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "6ZCocWsb"
+          },
+          {
+            "name": "book_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "description": "Bookmaker id, 453 1xbet, 16 bet365",
+              "title": "Book Id"
+            },
+            "description": "Bookmaker id, 453 1xbet, 16 bet365",
+            "example": 453
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/statistics": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Statistics",
+        "description": "Get event statistics by event ID",
+        "operationId": "Event Statistics",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "lzEM9v0K"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/statistics-alt": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Statistics Alt",
+        "description": "Get event statistics by event ID (darts)",
+        "operationId": "Event Statistics (alt)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "lIYk1eY8"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/points-history": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Points History",
+        "description": "Get the history of points by event ID. Point by Point",
+        "operationId": "Event Points history",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "6ZCocWsb"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/lineups": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Lineups",
+        "description": "Get starting lineups by event ID",
+        "operationId": "Event Starting lineups",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "biWgccO3"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/missing-players": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Missing Players",
+        "description": "Get all missing players by event ID",
+        "operationId": "Event Missing players",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "6ZCocWsb"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/news": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events News",
+        "description": "Get news by event ID",
+        "operationId": "Event News",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "6ZCocWsb"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/commentary": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Commentary",
+        "description": "Get a comment on an event by event ID",
+        "operationId": "Event Commentary",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "4U8yxaPL"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/commentary-alt": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Commentary Alt",
+        "description": "Get a comment on an event (cricket) by event ID",
+        "operationId": "Event Commentary alt (cricket)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "tK1xeE9p"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/scorecard": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Scorecard",
+        "description": "Get a scorecard on an event (cricket) by event ID",
+        "operationId": "Event Scorecard (cricket)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "tK1xeE9p"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/fall-of-wickets": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Fall Of Wickets",
+        "description": "Get a fall of wickets on an event (cricket) by event ID",
+        "operationId": "Event Fall wickets (cricket)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "tK1xeE9p"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/ball-by-ball": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Ball By Ball",
+        "description": "Get a ball by ball on an event (cricket) by event ID",
+        "operationId": "Event Ball-ball (cricket)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "tK1xeE9p"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/throw-by-throw": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Throw By Throw",
+        "description": "Get throw by throw (darts) by event ID",
+        "operationId": "Event Throw-throw (darts)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "j9TDJ0XI"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/report": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Report",
+        "description": "Get an event report by event ID",
+        "operationId": "Event Report",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "4U8yxaPL"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/h2h": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events H2H",
+        "description": "Get events between two teams by event ID",
+        "operationId": "H2H events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "n9Wtc6KT"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/last-change": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Last Change",
+        "description": "Get new data keys. Call this point to see what data has been changed.",
+        "operationId": "Event Last-change",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "4U8yxaPL"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/live-update": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Live Update",
+        "description": "Get only new data into live-events by sport_id. Call every 5 seconds.",
+        "operationId": "Changes to live events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/player-statistics-alt": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Player Statistics Alt",
+        "description": "Get player statistics by event ID, (basketball)",
+        "operationId": "Event Player statistics alt (basketball)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "fXx7UFrK"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/rounds-results": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Rounds Results",
+        "description": "Rounds results (golf) by  and event ID, (golf)",
+        "operationId": "Event Rounds results (golf)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "no_duel_event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "No duel event id (NO_DUEL_EVENT_ID)",
+              "title": "No Duel Event Id"
+            },
+            "description": "No duel event id (NO_DUEL_EVENT_ID)",
+            "example": "tOTtyuU7"
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "n78WB41T"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/no-duel-data": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "No Duel Data",
+        "description": "Data on the No-duel event, (golf)",
+        "operationId": "Event Data No-duel",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "no_duel_event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "No duel event id (NO_DUEL_EVENT_ID)",
+              "title": "No Duel Event Id"
+            },
+            "description": "No duel event id (NO_DUEL_EVENT_ID)",
+            "example": "tOTtyuU7"
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 20,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "n78WB41T"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/racing-details": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Racing Details",
+        "description": "Racing details, (HORSE_RACING)",
+        "operationId": "Racing details",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 35
+          },
+          {
+            "name": "timezone",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 12,
+              "minimum": -12,
+              "description": "Time zone",
+              "title": "Timezone"
+            },
+            "description": "Time zone",
+            "example": -4
+          },
+          {
+            "name": "tournament_template_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Tournament template ID",
+              "title": "Tournament Template Id"
+            },
+            "description": "Tournament template ID",
+            "example": "fsB7cpNF"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/details": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Details",
+        "description": "Get event details by event ID",
+        "operationId": "Event Details (beta)",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "6ZCocWsb"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/summary-results": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Summary Results",
+        "description": "Get event summary results by event ID",
+        "operationId": "Event Summary results",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "6ZCocWsb"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/summary-incidents": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Summary Incidents",
+        "description": "Get event summary incidents by event ID",
+        "operationId": "Event Summary incidents",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "6ZCocWsb"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/prematch-odds": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Prematch Odds",
+        "description": "Get event prematch odds by event ID",
+        "operationId": "Event Prematch odds",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "G8hqiThp"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/player-stats": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Player Stats",
+        "description": "Get event Player stats by event ID",
+        "operationId": "Event Player Stats",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "Sbld5SC5"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/predicted-lineups": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Events Predicted Lineups",
+        "description": "Get event predicted lineups by event ID",
+        "operationId": "Event Predicted_lineups",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Event id",
+              "title": "Event Id"
+            },
+            "description": "Event id",
+            "example": "27cNiVKa"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/teams/data": {
+      "get": {
+        "tags": [
+          "teams"
+        ],
+        "summary": "Teams Data",
+        "description": "Get team data by team ID",
+        "operationId": "Team Data",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "team_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Team id",
+              "title": "Team Id"
+            },
+            "description": "Team id",
+            "example": "Wtn9Stg0"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/teams/results": {
+      "get": {
+        "tags": [
+          "teams"
+        ],
+        "summary": "Teams Results",
+        "description": "Get team results by team ID. Use the pagination",
+        "operationId": "Team Results events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "team_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Team id",
+              "title": "Team Id"
+            },
+            "description": "Team id",
+            "example": "Wtn9Stg0"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number",
+            "example": "1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/teams/fixtures": {
+      "get": {
+        "tags": [
+          "teams"
+        ],
+        "summary": "Teams Fixtures",
+        "description": "Get upcoming events by team ID. Use the pagination",
+        "operationId": "Team Fixtures events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "team_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Team id",
+              "title": "Team Id"
+            },
+            "description": "Team id",
+            "example": "Wtn9Stg0"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number",
+            "example": "1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/teams/news": {
+      "get": {
+        "tags": [
+          "teams"
+        ],
+        "summary": "Teams News",
+        "description": "Get a list of news by team ID",
+        "operationId": "Team News",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "team_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 10,
+              "description": "Team id",
+              "title": "Team Id"
+            },
+            "description": "Team id",
+            "example": "Wtn9Stg0"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/teams/squad": {
+      "get": {
+        "tags": [
+          "teams"
+        ],
+        "summary": "Teams Squad",
+        "description": "Get squad by team ID",
+        "operationId": "Team Squad",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "team_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 10,
+              "description": "Team id",
+              "title": "Team Id"
+            },
+            "description": "Team id",
+            "example": "Wtn9Stg0"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/teams/transfers": {
+      "get": {
+        "tags": [
+          "teams"
+        ],
+        "summary": "Teams Transfers",
+        "description": "Get team transfers by team ID",
+        "operationId": "Team Transfers",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "team_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Team id",
+              "title": "Team Id"
+            },
+            "description": "Team id",
+            "example": "Wtn9Stg0"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number",
+            "example": "1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tournaments/list": {
+      "get": {
+        "tags": [
+          "tournaments"
+        ],
+        "summary": "Tournaments List",
+        "description": "Get a list of tournaments by sport ID",
+        "operationId": "Tournaments list",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tournaments/popular": {
+      "get": {
+        "tags": [
+          "tournaments"
+        ],
+        "summary": "Tournaments Popular",
+        "description": "Get a list of popular tournaments by sport ID",
+        "operationId": "Tournaments popular list",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tournaments/stages": {
+      "get": {
+        "tags": [
+          "tournaments"
+        ],
+        "summary": "Tournaments Stages",
+        "description": "Get a list of stages by sport ID",
+        "operationId": "Stages list",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tournaments/stages/data": {
+      "get": {
+        "tags": [
+          "tournaments"
+        ],
+        "summary": "Tournaments Data",
+        "description": "Get tournament data by tournament_stage_id",
+        "operationId": "Tournament Stages data",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "tournament_stage_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Tournament stage id",
+              "title": "Tournament Stage Id"
+            },
+            "description": "Tournament stage id",
+            "example": "6kJqdMr2"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tournaments/seasons/data": {
+      "get": {
+        "tags": [
+          "tournaments"
+        ],
+        "summary": "Tournaments Season",
+        "description": "Get season data by season_id",
+        "operationId": "Season Data",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "season_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Season tournament id",
+              "title": "Season Id"
+            },
+            "description": "Season tournament id",
+            "example": "ryC5w1EL"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tournaments/standings/tabs": {
+      "get": {
+        "tags": [
+          "tournaments"
+        ],
+        "summary": "Tournaments Standings Tabs",
+        "description": "Get the available types (tabs) of standings",
+        "operationId": "Tables tabs",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "tournament_stage_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Tournament Stage id",
+              "title": "Tournament Stage Id"
+            },
+            "description": "Tournament Stage id",
+            "example": "6kJqdMr2"
+          },
+          {
+            "name": "tournament_season_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Season tournament id",
+              "title": "Tournament Season Id"
+            },
+            "description": "Season tournament id",
+            "example": "tdkpynmB"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tournaments/standings": {
+      "get": {
+        "tags": [
+          "tournaments"
+        ],
+        "summary": "Tournaments Standings",
+        "description": "Get tournament tables",
+        "operationId": "Tournament Tables",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "standing_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/StandingsType"
+            }
+          },
+          {
+            "name": "tournament_stage_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Tournament Stage id",
+              "title": "Tournament Stage Id"
+            },
+            "description": "Tournament Stage id",
+            "example": "6kJqdMr2"
+          },
+          {
+            "name": "tournament_season_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Season tournament id",
+              "title": "Tournament Season Id"
+            },
+            "description": "Season tournament id",
+            "example": "tdkpynmB"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tournaments/fixtures": {
+      "get": {
+        "tags": [
+          "tournaments"
+        ],
+        "summary": "Tournaments Fixtures",
+        "description": "Get upcoming events by tournament_stage_id, Use the pagination",
+        "operationId": "Tournament Fixtures events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "tournament_stage_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Tournament Stage id",
+              "title": "Tournament Stage Id"
+            },
+            "description": "Tournament Stage id",
+            "example": "6kJqdMr2"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number",
+            "example": "1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tournaments/results": {
+      "get": {
+        "tags": [
+          "tournaments"
+        ],
+        "summary": "Tournaments Results",
+        "description": "Get team results by tournament_stage_id. Use the pagination",
+        "operationId": "Tournament Results events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "tournament_stage_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Tournament Stage id",
+              "title": "Tournament Stage Id"
+            },
+            "description": "Tournament Stage id",
+            "example": "6kJqdMr2"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "description": "Page number",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number",
+            "example": "1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tournaments/stages/seasons": {
+      "get": {
+        "tags": [
+          "tournaments"
+        ],
+        "summary": "Tournaments Stages Seasons",
+        "description": "Get seasons by stage_id (football)",
+        "operationId": "Tournament stages seasons",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "tournament_stage_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Tournament Stage id",
+              "title": "Tournament Stage Id"
+            },
+            "description": "Tournament Stage id",
+            "example": "6kJqdMr2"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/players/data": {
+      "get": {
+        "tags": [
+          "players"
+        ],
+        "summary": "Players Data",
+        "description": "Get player data by player ID",
+        "operationId": "Player Data",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "player_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Player id",
+              "title": "Player Id"
+            },
+            "description": "Player id",
+            "example": "vgOOdZbd"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/players/last-events": {
+      "get": {
+        "tags": [
+          "players"
+        ],
+        "summary": "Players Last Events",
+        "description": "Get the latest player events by player ID",
+        "operationId": "Latest player events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "player_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Player id",
+              "title": "Player Id"
+            },
+            "description": "Player id",
+            "example": "vgOOdZbd"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/players/alt-events": {
+      "get": {
+        "tags": [
+          "players"
+        ],
+        "summary": "Players Alt Events",
+        "description": "Get the player events by player ID",
+        "operationId": "Player Events",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "player_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Player id",
+              "title": "Player Id"
+            },
+            "description": "Player id",
+            "example": "vgOOdZbd"
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 0,
+              "description": "Page number",
+              "default": 0,
+              "title": "Page"
+            },
+            "description": "Page number",
+            "example": "0"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/players/career": {
+      "get": {
+        "tags": [
+          "players"
+        ],
+        "summary": "Players Career",
+        "description": "Get player career by player ID",
+        "operationId": "Player Career",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "player_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Player id",
+              "title": "Player Id"
+            },
+            "description": "Player id",
+            "example": "vgOOdZbd"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/players/transfers": {
+      "get": {
+        "tags": [
+          "players"
+        ],
+        "summary": "Players Transfers",
+        "description": "Get the latest player transfers by player ID",
+        "operationId": "Player Transfers",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Locale"
+            }
+          },
+          {
+            "name": "sport_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 42,
+              "minimum": 1,
+              "description": "Sport id, use `Sports list` endpoint",
+              "title": "Sport Id"
+            },
+            "description": "Sport id, use `Sports list` endpoint",
+            "example": 1
+          },
+          {
+            "name": "player_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Player id",
+              "title": "Player Id"
+            },
+            "description": "Player id",
+            "example": "vgOOdZbd"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/images/data": {
+      "get": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Images Data",
+        "description": "Get a image player, team, tournament by IMAGE_ID",
+        "operationId": "Image data",
+        "parameters": [
+          {
+            "name": "image_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 17,
+              "maxLength": 17,
+              "description": "Image ID",
+              "title": "Image Id"
+            },
+            "description": "Image ID",
+            "example": "OfjQEPjl-8Y6XjTag"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/news/categories": {
+      "get": {
+        "tags": [
+          "news"
+        ],
+        "summary": "News Categories",
+        "description": "Get categories of news",
+        "operationId": "Categories of news",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NewsLocale"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/news/top": {
+      "get": {
+        "tags": [
+          "news"
+        ],
+        "summary": "News Top List",
+        "description": "Get list of top news",
+        "operationId": "List of top news",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NewsLocale"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/news/list": {
+      "get": {
+        "tags": [
+          "news"
+        ],
+        "summary": "News List",
+        "description": "Get list of news by category_id and entity_id",
+        "operationId": "List of news",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NewsLocale"
+            }
+          },
+          {
+            "name": "category_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 999,
+              "minimum": 1,
+              "description": "Category ID, use `News categories` endpoint",
+              "title": "Category Id"
+            },
+            "description": "Category ID, use `News categories` endpoint",
+            "example": "59"
+          },
+          {
+            "name": "entity_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 10,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Entity ID, use `News categories` endpoint",
+              "title": "Entity Id"
+            },
+            "description": "Entity ID, use `News categories` endpoint",
+            "example": "1"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 0,
+              "description": "Page number",
+              "default": 0,
+              "title": "Page"
+            },
+            "description": "Page number",
+            "example": "0"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/news/summary": {
+      "get": {
+        "tags": [
+          "news"
+        ],
+        "summary": "News Summary",
+        "description": "Get brief information about the news by article_id",
+        "operationId": "Summary news data",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NewsLocale"
+            }
+          },
+          {
+            "name": "article_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 8,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Article ID",
+              "title": "Article Id"
+            },
+            "description": "Article ID",
+            "example": "p41OraKF"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/news/details": {
+      "get": {
+        "tags": [
+          "news"
+        ],
+        "summary": "News Details",
+        "description": "Get detailed information about the news by article_id",
+        "operationId": "News Details",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NewsLocale"
+            }
+          },
+          {
+            "name": "article_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 8,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Article ID",
+              "title": "Article Id"
+            },
+            "description": "Article ID",
+            "example": "p41OraKF"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/news/related": {
+      "get": {
+        "tags": [
+          "news"
+        ],
+        "summary": "News Related",
+        "description": "Get related news by article_id",
+        "operationId": "Related news",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NewsLocale"
+            }
+          },
+          {
+            "name": "article_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 8,
+              "pattern": "^[A-Za-z0-9]*$",
+              "description": "Article ID",
+              "title": "Article Id"
+            },
+            "description": "Article ID",
+            "example": "p41OraKF"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/news/most-read": {
+      "get": {
+        "tags": [
+          "news"
+        ],
+        "summary": "News Most Read",
+        "description": "Get the most read news",
+        "operationId": "Most read news",
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NewsLocale"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": []
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "LiveBetType": {
+        "type": "string",
+        "enum": [
+          "HOME_AWAY",
+          "HOME_DRAW_AWAY"
+        ],
+        "title": "LiveBetType"
+      },
+      "Locale": {
+        "type": "string",
+        "enum": [
+          "en_INT",
+          "en_KE",
+          "en_AU",
+          "en_IN",
+          "es_PE",
+          "en_AE",
+          "en_CA",
+          "de_DE",
+          "ru_RU",
+          "ru_INT",
+          "uk_UA",
+          "it_IT",
+          "sk_SK",
+          "da_DK",
+          "ro_RO",
+          "tr_TR",
+          "el_GR",
+          "pl_PL",
+          "es_ES",
+          "sl_SI",
+          "hu_HU",
+          "fr_FR",
+          "fi_FI",
+          "pt_PT",
+          "nl_NL",
+          "sv_SE",
+          "cs_CZ",
+          "bg_BG",
+          "ko_KR",
+          "in_ID",
+          "ja_JP",
+          "vi_VN",
+          "ka_GE",
+          "en_NG",
+          "pt_BR",
+          "es_CO",
+          "es_AR",
+          "de_AT",
+          "es_VE",
+          "es_MX",
+          "en_GB",
+          "en_ZA",
+          "es_CL",
+          "ms_MY",
+          "hr_HR"
+        ],
+        "title": "Locale"
+      },
+      "NewsLocale": {
+        "type": "string",
+        "enum": [
+          "en_INT",
+          "da_DK",
+          "de_DE",
+          "en_GB",
+          "es_ES",
+          "fr_FR",
+          "it_IT",
+          "nl_NL",
+          "pl_PL",
+          "pt_PT",
+          "ro_RO",
+          "sk_SK",
+          "cs_CZ"
+        ],
+        "title": "NewsLocale"
+      },
+      "StandingsType": {
+        "type": "string",
+        "enum": [
+          "home",
+          "away",
+          "overall",
+          "form",
+          "top_scores",
+          "draw",
+          "overall_live"
+        ],
+        "title": "StandingsType"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "apiKeyHeader": {
+        "type": "apiKey",
+        "name": "x-portal-apikey",
+        "in": "header"
+      },
+      "apiKeyQuery": {
+        "type": "apiKey",
+        "name": "x-portal-apikey",
+        "in": "query"
+      }
+    }
+  },
+  "security": [
+    {
+      "apiKeyHeader": []
+    }
+  ]
+}
