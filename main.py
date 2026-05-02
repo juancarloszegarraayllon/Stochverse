@@ -15,6 +15,23 @@ from parsers.flashlive import (
     _parse_flashlive_incidents,
     _parse_flashlive_stats,
 )
+from caches.state import (
+    _FL_GAME_CACHE,
+    FL_GAME_CACHE_TTL,
+    FL_GAME_NEG_CACHE_TTL,
+    _SERIES_TO_STAGE_CACHE,
+    _EVICT_FROM_WARM_START,
+    _TOURNAMENT_BRACKET_CACHE,
+    _BRACKET_CACHE_TTL_S,
+    _FL_TOURNAMENTS_CACHE,
+    _FL_TOURNAMENTS_TTL,
+    _EVENT_CAPS_CACHE,
+    _EVENT_CAPS_TTL,
+    _STATS_CACHE,
+    _STATS_CACHE_TTL,
+    _EVENT_NORMALIZED_CACHE,
+    _EVENT_NORMALIZED_TTL,
+)
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -5228,12 +5245,6 @@ async def sportsdb_probe():
 # each unmatched fallback path hit the FlashLive search endpoint
 # again. Cache the resolved game (or the negative result) for a
 # short window so the second-through-Nth callers reuse it.
-_FL_GAME_CACHE: dict = {}  # ticker -> (expires_ts, game_dict_or_None)
-FL_GAME_CACHE_TTL = 600    # 10 min — generous; modal sessions are short
-FL_GAME_NEG_CACHE_TTL = 30 # 30 s for None results — shields the FlashLive
-                           # search endpoint from hammering on uncovered
-                           # events without locking out a ticker for the
-
 # Persistent series→stage cache. When ANY Kalshi event in a given
 # series successfully matches an FL game, we save the FL tournament's
 # stage_id keyed by the Kalshi series_ticker (e.g. KXUCLGAME →
@@ -5245,7 +5256,6 @@ FL_GAME_NEG_CACHE_TTL = 30 # 30 s for None results — shields the FlashLive
 #
 # Key: series_ticker (UPPER)
 # Value: {stage_id, season_id, league_name, country, ts}
-_SERIES_TO_STAGE_CACHE: dict = {}
 
 # Cross-deploy persistence for _SERIES_TO_STAGE_CACHE. The cache is
 # small (a few dozen entries — one per soccer series we've resolved
@@ -5284,11 +5294,6 @@ def _maybe_save_series_cache():
 # SOCCER_COMP value; the entry can be removed after a clean snapshot
 # has been saved in production (i.e. a deploy completes successfully
 # and writes a new cache_blobs row).
-_EVICT_FROM_WARM_START = {
-    # Was "CONCACAF" → matched "CONCACAF Nations League" (wrong
-    # tournament). Tightened to "CONCACAF Champions Cup".
-    "KXCONCACAFCCUPGAME",
-}
 
 
 async def _load_series_cache_from_db():
@@ -5444,8 +5449,6 @@ async def _prewarm_series_stages():
 # dependency on per-fixture FL state, no dependency on /normalized.
 # Pill renders as long as the bracket exists for the tournament.
 # ─────────────────────────────────────────────────────────────────
-_TOURNAMENT_BRACKET_CACHE: dict = {}  # stage_id → {"bracket": compact, "ts": float}
-_BRACKET_CACHE_TTL_S: float = 300.0   # refresh each entry every 5 min
 _bracket_warm_task_started: bool = False
 
 
@@ -5922,8 +5925,6 @@ def _bracket_aggregate_for_event(found: dict):
 # stage_id when there's no UCL match in /v1/events/list right now."
 # Per-sport-id cache, hours-long TTL since the tournament inventory
 # barely changes across a season.
-_FL_TOURNAMENTS_CACHE: dict = {}
-_FL_TOURNAMENTS_TTL = 6 * 3600  # 6 hours
 
 # Internal sport name → FL sport_id, for tournaments-list lookup.
 _SPORT_NAME_TO_FL_ID = {
@@ -7101,8 +7102,6 @@ def _fl_has_data(resp) -> bool:
 # Per-event capability probe cache. Probing every endpoint in
 # parallel costs ~500ms worst-case, so cache by ticker for 5 min to
 # absorb repeated opens of the same event panel.
-_EVENT_CAPS_CACHE: dict = {}
-_EVENT_CAPS_TTL = 300  # seconds
 
 # Per-event scheme cache. Same TTL as caps — both are derived from FL
 # probes that don't change moment-to-moment.
@@ -7192,8 +7191,6 @@ def _warm_specific_events(tickers):
 # refresh fast enough to track set-by-set changes; finished/pre-match
 # events benefit from instant repeats when the user toggles between
 # tabs in the event-detail modal.
-_STATS_CACHE: dict = {}
-_STATS_CACHE_TTL = 10  # seconds
 
 
 @app.get("/api/event/{ticker}/capabilities")
@@ -7871,8 +7868,6 @@ async def event_normalized(ticker: str, refresh: bool = False,
 
 
 
-_EVENT_NORMALIZED_CACHE: dict = {}
-_EVENT_NORMALIZED_TTL = 300  # seconds
 
 
 @app.get("/api/event/{ticker}/scheme")
