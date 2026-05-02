@@ -6606,6 +6606,42 @@ async def get_event_predicted_lineups(ticker: str):
         return {"error": str(e)[:200]}
 
 
+@app.get("/api/event/{ticker}/darts-detail")
+async def get_event_darts_detail(ticker: str):
+    """Fetch darts-specific data: statistics-alt (categorical stat
+    table — 180s, 140+, 100+, checkouts, averages, leg-won) plus
+    throw-by-throw (live throw progression). Probe v4 confirmed
+    /throw-by-throw works on canonical j9TDJ0XI (10 KB
+    {VALUE, BLOCKS}); /statistics-alt also returns for darts events.
+    Combined into one endpoint to keep the modal sub-tab strip clean
+    — one Darts tab instead of two.
+    """
+    import asyncio
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = next((r for r in records if r.get("event_ticker") == ticker), None)
+    if not found:
+        return {"error": "event not found"}
+    try:
+        g = await _find_fl_game(found)
+        if not g:
+            return {"error": "FlashLive doesn't cover this match yet"}
+        fl_id = g.get("event_id")
+        if not fl_id:
+            return {"error": "no FlashLive event ID"}
+        from flashlive_feed import _fl_get
+        stats_d, throws_d = await asyncio.gather(
+            _fl_get("/v1/events/statistics-alt", {"event_id": fl_id}),
+            _fl_get("/v1/events/throw-by-throw", {"event_id": fl_id}),
+        )
+        if not stats_d and not throws_d:
+            return {"error": "no darts data available"}
+        return {"stats": stats_d, "throws": throws_d, "source": "flashlive"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
 @app.get("/api/event/{ticker}/points-history")
 async def get_event_points_history(ticker: str):
     """Fetch point-by-point progression from FlashLive. Tennis ships
@@ -7050,6 +7086,12 @@ async def event_capabilities(ticker: str):
             # basketball running margin and a handful of other
             # sports per probe v2. Gates the Points History sub-tab.
             "points_history": ("/v1/events/points-history", {"event_id": fl_id}),
+            # Darts detail — statistics-alt (categorical stats) and
+            # throw-by-throw (live progression) combined into one
+            # capability flag. Either endpoint returning data shows
+            # the Darts sub-tab.
+            "darts_stats": ("/v1/events/statistics-alt", {"event_id": fl_id}),
+            "throw_by_throw": ("/v1/events/throw-by-throw", {"event_id": fl_id}),
         }
         # Standings sub-types — one probe per documented
         # standing_type so the frontend can build sub-tabs from

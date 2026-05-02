@@ -23,6 +23,7 @@ import { renderMissingPlayers } from './blocks/MissingPlayers';
 import { renderPredictedLineups } from './blocks/PredictedLineups';
 import { renderHighlights } from './blocks/Highlights';
 import { renderPointsHistory } from './blocks/PointsHistory';
+import { renderDarts } from './blocks/Darts';
 
 declare global {
   interface Window {
@@ -113,6 +114,14 @@ declare global {
       // Basketball (running margin), and a handful of other
       // sports per probe v2. Capability-gated tab.
       renderPointsHistory?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      // Render the Match → Darts sub-tab from
+      // /api/event/<t>/darts-detail. Combined statistics-alt
+      // (categorical stats: 180s, checkouts, averages) +
+      // throw-by-throw (live progression). Darts-only tab.
+      renderDarts?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
@@ -420,8 +429,15 @@ async function renderPointsHistoryByTicker(
   return renderPointsHistory(mount, ticker);
 }
 
+async function renderDartsByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  return renderDarts(mount, ticker);
+}
+
 window.StochverseBundle = {
-  version: '0.5.6',
+  version: '0.5.7',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
@@ -437,6 +453,7 @@ window.StochverseBundle = {
   renderPredictedLineups: renderPredictedLineupsByTicker,
   renderHighlights: renderHighlightsByTicker,
   renderPointsHistory: renderPointsHistoryByTicker,
+  renderDarts: renderDartsByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);
