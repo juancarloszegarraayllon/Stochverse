@@ -6573,6 +6573,38 @@ async def get_event_player_stats(ticker: str):
     except Exception as e:
         return {"error": str(e)[:200]}
 
+
+@app.get("/api/event/{ticker}/predicted-lineups")
+async def get_event_predicted_lineups(ticker: str):
+    """Fetch predicted lineups (pre-match) from FlashLive for this
+    event. Pre-match block — universal across team sports. Frontend
+    capability-gates the sub-tab on
+    /api/event/{ticker}/capabilities.predicted_lineups so events
+    without data never show the tab (matches the player-stats
+    pattern shipped 2026-05-02).
+    """
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = next((r for r in records if r.get("event_ticker") == ticker), None)
+    if not found:
+        return {"error": "event not found"}
+    try:
+        g = await _find_fl_game(found)
+        if not g:
+            return {"error": "FlashLive doesn't cover this match yet"}
+        fl_id = g.get("event_id")
+        if not fl_id:
+            return {"error": "no FlashLive event ID"}
+        from flashlive_feed import _fl_get
+        data = await _fl_get("/v1/events/predicted-lineups",
+                             {"event_id": fl_id})
+        if not data:
+            return {"error": "no predicted lineups available"}
+        return {"data": data, "source": "flashlive"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
 # FlashLive uses two distinct kinds of sub-section labels inside a
 # DATA array. We classify them so the frontend can decide what to do
 # with each.

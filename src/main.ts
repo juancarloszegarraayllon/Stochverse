@@ -20,6 +20,7 @@ import { renderNews } from './blocks/News';
 import { renderSummary } from './blocks/Summary';
 import { renderPlayerStats } from './blocks/PlayerStats';
 import { renderMissingPlayers } from './blocks/MissingPlayers';
+import { renderPredictedLineups } from './blocks/PredictedLineups';
 
 declare global {
   interface Window {
@@ -86,6 +87,14 @@ declare global {
       // /normalized.data.missing_players. Per-team list of unavailable
       // players with chance-to-play color tag.
       renderMissingPlayers?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      // Render the Match → Predicted Lineups sub-tab from
+      // /api/event/<t>/predicted-lineups (dedicated endpoint —
+      // predicted_lineups isn't part of /normalized fan-out for
+      // cold-start latency reasons). Capability-gated tab.
+      renderPredictedLineups?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
@@ -372,8 +381,15 @@ async function renderMissingPlayersByTicker(
   return renderMissingPlayers(mount, ticker);
 }
 
+async function renderPredictedLineupsByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  return renderPredictedLineups(mount, ticker);
+}
+
 window.StochverseBundle = {
-  version: '0.5.3',
+  version: '0.5.4',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
@@ -386,6 +402,7 @@ window.StochverseBundle = {
   renderSummary: renderSummaryByTicker,
   renderPlayerStats: renderPlayerStatsByTicker,
   renderMissingPlayers: renderMissingPlayersByTicker,
+  renderPredictedLineups: renderPredictedLineupsByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);
