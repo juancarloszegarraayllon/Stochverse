@@ -1042,6 +1042,23 @@ async def search_past_event_for_teams(home: str, away: str, sport: str = ""):
     sport_id = _sport_id_from_name(sport)
     team_a = await _resolve_team_id(home, sport_id)
     team_b = await _resolve_team_id(away, sport_id)
+    # Elimination fallback for short-name teams that FL's multi-search
+    # doesn't index reliably (PSG, UTA, BOR, etc.). When one side
+    # resolved but the other didn't, run the JOINT search ("home
+    # away") which often surfaces the missing team via the opponent
+    # context, then subtract the resolved side's id-set to pick the
+    # remaining one. Without this, fixtures like UCL Bayern–PSG with
+    # PSG returning zero direct results fail the whole H2H chain.
+    if (team_a and not team_b) or (team_b and not team_a):
+        joint_ids = await _participant_ids_from_search(f"{home} {away}")
+        anchor_query = home if team_a else away
+        anchor_ids = await _participant_ids_from_search(anchor_query)
+        candidates = [tid for tid in joint_ids if tid not in anchor_ids]
+        if candidates:
+            if not team_b:
+                team_b = candidates[0]
+            elif not team_a:
+                team_a = candidates[0]
     if not team_a or not team_b or team_a == team_b:
         return None
 
@@ -1074,6 +1091,35 @@ async def search_past_event_for_teams(home: str, away: str, sport: str = ""):
                             "away_name": ev.get("AWAY_NAME") or "",
                         }
     return None
+
+
+async def _participant_ids_from_search(query: str) -> set:
+    """Return the set of participant IDs in a multi-search result.
+    Used by the elimination fallback in search_past_event_for_teams
+    when one team's name didn't resolve directly. Returns an empty
+    set on any error or empty response."""
+    if not query or not query.strip():
+        return set()
+    data = await _fl_get("/v1/search/multi-search", {"query": query})
+    if not data:
+        return set()
+    if isinstance(data, list):
+        results = data
+    elif isinstance(data, dict):
+        results = data.get("DATA") or data.get("data") or []
+    else:
+        return set()
+    out: set = set()
+    for it in (results or []):
+        if not isinstance(it, dict):
+            continue
+        t = (it.get("TYPE") or it.get("type") or "").lower()
+        if t not in ("participants", "participant"):
+            continue
+        tid = it.get("ID") or it.get("EVENT_ID") or ""
+        if tid:
+            out.add(tid)
+    return out
 
 
 async def _resolve_team_id(team_name: str, sport_id: str = "") -> str:
