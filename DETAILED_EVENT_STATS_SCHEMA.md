@@ -23,7 +23,7 @@ Each tier shares one diagram. Per-sport overrides are called out below.
 | **D** | Individual / head-to-head sports | Tennis, Darts, Snooker, Boxing, MMA, Table Tennis, Badminton |
 | **E** | Cricket — special case (rich pre-match, scorecard family went 404 on our event) | Cricket |
 | **F** | No FL data — skip the modal entirely | Golf, Horse Racing (only `/brief` + `/missing-players`, both empty placeholders) |
-| **G** | Different endpoint family (compound 16-char event_ids → 422 on standard endpoints) | Motorsport, Cycling |
+| **G** | ~~Different endpoint family~~ — `/v1/races/*` confirmed nonexistent (probe v3, 11 paths × 4 param names → 100% 404). Tournament-level endpoints reject the compound IDs too. Treat as no FL data. | Motorsport, Cycling |
 | **H** | No event in ±7d window during probe — re-probe in season | Bandy, Autoracing, Motoracing, Winter Sports, Ski Jumping, Cross Country, Biathlon, Kabaddi |
 
 ---
@@ -67,9 +67,9 @@ DETAILED EVENT STATS — modal blueprint (capability-driven render)
  ├── [cricket] Fall of Wickets    /v1/events/fall-of-wickets ⚠ 404 — re-probe
  ├── [cricket] Ball-by-Ball       /v1/events/ball-by-ball    ⚠ 404 — re-probe
  ├── [darts]  Throw-by-Throw      /v1/events/throw-by-throw  ⚠ 404 — re-probe live
- ├── Player Stats                 /v1/events/player-stats    ∅ 404/424 across all sports
  ├── Commentary                   /v1/events/commentary      ∅ empty universally
  ├── Report                       /v1/events/report          ∅ empty universally
+ │  (player-stats dropped — see §3, confirmed dead via probe v3)
  └── Last-change hash             /v1/events/last-change     ✅ universal (delta polling)
 
 [2] H2H                            /v1/events/h2h            ✅ universal, rich
@@ -91,7 +91,7 @@ sport's representative event. Don't build blocks for them in v2.
 | `/v1/events/commentary` | 404 every sport | drop |
 | `/v1/events/commentary-alt` | 404 every sport | drop |
 | `/v1/events/report` | 404 every sport | drop |
-| `/v1/events/player-stats` | 404 every sport (Hockey: 424) | drop, file question to FL |
+| `/v1/events/player-stats` | 0/40 events across 5 sports in probe v3 retest (also 404 in v2) | **drop permanently**. If we ever specifically need NBA/EPL player stats later, retest then. |
 | `/v1/events/player-statistics-alt` | 404 every sport | drop |
 
 ---
@@ -196,11 +196,12 @@ Only `/brief` and `/missing-players` return, both 11-byte empty
 placeholders. **Skip the modal entirely** — show only the card header.
 
 ### Tier G — Motorsport (31), Cycling (34)
-Every endpoint 422. Event_ids returned from `/list` are 16 chars
-(e.g. `Y9HWxKnpMctvDyx2`) vs the standard 8-char IDs — these are
-compound IDs for races with multiple competitors. Need a different
-endpoint family, likely `/v1/races/*` or `/v1/tournaments/*`. **Out
-of scope for v2 modal. File as Step E.**
+Every `/v1/events/*` endpoint returns 422 because event_ids returned
+from `/list` are 16-char compound IDs (e.g. `Y9HWxKnpMctvDyx2`).
+Probe v3 confirmed no `/v1/races/*` family exists (11 paths × 4 param
+names → 100% 404), and `/v1/tournaments/*` rejects the compound IDs
+too. **Out of scope for v2 modal — show only the card header, no
+modal.** Could revisit if FL adds a races API; not actionable today.
 
 ### Tier H — re-probe needed
 Bandy, Autoracing, Motoracing, Winter Sports, Ski Jumping, Cross Country,
@@ -267,16 +268,18 @@ These are Step E candidates after the modal lands.
    during a live IPL match. Status: open, not blocking — design the
    cricket modal without scorecard for now, add later if re-probe shows
    data.
-2. **`/player-stats` universally 404** — OpenAPI confirms `event_id`
-   is the right param, so we're calling correctly. Hypothesis: endpoint
-   only returns data for top-tier leagues (NBA, EPL, NHL). Action:
-   `fl_probe/probe_races.py` retests with 8 fresh events × 5 sports
-   to find at least one 200. Status: probe written, awaiting CI run.
+2. ✅ **`/player-stats` universally 404** — resolved as **dead**.
+   Probe v3 retested with 40 fresh events across 5 sports; 0 returned
+   data, including top-flight leagues like the Albanian Superliga and
+   Australian AIHL. Dropped from §2 modal blueprint and §3. If we
+   ever specifically need NBA/EPL player stats later, retest then.
 3. ✅ **Darts polling** — resolved: tab-open only, no live polling
    (darts is low-demand, hashing the body saves no bandwidth).
-4. **Motorsport / Cycling 422** — `fl_probe/probe_races.py` tests 11
-   candidate `/races/*` and `/tournaments/*` paths × 4 param names.
-   Status: probe written, awaiting CI run. Outcome will land here.
+4. ✅ **Motorsport / Cycling 422** — resolved as **no FL data via
+   current API**. Probe v3 tested 11 candidate `/races/*` and
+   `/tournaments/*` paths × 4 param names against the compound 16-char
+   event_ids — all 404 or 422. Tier G is now equivalent to Tier F
+   (Golf / Horse Racing): show card header only, no modal.
 5. ✅ **Per-sport probe re-runs** — resolved: weekly cron added to
    `fl_probe_inventory.yml` (Sundays 06:00 UTC). Mega plan has 10GB/mo
    bandwidth + unlimited requests, so weekly cron costs ~0.5% of quota
