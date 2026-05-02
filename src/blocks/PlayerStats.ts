@@ -85,15 +85,28 @@ export async function renderPlayerStats(
     '<div class="ed-stats-loading">Loading player stats…</div>';
   try {
     const ev: NormalizedEvent = await fetchNormalized(ticker);
-    const raw = (ev.data as { player_stats?: unknown }).player_stats;
-    // FL ships the data nested as either {DATA: {...}} or {data: {...}}.
-    let inner: FLPlayerStatsData = {};
-    if (raw && typeof raw === 'object') {
-      const r = raw as Record<string, unknown>;
-      inner = (r.DATA || r.data || r) as FLPlayerStatsData;
+    let inner = extractInner(
+      (ev.data as { player_stats?: unknown }).player_stats,
+    );
+    // Fallback: when /normalized's player_stats probe came back
+    // empty (failed during the parallel fan-out under FL pressure),
+    // hit the dedicated endpoint. One probe instead of one of N.
+    if (!(inner.PLAYERS || []).length) {
+      try {
+        const dedicated = await fetch(
+          '/api/event/' + encodeURIComponent(ticker) + '/player-stats',
+        );
+        if (dedicated.ok) {
+          const d = await dedicated.json();
+          if (d && !d.error) {
+            inner = extractInner(d.data);
+          }
+        }
+      } catch {
+        /* keep the empty-state below */
+      }
     }
-    const players = inner.PLAYERS || [];
-    if (!players.length) {
+    if (!(inner.PLAYERS || []).length) {
       mount.innerHTML =
         '<div class="ed-stats-loading">No player stats available.</div>';
       return;
@@ -103,6 +116,12 @@ export async function renderPlayerStats(
     mount.innerHTML =
       '<div class="ed-stats-loading">Failed to load player stats.</div>';
   }
+}
+
+function extractInner(raw: unknown): FLPlayerStatsData {
+  if (!raw || typeof raw !== 'object') return {};
+  const r = raw as Record<string, unknown>;
+  return (r.DATA || r.data || r) as FLPlayerStatsData;
 }
 
 function renderInto(mount: HTMLElement, inner: FLPlayerStatsData): void {

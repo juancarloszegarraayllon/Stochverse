@@ -42,13 +42,26 @@ export async function renderNews(
   mount.innerHTML = '<div class="ed-stats-loading">Loading news…</div>';
   try {
     const ev: NormalizedEvent = await fetchNormalized(ticker);
-    const news = (ev.data as { news?: unknown }).news as
-      | { DATA?: NewsArticle[]; data?: NewsArticle[] }
-      | null
-      | undefined;
-    let articles: NewsArticle[] =
-      (news && (news.DATA || news.data)) || [];
-    if (!Array.isArray(articles)) articles = [];
+    let articles = extractArticles((ev.data as { news?: unknown }).news);
+    // Fallback: when /normalized's news probe came back empty
+    // (failed during the parallel fan-out under FL pressure),
+    // hit the dedicated endpoint. One probe instead of one of N
+    // — usually succeeds where the parallel fetch didn't.
+    if (articles.length === 0) {
+      try {
+        const dedicated = await fetch(
+          '/api/event/' + encodeURIComponent(ticker) + '/news',
+        );
+        if (dedicated.ok) {
+          const d = await dedicated.json();
+          if (d && !d.error) {
+            articles = extractArticles(d.data);
+          }
+        }
+      } catch {
+        /* ignore — keeps the empty-state below */
+      }
+    }
     if (articles.length === 0) {
       mount.innerHTML =
         '<div class="ed-stats-loading">No news available.</div>';
@@ -113,6 +126,13 @@ export async function renderNews(
     mount.innerHTML =
       '<div class="ed-stats-loading">Failed to load news.</div>';
   }
+}
+
+function extractArticles(raw: unknown): NewsArticle[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const r = raw as { DATA?: NewsArticle[]; data?: NewsArticle[] };
+  const arr = r.DATA || r.data || [];
+  return Array.isArray(arr) ? arr : [];
 }
 
 function escHTML(s: string): string {

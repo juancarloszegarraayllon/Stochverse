@@ -705,7 +705,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.5.0" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.5.1" defer></script>
 </head>
 <body>
 <div id="header">
@@ -1389,6 +1389,14 @@ async function loadMore() {
   document.getElementById("loader").style.display = "none";
 }
 
+// Tracks tickers we've already kicked off a /normalized pre-warm
+// fetch for, so a user wiggling the mouse doesn't refire the same
+// 6-FL-probe request a dozen times. Reset every 5 min to match the
+// /normalized cache TTL — after that, scores/incidents may have
+// drifted enough that re-warming a hovered card is worth it.
+var _prewarmedTickers = new Set();
+setInterval(function() { _prewarmedTickers.clear(); }, 5 * 60 * 1000);
+
 function appendCards(evs) {
   var grid = document.getElementById("cards-grid");
   for (var i = 0; i < evs.length; i++) {
@@ -1411,6 +1419,24 @@ function appendCards(evs) {
       }
       var tkr = this.getAttribute("data-event-ticker");
       if (tkr) showEventDetail(tkr);
+    });
+    // Hover pre-warm: when the cursor enters a card, fire
+    // /api/event/<ticker>/normalized in the background. By the time
+    // the user clicks (typically 200-500ms after hover), the
+    // /normalized cache is partially or fully populated, and the
+    // Detailed Event Stats panel's sub-tabs render instantly instead
+    // of waiting for the ~6 parallel FL probes. We track which
+    // tickers we've already pre-warmed so a user wiggling the mouse
+    // doesn't fire the same fetch twice. The 5-min Set reset
+    // matches /normalized's cache TTL.
+    card.addEventListener("mouseenter", function() {
+      var tkr = this.getAttribute("data-event-ticker");
+      if (!tkr || _prewarmedTickers.has(tkr)) return;
+      _prewarmedTickers.add(tkr);
+      try {
+        fetch("/api/event/" + encodeURIComponent(tkr) + "/normalized")
+          .catch(function() { /* fire-and-forget */ });
+      } catch (e) {}
     });
     grid.appendChild(card);
     _observeCard(card);
