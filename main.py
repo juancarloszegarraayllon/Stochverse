@@ -189,6 +189,7 @@ async def startup_event():
     # caches are populated within ~100ms anyway.
     asyncio.create_task(_load_series_cache_from_db())
     asyncio.create_task(_load_tournament_brackets_from_db())
+    asyncio.create_task(_load_team_caches_from_db())
     asyncio.create_task(_tournament_bracket_warm_loop())
     # Prewarm series→stage_id for EVERY sport series in get_data(),
     # not just the ones users have clicked into. This is what was
@@ -5150,6 +5151,41 @@ async def _load_series_cache_from_db():
         )
     except Exception as e:
         _log.warning("series_to_stage warm-start failed: %s", e)
+
+
+async def _load_team_caches_from_db():
+    """Restore _TEAM_ID_CACHE and _TEAM_PAIR_EVENT_CACHE from the
+    previous container's last save.
+
+    Both caches feed the H2H resolution chain for future fixtures FL
+    hasn't loaded yet (UCL semis before kickoff, etc.). Without this
+    warm-start, every redeploy resets them and the next user pays the
+    3-5 sequential FL calls (multi-search ×2 + teams/results) cold.
+    With it, they're effectively free after the first cycle ever.
+
+    No targeted eviction here — team IDs never change FL-side, and
+    pair-event entries self-heal via the 7-day TTL in
+    search_past_event_for_teams."""
+    _log = logging.getLogger("stochverse")
+    try:
+        from db import load_cache_blob
+        from caches.state import _TEAM_ID_CACHE, _TEAM_PAIR_EVENT_CACHE
+        ids = await load_cache_blob("team_ids")
+        if isinstance(ids, dict):
+            for k, v in ids.items():
+                if isinstance(k, str) and isinstance(v, str) and v:
+                    _TEAM_ID_CACHE[k] = v
+        pairs = await load_cache_blob("team_pair_events")
+        if isinstance(pairs, dict):
+            for k, v in pairs.items():
+                if isinstance(k, str) and isinstance(v, dict):
+                    _TEAM_PAIR_EVENT_CACHE[k] = v
+        _log.info(
+            "team caches warm-start: %d team_ids, %d pair_events",
+            len(_TEAM_ID_CACHE), len(_TEAM_PAIR_EVENT_CACHE),
+        )
+    except Exception as e:
+        _log.warning("team caches warm-start failed: %s", e)
 
 
 async def _prewarm_series_stages():

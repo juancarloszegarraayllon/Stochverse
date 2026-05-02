@@ -198,6 +198,21 @@ def _normalize(s: str) -> str:
     return s.strip()
 
 
+def _cache_key_normalize(s: str) -> str:
+    """Tight name normalizer for cache keys ONLY. Lowercases and
+    strips diacritics, but does NOT drop distinguishing suffixes
+    (FC, City, United, etc.) the way _normalize does — those are
+    safe to fold for fuzzy match scoring but cause cache-key
+    collisions for distinct teams ("Manchester United" vs
+    "Manchester City" both fold to "manchester")."""
+    import unicodedata
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFD", str(s).lower())
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return " ".join(s.split())  # collapse internal whitespace too
+
+
 def match_game(title: str, sport: str = ""):
     """Find a FlashLive game matching a Kalshi event title.
     Returns a game dict or None.
@@ -1062,6 +1077,27 @@ async def search_past_event_for_teams(home: str, away: str, sport: str = ""):
     if not team_a or not team_b or team_a == team_b:
         return None
 
+    # Pair-cache hit: any past event_id between these two teams
+    # works as an anchor for /v1/events/h2h, so reuse the one we
+    # found earlier instead of re-walking /v1/teams/results.
+    # Sorted-tuple key so both fixture orientations (Bayern home
+    # vs PSG home) collide on the same entry.
+    from caches.state import (
+        _TEAM_PAIR_EVENT_CACHE,
+        TEAM_PAIR_EVENT_CACHE_TTL,
+    )
+    import time as _time
+    pair_key = "|".join(sorted((team_a, team_b)))
+    cached_pair = _TEAM_PAIR_EVENT_CACHE.get(pair_key)
+    if cached_pair and isinstance(cached_pair, dict):
+        cached_ts = cached_pair.get("ts") or 0
+        if (_time.time() - cached_ts) < TEAM_PAIR_EVENT_CACHE_TTL:
+            return {
+                "event_id":  cached_pair.get("event_id", ""),
+                "home_name": cached_pair.get("home_name", ""),
+                "away_name": cached_pair.get("away_name", ""),
+            }
+
     # Step 2/3 — fetch team A's recent results, walk for any event
     # whose opponent is team B. Try team A first, fall back to team B
     # if A's results don't have the matchup loaded (FL only keeps a
@@ -1085,11 +1121,23 @@ async def search_past_event_for_teams(home: str, away: str, sport: str = ""):
                    (opponent in away_ids and primary in home_ids):
                     eid = ev.get("EVENT_ID")
                     if eid:
-                        return {
+                        result = {
                             "event_id":  eid,
                             "home_name": ev.get("HOME_NAME") or "",
                             "away_name": ev.get("AWAY_NAME") or "",
                         }
+                        _TEAM_PAIR_EVENT_CACHE[pair_key] = {
+                            **result,
+                            "ts": _time.time(),
+                        }
+                        try:
+                            from enrichment.team_cache import (
+                                _maybe_save_team_caches,
+                            )
+                            _maybe_save_team_caches()
+                        except Exception:
+                            pass
+                        return result
     return None
 
 
@@ -1134,9 +1182,20 @@ async def _resolve_team_id(team_name: str, sport_id: str = "") -> str:
     (Australian A-League) instead of the intended Argentinian Primera
     team — picking the wrong team_id then makes search_past_event_
     for_teams walk the wrong team's results and fail.
+
+    Successful resolutions are memoized in _TEAM_ID_CACHE (persisted
+    across deploys via cache_blobs:team_ids). Team IDs never change
+    on FL's side, so this is effectively write-once-per-team. Empty
+    results are NOT cached, so transient failures (FL hiccup, query
+    too short) can re-resolve on the next call.
     """
     if not team_name:
         return ""
+    from caches.state import _TEAM_ID_CACHE
+    cache_key = f"{sport_id}|{_cache_key_normalize(team_name)}"
+    cached = _TEAM_ID_CACHE.get(cache_key)
+    if cached:
+        return cached
     data = await _fl_get("/v1/search/multi-search", {"query": team_name})
     if not data:
         return ""
@@ -1168,14 +1227,25 @@ async def _resolve_team_id(team_name: str, sport_id: str = "") -> str:
         candidates.append((tid, item_sport))
     if not candidates:
         return ""
+    chosen = ""
     if sport_id:
         # Prefer a candidate whose sport matches the caller's hint.
         for tid, isp in candidates:
             if isp and isp == sport_id:
-                return tid
-    # No sport hint or no match — preserve historical behavior and
-    # return the first participant result (highest FL relevance).
-    return candidates[0][0]
+                chosen = tid
+                break
+    if not chosen:
+        # No sport hint or no match — preserve historical behavior and
+        # return the first participant result (highest FL relevance).
+        chosen = candidates[0][0]
+    if chosen:
+        _TEAM_ID_CACHE[cache_key] = chosen
+        try:
+            from enrichment.team_cache import _maybe_save_team_caches
+            _maybe_save_team_caches()
+        except Exception:
+            pass
+    return chosen
 
 
 # Map our sport names to FL sport_ids. Mirrors the one in main.py

@@ -131,3 +131,43 @@ _EVENT_NORMALIZED_TTL = 300  # seconds
 # ─────────────────────────────────────────────────────────────────
 _H2H_CACHE: dict = {}
 _H2H_CACHE_TTL = 300  # seconds
+
+
+# ─────────────────────────────────────────────────────────────────
+# Team-name → FL team_id resolution cache
+#
+# Persists across deploys via cache_blobs:team_ids. Team IDs never
+# change inside FL, so this is essentially write-once-per-team.
+# Without persistence, every restart re-burns 1 multi-search call
+# per team-name lookup in search_past_event_for_teams (the slow
+# fallback path for future fixtures FL hasn't loaded yet).
+#
+# Key: f"{sport_id}|{normalized_name}" — sport_id keyed because
+# FL's multi-search returns sport-ambiguous hits ("Central Cordoba"
+# can be Argentinian or Australian). Empty sport_id is a distinct
+# key. Values are never empty strings — we only cache successful
+# resolutions, so failed lookups can retry later.
+# ─────────────────────────────────────────────────────────────────
+_TEAM_ID_CACHE: dict = {}
+
+
+# ─────────────────────────────────────────────────────────────────
+# Team-pair → past event_id cache
+#
+# Persists across deploys via cache_blobs:team_pair_events. Once we
+# find ANY past event between teams A and B, the FL /v1/events/h2h
+# endpoint returns the same H2H rows regardless of which event_id
+# anchors the query. So we cache the resolved anchor event_id by
+# the unordered team-pair, eliminating the /v1/teams/results walk
+# (1-2 sequential calls + 200-1500 row scan) on warm cache.
+#
+# Key: f"{team_id_a}|{team_id_b}" with the two ids sorted, so both
+# fixture orientations hit the same entry. Value:
+#   {event_id, home_name, away_name, ts}
+#
+# 7-day TTL guards against FL eventually purging an old anchor
+# event from its results window (which would make the H2H call
+# return empty). Stale entries self-heal weekly.
+# ─────────────────────────────────────────────────────────────────
+_TEAM_PAIR_EVENT_CACHE: dict = {}
+TEAM_PAIR_EVENT_CACHE_TTL = 7 * 24 * 3600  # 7 days
