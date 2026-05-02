@@ -7166,22 +7166,25 @@ async def event_normalized(ticker: str, refresh: bool = False,
         # Probe FL endpoints in parallel to discover capabilities.
         # Same set the /scheme endpoint uses; here we also fetch the
         # data so we can normalize each block.
+        #
+        # Trimmed list — only endpoints whose data is actually consumed
+        # by a frontend block. The dropped ones (predicted_lineups,
+        # commentary, summary, h2h, odds, highlights, report) are
+        # either unused entirely or consumed via dedicated endpoints
+        # (Commentary block hits /api/event/<t>/commentary; H2H hits
+        # /api/event/<t>/h2h). Halving the FL fan-out cuts /normalized
+        # cold-start latency from ~3-5s to ~1.5-2.5s, which makes the
+        # Detailed Event Stats panel's first sub-tab click feel
+        # snappy instead of "heavy".
         probes = []
         if fl_id:
             probes = [
                 ("statistics",        "/v1/events/statistics",        {"event_id": fl_id}),
                 ("lineups",           "/v1/events/lineups",           {"event_id": fl_id}),
-                ("predicted_lineups", "/v1/events/predicted-lineups", {"event_id": fl_id}),
-                ("commentary",        "/v1/events/commentary",        {"event_id": fl_id}),
                 ("missing_players",   "/v1/events/missing-players",   {"event_id": fl_id}),
                 ("player_stats",      "/v1/events/player-stats",      {"event_id": fl_id}),
                 ("summary_incidents", "/v1/events/summary-incidents", {"event_id": fl_id}),
-                ("summary",           "/v1/events/summary",           {"event_id": fl_id}),
-                ("h2h",               "/v1/events/h2h",               {"event_id": fl_id}),
                 ("news",              "/v1/events/news",              {"event_id": fl_id}),
-                ("odds",              "/v1/events/odds",              {"event_id": fl_id}),
-                ("highlights",        "/v1/events/highlights",        {"event_id": fl_id}),
-                ("report",            "/v1/events/report",            {"event_id": fl_id}),
             ]
         standing_types = ["overall", "home", "away", "form",
                           "top_scores", "draw", "overall_live"]
