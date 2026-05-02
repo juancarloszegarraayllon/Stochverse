@@ -7,6 +7,11 @@ on:
         description: 'Optional space-separated sport_ids (default: all 38)'
         required: false
         default: ''
+  # Weekly schema drift check. Sundays 06:00 UTC. ~12MB/run on Mega
+  # plan (10GB/mo bandwidth) → ~50MB/month, 0.5% of quota. Catches
+  # newly-in-season sports (Biathlon, Bandy, etc.) automatically.
+  schedule:
+    - cron: '0 6 * * 0'
 
 jobs:
   inventory:

@@ -1,0 +1,33 @@
+name: FL Probe v3 — Races + Player-Stats Retest
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run races + player-stats retest
+        env:
+          FLASHLIVE_API_KEY: ${{ secrets.FLASHLIVE_API_KEY }}
+        run: |
+          if [ -z "$FLASHLIVE_API_KEY" ]; then
+            echo "::error::FLASHLIVE_API_KEY secret is not set on this repo."
+            exit 1
+          fi
+          python3 fl_probe/probe_races.py | tee races_probe.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fl-races-probe
+          path: races_probe.txt
+          retention-days: 30

@@ -164,9 +164,10 @@ Real data we don't surface today:
 - `/statistics`: 404. `/statistics-alt`: ✅ 5 keys (`CATEGORY`, `ID`,
   `VALUE_AWAY`, `VALUE_HOME`) — *the* darts stats endpoint.
 - `/throw-by-throw`: 404 for our (non-live) event. Likely live-only.
-- ⚠ `/last-change`: **404 for darts**. Without a hash, our standard
-  delta-polling is broken for darts. Either skip polling or hash the
-  payload ourselves.
+- ⚠ `/last-change`: **404 for darts**. **Resolution: tab-open polling
+  only — no live polling for darts.** Hashing the body ourselves saves
+  no bandwidth (we'd still re-fetch to hash), and darts is low-demand
+  enough that stale data between user clicks is acceptable.
 
 ### Snooker (sport_id=15) — Tier D
 - `/news`: ✅ 12 keys (publishers, links, images). Snooker is one of
@@ -260,19 +261,26 @@ These are Step E candidates after the modal lands.
 
 ---
 
-## 9. Open questions before any code
+## 9. Open questions
 
-1. **Cricket scorecard family**: 404 for our event. Conditional on
-   match phase, or only major tournaments? Re-probe during IPL.
-2. **`/player-stats`**: 404 universally except Hockey (424). Is this
-   endpoint dead, or is the param shape wrong? Worth a single curl
-   against FL support.
-3. **Darts `/last-change`**: 404. Without a hash, polling strategy?
-   (Hash the body ourselves or special-case darts.)
-4. **Motorsport / Cycling 422**: confirm event_id shape and try
-   `/v1/races/*` family — file separately as Step E.
-5. **Per-sport probe re-runs**: when should we re-probe Bandy /
-   Biathlon / etc? Cron the inventory workflow weekly?
+1. **Cricket scorecard family** — 404 for our event. Action: re-probe
+   during a live IPL match. Status: open, not blocking — design the
+   cricket modal without scorecard for now, add later if re-probe shows
+   data.
+2. **`/player-stats` universally 404** — OpenAPI confirms `event_id`
+   is the right param, so we're calling correctly. Hypothesis: endpoint
+   only returns data for top-tier leagues (NBA, EPL, NHL). Action:
+   `fl_probe/probe_races.py` retests with 8 fresh events × 5 sports
+   to find at least one 200. Status: probe written, awaiting CI run.
+3. ✅ **Darts polling** — resolved: tab-open only, no live polling
+   (darts is low-demand, hashing the body saves no bandwidth).
+4. **Motorsport / Cycling 422** — `fl_probe/probe_races.py` tests 11
+   candidate `/races/*` and `/tournaments/*` paths × 4 param names.
+   Status: probe written, awaiting CI run. Outcome will land here.
+5. ✅ **Per-sport probe re-runs** — resolved: weekly cron added to
+   `fl_probe_inventory.yml` (Sundays 06:00 UTC). Mega plan has 10GB/mo
+   bandwidth + unlimited requests, so weekly cron costs ~0.5% of quota
+   (~50MB/month). Catches newly-in-season sports automatically.
 
 ---
 
