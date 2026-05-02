@@ -772,7 +772,7 @@ body.has-shared-banner #header{top:40px}
      the existing inline JS or initial render. The bundle is built
      locally via `npm run build` and committed to static/dist/ so
      Railway deploys don't need Node. -->
-<script type="module" src="/static/dist/main.js?v=0.5.8" defer></script>
+<script type="module" src="/static/dist/main.js?v=0.5.9" defer></script>
 </head>
 <body>
 <div id="header">
@@ -4862,6 +4862,122 @@ async function hydrateGameStats(evTicker) {
   }
 }
 
+// Inject MATCH sub-tabs based on per-event capabilities. Pulled out
+// of _augmentEventCapabilities so it runs UNCONDITIONALLY (the
+// standings logic in that function has early-returns that used to
+// short-circuit this block — caused commit dfa7976's bundle bump
+// to ship without the new tabs ever appearing). Each tab is a
+// no-op if its panel/button already exists, so calling repeatedly
+// is safe.
+function _injectMatchCapabilityTabs(panel, caps) {
+  var matchPanelForCaps = panel.querySelector('.ed-sb-main[data-main="match"]');
+  if (!matchPanelForCaps) return;
+  // Player Stats — top-tier league events only (probe v4)
+  if (caps.player_stats === true) {
+    var subTabsBar = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
+    if (subTabsBar && !subTabsBar.querySelector('button[data-mt="player-stats"]')) {
+      var psBtn = '<button class="ed-sb-tab" data-mt="player-stats" onclick="window.switchMatchTab(this)">Player Stats</button>';
+      var anchor = subTabsBar.querySelector('button[data-mt="commentary"]')
+                || subTabsBar.querySelector('button[data-mt="missing-players"]');
+      if (anchor) anchor.insertAdjacentHTML('beforebegin', psBtn);
+      else subTabsBar.insertAdjacentHTML('beforeend', psBtn);
+    }
+    if (!matchPanelForCaps.querySelector('div[data-mt="player-stats"]')) {
+      var psPanel = '<div data-mt="player-stats" style="display:none">'
+                  + '<div class="ed-sb-lazy" data-lazy="player-stats">Loading player stats…</div>'
+                  + '</div>';
+      matchPanelForCaps.insertAdjacentHTML('beforeend', psPanel);
+    }
+  }
+  // Predicted Lineups — pre-match expected XI, universal across
+  // team sports per probe v2 inventory.
+  if (caps.predicted_lineups === true) {
+    var subTabsBar2 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
+    if (subTabsBar2 && !subTabsBar2.querySelector('button[data-mt="predicted-lineups"]')) {
+      var plBtn = '<button class="ed-sb-tab" data-mt="predicted-lineups" onclick="window.switchMatchTab(this)">Predicted</button>';
+      var plAnchor = subTabsBar2.querySelector('button[data-mt="player-stats"]')
+                  || subTabsBar2.querySelector('button[data-mt="commentary"]')
+                  || subTabsBar2.querySelector('button[data-mt="missing-players"]');
+      if (plAnchor) plAnchor.insertAdjacentHTML('beforebegin', plBtn);
+      else subTabsBar2.insertAdjacentHTML('beforeend', plBtn);
+    }
+    if (!matchPanelForCaps.querySelector('div[data-mt="predicted-lineups"]')) {
+      var plPanel = '<div data-mt="predicted-lineups" style="display:none">'
+                  + '<div class="ed-sb-lazy" data-lazy="predicted-lineups">Loading predicted lineups…</div>'
+                  + '</div>';
+      matchPanelForCaps.insertAdjacentHTML('beforeend', plPanel);
+    }
+  }
+  // Highlights — Soccer / Cricket / Aussie Rules / Rugby League
+  if (caps.highlights === true) {
+    var subTabsBar3 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
+    if (subTabsBar3 && !subTabsBar3.querySelector('button[data-mt="highlights"]')) {
+      var hlBtn = '<button class="ed-sb-tab" data-mt="highlights" onclick="window.switchMatchTab(this)">Highlights</button>';
+      subTabsBar3.insertAdjacentHTML('beforeend', hlBtn);
+    }
+    if (!matchPanelForCaps.querySelector('div[data-mt="highlights"]')) {
+      var hlPanel = '<div data-mt="highlights" style="display:none">'
+                  + '<div class="ed-sb-lazy" data-lazy="highlights">Loading highlights…</div>'
+                  + '</div>';
+      matchPanelForCaps.insertAdjacentHTML('beforeend', hlPanel);
+    }
+  }
+  // Points History — Tennis primary, also Basketball / Handball /
+  // Volleyball / Snooker / Beach Volleyball / Aussie Rules.
+  if (caps.points_history === true) {
+    var subTabsBar4 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
+    if (subTabsBar4 && !subTabsBar4.querySelector('button[data-mt="points-history"]')) {
+      var phBtn = '<button class="ed-sb-tab" data-mt="points-history" onclick="window.switchMatchTab(this)">Points</button>';
+      var phAnchor = subTabsBar4.querySelector('button[data-mt="highlights"]')
+                  || subTabsBar4.querySelector('button[data-mt="commentary"]')
+                  || subTabsBar4.querySelector('button[data-mt="missing-players"]');
+      if (phAnchor) phAnchor.insertAdjacentHTML('beforebegin', phBtn);
+      else subTabsBar4.insertAdjacentHTML('beforeend', phBtn);
+    }
+    if (!matchPanelForCaps.querySelector('div[data-mt="points-history"]')) {
+      var phPanel = '<div data-mt="points-history" style="display:none">'
+                  + '<div class="ed-sb-lazy" data-lazy="points-history">Loading points…</div>'
+                  + '</div>';
+      matchPanelForCaps.insertAdjacentHTML('beforeend', phPanel);
+    }
+  }
+  // Darts — combined statistics-alt + throw-by-throw
+  if (caps.darts_stats === true || caps.throw_by_throw === true) {
+    var subTabsBar5 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
+    if (subTabsBar5 && !subTabsBar5.querySelector('button[data-mt="darts"]')) {
+      var dBtn = '<button class="ed-sb-tab" data-mt="darts" onclick="window.switchMatchTab(this)">Darts</button>';
+      var dAnchor = subTabsBar5.querySelector('button[data-mt="commentary"]')
+                 || subTabsBar5.querySelector('button[data-mt="missing-players"]')
+                 || subTabsBar5.querySelector('button[data-mt="highlights"]');
+      if (dAnchor) dAnchor.insertAdjacentHTML('beforebegin', dBtn);
+      else subTabsBar5.insertAdjacentHTML('beforeend', dBtn);
+    }
+    if (!matchPanelForCaps.querySelector('div[data-mt="darts"]')) {
+      var dPanel = '<div data-mt="darts" style="display:none">'
+                 + '<div class="ed-sb-lazy" data-lazy="darts">Loading darts data…</div>'
+                 + '</div>';
+      matchPanelForCaps.insertAdjacentHTML('beforeend', dPanel);
+    }
+  }
+  // Golf — Tier I, separate endpoint family
+  if (caps.golf === true) {
+    var subTabsBar6 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
+    if (subTabsBar6 && !subTabsBar6.querySelector('button[data-mt="golf"]')) {
+      var gBtn = '<button class="ed-sb-tab" data-mt="golf" onclick="window.switchMatchTab(this)">Leaderboard</button>';
+      var gAnchor = subTabsBar6.querySelector('button[data-mt="commentary"]')
+                 || subTabsBar6.querySelector('button[data-mt="highlights"]');
+      if (gAnchor) gAnchor.insertAdjacentHTML('beforebegin', gBtn);
+      else subTabsBar6.insertAdjacentHTML('beforeend', gBtn);
+    }
+    if (!matchPanelForCaps.querySelector('div[data-mt="golf"]')) {
+      var gPanel = '<div data-mt="golf" style="display:none">'
+                 + '<div class="ed-sb-lazy" data-lazy="golf">Loading leaderboard…</div>'
+                 + '</div>';
+      matchPanelForCaps.insertAdjacentHTML('beforeend', gPanel);
+    }
+  }
+}
+
 async function _augmentEventCapabilities(panel, ticker, sportStTypes) {
   try {
     // Fire /capabilities and /normalized in parallel. /capabilities
@@ -4875,6 +4991,50 @@ async function _augmentEventCapabilities(panel, ticker, sportStTypes) {
     var capsRes = await capsPromise;
     var normRes = await normPromise;
     var caps = (capsRes && !capsRes.error && capsRes.capabilities) || {};
+    // Inject MATCH sub-tabs (Player Stats, Predicted, Highlights,
+    // Points, Darts, Golf) UNCONDITIONALLY before the standings logic
+    // — the standings code below has early-returns that would
+    // short-circuit this work otherwise. Each tab is a no-op if the
+    // capability is false or already injected, so this is safe.
+    _injectMatchCapabilityTabs(panel, caps);
+    // Filter the sport-default standings sub-tab strip down to the
+    // sub-types the per-event probe actually confirmed have data.
+    // Without this, a Soccer match with only caps.standings.away=true
+    // still shows "LIVE STANDINGS | STANDINGS | FORM | TOP SCORERS"
+    // (sport defaults), and clicking each shows "No standings
+    // available." Better to expose only the sub-tabs that have data.
+    // We keep the union (sport-default + per-event caps) only when
+    // /normalized's has_standings/has_bracket fall-back signals
+    // success — see the perEventTypes block below for the reverse
+    // case. If the per-event probe returned NO standings flags AND
+    // /normalized signals nothing either, sportStTypes wins (existing
+    // behavior — better than showing zero standings tabs).
+    var hasAnyStCap = false;
+    var ALL_ST = ["overall_live", "overall", "home", "away", "form", "top_scores", "draw"];
+    var stCaps = caps.standings || {};
+    for (var k = 0; k < ALL_ST.length; k++) {
+      if (stCaps[ALL_ST[k]] === true) { hasAnyStCap = true; break; }
+    }
+    if (hasAnyStCap) {
+      // Per-event probe returned at least one true flag → trust it.
+      // Filter sportStTypes down to only the types confirmed by caps
+      // so empty "No standings available" panels don't appear.
+      var filtered = [];
+      for (var m = 0; m < sportStTypes.length; m++) {
+        if (stCaps[sportStTypes[m]] === true) filtered.push(sportStTypes[m]);
+      }
+      sportStTypes = filtered;
+      // Refresh the visible standings sub-tab strip + main button
+      // label to match the filtered set, in case the user already
+      // opened Standings.
+      var stPanelEl = panel.querySelector('.ed-sb-main[data-main="standings"]');
+      if (stPanelEl) {
+        stPanelEl.dataset.stTypes = sportStTypes.join(",");
+        if (stPanelEl.dataset.loaded) _hydrateStandingsTabs(stPanelEl, ticker);
+      }
+      var stBtnEl = panel.querySelector('.ed-sb-main-tabs [data-main="standings"]');
+      if (stBtnEl) stBtnEl.textContent = _standingsTabLabel(sportStTypes);
+    }
     var st = caps.standings || {};
     // Preserve canonical render order so a sport that gains "draw"
     // mid-session ends up with the same tab order as a sport that had
@@ -4938,137 +5098,6 @@ async function _augmentEventCapabilities(panel, ticker, sportStTypes) {
       // tab order in the strip.
       var mains = panel.querySelectorAll(".ed-sb-main");
       if (mains.length) mains[mains.length - 1].insertAdjacentHTML("afterend", ph);
-    }
-    // ── Capability-gated MATCH sub-tabs ──
-    // Initial render hides these tabs (hasPlayerStats=false,
-    // predicted lineups not rendered). When /capabilities confirms
-    // FL has data for this event, inject the sub-tab button +
-    // lazy-load panel into the MATCH main panel. Mirrors the
-    // standings dynamic-injection pattern above. Empty states
-    // never appear because the tab only exists when data exists.
-    var matchPanelForCaps = panel.querySelector('.ed-sb-main[data-main="match"]');
-    if (matchPanelForCaps) {
-      // Player Stats — top-tier league events only (probe v4)
-      if (caps.player_stats === true) {
-        var subTabsBar = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
-        if (subTabsBar && !subTabsBar.querySelector('button[data-mt="player-stats"]')) {
-          var psBtn = '<button class="ed-sb-tab" data-mt="player-stats" onclick="window.switchMatchTab(this)">Player Stats</button>';
-          var anchor = subTabsBar.querySelector('button[data-mt="commentary"]')
-                    || subTabsBar.querySelector('button[data-mt="missing-players"]');
-          if (anchor) anchor.insertAdjacentHTML('beforebegin', psBtn);
-          else subTabsBar.insertAdjacentHTML('beforeend', psBtn);
-        }
-        if (!matchPanelForCaps.querySelector('div[data-mt="player-stats"]')) {
-          var psPanel = '<div data-mt="player-stats" style="display:none">'
-                      + '<div class="ed-sb-lazy" data-lazy="player-stats">Loading player stats…</div>'
-                      + '</div>';
-          matchPanelForCaps.insertAdjacentHTML('beforeend', psPanel);
-        }
-      }
-      // Predicted Lineups — pre-match expected XI, universal across
-      // team sports per probe v2 inventory. Sits between Lineups and
-      // Player Stats in the sub-tab strip — pre-match data shows
-      // before live data conceptually.
-      if (caps.predicted_lineups === true) {
-        var subTabsBar2 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
-        if (subTabsBar2 && !subTabsBar2.querySelector('button[data-mt="predicted-lineups"]')) {
-          var plBtn = '<button class="ed-sb-tab" data-mt="predicted-lineups" onclick="window.switchMatchTab(this)">Predicted</button>';
-          var plAnchor = subTabsBar2.querySelector('button[data-mt="player-stats"]')
-                      || subTabsBar2.querySelector('button[data-mt="commentary"]')
-                      || subTabsBar2.querySelector('button[data-mt="missing-players"]');
-          if (plAnchor) plAnchor.insertAdjacentHTML('beforebegin', plBtn);
-          else subTabsBar2.insertAdjacentHTML('beforeend', plBtn);
-        }
-        if (!matchPanelForCaps.querySelector('div[data-mt="predicted-lineups"]')) {
-          var plPanel = '<div data-mt="predicted-lineups" style="display:none">'
-                      + '<div class="ed-sb-lazy" data-lazy="predicted-lineups">Loading predicted lineups…</div>'
-                      + '</div>';
-          matchPanelForCaps.insertAdjacentHTML('beforeend', plPanel);
-        }
-      }
-      // Highlights (video clips) — Soccer / Cricket / Aussie Rules /
-      // Rugby League per probe v2. Last sub-tab in the strip — sits
-      // after live data because it's typically post-match content.
-      if (caps.highlights === true) {
-        var subTabsBar3 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
-        if (subTabsBar3 && !subTabsBar3.querySelector('button[data-mt="highlights"]')) {
-          var hlBtn = '<button class="ed-sb-tab" data-mt="highlights" onclick="window.switchMatchTab(this)">Highlights</button>';
-          subTabsBar3.insertAdjacentHTML('beforeend', hlBtn);
-        }
-        if (!matchPanelForCaps.querySelector('div[data-mt="highlights"]')) {
-          var hlPanel = '<div data-mt="highlights" style="display:none">'
-                      + '<div class="ed-sb-lazy" data-lazy="highlights">Loading highlights…</div>'
-                      + '</div>';
-          matchPanelForCaps.insertAdjacentHTML('beforeend', hlPanel);
-        }
-      }
-      // Points History — set/game/point progression. Tennis is the
-      // primary user; Basketball / Handball / Volleyball / Snooker /
-      // Beach Volleyball / Aussie Rules also populate it.
-      if (caps.points_history === true) {
-        var subTabsBar4 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
-        if (subTabsBar4 && !subTabsBar4.querySelector('button[data-mt="points-history"]')) {
-          var phBtn = '<button class="ed-sb-tab" data-mt="points-history" onclick="window.switchMatchTab(this)">Points</button>';
-          // Insert before Highlights (post-match) if present, else
-          // before Commentary, else end of strip.
-          var phAnchor = subTabsBar4.querySelector('button[data-mt="highlights"]')
-                      || subTabsBar4.querySelector('button[data-mt="commentary"]')
-                      || subTabsBar4.querySelector('button[data-mt="missing-players"]');
-          if (phAnchor) phAnchor.insertAdjacentHTML('beforebegin', phBtn);
-          else subTabsBar4.insertAdjacentHTML('beforeend', phBtn);
-        }
-        if (!matchPanelForCaps.querySelector('div[data-mt="points-history"]')) {
-          var phPanel = '<div data-mt="points-history" style="display:none">'
-                      + '<div class="ed-sb-lazy" data-lazy="points-history">Loading points…</div>'
-                      + '</div>';
-          matchPanelForCaps.insertAdjacentHTML('beforeend', phPanel);
-        }
-      }
-      // Darts — categorical stats (statistics-alt) + throw-by-throw
-      // progression. Either capability flag enables the tab. Single
-      // sub-tab labeled "Darts" rather than two — keeps the strip
-      // clean. Replaces the regular Stats tab for darts events
-      // (statistics endpoint 404s for darts; statistics-alt is the
-      // darts-specific path).
-      if (caps.darts_stats === true || caps.throw_by_throw === true) {
-        var subTabsBar5 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
-        if (subTabsBar5 && !subTabsBar5.querySelector('button[data-mt="darts"]')) {
-          var dBtn = '<button class="ed-sb-tab" data-mt="darts" onclick="window.switchMatchTab(this)">Darts</button>';
-          var dAnchor = subTabsBar5.querySelector('button[data-mt="commentary"]')
-                     || subTabsBar5.querySelector('button[data-mt="missing-players"]')
-                     || subTabsBar5.querySelector('button[data-mt="highlights"]');
-          if (dAnchor) dAnchor.insertAdjacentHTML('beforebegin', dBtn);
-          else subTabsBar5.insertAdjacentHTML('beforeend', dBtn);
-        }
-        if (!matchPanelForCaps.querySelector('div[data-mt="darts"]')) {
-          var dPanel = '<div data-mt="darts" style="display:none">'
-                     + '<div class="ed-sb-lazy" data-lazy="darts">Loading darts data…</div>'
-                     + '</div>';
-          matchPanelForCaps.insertAdjacentHTML('beforeend', dPanel);
-        }
-      }
-      // Golf — Tier I, separate endpoint family. /capabilities does
-      // the no_duel_event_id discovery and probes /no-duel-data;
-      // caps.golf is true only when FL has data for this golf event.
-      if (caps.golf === true) {
-        var subTabsBar6 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
-        if (subTabsBar6 && !subTabsBar6.querySelector('button[data-mt="golf"]')) {
-          var gBtn = '<button class="ed-sb-tab" data-mt="golf" onclick="window.switchMatchTab(this)">Leaderboard</button>';
-          // Golf events don't have most other tabs (no Lineups,
-          // no Player Stats), so just insert before any post-match
-          // content tabs or at the end.
-          var gAnchor = subTabsBar6.querySelector('button[data-mt="commentary"]')
-                     || subTabsBar6.querySelector('button[data-mt="highlights"]');
-          if (gAnchor) gAnchor.insertAdjacentHTML('beforebegin', gBtn);
-          else subTabsBar6.insertAdjacentHTML('beforeend', gBtn);
-        }
-        if (!matchPanelForCaps.querySelector('div[data-mt="golf"]')) {
-          var gPanel = '<div data-mt="golf" style="display:none">'
-                     + '<div class="ed-sb-lazy" data-lazy="golf">Loading leaderboard…</div>'
-                     + '</div>';
-          matchPanelForCaps.insertAdjacentHTML('beforeend', gPanel);
-        }
-      }
     }
   } catch (e) { /* augmentation is best-effort — silent on error */ }
 }
