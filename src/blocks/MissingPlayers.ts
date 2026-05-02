@@ -42,11 +42,36 @@ export async function renderMissingPlayers(
     '<div class="ed-stats-loading">Loading missing players…</div>';
   try {
     const ev: NormalizedEvent = await fetchNormalized(ticker);
-    const raw = (ev.data as { missing_players?: unknown }).missing_players;
-    let players: MissingPlayer[] = [];
-    if (raw && typeof raw === 'object') {
-      const r = raw as MissingPlayersData;
-      players = r.DATA || r.data || [];
+    let players = extractPlayers(
+      (ev.data as { missing_players?: unknown }).missing_players,
+    );
+    let title = ev.title || '';
+    // Fallback to the dedicated endpoint when /normalized's
+    // missing_players probe came back empty. /normalized fans out
+    // to ~17 FL endpoints in parallel; under FL rate pressure the
+    // missing-players probe can return null while other probes
+    // succeed. The dedicated endpoint is one probe, so it tends to
+    // succeed when /normalized's parallel one didn't. Without this
+    // fallback, matches that genuinely have missing players (e.g.
+    // Argentinian Primera Union Santa Fe vs Talleres Cordoba) show
+    // "No missing players reported." instead of the actual list.
+    if (players.length === 0) {
+      try {
+        const dedicated = await fetch(
+          '/api/event/' +
+            encodeURIComponent(ticker) +
+            '/missing-players',
+        );
+        if (dedicated.ok) {
+          const d = await dedicated.json();
+          if (d && !d.error) {
+            players = extractPlayers(d.data);
+            if (d.home_name) title = d.home_name + ' vs ' + (d.away_name || '');
+          }
+        }
+      } catch {
+        /* ignore — keeps the empty-state below */
+      }
     }
     if (!Array.isArray(players) || players.length === 0) {
       mount.innerHTML =
@@ -55,7 +80,6 @@ export async function renderMissingPlayers(
     }
     // Parse home/away from title — matches the Lineups block. FL's
     // missing-players endpoint doesn't ship team names, only TEAM=1/2.
-    const title = ev.title || '';
     const parts = title.split(/\s+(?:vs\.?|v|at)\s+/i);
     const homeName = parts[0]?.trim() || 'Home';
     const awayName = parts[1]?.trim() || 'Away';
@@ -69,6 +93,13 @@ export async function renderMissingPlayers(
     mount.innerHTML =
       '<div class="ed-stats-loading">Failed to load missing players.</div>';
   }
+}
+
+function extractPlayers(raw: unknown): MissingPlayer[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const r = raw as MissingPlayersData;
+  const arr = r.DATA || r.data || [];
+  return Array.isArray(arr) ? arr : [];
 }
 
 function renderTeam(name: string, list: MissingPlayer[]): string {
