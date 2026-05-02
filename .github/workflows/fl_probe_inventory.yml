@@ -1,0 +1,43 @@
+name: FL Probe v2 — Inventory
+
+on:
+  workflow_dispatch:
+    inputs:
+      sport_ids:
+        description: 'Optional space-separated sport_ids (default: all 38)'
+        required: false
+        default: ''
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run inventory probe
+        env:
+          FLASHLIVE_API_KEY: ${{ secrets.FLASHLIVE_API_KEY }}
+          SPORT_IDS:         ${{ github.event.inputs.sport_ids }}
+        run: |
+          if [ -z "$FLASHLIVE_API_KEY" ]; then
+            echo "::error::FLASHLIVE_API_KEY secret is not set on this repo."
+            exit 1
+          fi
+          if [ -n "$SPORT_IDS" ]; then
+            python3 fl_probe/probe_inventory.py $SPORT_IDS | tee inventory.txt
+          else
+            python3 fl_probe/probe_inventory.py | tee inventory.txt
+          fi
+
+      - name: Upload inventory artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fl-inventory
+          path: inventory.txt
+          retention-days: 30
