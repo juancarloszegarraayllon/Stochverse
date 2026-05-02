@@ -6606,6 +6606,40 @@ async def get_event_predicted_lineups(ticker: str):
         return {"error": str(e)[:200]}
 
 
+@app.get("/api/event/{ticker}/points-history")
+async def get_event_points_history(ticker: str):
+    """Fetch point-by-point progression from FlashLive. Tennis ships
+    set/game/point detail (CURRENT_GAME, FIFTEENS_CONTENT, SERVING,
+    LOST_SERVE, LAST_SCORED); Basketball ships HOME_AHEAD running
+    margin; Handball / Volleyball / Snooker / Beach Volleyball /
+    Aussie Rules also populate this endpoint per probe v2 inventory.
+    Capability-gated on /capabilities.points_history.
+    """
+    ticker = (ticker or "").strip().upper()
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    found = next((r for r in records if r.get("event_ticker") == ticker), None)
+    if not found:
+        return {"error": "event not found"}
+    try:
+        g = await _find_fl_game(found)
+        if not g:
+            return {"error": "FlashLive doesn't cover this match yet"}
+        fl_id = g.get("event_id")
+        if not fl_id:
+            return {"error": "no FlashLive event ID"}
+        from flashlive_feed import _fl_get
+        data = await _fl_get("/v1/events/points-history",
+                             {"event_id": fl_id})
+        if not data:
+            return {"error": "no points history available"}
+        # Pass sport hint so the block can branch tennis vs basketball.
+        return {"data": data, "sport": found.get("_sport", ""),
+                "source": "flashlive"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
 @app.get("/api/event/{ticker}/highlights")
 async def get_event_highlights(ticker: str):
     """Fetch video highlights from FlashLive for this event. Probe v2
@@ -7012,6 +7046,10 @@ async def event_capabilities(ticker: str):
             # Rugby League per probe v2 inventory. Gates the
             # Highlights sub-tab in the Match panel.
             "highlights": ("/v1/events/highlights", {"event_id": fl_id}),
+            # Points History — tennis set/game/point detail; also
+            # basketball running margin and a handful of other
+            # sports per probe v2. Gates the Points History sub-tab.
+            "points_history": ("/v1/events/points-history", {"event_id": fl_id}),
         }
         # Standings sub-types — one probe per documented
         # standing_type so the frontend can build sub-tabs from

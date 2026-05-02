@@ -331,6 +331,18 @@ html,body{overscroll-behavior:none}
 .ed-lu-predicted .ed-lu-player{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12px}
 .ed-lu-predicted .ed-lu-num{display:inline-block;min-width:22px;text-align:center;font-variant-numeric:tabular-nums;color:var(--text-dim);font-weight:600}
 .ed-lu-predicted .ed-lu-name{color:var(--text)}
+/* Points History block (PointsHistory.ts) */
+.ed-ph-wrap{padding:6px 0;font-size:12px}
+.ed-ph-group{margin-bottom:14px}
+.ed-ph-group-head{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border,rgba(255,255,255,0.08))}
+.ed-ph-list{display:flex;flex-direction:column;gap:2px}
+.ed-ph-row{display:flex;align-items:center;gap:10px;padding:4px 6px;border-radius:4px}
+.ed-ph-row:hover{background:var(--bg-card,rgba(255,255,255,0.04))}
+.ed-ph-row.ed-ph-break{background:rgba(255,140,0,0.08)}
+.ed-ph-time{min-width:42px;color:var(--text-dim);font-variant-numeric:tabular-nums;font-size:11px}
+.ed-ph-score{min-width:60px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+.ed-ph-detail{color:var(--text-muted);font-size:11px}
+.ed-ph-tag{padding:1px 6px;border-radius:3px;background:rgba(255,140,0,0.18);color:#ffb86c;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.4px}
 .ed-stats-bar{display:flex;height:4px;border-radius:2px;overflow:hidden;margin-top:3px}
 .ed-stats-bar-home{background:var(--green);height:100%}
 .ed-stats-bar-away{background:var(--red);height:100%}
@@ -4955,6 +4967,28 @@ async function _augmentEventCapabilities(panel, ticker, sportStTypes) {
           matchPanelForCaps.insertAdjacentHTML('beforeend', hlPanel);
         }
       }
+      // Points History — set/game/point progression. Tennis is the
+      // primary user; Basketball / Handball / Volleyball / Snooker /
+      // Beach Volleyball / Aussie Rules also populate it.
+      if (caps.points_history === true) {
+        var subTabsBar4 = matchPanelForCaps.querySelector('.ed-sb-sub-tabs');
+        if (subTabsBar4 && !subTabsBar4.querySelector('button[data-mt="points-history"]')) {
+          var phBtn = '<button class="ed-sb-tab" data-mt="points-history" onclick="window.switchMatchTab(this)">Points</button>';
+          // Insert before Highlights (post-match) if present, else
+          // before Commentary, else end of strip.
+          var phAnchor = subTabsBar4.querySelector('button[data-mt="highlights"]')
+                      || subTabsBar4.querySelector('button[data-mt="commentary"]')
+                      || subTabsBar4.querySelector('button[data-mt="missing-players"]');
+          if (phAnchor) phAnchor.insertAdjacentHTML('beforebegin', phBtn);
+          else subTabsBar4.insertAdjacentHTML('beforeend', phBtn);
+        }
+        if (!matchPanelForCaps.querySelector('div[data-mt="points-history"]')) {
+          var phPanel = '<div data-mt="points-history" style="display:none">'
+                      + '<div class="ed-sb-lazy" data-lazy="points-history">Loading points…</div>'
+                      + '</div>';
+          matchPanelForCaps.insertAdjacentHTML('beforeend', phPanel);
+        }
+      }
     }
   } catch (e) { /* augmentation is best-effort — silent on error */ }
 }
@@ -6248,6 +6282,7 @@ window.switchMatchTab = function(btn) {
       else if (target === 'missing-players') _loadMissingPlayers(lazy, ticker);
       else if (target === 'predicted-lineups') _loadPredictedLineups(lazy, ticker);
       else if (target === 'highlights') _loadHighlights(lazy, ticker);
+      else if (target === 'points-history') _loadPointsHistory(lazy, ticker);
       else if (target === 'lineups' && window.StochverseBundle && window.StochverseBundle.renderLineups) {
         window.StochverseBundle.renderLineups(ticker, lazy);
       }
@@ -6446,6 +6481,22 @@ async function _loadHighlights(container, ticker) {
     }
   }
   container.innerHTML = '<div class="ed-stats-loading">Highlights unavailable.</div>';
+}
+
+// Points History render: tennis set/game/point detail, basketball
+// running margin, etc. Per probe v2 inventory: Tennis, Basketball,
+// Handball, Volleyball, Snooker, Beach Volleyball, Aussie Rules.
+// Hits /api/event/<t>/points-history directly. Capability-gated.
+async function _loadPointsHistory(container, ticker) {
+  if (window.StochverseBundle && window.StochverseBundle.renderPointsHistory) {
+    try {
+      await window.StochverseBundle.renderPointsHistory(ticker, container);
+      return;
+    } catch (e) {
+      // Fall through to error state.
+    }
+  }
+  container.innerHTML = '<div class="ed-stats-loading">Points history unavailable.</div>';
 }
 
 // Player Stats render: groups players by team and uses FlashLive's
@@ -6809,6 +6860,7 @@ window.switchSBTab = function(btn) {
       else if (lazyKey === "player-stats") _loadPlayerStats(lazy, ticker);
       else if (lazyKey === "predicted-lineups") _loadPredictedLineups(lazy, ticker);
       else if (lazyKey === "highlights") _loadHighlights(lazy, ticker);
+      else if (lazyKey === "points-history") _loadPointsHistory(lazy, ticker);
     }
   }
 };

@@ -22,6 +22,7 @@ import { renderPlayerStats } from './blocks/PlayerStats';
 import { renderMissingPlayers } from './blocks/MissingPlayers';
 import { renderPredictedLineups } from './blocks/PredictedLineups';
 import { renderHighlights } from './blocks/Highlights';
+import { renderPointsHistory } from './blocks/PointsHistory';
 
 declare global {
   interface Window {
@@ -104,6 +105,14 @@ declare global {
       // Rules / Rugby League per probe v2 inventory.
       // Capability-gated tab.
       renderHighlights?: (
+        ticker: string,
+        mount: HTMLElement,
+      ) => Promise<void>;
+      // Render the Match → Points History sub-tab from
+      // /api/event/<t>/points-history. Tennis (set/game/point),
+      // Basketball (running margin), and a handful of other
+      // sports per probe v2. Capability-gated tab.
+      renderPointsHistory?: (
         ticker: string,
         mount: HTMLElement,
       ) => Promise<void>;
@@ -404,8 +413,15 @@ async function renderHighlightsByTicker(
   return renderHighlights(mount, ticker);
 }
 
+async function renderPointsHistoryByTicker(
+  ticker: string,
+  mount: HTMLElement,
+): Promise<void> {
+  return renderPointsHistory(mount, ticker);
+}
+
 window.StochverseBundle = {
-  version: '0.5.5',
+  version: '0.5.6',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
@@ -420,6 +436,7 @@ window.StochverseBundle = {
   renderMissingPlayers: renderMissingPlayersByTicker,
   renderPredictedLineups: renderPredictedLineupsByTicker,
   renderHighlights: renderHighlightsByTicker,
+  renderPointsHistory: renderPointsHistoryByTicker,
 };
 
 console.log('[stochverse] bundle loaded', window.StochverseBundle);
