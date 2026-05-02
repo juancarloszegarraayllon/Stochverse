@@ -1,12 +1,24 @@
 # Detailed Event Stats — Master Schema
 
-> Source of truth: `fl_probe v2 — Inventory` run #1 (2026-05-02).
-> 31 sports with usable events, 26 endpoints per event, every leaf below
-> grounded in a real response key. Where a key is `← NEW` it means FL
-> ships it but Stochverse currently does not surface it.
+> Sources: `fl_probe v2` (inventory across 31 sports), `fl_probe v3`
+> (Q2/Q4 retest), `fl_probe v4` (canonical example IDs from FL OpenAPI
+> spec). Every leaf below grounded in a real response key from one of
+> those runs.
 
-**Status legend** &nbsp; ✅ live in inventory &nbsp; ▲ partial / sport-specific
-&nbsp; ← NEW = not yet surfaced &nbsp; ∅ 200 but empty &nbsp; · 404 (N/A)
+**⚠️ Critical mental-model fix (probe v4, 2026-05-02):**
+**404 from any FL event endpoint = "no data for this event in this
+category"**, NOT "endpoint dead". Probe v4 hit the spec's canonical
+example IDs and confirmed `/player-stats`, `/player-statistics-alt`,
+`/throw-by-throw`, `/no-duel-data`, `/rounds-results`, and
+`/commentary` all return rich data — even though they 404'd against
+random `/list` events in v2. **Treat capability per-event, not
+per-endpoint.** The right architecture is capability flags driven by
+`/v1/events/last-change` hashes, not endpoint tombstones.
+
+**Status legend** &nbsp; ✅ confirmed live (probe v2 inventory or v4
+canonical) &nbsp; ▲ partial / sport-specific &nbsp; ← NEW = not yet
+surfaced by Stochverse &nbsp; ∅ 200 but empty &nbsp; · 404 (no data
+for the event probed; endpoint may still return for other events)
 
 ---
 
@@ -19,12 +31,13 @@ Each tier shares one diagram. Per-sport overrides are called out below.
 |---|---|---|
 | **A** | Full team sports (lineups + stats + incidents + odds) | Soccer, Hockey, Aussie Rules, Rugby League |
 | **B** | Team sports without lineups (stats only, off-season noisy) | American Football, Rugby Union, Baseball |
-| **C** | Score-tracking team sports (scoreboard + summaries, often + odds + points-history) | Basketball, Handball, Volleyball, Floorball, Futsal, Field Hockey, Beach Volleyball, Water Polo, Beach Soccer, Esports, Pesapallo, Netball |
+| **C** | Score-tracking team sports (scoreboard + summaries, often + odds + points-history + per-player stats) | Basketball, Handball, Volleyball, Floorball, Futsal, Field Hockey, Beach Volleyball, Water Polo, Beach Soccer, Esports, Pesapallo, Netball |
 | **D** | Individual / head-to-head sports | Tennis, Darts, Snooker, Boxing, MMA, Table Tennis, Badminton |
-| **E** | Cricket — special case (rich pre-match, scorecard family went 404 on our event) | Cricket |
-| **F** | No FL data — skip the modal entirely | Golf, Horse Racing (only `/brief` + `/missing-players`, both empty placeholders) |
-| **G** | ~~Different endpoint family~~ — `/v1/races/*` confirmed nonexistent (probe v3, 11 paths × 4 param names → 100% 404). Tournament-level endpoints reject the compound IDs too. Treat as no FL data. | Motorsport, Cycling |
+| **E** | Cricket — special case. Rich pre-match data via `/data` and `/summary`. Scorecard family (`/scorecard`, `/fall-of-wickets`, `/ball-by-ball`) 404'd on both v2 random events AND v4 spec canonical (`tK1xeE9p`) — endpoints documented but no data flowing to our IDs. Re-probe during a live IPL match before designing the cricket scorecard tab. | Cricket |
+| **F** | No FL modal — only `/brief` + `/missing-players` and both return empty placeholders | Horse Racing |
+| **G** | Confirmed nonexistent endpoint family. Probe v3 tested 11 candidate `/v1/races/*` paths × 4 param names → 100% 404. Probe v4 retested `/v1/events/racing-details` against the spec canonical (`sport=35, template=fsB7cpNF`) → also 404. Treat as no FL data via current API. | Motorsport, Cycling |
 | **H** | No event in ±7d window during probe — re-probe in season | Bandy, Autoracing, Motoracing, Winter Sports, Ski Jumping, Cross Country, Biathlon, Kabaddi |
+| **I** | Individual no-duel sports — uses `no_duel_event_id + event_id` pair, separate endpoint family. Probe v4 confirmed `/no-duel-data` (rich event metadata) + `/rounds-results` (per-round results). | Golf |
 
 ---
 
@@ -39,9 +52,10 @@ DETAILED EVENT STATS — modal blueprint (capability-driven render)
  │                                  DATA.EVENT.HAS_LIVE_CENTRE
  │                                  DATA.EVENT.STATS_DATA
  │                                  DATA.TOURNAMENT.HAS_LIVE_TABLE
- ├── Extended Details (beta)      /v1/events/details         ← NEW (universal team sports)
- │      adds: DATA.EVENT_PARTICIPANTS[].PARTICIPANTS[].PARTICIPANT.IMAGES
- │            DATA.LEAGUE_NAMES.NAME_A / NAME_C
+ ├── Extended Details             /v1/events/details         ✅ confirmed v4 (was beta)
+ │      DATA.__TYPENAME, IS_LIVE_UPDATE_EVENT, SETTINGS,
+ │      EVENT_ROUND, LEAGUE_NAMES.{NAME_A,NAME_C},
+ │      EVENT_PARTICIPANTS[].PARTICIPANTS[].PARTICIPANT.IMAGES
  ├── Brief score                  /v1/events/brief           ← NEW — compact snapshot
  ├── Summary                      /v1/events/summary         ✅ Tier A/B (incidents)
  │                                                            ▲ Tier C/D (scoreboard only)
@@ -51,9 +65,17 @@ DETAILED EVENT STATS — modal blueprint (capability-driven render)
  │     └─ [darts]                 /v1/events/statistics-alt  ← NEW — only darts
  ├── Lineups                      /v1/events/lineups         ▲ Soccer / Hockey /
  │                                                            Aussie Rules / Rugby League
+ │      MEMBERS[].INCIDENTS[]: per-player event IDs (decoder = stat-type
+ │      enum from API docs "List of Object" page; e.g. 1=YELLOW_CARD)
  ├── Predicted Lineups            /v1/events/predicted-lineups ← NEW — pre-match,
  │                                                              ~all team sports
  ├── Missing Players              /v1/events/missing-players ✅ universal
+ ├── Player Stats                 /v1/events/player-stats    ← NEW (probe v4) — RICH
+ │      DATA.{TEAMS, PLAYERS, STATS_TYPE_GROUPS, STATS_TYPES, STATS, RATINGS}
+ │      Spec canonical (Sbld5SC5) returned 335 KB. Per-event capability
+ │      flag, gate render on /last-change.PLAYER_STATISTICS hash present.
+ │     └─ [basketball] Player Stats (alt)  /v1/events/player-statistics-alt
+ │           DATA.{TABS, BLOCKS} — 6 KB tabular, basketball-specific shape
  ├── Highlights (video)           /v1/events/highlights      ← NEW — Soccer, Cricket,
  │                                                            Aussie Rules, Rugby League
  ├── News                         /v1/events/news            ← NEW — Snooker,
@@ -63,45 +85,105 @@ DETAILED EVENT STATS — modal blueprint (capability-driven render)
  │                                                            Snooker, Beach Volleyball,
  │                                                            Aussie Rules
  ├── [tennis] Points History      same                       ✅ rich set/game progression
- ├── [cricket] Scorecard          /v1/events/scorecard       ⚠ 404 on our event — re-probe
- ├── [cricket] Fall of Wickets    /v1/events/fall-of-wickets ⚠ 404 — re-probe
- ├── [cricket] Ball-by-Ball       /v1/events/ball-by-ball    ⚠ 404 — re-probe
- ├── [darts]  Throw-by-Throw      /v1/events/throw-by-throw  ⚠ 404 — re-probe live
- ├── Commentary                   /v1/events/commentary      ∅ empty universally
- ├── Report                       /v1/events/report          ∅ empty universally
- │  (player-stats dropped — see §3, confirmed dead via probe v3)
+ ├── [cricket] Scorecard          /v1/events/scorecard       ⚠ 404 on v2 random + v4 canonical
+ ├── [cricket] Fall of Wickets    /v1/events/fall-of-wickets ⚠ 404 — re-probe live IPL
+ ├── [cricket] Ball-by-Ball       /v1/events/ball-by-ball    ⚠ 404 — re-probe live IPL
+ ├── [darts]  Throw-by-Throw      /v1/events/throw-by-throw  ✅ confirmed v4 (canonical j9TDJ0XI)
+ │      DATA.{VALUE, BLOCKS} — 10 KB. Probe v2 404'd because event
+ │      wasn't live; spec canonical is a stored historical example.
+ ├── Commentary                   /v1/events/commentary      ✅ confirmed v4 (canonical 4U8yxaPL)
+ │      DATA=[{END_MATCH}, ...×145] — 29 KB. NOT universally dead — was
+ │      data-conditional 404 in v2 inventory. Render gated by capability.
+ ├── Report                       /v1/events/report          · 404 on canonical (4U8yxaPL)
+ │                                                            also empty in v2 — leave dropped
  └── Last-change hash             /v1/events/last-change     ✅ universal (delta polling)
+        Hashes returned: COMMON, SUMMARY, STATISTICS, LINEUPS,
+        PLAYER_STATISTICS, HIGHLIGHTS — drives capability gating.
+
+[1b] GOLF (Tier I — separate endpoint family)
+ ├── No-Duel Data                 /v1/events/no-duel-data    ✅ confirmed v4
+ │      Params: locale + no_duel_event_id + event_id (NOT just event_id)
+ │      DATA.{FEATURES, RANKINGS, STAGE, EVENT_PARTICIPANT_*, ...}
+ └── Rounds Results               /v1/events/rounds-results  ✅ confirmed v4
+        DATA=[{GOLF_ROUND, ITEMS}, ×4 rounds]
 
 [2] H2H                            /v1/events/h2h            ✅ universal, rich
+                                                              (3 tabs, 114 KB on canonical)
 [3] STANDINGS                      (separate endpoint family — out of scope for v2 modal)
 [4] DRAW / BRACKET                 (separate endpoint family — out of scope for v2 modal)
 [5] ODDS                           /v1/events/odds           ▲ 10 sports — see §4
-[6] NEWS                           /v1/events/news           ▲ Snooker, Rugby League only
+ ├── Prematch Odds                /v1/events/prematch-odds   ← NEW (probe v4)
+ │      Params: locale + sport_id + event_id (NOT just event_id)
+ │      DATA=[{BOOKMAKER_ID, BOOKMAKER_BETTING_TYPE, BOOKMAKER_NAME, ITEMS}, ...]
+ ├── Live Odds (alt)              /v1/events/live-odds-alt   ⚠ needs live event
+ │      Params: locale + bet_type (HOME_AWAY|HOME_DRAW_AWAY) + event_id + book_id
+ │      Probe v4 got 404 on canonical (event wasn't live). Re-probe live.
+ └── Bulk odds list               /v1/events/list-main-odds  ← NEW (probe v4) — sport+date
+        Params: locale + sport_id + timezone + indent_days
+        Returns ~1000 events with odds. Different shape — not modal-level,
+        belongs in cards-list architecture (Step E).
+[6] NEWS                           /v1/events/news            ▲ Snooker, Rugby League only
+
+[REAL-TIME — for live polling architecture, not modal]
+ ├── Live List                    /v1/events/live-list       ✅ confirmed v4
+ │      Params: locale + sport_id + timezone
+ │      Returns currently-live events (74 soccer events at probe time)
+ └── Live Update                  /v1/events/live-update     ✅ confirmed v4
+        Params: locale + sport_id
+        Returns just event_ids that changed; call every 5 sec per FL docs.
 ```
 
 ---
 
-## 3. Endpoints currently empty across all sports
+## 3. Endpoints status — revised after probe v4
 
-These are wired-up FL endpoints that returned no useful payload on any
-sport's representative event. Don't build blocks for them in v2.
+**Original framing (probe v2/v3): "endpoints universally empty across
+all sports" → drop permanently. This framing was wrong.** Probe v4
+(2026-05-02) hit each endpoint with the FL OpenAPI spec's canonical
+example IDs and found that 5 of the 6 "dead" endpoints actually return
+rich data on the spec's canonical event. The 404s in v2 were random
+events that happened to lack data for that category — not endpoint
+death.
 
-| Endpoint | Result | Decision |
-|---|---|---|
-| `/v1/events/commentary` | 404 every sport | drop |
-| `/v1/events/commentary-alt` | 404 every sport | drop |
-| `/v1/events/report` | 404 every sport | drop |
-| `/v1/events/player-stats` | 0/40 events across 5 sports in probe v3 retest (also 404 in v2) | **drop permanently**. If we ever specifically need NBA/EPL player stats later, retest then. |
-| `/v1/events/player-statistics-alt` | 404 every sport | drop |
+| Endpoint | v2/v3 verdict | v4 result (canonical) | Revised decision |
+|---|---|---|---|
+| `/v1/events/player-stats` | 0/40 events → "permanently dead" | ✅ **OK 335 KB** on `Sbld5SC5` (`TEAMS, PLAYERS, STATS_TYPE_GROUPS, STATS_TYPES, STATS, RATINGS`) | **Build block.** Per-event capability flag, gate on `/last-change.PLAYER_STATISTICS` hash. |
+| `/v1/events/player-statistics-alt` | 404 every sport | ✅ **OK 6 KB** on `fXx7UFrK` (`TABS, BLOCKS`) | **Build basketball block.** Different shape from `/player-stats`. |
+| `/v1/events/throw-by-throw` | 404 (non-live) | ✅ **OK 10 KB** on `j9TDJ0XI` (`VALUE, BLOCKS`) | **Build darts block.** Was data-conditional, not dead. |
+| `/v1/events/no-duel-data` | 422 (wrong params used in v2) | ✅ **OK** on golf `tOTtyuU7+n78WB41T` | **Build golf block** — Tier I, requires `no_duel_event_id + event_id` pair. |
+| `/v1/events/rounds-results` | 422 (wrong params) | ✅ **OK** on golf `tOTtyuU7+n78WB41T` | **Build golf block** — 4 rounds × ITEMS shape. |
+| `/v1/events/commentary` | 404 every sport in v2 | ✅ **OK 29 KB** on `4U8yxaPL` (`[{END_MATCH}, ...×145]`) | **Reclassify** — data-conditional, not dead. Re-probe more events to find which sports/leagues populate it. |
+| `/v1/events/racing-details` | 404 (compound IDs) | · 404 on canonical (`sport=35, template=fsB7cpNF`) | Stays dropped (Tier G). Spec canonical also failed → stronger evidence. |
+| `/v1/events/commentary-alt` | 404 every sport | · 404 on cricket canonical `tK1xeE9p` | Stays dropped — paired with the cricket scorecard family failure (likely same root cause). |
+| `/v1/events/report` | 404 every sport | · 404 on canonical `4U8yxaPL` | Stays dropped — only endpoint where spec canonical also 404'd. |
+| `/v1/events/last-change` | ✅ universal (delta polling) | · 404 on canonical `4U8yxaPL` | Keep as universal — canonical 404 is a data-conditional anomaly; v2 inventory confirmed it works on most events. |
+| `/v1/events/highlights` | ✅ 4 sports in v2 | · 404 on canonical `Mss8F4uf` | Keep as confirmed — canonical is stale, v2 inventory has higher confidence. |
 
 ---
 
-## 4. Odds availability (∗ = sport returns `/v1/events/odds`)
+## 4. Odds availability
 
+**`/v1/events/odds`** (∗ = sport returns it):
 Basketball ∗, Hockey ∗ (32 kB), Handball ∗, Darts ∗, Snooker ∗ (23 kB),
 Boxing ∗, Aussie Rules ∗ (36 kB), Rugby League ∗ (32 kB), MMA ∗, Esports ∗.
-
 Same 12-key shape across all 10. One block design, ten sports.
+
+**`/v1/events/prematch-odds`** (probe v4 confirmed for soccer
+canonical `G8hqiThp`, sport=1): 1.2 KB, shape `[{BOOKMAKER_ID,
+BOOKMAKER_BETTING_TYPE, BOOKMAKER_NAME, ITEMS}, ...]`. Per-sport
+availability needs a sweep — distinct from `/odds` which is event-
+state-agnostic.
+
+**`/v1/events/live-odds-alt`** (needs live event to test): requires
+`bet_type` enum (`HOME_AWAY` or `HOME_DRAW_AWAY`) + `book_id` (1–1000;
+examples in spec: 453=1xbet, 16=bet365). Both bet_type variants 404'd
+on canonical `6ZCocWsb` because event wasn't live at probe time.
+Re-probe against currently-live event when designing the live odds tab.
+
+**`/v1/events/list-main-odds`** (probe v4 confirmed): 395 KB / 1009
+events for soccer today. Sport+date bulk — *not* a modal endpoint.
+Belongs in cards-list architecture (Step E) for showing odds on the
+front-page event list.
 
 ---
 
@@ -154,20 +236,42 @@ Real data we don't surface today:
   specific.
 - `/summary`: `AWAY_OVERS_AND_BALLS_FIRST_INNING`, `AWAY_WICKETS_FIRST_INNING`
   — surface as Innings card.
-- ⚠ `/scorecard`, `/fall-of-wickets`, `/ball-by-ball`: **all 404** for
-  our event. Either the match was between innings or these endpoints
-  are conditional on tournament tier. **Re-probe during an IPL match
-  before designing the cricket scorecard block.**
+- ⚠ `/scorecard`, `/fall-of-wickets`, `/ball-by-ball`: **404 on both
+  v2 random events AND v4 spec canonical** (`tK1xeE9p`). The fact that
+  the spec's own canonical 404'd is the strongest signal yet that
+  these endpoints are gated on a condition we haven't identified
+  (live state? tournament tier? data-feed contract?). **Action: file
+  with FL/RapidAPI support before designing the cricket scorecard tab.**
+  Design the cricket modal *without* scorecard for now.
+- `/commentary-alt` (cricket-specific): also 404 on canonical → likely
+  same root cause as scorecard family.
 - `/highlights`: works (13-key video shape).
 
 ### Darts (sport_id=14) — Tier D special
 - `/statistics`: 404. `/statistics-alt`: ✅ 5 keys (`CATEGORY`, `ID`,
   `VALUE_AWAY`, `VALUE_HOME`) — *the* darts stats endpoint.
-- `/throw-by-throw`: 404 for our (non-live) event. Likely live-only.
+- `/throw-by-throw`: ✅ **confirmed live in probe v4** (canonical
+  `j9TDJ0XI`, 10 KB, `{VALUE, BLOCKS}`). The v2 404 was because the
+  event wasn't live; spec canonical is a stored historical example.
+  Build the throw-by-throw block — gate render on capability.
 - ⚠ `/last-change`: **404 for darts**. **Resolution: tab-open polling
   only — no live polling for darts.** Hashing the body ourselves saves
   no bandwidth (we'd still re-fetch to hash), and darts is low-demand
   enough that stale data between user clicks is acceptable.
+
+### Golf (sport_id=23) — Tier I (was Tier F, reclassified by probe v4)
+- Uses **`no_duel_event_id + event_id` pair**, not just `event_id`.
+  Probe v2 hit golf with `event_id` only and got 422 → wrongly
+  classified as "no FL data" (Tier F).
+- `/no-duel-data` (probe v4 canonical `tOTtyuU7+n78WB41T`): 619 bytes,
+  `DATA.{FEATURES, BIRTHDAY_TIMESTAMP, EVENT_PARTICIPANT_RANKING,
+  EVENT_PARTICIPANT_COUNTRY, STAGE, ...×13}` — golf event metadata
+  + per-participant ranking.
+- `/rounds-results` (same params): 4.5 KB,
+  `[{GOLF_ROUND, ITEMS}, ×4 rounds]` — per-round results, the canonical
+  golf scorecard view.
+- Build a golf-specific modal: Header + Rounds Results + No-Duel Data.
+  Skip Lineups/Stats/H2H tabs (don't apply).
 
 ### Snooker (sport_id=15) — Tier D
 - `/news`: ✅ 12 keys (publishers, links, images). Snooker is one of
@@ -191,9 +295,13 @@ Real data we don't surface today:
 - Full team-sport surface (data/details/brief/summary/odds/h2h all
   return). Surprisingly close to Basketball in shape.
 
-### Tier F — Golf (23), Horse Racing (35)
-Only `/brief` and `/missing-players` return, both 11-byte empty
-placeholders. **Skip the modal entirely** — show only the card header.
+### Tier F — Horse Racing (35) only
+(Golf moved to Tier I after probe v4 reclassification — see Golf
+section above.) Probe v4 confirmed Horse Racing's `/racing-details`
+endpoint also 404s on the spec canonical (`sport=35,
+template=fsB7cpNF`). Only `/brief` + `/missing-players` return,
+both empty placeholders. **Skip the modal entirely** — show only
+the card header.
 
 ### Tier G — Motorsport (31), Cycling (34)
 Every `/v1/events/*` endpoint returns 422 because event_ids returned
@@ -210,31 +318,46 @@ when each sport is in season.
 
 ---
 
-## 6. Round-1 build recommendation (~5 days)
+## 6. Round-1 build recommendation (~7 days, revised after probe v4)
 
-Tackle in this order. Every item below is backed by real keys from
-this inventory.
+Tackle in this order. Every item below is backed by real response
+keys from probe v2 inventory or v4 canonical retest.
 
-1. **`/v1/events/predicted-lineups` across team sports** — universal
+1. **`/v1/events/player-stats` block** — NEW priority #1 after probe v4.
+   335 KB on canonical, 6 top-level data keys (`TEAMS, PLAYERS,
+   STATS_TYPE_GROUPS, STATS_TYPES, STATS, RATINGS`). This is the
+   single highest-value block in the inventory — per-player tracking
+   we've been missing. Gate render on
+   `/last-change.PLAYER_STATISTICS` hash. Need a per-sport sweep to
+   know which sports populate it; spec hints at major team sports.
+   ~1.5 days (block + capability gating + sport sweep).
+
+2. **`/v1/events/predicted-lineups` across team sports** — universal
    pre-match block we currently miss. Soccer, Basketball, Hockey,
    Baseball, AMF, Volleyball, Cricket all return data with the same
    8-key shape (`PREDICTED_LINEUP.FORMATION` + `GROUPS` + `PLAYERS`).
    ~1 day.
 
-2. **`/v1/events/highlights` for the 4 sports that return video** —
+3. **`/v1/events/odds` + `/prematch-odds` for the 10 sports** (see §4).
+   Same shape, two endpoints (live odds vs prematch). Build as one
+   tab with mode toggle. ~1.5 days.
+
+4. **`/v1/events/highlights` for the 4 sports that return video** —
    Soccer, Cricket, Aussie Rules, Rugby League. 13-key shape uniform.
    ~1 day.
 
-3. **`/v1/events/odds` for the 10 sports that return it** (see §4).
-   Same 12-key shape across all 10 → one block design, ten sports
-   enabled. ~1.5 days.
-
-4. **`/v1/events/points-history` for Tennis** — set/game/point
+5. **`/v1/events/points-history` for Tennis** — set/game/point
    progression. Fundamentally different from the cross-sport summary
    block; tennis users expect this. ~1 day.
 
-5. **`/v1/events/statistics-alt` for Darts** — only path to darts
-   stats. ~0.5 day.
+6. **Darts blocks** — `/statistics-alt` (basic stats) +
+   `/throw-by-throw` (live throw progression, confirmed live by v4).
+   Combined ~0.5 day.
+
+7. **Golf modal** — new sport, dedicated modal: Header + Rounds Results
+   (`/rounds-results`) + No-Duel Data (`/no-duel-data`). Requires
+   `no_duel_event_id + event_id` pair-passing in our routing layer.
+   ~0.5 day.
 
 ---
 
@@ -264,29 +387,60 @@ These are Step E candidates after the modal lands.
 
 ## 9. Open questions
 
-1. **Cricket scorecard family** — 404 for our event. Action: re-probe
-   during a live IPL match. Status: open, not blocking — design the
-   cricket modal without scorecard for now, add later if re-probe shows
-   data.
-2. ✅ **`/player-stats` universally 404** — resolved as **dead**.
-   Probe v3 retested with 40 fresh events across 5 sports; 0 returned
-   data, including top-flight leagues like the Albanian Superliga and
-   Australian AIHL. Dropped from §2 modal blueprint and §3. If we
-   ever specifically need NBA/EPL player stats later, retest then.
+1. **Cricket scorecard family** — 404 on both v2 random events AND
+   v4 spec canonical (`tK1xeE9p`). The spec-canonical 404 is the
+   strongest signal yet that these endpoints are gated on a condition
+   we haven't identified. Status: **open**. Action: file with
+   FL/RapidAPI support OR re-probe specifically during a live IPL
+   ball-by-ball state. Non-blocking — design cricket modal without
+   scorecard for now.
+
+2. ✅ **`/player-stats` reopened and resolved POSITIVE** — probe v4
+   hit the spec canonical (`Sbld5SC5`) and got **335 KB** of rich
+   per-player data (`TEAMS, PLAYERS, STATS_TYPE_GROUPS, STATS_TYPES,
+   STATS, RATINGS`). The probe v3 verdict "dead" was wrong — random
+   `/list` events were data-conditional 404s, not endpoint death.
+   `/player-statistics-alt` (basketball) also confirmed working
+   (canonical `fXx7UFrK`). Both added to §2 modal blueprint and §3
+   reclassified. **NEW priority #1 in §6 round-1.**
+
 3. ✅ **Darts polling** — resolved: tab-open only, no live polling
    (darts is low-demand, hashing the body saves no bandwidth).
+   `/throw-by-throw` confirmed working in v4 — was data-conditional
+   404 in v2, not endpoint death.
+
 4. ✅ **Motorsport / Cycling 422** — resolved as **no FL data via
    current API**. Probe v3 tested 11 candidate `/races/*` and
    `/tournaments/*` paths × 4 param names against the compound 16-char
-   event_ids — all 404 or 422. Tier G is now equivalent to Tier F
-   (Golf / Horse Racing): show card header only, no modal.
+   event_ids — all 404 or 422. Probe v4 also confirmed
+   `/v1/events/racing-details` 404s on the spec canonical
+   (`sport=35, template=fsB7cpNF`). Tier G stays "no FL modal".
+   Note: Tier F now contains only Horse Racing (Golf reclassified
+   to Tier I after probe v4 — see §5).
+
 5. ✅ **Per-sport probe re-runs** — resolved: weekly cron added to
    `fl_probe_inventory.yml` (Sundays 06:00 UTC). Mega plan has 10GB/mo
    bandwidth + unlimited requests, so weekly cron costs ~0.5% of quota
    (~50MB/month). Catches newly-in-season sports automatically.
 
+6. **NEW: `/v1/events/live-odds-alt` shape** — probe v4 got 404 on
+   both bet_type variants (HOME_AWAY and HOME_DRAW_AWAY) against
+   canonical `6ZCocWsb` because event wasn't live at probe time.
+   Action: re-probe against a currently-live event before designing
+   the live odds tab. Non-blocking — `/odds` and `/prematch-odds`
+   cover the static cases.
+
+7. **NEW: `/v1/events/commentary` per-sport availability** — probe v4
+   found commentary returns 29 KB on canonical `4U8yxaPL`, contradicting
+   the v2 inventory's "404 every sport" finding. Need a sport-by-sport
+   sweep to know which sports actually populate commentary so we can
+   classify it correctly in §3 (right now it's reclassified as
+   "data-conditional, scope unknown"). Non-blocking.
+
 ---
 
-*Generated from `fl_probe/probe_inventory.py` run on main @ `f481c0d`.
-Re-generate any time via Actions → "FL Probe v2 — Inventory" →
-Run workflow.*
+*Last revised by `fl_probe/probe_canonicals.py` (probe v4) on
+2026-05-02. Re-run any time via Actions → "FL Probe v4 — Canonical
+IDs" → Run workflow. Earlier sources: probe v2 inventory
+(`probe_inventory.py`), probe v3 races/player-stats retest
+(`probe_races.py`).*
