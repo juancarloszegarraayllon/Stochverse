@@ -37,6 +37,7 @@ from caches.state import (
 from enrichment.aggregate import (
     _canonical_game_ticker,
     _aggregate_from_bracket,
+    _bracket_from_warm_cache,
 )
 from enrichment.stage_discovery import (
     _SPORT_NAME_TO_FL_ID,
@@ -6977,6 +6978,13 @@ async def event_capabilities(ticker: str):
                 standings_caps[key[len("__standings__"):]] = has
             else:
                 capabilities[key] = has
+        # Warm-cache fallback for the Draw bracket. The on-demand
+        # probe above is fragile (rate limits, transient FL hiccups);
+        # if we already have a warm-cached bracket for this stage_id,
+        # surface the Draw tab regardless of probe outcome.
+        if stage_id and not standings_caps.get("draw"):
+            if _bracket_from_warm_cache(stage_id, _TOURNAMENT_BRACKET_CACHE):
+                standings_caps["draw"] = True
         capabilities["standings"] = standings_caps
         payload = {
             "ticker": ticker_norm,
@@ -7423,7 +7431,10 @@ async def event_normalized(ticker: str, refresh: bool = False,
                     raw_by_key.get("standings_top_scores"),
                     limit=0),
             },
-            "bracket":          _compact_bracket(raw_by_key.get("standings_draw")),
+            "bracket":          (_compact_bracket(raw_by_key.get("standings_draw"))
+                                 or _bracket_from_warm_cache(
+                                     bracket_stage_id or stage_id,
+                                     _TOURNAMENT_BRACKET_CACHE)),
             # Raw FL draw response from the resolved bracket stage. The
             # legacy _renderBracket() in static/index.html consumes this
             # shape directly (TABS + ROUNDS + DRAW_*); the compact
@@ -7653,6 +7664,17 @@ async def event_scheme(ticker: str, refresh: bool = False):
                 main_tabs_set.add(target[len("main_tab:"):])
             elif target.startswith("standings:"):
                 standings_set.add(target[len("standings:"):])
+        # Warm-cache fallback for the Draw bracket. Same rationale as
+        # in /capabilities: the on-demand probe is fragile, and we
+        # already have the bracket cached via the warm loop. Promote
+        # "draw" into standings_set so the Draw top tab appears, and
+        # populate raw_by_key["standings_draw"] so the bracket field
+        # below resolves to non-null when _compact_bracket runs.
+        if stage_id and "draw" not in standings_set:
+            warm_bracket = _bracket_from_warm_cache(
+                stage_id, _TOURNAMENT_BRACKET_CACHE)
+            if warm_bracket:
+                standings_set.add("draw")
         # ── Compose Match sub-tabs in display order. Summary always
         #    appears (every sport has period/timeline info via the
         #    cached game dict, even if FL's summary endpoint was

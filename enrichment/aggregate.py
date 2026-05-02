@@ -8,6 +8,25 @@ now without touching shared state.
 """
 
 
+def _bracket_from_warm_cache(stage_id: str, bracket_cache: dict):
+    """Return the compacted bracket stored in `bracket_cache` for
+    `stage_id`, or None if not cached / missing.
+
+    Pure read of the caller-supplied cache dict (no globals here).
+    Used as a fallback in /capabilities and /normalized when the
+    on-demand /v1/tournaments/standings?type=draw probe returns
+    empty / fails / rate-limits — the warm loop fetches and caches
+    the bracket every ~5 minutes, so the cache is more reliable
+    than a single fresh probe. Relying solely on the probe was
+    making UCL Draw tabs silently disappear when the probe blipped
+    even though we had the bracket data sitting in memory.
+    """
+    if not stage_id or not isinstance(bracket_cache, dict):
+        return None
+    cached = bracket_cache.get(stage_id)
+    return (cached or {}).get("bracket")
+
+
 def _canonical_game_ticker(event_ticker: str, records: list) -> str:
     """Return the GAME-suffix sibling ticker for any market ticker
     sharing the same fixture suffix. Lets us look up one cache
