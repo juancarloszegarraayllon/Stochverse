@@ -7177,6 +7177,19 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         return (1, mk)
 
     sorted_matchups = sorted(matchups.items(), key=_cup_priority)
+    # Aggregate enrichment — capped per request so we don't blow
+    # the page-load budget. Cup-tie tickers only (UCL knockouts,
+    # Libertadores, FA Cup, etc.) since aggregate doesn't apply
+    # to round-robin league matches anyway. The lookup is cached
+    # for 5 min on the SofaScore side so repeated /sports calls
+    # within a window are free.
+    AGG_LOOKUP_CAP = 15
+    cup_prefixes_for_agg = (
+        "KXUCL", "KXUEL", "KXUECL", "KXCONMEBOLLIB", "KXCONMEBOLSUD",
+        "KXFACUP", "KXDFBPOKAL", "KXCOPADELREY", "KXCOPPAITALIA",
+        "KXKNVBCUP", "KXMLSCUP",
+    )
+    agg_lookups_done = 0
     by_league: dict = {}
     total_events = 0
     for (series, _), bundle in sorted_matchups:
@@ -7235,21 +7248,34 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
             home_name = bare_title[:m.start()].strip()
             away_name = bare_title[m.end():].strip()
         primary_ticker = primary.get("event_ticker") or markets[0]["event_ticker"]
-        # Aggregate — only pass through what's already on the cache
-        # record. We DO NOT do a fresh SofaScore lookup per matchup
-        # here because the unpaired-h2h pipeline can iterate 100+
-        # matchups per request and a per-matchup HTTP call to
-        # SofaScore stacks up enough latency to trigger the
-        # browser's 'page unresponsive' warning. The cache's
-        # _enrich_soccer_aggregate run upstream populates aggregate
-        # for matched FL games; for genuinely unpaired h2h
-        # (Kalshi-only futures), aggregate just won't render until
-        # we add a background SofaScore enricher. Acceptable trade
-        # — chips, tab strip, matchup line all still work.
+        # Aggregate — pass through whatever's on the cache record
+        # first (free), then for cup-tie matchups missing aggregate
+        # do a bounded SofaScore lookup. The cap (AGG_LOOKUP_CAP)
+        # bounds page-load cost: at most 15 SofaScore calls per
+        # /sports request, gated to known cup-tie series tickers
+        # so we don't spend that budget on round-robin league
+        # matches that don't have aggregates anyway. SofaScore
+        # caches results for 5 min on its side, so repeated
+        # navigation in a session hits cache.
         live = primary.get("_live_state") or {}
         agg_label = live.get("aggregate_label") if isinstance(live, dict) else None
         agg_h = primary.get("aggregate_home")
         agg_a = primary.get("aggregate_away")
+        if (sport_name == "Soccer" and (agg_h is None or agg_a is None)
+                and agg_lookups_done < AGG_LOOKUP_CAP
+                and any(series.startswith(p) for p in cup_prefixes_for_agg)):
+            try:
+                from sofascore_feed import match_game as sofa_match
+                sg = sofa_match(bare_title, "Soccer")
+                if sg and sg.get("is_two_leg"):
+                    if agg_h is None: agg_h = sg.get("aggregate_home")
+                    if agg_a is None: agg_a = sg.get("aggregate_away")
+                    if not agg_label and sg.get("leg_number") and sg.get("round_name"):
+                        agg_label = (sg.get("round_name", "") + " · LEG " +
+                                     str(sg.get("leg_number")))
+            except Exception:
+                pass
+            agg_lookups_done += 1
         ev = {
             "EVENT_ID": "kalshi-h2h-" + primary_ticker,
             "START_TIME": None,
