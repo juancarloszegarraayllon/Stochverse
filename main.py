@@ -6789,6 +6789,43 @@ async def fl_sports_events_count(timezone: int = 0):
     return {"data": data, "source": "flashlive"}
 
 
+@app.get("/api/fl/sports-list")
+async def fl_sports_list():
+    """Static FL sports catalog (1=Soccer, 2=Tennis, ...). Cached
+    upstream effectively forever — sports don't change. Used by
+    the top sport nav strip on /sports pages.
+    """
+    from flashlive_feed import _fl_get
+    data = await _fl_get("/v1/sports/list", {})
+    if not data:
+        return {"error": "no sports list available"}
+    return {"data": data, "source": "flashlive"}
+
+
+@app.get("/api/fl/events-list")
+async def fl_events_list(sport_id: int, timezone: int = 0,
+                         indent_days: int = 0):
+    """Sport+date events list, pre-grouped by FL into
+    DATA[].EVENTS[] with TOURNAMENT_STAGE_ID + COUNTRY_NAME etc.
+    Drives COL 1 (leagues sidebar) and COL 2 (event cards) on the
+    /sports/:sport_id page.
+    """
+    from flashlive_feed import _fl_get
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    if not -12 <= timezone <= 12:
+        return {"error": "timezone must be between -12 and 12"}
+    if not -7 <= indent_days <= 7:
+        return {"error": "indent_days must be between -7 and 7"}
+    data = await _fl_get("/v1/events/list", {
+        "sport_id": sport_id, "timezone": timezone,
+        "indent_days": indent_days,
+    })
+    if not data:
+        return {"error": "no events list available"}
+    return {"data": data, "source": "flashlive"}
+
+
 @app.get("/api/fl/list-main-odds")
 async def fl_list_main_odds(sport_id: int, timezone: int = 0,
                              indent_days: int = 0):
@@ -9586,7 +9623,41 @@ def root():
     )
 
 
+@app.get("/sports", response_class=HTMLResponse)
+@app.get("/sports/{sport_id}", response_class=HTMLResponse)
+def sports_browse(sport_id: int = 1):
+    """Sports browse page (Phase 2 of FL hierarchy build). 3-column
+    Sofascore-style layout: leagues / events / detail. Reuses the
+    existing block bundle (`/static/dist/main.js`) for the inline
+    detail panel in COL 3. Mobile collapses to single-column.
+
+    Path /sports → defaults to soccer (sport_id=1). The sport_id is
+    a path segment (not query) for clean URLs and per-sport caching.
+    """
+    p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                      "static", "sports.html")
+    if not _os.path.exists(p):
+        return HTMLResponse(
+            "<h1>static/sports.html not found</h1>"
+            "<p>Make sure sports.html is in the static/ folder</p>",
+            status_code=500,
+        )
+    global _SPORTS_HTML_CACHE
+    mtime = _os.path.getmtime(p)
+    if _SPORTS_HTML_CACHE.get("mtime") != mtime:
+        with open(p, "r", encoding="utf-8") as f:
+            html = f.read()
+        html = html.replace("<!--__ANALYTICS__-->", _analytics_snippet())
+        _SPORTS_HTML_CACHE["html"] = html
+        _SPORTS_HTML_CACHE["mtime"] = mtime
+    return HTMLResponse(
+        _SPORTS_HTML_CACHE["html"],
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
 _INDEX_HTML_CACHE = {"html": None, "mtime": None}
+_SPORTS_HTML_CACHE = {"html": None, "mtime": None}
 
 
 def _analytics_snippet() -> str:

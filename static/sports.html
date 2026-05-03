@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Stochverse — Sports</title>
+
+<!-- Theme variables shared with index.html so the dark look is identical.
+     If you tweak palette here, mirror it in static/index.html lines 10-12. -->
+<style>
+:root{--bg:#000;--bg2:#0a0a0a;--bg3:#111;--border:#1a1a1a;--green:#00ff00;--green-dim:#00aa00;--green-line:#0a3f0a;--green-bg:#001500;--red:#ff3333;--text:#fff;--text-dim:#888;--text-muted:#444;--bg-card:rgba(255,255,255,0.04);--bg-card-hover:rgba(255,255,255,0.07)}
+:root{--header-h:56px;--sport-nav-h:48px;--col1-w:280px;--col3-w:480px}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.4;height:100%;overflow:hidden}
+
+/* Header (compact — link back to home, page title) */
+.sp-header{height:var(--header-h);display:flex;align-items:center;padding:0 16px;border-bottom:1px solid var(--border);background:var(--bg);position:sticky;top:0;z-index:30}
+.sp-logo{font-size:16px;font-weight:700;color:var(--green);text-decoration:none;letter-spacing:.5px}
+.sp-logo:hover{color:var(--green-dim)}
+.sp-header-spacer{flex:1}
+.sp-header a.sp-back{color:var(--text-dim);text-decoration:none;font-size:12px;padding:6px 10px;border-radius:4px}
+.sp-header a.sp-back:hover{color:var(--text);background:var(--bg-card)}
+
+/* Top sport nav strip — horizontally scrollable like Sofascore.
+   Each sport is a button with icon + name + optional live count. */
+.sp-nav{height:var(--sport-nav-h);display:flex;align-items:center;gap:2px;padding:0 8px;border-bottom:1px solid var(--border);background:var(--bg2);overflow-x:auto;overflow-y:hidden;scrollbar-width:none;white-space:nowrap;flex-shrink:0}
+.sp-nav::-webkit-scrollbar{display:none}
+.sp-nav-item{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:6px;cursor:pointer;color:var(--text-dim);font-size:13px;font-weight:500;background:transparent;border:0;transition:background .12s ease,color .12s ease;white-space:nowrap}
+.sp-nav-item:hover{color:var(--text);background:var(--bg-card)}
+.sp-nav-item.active{color:var(--green);background:var(--green-bg)}
+.sp-nav-count{font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;background:var(--bg-card);color:var(--text-dim);font-variant-numeric:tabular-nums}
+.sp-nav-item.active .sp-nav-count{background:var(--green-line);color:var(--green)}
+
+/* Main 3-column grid. Heights are calculated so each column
+   gets its own scrollbar without page-level scroll. */
+.sp-main{display:grid;grid-template-columns:var(--col1-w) 1fr var(--col3-w);height:calc(100vh - var(--header-h) - var(--sport-nav-h));overflow:hidden}
+.sp-col{height:100%;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.sp-col::-webkit-scrollbar{width:8px}
+.sp-col::-webkit-scrollbar-track{background:transparent}
+.sp-col::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.sp-col::-webkit-scrollbar-thumb:hover{background:#333}
+.sp-col1{border-right:1px solid var(--border);background:var(--bg)}
+.sp-col2{background:var(--bg);border-right:1px solid var(--border)}
+.sp-col3{background:var(--bg2)}
+
+/* COL 1 — leagues sidebar.
+   Each tournament = collapsible group with country flag/name + count. */
+.sp-c1-tabs{display:flex;border-bottom:1px solid var(--border);font-size:12px}
+.sp-c1-tab{flex:1;text-align:center;padding:10px 8px;cursor:pointer;color:var(--text-dim);border-bottom:2px solid transparent;font-weight:500}
+.sp-c1-tab:hover{color:var(--text)}
+.sp-c1-tab.active{color:var(--green);border-bottom-color:var(--green)}
+.sp-c1-filters{display:flex;gap:6px;padding:10px 12px;flex-wrap:wrap;border-bottom:1px solid var(--border)}
+.sp-c1-filter{font-size:11px;padding:5px 10px;border-radius:14px;background:var(--bg-card);color:var(--text-dim);cursor:pointer;border:1px solid transparent;font-weight:500}
+.sp-c1-filter:hover{color:var(--text)}
+.sp-c1-filter.active{background:var(--red);color:#fff;border-color:var(--red)}
+.sp-c1-list{padding:6px 0}
+.sp-c1-league{padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-dim)}
+.sp-c1-league:hover{background:var(--bg-card);color:var(--text)}
+.sp-c1-league.active{background:var(--green-bg);color:var(--green);border-left:2px solid var(--green);padding-left:10px}
+.sp-c1-league-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sp-c1-league-count{font-size:10px;font-variant-numeric:tabular-nums;color:var(--text-muted)}
+
+/* COL 2 — events list grouped by tournament.
+   Each tournament has a header + collapsible list of event rows. */
+.sp-c2-empty{padding:60px 24px;text-align:center;color:var(--text-muted);font-size:13px}
+.sp-c2-tournament{border-bottom:1px solid var(--border)}
+.sp-c2-tournament-head{padding:10px 14px;background:var(--bg2);font-size:11px;font-weight:600;color:var(--text);display:flex;align-items:center;gap:8px;letter-spacing:.3px;text-transform:uppercase}
+.sp-c2-country{color:var(--text-dim);font-weight:500}
+.sp-c2-events{padding:0}
+.sp-c2-event{display:grid;grid-template-columns:64px 1fr 60px 28px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:center;transition:background .1s ease}
+.sp-c2-event:hover{background:var(--bg-card)}
+.sp-c2-event.selected{background:var(--green-bg)}
+.sp-c2-event:last-child{border-bottom:none}
+.sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums}
+.sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);margin-top:2px;text-transform:uppercase}
+.sp-c2-time-state.live{color:var(--red);font-weight:700}
+.sp-c2-teams{font-size:13px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
+.sp-c2-team{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sp-c2-scores{font-size:13px;font-weight:700;text-align:right;font-variant-numeric:tabular-nums;display:flex;flex-direction:column;gap:2px}
+.sp-c2-fav{color:var(--text-muted);text-align:center;cursor:pointer;font-size:14px}
+.sp-c2-fav:hover{color:var(--green)}
+
+/* COL 3 — event detail panel placeholder.
+   Will be populated by the bundle's renderer once an event is
+   selected. The placeholder lives here for both empty-state and
+   loading-state. */
+.sp-c3-empty{padding:80px 32px;text-align:center;color:var(--text-muted);font-size:13px}
+.sp-c3-empty-icon{font-size:32px;margin-bottom:12px;opacity:.4}
+.sp-c3-empty-title{font-size:14px;color:var(--text-dim);margin-bottom:6px}
+.sp-c3-empty-hint{font-size:12px;color:var(--text-muted)}
+
+/* Mobile fallback — collapse to single column with the existing
+   modal pattern. COL 1 + COL 3 hidden, COL 2 expands full-width.
+   Click an event card → open existing modal (if matched ticker)
+   or a basic FL detail view (TODO when COL 3 ships). */
+@media (max-width:900px){
+  :root{--col1-w:0;--col3-w:0}
+  .sp-main{grid-template-columns:1fr}
+  .sp-col1,.sp-col3{display:none}
+  .sp-col2{border-right:none}
+  .sp-c2-event{grid-template-columns:56px 1fr 50px 28px}
+}
+</style>
+<!--__ANALYTICS__-->
+</head>
+<body>
+
+<header class="sp-header">
+  <a class="sp-logo" href="/">STOCHVERSE</a>
+  <div class="sp-header-spacer"></div>
+  <a class="sp-back" href="/">← Markets</a>
+</header>
+
+<!-- Top sport nav: populated from /api/fl/sports-list + counts.
+     Active sport pulled from the URL path (/sports/:sport_id). -->
+<nav class="sp-nav" id="sp-nav" aria-label="Sport selector">
+  <span style="color:var(--text-muted);padding:0 14px;font-size:12px">Loading sports…</span>
+</nav>
+
+<main class="sp-main">
+
+  <!-- COL 1 — leagues sidebar -->
+  <aside class="sp-col sp-col1" id="sp-col1">
+    <div class="sp-c1-tabs">
+      <div class="sp-c1-tab active" data-tab="all">All</div>
+      <div class="sp-c1-tab" data-tab="favourites">Favourites</div>
+      <div class="sp-c1-tab" data-tab="competitions">Competitions</div>
+    </div>
+    <div class="sp-c1-filters" id="sp-c1-filters">
+      <span class="sp-c1-filter active" data-state="all">All</span>
+      <span class="sp-c1-filter" data-state="live">Live</span>
+      <span class="sp-c1-filter" data-state="finished">Finished</span>
+      <span class="sp-c1-filter" data-state="upcoming">Upcoming</span>
+    </div>
+    <div class="sp-c1-list" id="sp-c1-list">
+      <div style="padding:24px 14px;color:var(--text-muted);font-size:12px;text-align:center">Loading leagues…</div>
+    </div>
+  </aside>
+
+  <!-- COL 2 — events stream, grouped by tournament -->
+  <section class="sp-col sp-col2" id="sp-col2">
+    <div class="sp-c2-empty" id="sp-col2-empty">Loading events…</div>
+  </section>
+
+  <!-- COL 3 — selected event detail. Placeholder until COL 3
+       wiring lands in the next commit. -->
+  <aside class="sp-col sp-col3" id="sp-col3">
+    <div class="sp-c3-empty">
+      <div class="sp-c3-empty-icon">⊙</div>
+      <div class="sp-c3-empty-title">Select an event</div>
+      <div class="sp-c3-empty-hint">Click any match in the list to see details, stats, and odds here.</div>
+    </div>
+  </aside>
+
+</main>
+
+<script type="module">
+// Phase 2a wiring — top nav, COL 1, COL 2.
+// COL 3 detail rendering ships in a follow-up commit so the user
+// can visually verify the scaffold + nav + leagues + events first.
+
+const SPORT_ICONS = {
+  1: '⚽', 2: '🎾', 3: '🏀', 4: '🏒', 5: '🏈', 6: '⚾', 7: '🤾',
+  8: '🏉', 12: '🏐', 13: '🏏', 14: '🎯', 15: '🎱', 16: '🥊',
+  18: 'AR', 19: 'RL', 22: '🤽', 23: '⛳', 25: '🏓', 28: '🥋',
+  21: '🏸', 36: '🎮', 35: '🐎', 31: '🏎', 32: '🏎', 33: '🏎',
+};
+
+// Pull active sport_id from URL path (/sports/3 → 3) or query string.
+function activeSportId() {
+  const parts = (location.pathname || '').split('/').filter(Boolean);
+  if (parts[0] === 'sports' && parts[1]) {
+    const n = parseInt(parts[1], 10);
+    if (!isNaN(n) && n >= 1 && n <= 42) return n;
+  }
+  return 1;  // default soccer
+}
+
+function escH(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Top sport nav — populate from /api/fl/sports-list + events-count.
+async function loadSportNav() {
+  const nav = document.getElementById('sp-nav');
+  let sportsListData, countsData;
+  try {
+    const tz = -new Date().getTimezoneOffset() / 60;
+    const [r1, r2] = await Promise.all([
+      fetch('/api/fl/sports-list').then(r => r.json()),
+      fetch('/api/fl/sports-events-count?timezone=' + Math.round(tz))
+        .then(r => r.json()).catch(() => null),
+    ]);
+    sportsListData = r1;
+    countsData = r2;
+  } catch (e) {
+    nav.innerHTML = '<span style="color:var(--red);padding:0 14px;font-size:12px">Failed to load sports</span>';
+    return;
+  }
+  if (sportsListData.error) {
+    nav.innerHTML = '<span style="color:var(--red);padding:0 14px;font-size:12px">' + escH(sportsListData.error) + '</span>';
+    return;
+  }
+  const sports = (sportsListData.data && sportsListData.data.DATA) || [];
+  // Build count map by sport_id from /events-count if available.
+  const counts = {};
+  const cd = (countsData && countsData.data && countsData.data.DATA) || [];
+  for (const c of cd) {
+    const sid = c.SPORT_ID || c.ID;
+    const n = c.LIVE_EVENT_COUNT || c.EVENT_COUNT || c.COUNT;
+    if (sid != null && n != null) counts[sid] = n;
+  }
+  const active = activeSportId();
+  let html = '';
+  for (const s of sports) {
+    const sid = s.ID;
+    const name = (s.NAME || '').toLowerCase()
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+    const icon = SPORT_ICONS[sid] || '•';
+    const count = counts[sid];
+    const cls = 'sp-nav-item' + (sid === active ? ' active' : '');
+    html += '<a class="' + cls + '" href="/sports/' + sid + '">';
+    html += '<span class="sp-nav-icon">' + escH(icon) + '</span>';
+    html += '<span class="sp-nav-name">' + escH(name) + '</span>';
+    if (count != null && count > 0) {
+      html += '<span class="sp-nav-count">' + escH(count) + '</span>';
+    }
+    html += '</a>';
+  }
+  nav.innerHTML = html;
+}
+
+// COL 1 + COL 2 — fetch events for the active sport, group by
+// tournament. COL 1 lists tournaments with counts; COL 2 lists
+// events grouped under tournament headers.
+let _eventsCache = null;
+let _activeStateFilter = 'all';
+let _activeLeagueFilter = null;  // tournament_stage_id, or null = all
+
+async function loadEvents() {
+  const sid = activeSportId();
+  const col1 = document.getElementById('sp-c1-list');
+  const col2 = document.getElementById('sp-col2');
+  col1.innerHTML = '<div style="padding:24px 14px;color:var(--text-muted);font-size:12px;text-align:center">Loading…</div>';
+  col2.innerHTML = '<div class="sp-c2-empty">Loading events…</div>';
+  try {
+    const tz = -new Date().getTimezoneOffset() / 60;
+    const r = await fetch('/api/fl/events-list?sport_id=' + sid +
+      '&timezone=' + Math.round(tz) + '&indent_days=0');
+    const json = await r.json();
+    if (json.error) {
+      col2.innerHTML = '<div class="sp-c2-empty">' + escH(json.error) + '</div>';
+      col1.innerHTML = '';
+      return;
+    }
+    _eventsCache = (json.data && json.data.DATA) || [];
+    renderCol1();
+    renderCol2();
+  } catch (e) {
+    col2.innerHTML = '<div class="sp-c2-empty" style="color:var(--red)">Failed to load events.</div>';
+    col1.innerHTML = '';
+  }
+}
+
+function eventState(ev) {
+  // STAGE_TYPE: SCHEDULED | LIVE | FINISHED. Falls back to
+  // STAGE if not present (older payloads). Anything starting
+  // with HALF/SET/QUARTER/INNING/PERIOD/EXTRA is live.
+  const t = (ev.STAGE_TYPE || '').toUpperCase();
+  if (t === 'LIVE') return 'live';
+  if (t === 'FINISHED') return 'finished';
+  if (t === 'SCHEDULED') return 'upcoming';
+  return (ev.STAGE || '').toUpperCase().match(/HALF|SET|QUARTER|INNING|PERIOD|EXTRA|LIVE/)
+    ? 'live' : 'upcoming';
+}
+
+function passesStateFilter(ev) {
+  if (_activeStateFilter === 'all') return true;
+  return eventState(ev) === _activeStateFilter;
+}
+
+function renderCol1() {
+  const col1 = document.getElementById('sp-c1-list');
+  if (!_eventsCache || !_eventsCache.length) {
+    col1.innerHTML = '<div style="padding:24px 14px;color:var(--text-muted);font-size:12px;text-align:center">No leagues today.</div>';
+    return;
+  }
+  let html = '';
+  // Add an "All leagues" pseudo-entry at top.
+  let totalEvents = 0;
+  for (const t of _eventsCache) {
+    for (const ev of (t.EVENTS || [])) {
+      if (passesStateFilter(ev)) totalEvents++;
+    }
+  }
+  const allCls = 'sp-c1-league' + (_activeLeagueFilter == null ? ' active' : '');
+  html += '<div class="' + allCls + '" data-stage-id="">';
+  html += '<span class="sp-c1-league-name">All leagues</span>';
+  html += '<span class="sp-c1-league-count">' + totalEvents + '</span>';
+  html += '</div>';
+  // Then each tournament (with its filtered event count).
+  for (const t of _eventsCache) {
+    const stageId = t.TOURNAMENT_STAGE_ID || '';
+    const evs = (t.EVENTS || []).filter(passesStateFilter);
+    if (!evs.length) continue;
+    const cls = 'sp-c1-league' + (_activeLeagueFilter === stageId ? ' active' : '');
+    html += '<div class="' + cls + '" data-stage-id="' + escH(stageId) + '">';
+    html += '<span class="sp-c1-league-name">' + escH(t.NAME || '') + '</span>';
+    html += '<span class="sp-c1-league-count">' + evs.length + '</span>';
+    html += '</div>';
+  }
+  col1.innerHTML = html;
+  // Wire click handlers
+  col1.querySelectorAll('.sp-c1-league').forEach(el => {
+    el.addEventListener('click', () => {
+      const sid = el.dataset.stageId || null;
+      _activeLeagueFilter = sid || null;
+      renderCol1();
+      renderCol2();
+    });
+  });
+}
+
+function fmtTime(unixSec) {
+  if (!unixSec) return '';
+  const d = new Date(unixSec * 1000);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function renderCol2() {
+  const col2 = document.getElementById('sp-col2');
+  if (!_eventsCache || !_eventsCache.length) {
+    col2.innerHTML = '<div class="sp-c2-empty">No events today.</div>';
+    return;
+  }
+  let html = '';
+  let any = false;
+  for (const t of _eventsCache) {
+    const stageId = t.TOURNAMENT_STAGE_ID || '';
+    if (_activeLeagueFilter && _activeLeagueFilter !== stageId) continue;
+    const evs = (t.EVENTS || []).filter(passesStateFilter);
+    if (!evs.length) continue;
+    any = true;
+    html += '<div class="sp-c2-tournament">';
+    html += '<div class="sp-c2-tournament-head">';
+    if (t.COUNTRY_NAME) html += '<span class="sp-c2-country">' + escH(t.COUNTRY_NAME) + '</span> ▸ ';
+    html += escH(t.NAME_PART_2 || t.NAME || '');
+    html += '</div>';
+    html += '<div class="sp-c2-events">';
+    for (const ev of evs) {
+      const state = eventState(ev);
+      const time = state === 'finished' ? 'FT' : fmtTime(ev.START_TIME);
+      const stLbl = state === 'live' ? (ev.STAGE || 'LIVE') :
+                    state === 'finished' ? '' :
+                    state === 'upcoming' ? '' : '';
+      html += '<div class="sp-c2-event" data-event-id="' + escH(ev.EVENT_ID || '') + '">';
+      html += '<div class="sp-c2-time">' + escH(time);
+      if (stLbl) html += '<span class="sp-c2-time-state' + (state === 'live' ? ' live' : '') + '">' + escH(stLbl) + '</span>';
+      html += '</div>';
+      html += '<div class="sp-c2-teams">';
+      html += '<span class="sp-c2-team">' + escH(ev.HOME_NAME || '') + '</span>';
+      html += '<span class="sp-c2-team">' + escH(ev.AWAY_NAME || '') + '</span>';
+      html += '</div>';
+      html += '<div class="sp-c2-scores">';
+      html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
+      html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
+      html += '</div>';
+      html += '<div class="sp-c2-fav" title="Favourite">☆</div>';
+      html += '</div>';
+    }
+    html += '</div></div>';
+  }
+  col2.innerHTML = any ? html :
+    '<div class="sp-c2-empty">No events match the current filter.</div>';
+  // Wire click → COL 3 (placeholder for now; wires up in next commit)
+  col2.querySelectorAll('.sp-c2-event').forEach(el => {
+    el.addEventListener('click', () => {
+      col2.querySelectorAll('.sp-c2-event.selected').forEach(x => x.classList.remove('selected'));
+      el.classList.add('selected');
+      // TODO Phase 2b: render detail in COL 3 from FL event_id
+    });
+  });
+}
+
+// State-filter pill clicks
+document.querySelectorAll('.sp-c1-filter').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.sp-c1-filter').forEach(x => x.classList.remove('active'));
+    el.classList.add('active');
+    _activeStateFilter = el.dataset.state;
+    renderCol1();
+    renderCol2();
+  });
+});
+
+// Initial load
+loadSportNav();
+loadEvents();
+</script>
+
+</body>
+</html>
