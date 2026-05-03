@@ -7014,8 +7014,16 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
     rare in practice since labels and FL names usually share
     obvious tokens).
     """
-    out = {"home_yes": None, "away_yes": None, "tie_yes": None}
-    outcomes = kalshi_record.get("outcomes") or []
+    out = {"home_yes": None, "away_yes": None, "tie_yes": None,
+           "_dbg_labels": []}
+    # Cache records use two different field names depending on
+    # path: raw records (data_all) carry `outcomes`, grouped
+    # records (data, post-_group_game_markets) carry `_outcomes`.
+    # Try both so this works regardless of which cache slice
+    # _build_kalshi_index_for_sport happened to read from.
+    outcomes = (kalshi_record.get("outcomes")
+                or kalshi_record.get("_outcomes")
+                or [])
     if not outcomes:
         return out
     import re
@@ -7034,7 +7042,19 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
         if not label:
             continue
         label_lc = label.lower()
+        out["_dbg_labels"].append(label)
+        # Outcome may store yes_bid as int cents OR as float
+        # dollars depending on transformation stage. Cents is the
+        # common form (set at lines 1649-1650 of main.py via
+        # _cents_from). Coerce to int cents for output.
         yes_bid = o.get("yes_bid")
+        if yes_bid is None:
+            yb_dollars = o.get("yes_bid_dollars")
+            if yb_dollars is not None:
+                try:
+                    yes_bid = int(round(float(yb_dollars) * 100))
+                except (TypeError, ValueError):
+                    yes_bid = None
         # Tie / Draw catch — these are short labels that won't
         # token-match either team; handle first so they don't fall
         # through to noisy team-name matching.
