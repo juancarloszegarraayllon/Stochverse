@@ -173,19 +173,20 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 @keyframes sp-flash-down{0%{background-color:rgba(255,51,51,0.55)}100%{background-color:transparent}}
 .sp-c2-yes.sp-flash-up,.sp-c2-no.sp-flash-up,.sp-c2-prob.sp-flash-up{animation:sp-flash-up 0.9s ease-out}
 .sp-c2-yes.sp-flash-down,.sp-c2-no.sp-flash-down,.sp-c2-prob.sp-flash-down{animation:sp-flash-down 0.9s ease-out}
-/* List header — Score and Kalshi group labels above the event
-   rows (sticky below the market-type tab strip). PROB / YES / NO
-   sub-labels under "Kalshi" align with the chip columns below.
-   Replaces per-event mini-headers, which felt like a doubled
-   table inside each row. */
-.sp-c2-list-header{display:grid;grid-template-columns:20px 64px 1fr 40px 180px;gap:8px;padding:6px 14px 8px;background:var(--bg2);border-bottom:1px solid var(--border);position:sticky;top:38px;z-index:3;font-size:9px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
-.sp-c2-list-header-score{text-align:center;align-self:end}
-.sp-c2-list-header-kalshi{display:flex;flex-direction:column;align-items:stretch}
-.sp-c2-list-header-kalshi-title{text-align:center;color:var(--text);padding-bottom:2px}
-.sp-c2-list-header-kalshi-cols{display:grid;grid-template-columns:32px 1fr 1fr;gap:4px;font-size:8px}
-.sp-c2-list-header-kalshi-cols .lh-prob{text-align:right;color:var(--text-muted)}
-.sp-c2-list-header-kalshi-cols .lh-yes{text-align:center;color:var(--green)}
-.sp-c2-list-header-kalshi-cols .lh-no{text-align:center;color:var(--red)}
+/* Per-tournament column header strip — sits between the
+   tournament name and its first event row. Matches the .sp-c2-event
+   grid so 'Score' lines up with the score column and 'Kalshi
+   (PROB / YES / NO)' lines up with the chip columns. Renders
+   only when at least one event in the tournament has a Kalshi
+   match — otherwise there'd be nothing to label. */
+.sp-c2-tournament-cols{display:grid;grid-template-columns:20px 64px 1fr 40px 180px;gap:8px;padding:4px 14px 6px;background:transparent;border-bottom:1px solid var(--border);font-size:9px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+.sp-c2-tcol-score{text-align:center;align-self:end}
+.sp-c2-tcol-kalshi{display:flex;flex-direction:column;align-items:stretch}
+.sp-c2-tcol-kalshi-title{text-align:center;color:var(--text);padding-bottom:2px}
+.sp-c2-tcol-kalshi-cols{display:grid;grid-template-columns:32px 1fr 1fr;gap:4px;font-size:8px}
+.sp-c2-tcol-kalshi-cols .lh-prob{text-align:right;color:var(--text-muted)}
+.sp-c2-tcol-kalshi-cols .lh-yes{text-align:center;color:var(--green)}
+.sp-c2-tcol-kalshi-cols .lh-no{text-align:center;color:var(--red)}
 /* Load-more toggle inside the teams cell — green text link
    appearing under the visible outcomes when there are more than
    4 to display. Click expands / collapses the full list. */
@@ -701,26 +702,6 @@ function renderCol2() {
         html += '</div>';
       }
     }
-    // Column headers — Score group label + Kalshi group label
-    // with PROB/YES/NO sub-labels. One sticky bar at the top of
-    // the events list (not per-event), matching the mockup's
-    // grouped-header style.
-    if (_matchedKalshiCount > 0) {
-      html += '<div class="sp-c2-list-header">';
-      html += '<div></div>';  // indicator spacer
-      html += '<div></div>';  // time spacer
-      html += '<div></div>';  // teams spacer
-      html += '<div class="sp-c2-list-header-score">Score</div>';
-      html += '<div class="sp-c2-list-header-kalshi">';
-      html += '<span class="sp-c2-list-header-kalshi-title">Kalshi</span>';
-      html += '<div class="sp-c2-list-header-kalshi-cols">';
-      html += '<span class="lh-prob">PROB</span>';
-      html += '<span class="lh-yes">YES</span>';
-      html += '<span class="lh-no">NO</span>';
-      html += '</div>';
-      html += '</div>';
-      html += '</div>';
-    }
   }
   for (const t of _eventsCache) {
     const stageId = t.TOURNAMENT_STAGE_ID || '';
@@ -728,11 +709,32 @@ function renderCol2() {
     const evs = (t.events || t.EVENTS || []).filter(passesStateFilter);
     if (!evs.length) continue;
     any = true;
+    // Does this tournament have any matched (Kalshi-backed)
+    // events? If so render the Score / Kalshi (PROB/YES/NO)
+    // column header strip beneath the tournament name. If not,
+    // skip the strip — there's nothing to label.
+    const tournamentHasMatch = evs.some(e => e.kalshi && e.kalshi.event_ticker);
     html += '<div class="sp-c2-tournament">';
     html += '<div class="sp-c2-tournament-head">';
     html += '<span class="sp-c2-league-name">' + escH(leagueDisplayName(t)) + '</span>';
     if (t.COUNTRY_NAME) html += '<span class="sp-c2-country">' + escH(t.COUNTRY_NAME) + '</span>';
     html += '</div>';
+    if (tournamentHasMatch) {
+      html += '<div class="sp-c2-tournament-cols">';
+      html += '<div></div>';  // indicator spacer
+      html += '<div></div>';  // time spacer
+      html += '<div></div>';  // teams spacer
+      html += '<div class="sp-c2-tcol-score">Score</div>';
+      html += '<div class="sp-c2-tcol-kalshi">';
+      html += '<span class="sp-c2-tcol-kalshi-title">Kalshi</span>';
+      html += '<div class="sp-c2-tcol-kalshi-cols">';
+      html += '<span class="lh-prob">PROB</span>';
+      html += '<span class="lh-yes">YES</span>';
+      html += '<span class="lh-no">NO</span>';
+      html += '</div>';
+      html += '</div>';
+      html += '</div>';
+    }
     html += '<div class="sp-c2-events">';
     for (const ev of evs) {
       // In Market view, each Kalshi ticker becomes its own row;
@@ -916,8 +918,11 @@ function renderEventRow(ev, market, isMarketRow) {
   // Build the visible outcome list (capped at MAX_VISIBLE unless
   // the user toggled "+ N more" on this event). The same list
   // drives both the teams cell (labels) and the marketcell
-  // (chips) so they stay in lockstep.
-  const allOutcomes = matched ? collectOutcomesForRender(ev) : [];
+  // (chips) so they stay in lockstep. In Market view we pass the
+  // per-row market so SPREADS / TOTALS / etc. show their own
+  // outcomes — not always the headline Winner's home/away/tie.
+  const rowMarketOverride = isMarketRow ? market : null;
+  const allOutcomes = matched ? collectOutcomesForRender(ev, rowMarketOverride) : [];
   const MAX_VISIBLE = 4;
   const expanded = _expandedEvents.has(ev.EVENT_ID);
   const outcomes = (allOutcomes.length > MAX_VISIBLE && !expanded)
@@ -979,15 +984,16 @@ function renderEventRow(ev, market, isMarketRow) {
   return html;
 }
 
-function collectOutcomesForRender(ev) {
+function collectOutcomesForRender(ev, marketOverride) {
   // Return a uniform [{label, prob, yes, no, ticker}, …] list for
-  // the active market on this event. Winner: home / away / tie
-  // (built from primary_prices using FL team names). Other markets
-  // (Spreads, Totals, player props): pass-through outcomes from
-  // the cache, which already carry self-describing labels like
+  // the relevant market. In Market view the caller passes the
+  // specific per-row market via marketOverride; in Game view we
+  // pick by the active market-type tab. Winner uses primary_prices
+  // (home / away / tie with FL team names); other types pass
+  // through cache outcomes with self-describing labels like
   // "Real Madrid wins by over 2.5 goals".
   if (!ev.kalshi) return [];
-  const activeMarket = pickMarketForGameRow(ev);
+  const activeMarket = marketOverride || pickMarketForGameRow(ev);
   const isWinner = activeMarket && (activeMarket.market_type || '') === '';
   if (isWinner && ev.kalshi.primary_prices) {
     const p = ev.kalshi.primary_prices;
