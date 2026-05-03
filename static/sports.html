@@ -1289,28 +1289,20 @@ function renderEventRow(ev, market, isMarketRow) {
   } else if (showMatchup) {
     // Score is baked into the matchup header line ('Home X - Y
     // Away'), so the standalone score column stays empty for
-    // these rows. Aggregate label still renders here when present
-    // — the AGG context belongs next to the score, not the
-    // matchup name.
+    // these rows. Aggregate / series label still renders here
+    // when present — the multi-leg or playoff context belongs
+    // next to the score, not the matchup name.
     html += '<div class="sp-c2-scores">';
-    if (matched && ev.kalshi.aggregate_home != null && ev.kalshi.aggregate_away != null) {
-      html += '<span class="sp-c2-agg" title="Aggregate score">agg ' +
-              escH(ev.kalshi.aggregate_home) + '-' +
-              escH(ev.kalshi.aggregate_away) + '</span>';
-    }
+    html += renderAggOrSeries(ev);
     html += '</div>';
   } else {
     html += '<div class="sp-c2-scores">';
     html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
     html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
-    // Aggregate score (two-leg knockout ties — soccer cup
-    // competitions). Only shows when matched event has aggregate
-    // data from SofaScore enrichment.
-    if (matched && ev.kalshi.aggregate_home != null && ev.kalshi.aggregate_away != null) {
-      html += '<span class="sp-c2-agg" title="Aggregate score">agg ' +
-              escH(ev.kalshi.aggregate_home) + '-' +
-              escH(ev.kalshi.aggregate_away) + '</span>';
-    }
+    // Aggregate (soccer two-leg ties) or series score (NBA / NHL
+    // / MLB / NFL playoffs best-of-N). Same UX slot, label
+    // adapts to what's present.
+    html += renderAggOrSeries(ev);
     html += '</div>';
   }
   // Right market cell — chip rows only (PROB / YES / NO), one per
@@ -1372,6 +1364,30 @@ function collectOutcomesForRender(ev, marketOverride) {
     return activeMarket.outcomes;
   }
   return [];
+}
+
+function renderAggOrSeries(ev) {
+  // Universal multi-leg / playoff-series label, shown next to the
+  // current-game score. Two data shapes share the slot:
+  //   1. Soccer two-leg cup ties → 'AGG X-Y' (sum of goals across
+  //      both legs of the knockout tie).
+  //   2. NBA / NHL / MLB / NFL best-of-N playoffs → 'SERIES X-Y'
+  //      (wins-to-wins in the series).
+  // Only one shape ever applies per event — soccer ties use
+  // aggregate_*, North-American playoff sports use series_*.
+  // Renders nothing for round-robin league games where neither
+  // is populated.
+  if (!ev.kalshi || !(ev.kalshi.event_ticker)) return '';
+  const k = ev.kalshi;
+  if (k.aggregate_home != null && k.aggregate_away != null) {
+    return '<span class="sp-c2-agg" title="Aggregate score">agg ' +
+           escH(k.aggregate_home) + '-' + escH(k.aggregate_away) + '</span>';
+  }
+  if (k.series_home_wins != null && k.series_away_wins != null) {
+    return '<span class="sp-c2-agg" title="Playoff series score">series ' +
+           escH(k.series_home_wins) + '-' + escH(k.series_away_wins) + '</span>';
+  }
+  return '';
 }
 
 function eventShowsScoreInColumn(ev) {

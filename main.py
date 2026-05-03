@@ -7295,6 +7295,17 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
                 "aggregate_home": agg_h,
                 "aggregate_away": agg_a,
                 "aggregate_label": agg_label,
+                # Playoff series score — pass through from cache
+                # if present. Universal: NBA/NHL/MLB best-of-N
+                # series get a 'SERIES X-Y' label, same way soccer
+                # cup-ties get 'AGG X-Y'. Cache populates these
+                # fields when FL/ESPN matched the game; for
+                # genuinely-unpaired Kalshi-only h2h with no FL
+                # pair, these stay null until a background
+                # enricher lands.
+                "series_home_wins": primary.get("series_home_wins"),
+                "series_away_wins": primary.get("series_away_wins"),
+                "series_summary":   primary.get("series_summary"),
             },
         }
         by_league.setdefault(league, []).append(ev)
@@ -7885,6 +7896,17 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                     "aggregate_away": primary.get("aggregate_away"),
                     "aggregate_label": (live.get("aggregate_label")
                                         if isinstance(live, dict) else None),
+                    # Playoff series score for best-of-N sports
+                    # (NBA / NHL / MLB / NFL playoffs). Different
+                    # data shape from soccer aggregate but same UX
+                    # purpose — show 'SERIES 2-1' next to the leg
+                    # score so users see the series standing.
+                    # Populated by FL/ESPN match enrichment when
+                    # the game is part of a playoff series; null
+                    # for round-robin league games.
+                    "series_home_wins": primary.get("series_home_wins"),
+                    "series_away_wins": primary.get("series_away_wins"),
+                    "series_summary":   primary.get("series_summary"),
                 }
             else:
                 ev_out["kalshi"] = None
