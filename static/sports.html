@@ -130,20 +130,29 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    user pick which Kalshi sub-market is shown across all rows
    (Winner, Spread, Total Points, etc.). Hidden in Market view
    where each market becomes its own row. */
-.sp-c2-mtypes{display:flex;gap:0;padding:0 14px;background:var(--bg);border-bottom:1px solid var(--border);overflow-x:auto;overflow-y:hidden;scrollbar-width:none;white-space:nowrap;position:sticky;top:38px;z-index:4}
-.sp-c2-mtypes::-webkit-scrollbar{display:none}
-.sp-c2-mtype{padding:8px 12px;background:transparent;color:var(--text-dim);border:0;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;border-bottom:2px solid transparent;letter-spacing:.3px;flex-shrink:0;transition:color .12s ease,border-color .12s ease}
-.sp-c2-mtype:hover{color:var(--text)}
-.sp-c2-mtype.active{color:var(--green);border-bottom-color:var(--green)}
 .sp-c2-tournament{border-bottom:1px solid var(--border)}
 .sp-c2-tournament-head{padding:10px 14px;background:var(--bg2);display:flex;align-items:baseline;gap:8px;border-top:1px solid var(--border)}
 .sp-c2-league-name{font-size:12px;font-weight:700;color:var(--text);letter-spacing:.3px}
 .sp-c2-country{font-size:10px;font-weight:500;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px}
 .sp-c2-events{padding:0}
-.sp-c2-event{display:grid;grid-template-columns:20px 64px 1fr 40px 180px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:start;transition:background .1s ease;border-left:2px solid transparent}
+/* Event = vertical container holding optional per-event tab strip
+   on top + the main grid row. Click + selection styles live on
+   the wrapper so a click anywhere selects the event (tabs stop
+   propagation). */
+.sp-c2-event{display:flex;flex-direction:column;cursor:pointer;border-bottom:1px solid var(--border);transition:background .1s ease;border-left:2px solid transparent}
 .sp-c2-event:hover{background:var(--bg-card)}
 .sp-c2-event.selected{background:var(--green-bg);border-left-color:var(--green)}
 .sp-c2-event:last-child{border-bottom:none}
+.sp-c2-event-row{display:grid;grid-template-columns:20px 64px 1fr 40px 180px;gap:8px;padding:10px 14px;align-items:start}
+/* Per-event tab strip — appears at the top of matched events that
+   have multiple market types. Sits inside the event's accent
+   border, so visually it belongs to THIS event. Horizontal scroll
+   when the strip overflows. */
+.sp-c2-event-tabs{display:flex;gap:14px;padding:8px 14px 0;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;overflow-x:auto;scrollbar-width:none}
+.sp-c2-event-tabs::-webkit-scrollbar{display:none}
+.sp-c2-event-tab{background:transparent;border:0;color:var(--text-muted);font-weight:700;font-size:9px;padding:2px 0;cursor:pointer;font-family:inherit;letter-spacing:.4px;text-transform:uppercase;border-bottom:2px solid transparent;flex-shrink:0;transition:color .12s ease,border-color .12s ease}
+.sp-c2-event-tab:hover{color:var(--text)}
+.sp-c2-event-tab.active{color:var(--green);border-bottom-color:var(--green)}
 /* Matched (Kalshi market exists) gets a subtle accent. Lite (FL only)
    stays neutral so the eye is drawn to actionable rows. */
 .sp-c2-event.sp-c2-matched .sp-c2-team{color:var(--text)}
@@ -473,7 +482,13 @@ let _activeStateFilter = 'all';
 let _activeLeagueFilter = null;  // tournament_stage_id, or null = all
 let _onlyMatched = false;        // toggled by clicking the "X on Kalshi" pill
 let _viewMode = 'game';          // 'game' (one row per match) or 'market' (one row per ticker)
-let _activeMarketType = '';      // active market type in Game view (empty = headline Winner)
+// Per-event active market type, keyed by EVENT_ID. Default '' = headline Winner.
+// Each matched event with multiple market types renders its own
+// inline tab strip — clicking a tab updates this map and re-renders
+// just that event's outcomes/chips. Replaces the old global
+// _activeMarketType tab strip at the top of COL 2 (felt disconnected
+// from the events; per-event matches the homepage card design).
+const _eventActiveMarketType = new Map();
 const _collapsedCountries = new Set();  // Set of country names
 const _expandedEvents = new Set();      // Event IDs with full outcome list shown (Load more toggled)
 
@@ -692,28 +707,6 @@ function renderCol2() {
     html += '</div>';
     html += '</div>';
 
-    // Market-type tab strip (Game view only). Sets which Kalshi
-    // sub-market is shown on the right of each row — Winner,
-    // Spread, Total Points, etc. Mirrors the homepage's per-card
-    // sub-tab pattern but list-level. In Market view this is
-    // hidden because every market becomes its own row.
-    if (_viewMode === 'game' && _matchedKalshiCount > 0) {
-      const types = collectMarketTypes(_eventsCache);
-      if (types.length > 1) {
-        html += '<div class="sp-c2-mtypes" role="tablist">';
-        // Headline Winner first (empty market_type), then others
-        // alphabetical so the strip is stable across renders.
-        const winnerCls = 'sp-c2-mtype' + (_activeMarketType === '' ? ' active' : '');
-        html += '<button class="' + winnerCls + '" data-mtype="" type="button">Winner</button>';
-        for (const tp of types) {
-          if (!tp) continue;
-          const cls = 'sp-c2-mtype' + (_activeMarketType === tp ? ' active' : '');
-          html += '<button class="' + cls + '" data-mtype="' + escH(tp) +
-                  '" type="button">' + escH(tp) + '</button>';
-        }
-        html += '</div>';
-      }
-    }
   }
   for (const t of _eventsCache) {
     const stageId = t.TOURNAMENT_STAGE_ID || '';
@@ -819,58 +812,57 @@ function renderCol2() {
     el.addEventListener('click', () => {
       _viewMode = el.dataset.view;
       try { localStorage.setItem(VIEW_LS_KEY, _viewMode); } catch (e) {}
-      // Switching to Market view, drop any market-type filter so
-      // we don't double-filter (Market view already shows every
-      // market individually).
-      if (_viewMode === 'market') _activeMarketType = '';
       renderCol2();
     });
   });
-  // Market-type tab strip (Game view).
-  col2.querySelectorAll('.sp-c2-mtype').forEach(el => {
-    el.addEventListener('click', () => {
-      _activeMarketType = el.dataset.mtype || '';
+  // Per-event market-type tabs — one strip per matched event.
+  // Updates the per-event map then re-renders so just this event's
+  // outcomes and chips swap. stopPropagation so the row's click
+  // handler doesn't also fire selection.
+  col2.querySelectorAll('.sp-c2-event-tab').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wrap = el.closest('.sp-c2-event');
+      if (!wrap) return;
+      const evId = wrap.dataset.eventId;
+      _eventActiveMarketType.set(evId, el.dataset.mtype || '');
       renderCol2();
     });
   });
 }
 
-function collectMarketTypes(tournaments) {
-  // Aggregate every market_type seen across the day's events,
-  // preserving Kalshi's ordering on first appearance and
-  // dedup'ing. Powers the Game-view market-type sub-tab strip.
-  // The empty string ('' = headline Winner) is always at index 0
-  // implicitly — we render that as the leftmost pill in the
-  // tab strip and exclude it from this list.
-  const seen = new Set();
-  const out = [];
-  for (const t of (tournaments || [])) {
-    for (const ev of (t.events || [])) {
-      if (!ev.kalshi || !ev.kalshi.markets) continue;
-      for (const m of ev.kalshi.markets) {
-        const tp = m.market_type || '';
-        if (tp && !seen.has(tp)) { seen.add(tp); out.push(tp); }
-      }
-    }
-  }
-  // Stable: alphabetical so the strip doesn't shuffle as live
-  // events update (different events introduce different markets).
-  out.sort((a, b) => a.localeCompare(b));
-  return out;
+
+function eventMarketTypes(ev) {
+  // List of market types available for this event, ordered with
+  // headline Winner ('') first, then alphabetical. Used to render
+  // the per-event tab strip — only types this event actually has,
+  // not the union across all events.
+  if (!ev.kalshi || !ev.kalshi.markets) return [];
+  const set = new Set();
+  for (const m of ev.kalshi.markets) set.add(m.market_type || '');
+  const arr = Array.from(set);
+  arr.sort((a, b) => {
+    if (a === b) return 0;
+    if (a === '') return -1;
+    if (b === '') return 1;
+    return a.localeCompare(b);
+  });
+  return arr;
 }
 
 function pickMarketForGameRow(ev) {
-  // In Game view, return the market matching _activeMarketType
-  // exactly. NO fallback across types — falling back to Winner
-  // when the user picked Spreads / BTTS / Totals would silently
-  // show wrong outcomes (e.g. 'Tie' under the Spreads tab for an
-  // event that has no Spreads market). When there's no exact
-  // match we return null and the renderer leaves the chips empty
-  // while still showing team names so the user can see which
-  // game it is.
+  // Game view: return the market matching the PER-EVENT active
+  // market type. Each matched event tracks its own selected tab
+  // in _eventActiveMarketType so users can compare different
+  // markets across events independently. Default '' = headline
+  // Winner. NO fallback across types — if the user picked Spreads
+  // and this event has no Spreads market, return null and let
+  // the renderer leave the chips empty (with team names still
+  // visible so the user can see which game it is).
   if (!ev.kalshi || !ev.kalshi.markets) return null;
+  const t = _eventActiveMarketType.get(ev.EVENT_ID) || '';
   for (const m of ev.kalshi.markets) {
-    if ((m.market_type || '') === _activeMarketType) return m;
+    if ((m.market_type || '') === t) return m;
   }
   return null;
 }
@@ -908,6 +900,27 @@ function renderEventRow(ev, market, isMarketRow) {
   let html = '<div class="' + evClasses + '" data-event-id="' + escH(ev.EVENT_ID || '') + '"';
   if (rowTicker) html += ' data-ticker="' + escH(rowTicker) + '"';
   html += '>';
+  // Per-event market-type tabs — only in Game view, only when this
+  // event has more than one market. Mirrors the homepage card
+  // pattern: the tabs live INSIDE the row so users can switch
+  // markets right where they're looking, instead of via a global
+  // filter at the top of COL 2.
+  if (matched && !isMarketRow) {
+    const types = eventMarketTypes(ev);
+    if (types.length > 1) {
+      const evActive = _eventActiveMarketType.get(ev.EVENT_ID) || '';
+      html += '<div class="sp-c2-event-tabs">';
+      for (const t of types) {
+        const lbl = t === '' ? 'Winner' : t;
+        const cls = 'sp-c2-event-tab' + (t === evActive ? ' active' : '');
+        html += '<button class="' + cls + '" data-mtype="' + escH(t) +
+                '" type="button">' + escH(lbl) + '</button>';
+      }
+      html += '</div>';
+    }
+  }
+  // Main row — indicator / time / teams / scores / marketcell.
+  html += '<div class="sp-c2-event-row">';
   // Left indicator column — Kalshi K (+ count badge in Game view
   // when an event has multiple markets).
   html += '<div class="sp-c2-indicator">';
@@ -1007,7 +1020,8 @@ function renderEventRow(ev, market, isMarketRow) {
             (matched ? 'No prices yet' : 'No markets yet') + '">—</span>';
   }
   html += '</div>';
-  html += '</div>';
+  html += '</div>';   // close .sp-c2-event-row
+  html += '</div>';   // close .sp-c2-event
   return html;
 }
 
