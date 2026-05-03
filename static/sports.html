@@ -1446,29 +1446,83 @@ function _computeSoccerMinute(stageStartMs, period) {
   return prefix + ' ' + body;
 }
 
+// FL sport_id → ESPN/internal sport name. Used by liveClockLabel
+// to pick the right period prefix ('Q' for Basketball/Football,
+// 'P' for Hockey, no prefix for Soccer).
+function _activeSportName() {
+  const m = {1:'Soccer', 2:'Tennis', 3:'Basketball', 4:'Hockey',
+             5:'Football', 6:'Baseball'};
+  return m[activeSportId()] || '';
+}
+
+function _parseClockSecs(s) {
+  // '8:42' → 522. Returns null for non-clock strings.
+  if (!s) return null;
+  const m = String(s).match(/^(\d+):(\d{1,2})$/);
+  if (!m) return null;
+  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+}
+
+function _formatMMSS(secs) {
+  if (secs < 0) secs = 0;
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return m + ':' + (s < 10 ? '0' + s : s);
+}
+
+function _buildLiveLabel(sport, period, clockSecs, stageStartMs) {
+  // Mirrors homepage's buildLiveLabel exactly so /sports and
+  // homepage agree on every live game's label byte-for-byte.
+  if (sport === 'Soccer') {
+    const precise = _computeSoccerMinute(stageStartMs, period);
+    if (precise !== null) return precise;
+    return Math.floor(clockSecs / 60) + "'";
+  }
+  const clockStr = _formatMMSS(clockSecs);
+  if (sport === 'Hockey') return 'P' + period + ' ' + clockStr;
+  if (sport === 'Basketball' || sport === 'Football') return 'Q' + period + ' ' + clockStr;
+  return clockStr;
+}
+
 function liveClockLabel(ev) {
-  // Live-state label for an in-progress event. Same format as
-  // the homepage live badge:
-  //   Soccer:        '1H 32:15' / '2H 67:42' / '1H 45+3:27' / 'HT'
-  //   Hockey:        'P{period} M:SS'  (when GAME_TIME is set)
-  //   Basketball/FB: 'Q{period} M:SS'  (when GAME_TIME is set)
-  //   Otherwise:     humanized STAGE.
-  // Ticked client-side every 500 ms so the seconds count down
-  // visibly without requiring a backend refresh.
+  // Live-state label matching homepage format:
+  //   Soccer:           '1H 32:15' / '2H 45+3:27' / 'HT'  (count up)
+  //   Hockey:           'P{period} M:SS'                  (count down)
+  //   Basketball / FB:  'Q{period} M:SS'                  (count down)
+  // Soccer counts up from STAGE_START_TIME (FL ships seconds);
+  // other sports count down from ESPN's display_clock at the
+  // moment captured_at_ms it was sampled. 15 s drift cap so a
+  // stale capture never runs the clock to zero.
   const stage = String(ev.STAGE || '').toUpperCase();
   if (stage === 'HALF_TIME' || stage === 'BREAK_AFTER_FIRST_HALF') return 'HT';
-  // Soccer second-precise clock
-  const period = _stageToPeriod(stage);
-  if (period > 0) {
-    const stageStartSec = parseInt(ev.STAGE_START_TIME, 10);
-    if (stageStartSec > 0) {
-      const result = _computeSoccerMinute(stageStartSec * 1000, period);
+  const sport = _activeSportName();
+  const stageStartSec = parseInt(ev.STAGE_START_TIME, 10);
+  const stageStartMs = stageStartSec > 0 ? stageStartSec * 1000 : null;
+  // Soccer — STAGE_START_TIME is enough; ESPN clock not needed.
+  if (sport === 'Soccer') {
+    const period = _stageToPeriod(stage);
+    if (period > 0 && stageStartMs) {
+      const result = _computeSoccerMinute(stageStartMs, period);
       if (result) return result;
     }
   }
-  // Non-soccer fallback — FL ships GAME_TIME pre-formatted
-  // ('Q3 8:42' for basketball, 'P2 12:34' for hockey). When
-  // present it's already MM:SS; use as-is.
+  // Hockey / Basketball / Football — interpolate ESPN's display_clock
+  // from when it was captured. Backend enrichment attaches
+  // ev._live_state with display_clock/period/clock_running/captured_at_ms.
+  const ls = ev._live_state;
+  if (ls && ls.display_clock && ls.captured_at_ms) {
+    const baseSecs = _parseClockSecs(ls.display_clock);
+    if (baseSecs !== null) {
+      let elapsed = Math.max(0, Math.floor((Date.now() - ls.captured_at_ms) / 1000));
+      if (elapsed > 15) elapsed = 15;  // drift safety net
+      const running = ls.clock_running !== false;
+      const clockSecs = running ? Math.max(0, baseSecs - elapsed) : baseSecs;
+      return _buildLiveLabel(sport, ls.period || 0, clockSecs, stageStartMs);
+    }
+  }
+  // Fallback when neither soccer STAGE_START_TIME nor ESPN
+  // _live_state is present — FL sometimes ships GAME_TIME
+  // pre-formatted ('Q3 8:42'); use as-is.
   if (ev.GAME_TIME != null && ev.GAME_TIME !== '') {
     return String(ev.GAME_TIME);
   }

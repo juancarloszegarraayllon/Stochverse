@@ -7915,10 +7915,40 @@ async def sports_feed(sport_id: int, timezone: int = 0,
             tk = (ev.get("kalshi") or {}).get("event_ticker")
             if tk:
                 matched_kalshi_tickers.add(tk)
+    # FL sport_id → ESPN sport name. Only for sports where ESPN
+    # ships the running game clock we want to render on /sports;
+    # soccer is handled directly via FL's STAGE_START_TIME so it's
+    # not in this map.
+    _ESPN_CLOCK_SPORT = {3: "Basketball", 4: "Hockey", 5: "Football"}
+    espn_clock_sport = _ESPN_CLOCK_SPORT.get(sport_id)
     for t in ((fl_data or {}).get("DATA") or []):
         events_out: list = []
         for ev in (t.get("EVENTS") or []):
             ev_out = dict(ev)  # shallow copy; we add 'kalshi' key
+            # ESPN clock enrichment for live games — Basketball /
+            # Hockey / Football count DOWN within each period and
+            # FL doesn't ship the running clock, so we look it up
+            # in the in-memory ESPN game list (cheap, no HTTP).
+            # Frontend uses display_clock + captured_at_ms to
+            # interpolate sub-minute precision client-side.
+            if (espn_clock_sport
+                    and (ev.get("STAGE_TYPE") or "").upper() == "LIVE"):
+                _h = ev.get("HOME_NAME") or ""
+                _a = ev.get("AWAY_NAME") or ""
+                if _h and _a:
+                    try:
+                        from espn_feed import match_game as _espn_match
+                        _eg = _espn_match(_h + " vs " + _a, espn_clock_sport)
+                        if _eg and _eg.get("display_clock"):
+                            ev_out["_live_state"] = {
+                                "state":           _eg.get("state"),
+                                "period":          _eg.get("period"),
+                                "display_clock":   _eg.get("display_clock"),
+                                "clock_running":   _eg.get("clock_running"),
+                                "captured_at_ms":  _eg.get("captured_at_ms"),
+                            }
+                    except Exception:
+                        pass
             fl_event_id = ev.get("EVENT_ID") or ""
             kalshi_matches = kalshi_idx.get(fl_event_id) or []
             if kalshi_matches:
