@@ -88,13 +88,15 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 /* Summary header at top of COL 2 — total event count + matched count. */
 .sp-c2-summary{padding:10px 14px;background:var(--bg);border-bottom:1px solid var(--border);font-size:11px;color:var(--text-dim);position:sticky;top:0;z-index:5}
 .sp-c2-summary-total{color:var(--text);font-weight:600}
-.sp-c2-summary-matched{color:var(--green);font-weight:600}
+.sp-c2-summary-pill{display:inline-block;padding:2px 8px;border-radius:11px;background:var(--green-bg);color:var(--green);font-size:11px;font-weight:600;border:1px solid var(--green-line);cursor:pointer;font-family:inherit;transition:background .12s ease,color .12s ease}
+.sp-c2-summary-pill:hover{background:var(--green-line);color:var(--green)}
+.sp-c2-summary-pill.active{background:var(--green);color:var(--bg);border-color:var(--green)}
 .sp-c2-tournament{border-bottom:1px solid var(--border)}
 .sp-c2-tournament-head{padding:10px 14px;background:var(--bg2);display:flex;align-items:baseline;gap:8px;border-top:1px solid var(--border)}
 .sp-c2-league-name{font-size:12px;font-weight:700;color:var(--text);letter-spacing:.3px}
 .sp-c2-country{font-size:10px;font-weight:500;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px}
 .sp-c2-events{padding:0}
-.sp-c2-event{display:grid;grid-template-columns:64px 1fr 50px 36px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:center;transition:background .1s ease;border-left:2px solid transparent}
+.sp-c2-event{display:grid;grid-template-columns:20px 64px 1fr 50px 36px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:center;transition:background .1s ease;border-left:2px solid transparent}
 .sp-c2-event:hover{background:var(--bg-card)}
 .sp-c2-event.selected{background:var(--green-bg);border-left-color:var(--green)}
 .sp-c2-event:last-child{border-bottom:none}
@@ -102,8 +104,17 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    stays neutral so the eye is drawn to actionable rows. */
 .sp-c2-event.sp-c2-matched .sp-c2-team{color:var(--text)}
 .sp-c2-event.sp-c2-lite .sp-c2-team{color:var(--text-dim)}
-.sp-c2-marketcell{text-align:center}
-.sp-c2-kalshi-badge{display:inline-block;width:22px;height:22px;line-height:22px;border-radius:11px;background:var(--green-bg);color:var(--green);font-size:11px;font-weight:700;text-align:center;border:1px solid var(--green-line)}
+/* Left indicator column — Kalshi marker for matched rows. Empty
+   for lite rows (kept as a column so all rows align). When
+   Polymarket / sportsbook integrations land, the same column
+   will stack additional source markers (P, DK, FD, ...). */
+.sp-c2-indicator{display:flex;align-items:center;justify-content:center}
+.sp-c2-kalshi-badge{display:inline-flex;width:18px;height:18px;line-height:1;border-radius:50%;background:var(--green-bg);color:var(--green);font-size:10px;font-weight:700;align-items:center;justify-content:center;border:1px solid var(--green-line)}
+/* Right market cell — reserved for price chips. Today shows a
+   '—' placeholder for unmatched events; will hold YES% chips
+   (Kalshi/Polymarket/sportsbook) once the prices wire-up
+   ships in Phase 2c. */
+.sp-c2-marketcell{text-align:right;color:var(--text-muted);font-size:12px;font-variant-numeric:tabular-nums}
 .sp-c2-no-market{color:var(--text-muted);font-size:14px}
 .sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums}
 .sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);margin-top:2px;text-transform:uppercase}
@@ -304,6 +315,7 @@ let _matchedKalshiCount = 0;
 let _selectedEventId = null;     // currently-selected FL EVENT_ID for COL 3
 let _activeStateFilter = 'all';
 let _activeLeagueFilter = null;  // tournament_stage_id, or null = all
+let _onlyMatched = false;        // toggled by clicking the "X on Kalshi" pill
 const _collapsedCountries = new Set();  // Set of country names
 
 async function loadEvents() {
@@ -348,8 +360,15 @@ function eventState(ev) {
 }
 
 function passesStateFilter(ev) {
-  if (_activeStateFilter === 'all') return true;
-  return eventState(ev) === _activeStateFilter;
+  if (_activeStateFilter !== 'all' && eventState(ev) !== _activeStateFilter) {
+    return false;
+  }
+  // 'On Kalshi' filter — toggled by clicking the summary pill.
+  // When active, drops all FL-only (lite) events from the list.
+  if (_onlyMatched && !(ev.kalshi && ev.kalshi.event_ticker)) {
+    return false;
+  }
+  return true;
 }
 
 function renderCol1() {
@@ -472,7 +491,13 @@ function renderCol2() {
     html += '<div class="sp-c2-summary">';
     html += '<span class="sp-c2-summary-total">' + totalEvents + ' events</span>';
     if (_matchedKalshiCount > 0) {
-      html += ' · <span class="sp-c2-summary-matched">' + _matchedKalshiCount + ' on Kalshi</span>';
+      // Pill is clickable — toggles _onlyMatched filter so users
+      // can quickly drop the FL-only rows and focus on tradable
+      // markets.
+      const pillCls = 'sp-c2-summary-pill' + (_onlyMatched ? ' active' : '');
+      html += ' · <button class="' + pillCls + '" id="sp-c2-only-kalshi" type="button">';
+      html += _matchedKalshiCount + ' on Kalshi';
+      html += '</button>';
     }
     html += '</div>';
   }
@@ -506,6 +531,14 @@ function renderCol2() {
       html += '<div class="' + evClasses + '" data-event-id="' + escH(ev.EVENT_ID || '') + '"';
       if (matched) html += ' data-ticker="' + escH(ev.kalshi.event_ticker) + '"';
       html += '>';
+      // Left indicator column — Kalshi marker on matched rows so
+      // users can see at a glance which events have a market. The
+      // right cell is reserved for prices (Phase 2c).
+      html += '<div class="sp-c2-indicator">';
+      if (matched) {
+        html += '<span class="sp-c2-kalshi-badge" title="On Kalshi">K</span>';
+      }
+      html += '</div>';
       html += '<div class="sp-c2-time">' + escH(time);
       if (stLbl) html += '<span class="sp-c2-time-state' + (state === 'live' ? ' live' : '') + '">' + escH(stLbl) + '</span>';
       html += '</div>';
@@ -517,15 +550,11 @@ function renderCol2() {
       html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
       html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
       html += '</div>';
-      // Right column: Kalshi badge for matched, "no markets" for lite.
-      // Future-compatible: when Polymarket / sportsbook integration lands,
-      // the lite slot becomes those market chips.
+      // Right market cell — empty placeholder today; will hold
+      // YES% price chips (Kalshi / Polymarket / sportsbook) when
+      // Phase 2c wires up prices.
       html += '<div class="sp-c2-marketcell">';
-      if (matched) {
-        html += '<span class="sp-c2-kalshi-badge" title="On Kalshi">K</span>';
-      } else {
-        html += '<span class="sp-c2-no-market" title="No markets yet — Polymarket / sportsbook integration coming">—</span>';
-      }
+      html += matched ? '' : '<span class="sp-c2-no-market" title="No markets yet">—</span>';
       html += '</div>';
       html += '</div>';
     }
@@ -544,6 +573,17 @@ function renderCol2() {
       renderCol3(evId, ticker);
     });
   });
+  // 'On Kalshi' pill — toggles _onlyMatched. Re-render both
+  // columns so the league counts in COL 1 reflect the filtered
+  // set.
+  const pill = col2.querySelector('#sp-c2-only-kalshi');
+  if (pill) {
+    pill.addEventListener('click', () => {
+      _onlyMatched = !_onlyMatched;
+      renderCol1();
+      renderCol2();
+    });
+  }
 }
 
 // State-filter pill clicks
@@ -649,10 +689,24 @@ async function renderCol3(flEventId, ticker) {
 // estate. Persists to localStorage so user prefs survive reload.
 //
 // Disabled at <900px (mobile fallback uses single-column anyway).
+// COL 3 max is dynamic — capped by viewport width minus a
+// minimum-viable footprint for COL 1 + COL 2 (~480px combined),
+// so on wide displays you can drag COL 3 to fill most of the
+// screen for full event-detail real estate.
 const SPLIT_BOUNDS = {
   col1: { min: 200, max: 480, default: 280, var: '--col1-w' },
-  col3: { min: 320, max: 720, default: 480, var: '--col3-w' },
+  col3: { min: 320, max: 1400, default: 480, var: '--col3-w' },
 };
+
+function effectiveMax(key) {
+  const b = SPLIT_BOUNDS[key];
+  if (key === 'col3') {
+    // Reserve at least 480px combined for COL 1 + COL 2 (sidebar
+    // 200 + middle 280 minimum); the rest can go to COL 3.
+    return Math.max(b.min, Math.min(b.max, window.innerWidth - 480));
+  }
+  return b.max;
+}
 const SPLIT_LS_KEY = 'sv:sports:cols';
 
 function loadColWidths() {
@@ -664,8 +718,9 @@ function loadColWidths() {
   const main = document.getElementById('sp-main');
   for (const key of ['col1', 'col3']) {
     const b = SPLIT_BOUNDS[key];
+    const max = effectiveMax(key);
     const w = saved[key];
-    if (typeof w === 'number' && w >= b.min && w <= b.max) {
+    if (typeof w === 'number' && w >= b.min && w <= max) {
       main.style.setProperty(b.var, w + 'px');
     }
   }
@@ -712,7 +767,8 @@ function setupSplitter(splitterEl) {
     // COL 3 grows when you drag the right splitter LEFT (delta
     // negative shrinks main area, expanding col3). Invert for col3.
     if (key === 'col3') delta = -delta;
-    let next = Math.max(b.min, Math.min(b.max, startW + delta));
+    const max = effectiveMax(key);
+    let next = Math.max(b.min, Math.min(max, startW + delta));
     main.style.setProperty(b.var, next + 'px');
   }
 
