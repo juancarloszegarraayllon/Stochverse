@@ -7000,6 +7000,62 @@ def _market_type_from_title(title: str) -> str:
     return ""
 
 
+def _extract_winner_prices(kalshi_record: dict, home_name: str,
+                            away_name: str) -> dict:
+    """For a Kalshi headline-Winner record (3-way: home/away/tie),
+    pick the YES price (in cents) for each side by fuzzy-matching
+    outcome labels to FL home_name / away_name. Returns a dict
+    with home_yes / away_yes / tie_yes (None if a side wasn't
+    matched). Powers the price chips in COL 2 right cells.
+
+    Matching strategy: lowercase-token overlap between outcome
+    label and team name. Whichever team has the highest token
+    overlap wins the outcome. Ties resolve to None (defensive —
+    rare in practice since labels and FL names usually share
+    obvious tokens).
+    """
+    out = {"home_yes": None, "away_yes": None, "tie_yes": None}
+    outcomes = kalshi_record.get("outcomes") or []
+    if not outcomes:
+        return out
+    import re
+    home_lc = (home_name or "").lower()
+    away_lc = (away_name or "").lower()
+    home_toks = set(t for t in re.split(r"[^a-z0-9]+", home_lc) if len(t) >= 3)
+    away_toks = set(t for t in re.split(r"[^a-z0-9]+", away_lc) if len(t) >= 3)
+
+    def score(label_lc: str, tokens: set) -> int:
+        if not tokens:
+            return 0
+        return sum(1 for tok in tokens if tok in label_lc)
+
+    for o in outcomes:
+        label = str(o.get("label") or "").strip()
+        if not label:
+            continue
+        label_lc = label.lower()
+        yes_bid = o.get("yes_bid")
+        # Tie / Draw catch — these are short labels that won't
+        # token-match either team; handle first so they don't fall
+        # through to noisy team-name matching.
+        if label_lc in ("tie", "draw", "no winner", "no result"):
+            if yes_bid is not None:
+                out["tie_yes"] = yes_bid
+            continue
+        h_score = score(label_lc, home_toks)
+        a_score = score(label_lc, away_toks)
+        if h_score == 0 and a_score == 0:
+            continue
+        if h_score > a_score:
+            if out["home_yes"] is None and yes_bid is not None:
+                out["home_yes"] = yes_bid
+        elif a_score > h_score:
+            if out["away_yes"] is None and yes_bid is not None:
+                out["away_yes"] = yes_bid
+        # h_score == a_score (ambiguous) → don't assign
+    return out
+
+
 def _parse_title_teams(title: str) -> tuple:
     """Best-effort split of 'Team A vs Team B' into (home, away).
     Used for Kalshi-only-feed display where we have no FL match
@@ -7093,12 +7149,22 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                         "series_ticker": r.get("series_ticker", ""),
                         "market_type": _market_type_from_title(r.get("title", "")),
                     })
+                # Extract YES prices for home / away / tie from the
+                # primary (headline Winner) market — used for the
+                # COL 2 right-cell price chips. Sub-markets like
+                # 'Spread' or 'Total Points' have different outcomes
+                # so they don't fit the home/away/tie shape.
+                home_name = ev.get("HOME_NAME") or ""
+                away_name = ev.get("AWAY_NAME") or ""
+                primary_prices = _extract_winner_prices(
+                    primary, home_name, away_name)
                 ev_out["kalshi"] = {
                     "event_ticker": primary.get("event_ticker", ""),
                     "title": primary.get("title", ""),
                     "series_ticker": primary.get("series_ticker", ""),
                     "count": len(markets),
                     "markets": markets,
+                    "primary_prices": primary_prices,
                 }
             else:
                 ev_out["kalshi"] = None
