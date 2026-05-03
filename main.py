@@ -7102,10 +7102,22 @@ def _kalshi_title_corroborates_fl_game(kalshi_title: str, fl_game: dict) -> bool
           titles when FL had full names like 'Minnesota
           Timberwolves vs San Antonio Spurs' (timberwolves and
           spurs absent from Kalshi titles).
-      v3 (this): >=4-char WHOLE-WORD AT-LEAST-ONE-required, with
+      v3: >=4-char WHOLE-WORD AT-LEAST-ONE-required, with
           a sport-vocab stop list to drop generic tokens, and a
           fallback to >=3-char tokens when a team has no
           longer-word tokens at all (e.g., 'PSG').
+      v4 (this): also accept the FL team's official abbreviation
+          (home_abbr / away_abbr — 'PSG', 'BAR', 'LAL') as a
+          whole-word match. Kalshi titles for international
+          fixtures routinely use abbreviations directly:
+            Kalshi 'Bayern vs PSG'
+            FL    'Bayern Munich' vs 'Paris Saint-Germain'
+          Without abbr-aware corroboration, the away side's
+          full-name tokens (paris/saint/germain) don't appear
+          in the Kalshi title and the match is thrown out — even
+          though match_game() correctly paired them via the
+          shortname phrase. Universal fix; benefits any sport
+          where FL ships a SHORTNAME and Kalshi uses it.
 
     The sport-vocab stop list is conservative — only includes
     tokens that demonstrably caused false positives. We can
@@ -7121,7 +7133,7 @@ def _kalshi_title_corroborates_fl_game(kalshi_title: str, fl_game: dict) -> bool
     import re
     title_lc = kalshi_title.lower()
 
-    def has_distinguishing_token(team_name: str) -> bool:
+    def has_distinguishing_token(team_name: str, abbrev: str = "") -> bool:
         toks_all = [t for t in re.split(r"[^a-z0-9]+", team_name.lower()) if t]
         # Strict: >=4 chars + not generic sport vocab
         toks_strict = [t for t in toks_all
@@ -7129,11 +7141,17 @@ def _kalshi_title_corroborates_fl_game(kalshi_title: str, fl_game: dict) -> bool
         for tok in toks_strict:
             if re.search(r'\b' + re.escape(tok) + r'\b', title_lc):
                 return True
-        # Fallback for teams with only short tokens (e.g., 'PSG',
-        # 'AC Milan', 'FC Basel'): >=3 chars whole-word match.
-        # Only used when strict-token list is empty so we don't
-        # fall back to noisy short tokens when a longer one was
-        # available but absent.
+        # Abbreviation match — FL's official short code (e.g. 'PSG',
+        # 'BAR', 'LAL'). Kalshi often uses these directly. Whole-word
+        # so 'PSG' doesn't fire on 'PSGreener' or similar.
+        abbr_lc = (abbrev or "").lower().strip()
+        if abbr_lc and len(abbr_lc) >= 2:
+            if re.search(r'\b' + re.escape(abbr_lc) + r'\b', title_lc):
+                return True
+        # Fallback for teams with only short tokens (e.g., 'AC Milan',
+        # 'FC Basel'): >=3 chars whole-word match. Only used when
+        # strict-token list is empty so we don't fall back to noisy
+        # short tokens when a longer one was available but absent.
         if not toks_strict:
             toks_short = [t for t in toks_all if len(t) >= 3]
             for tok in toks_short:
@@ -7141,7 +7159,8 @@ def _kalshi_title_corroborates_fl_game(kalshi_title: str, fl_game: dict) -> bool
                     return True
         return False
 
-    return has_distinguishing_token(home) and has_distinguishing_token(away)
+    return (has_distinguishing_token(home, fl_game.get("home_abbr"))
+            and has_distinguishing_token(away, fl_game.get("away_abbr")))
 
 
 def _market_type_from_title(title: str) -> str:
@@ -7359,6 +7378,81 @@ def _parse_title_teams(title: str) -> tuple:
             if len(parts) == 2:
                 return (parts[0].strip(), parts[1].strip())
     return ("", "")
+
+
+@app.get("/api/_debug/sport_buckets/{sport_id}")
+async def debug_sport_buckets(sport_id: int, timezone: int = 0,
+                               indent_days: int = 0):
+    """Inspection endpoint — shows the raw FL tournaments + which
+    Kalshi events pair with which (and which don't). Useful for
+    diagnosing 'I expected to see X on /sports but it's missing'
+    cases. Lists per-tournament: NAME, NAME_PART_1 (region),
+    COUNTRY_NAME, event count, and sample event names. Plus a list
+    of Kalshi events for the sport that didn't pair with any FL
+    fixture — those would otherwise be invisible on /sports.
+    """
+    from flashlive_feed import _fl_get, match_game
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    fl_data = await _fl_get("/v1/events/list", {
+        "sport_id": sport_id, "timezone": timezone,
+        "indent_days": indent_days,
+    })
+    kalshi_sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
+    out_tournaments = []
+    for t in (fl_data.get("DATA") or []):
+        evs = t.get("EVENTS") or []
+        sample_names = []
+        for ev in evs[:8]:
+            sample_names.append(
+                (ev.get("HOME_NAME") or "?") + " vs " + (ev.get("AWAY_NAME") or "?")
+            )
+        out_tournaments.append({
+            "NAME": t.get("NAME"),
+            "NAME_PART_1": t.get("NAME_PART_1"),
+            "NAME_PART_2": t.get("NAME_PART_2"),
+            "COUNTRY_NAME": t.get("COUNTRY_NAME"),
+            "TOURNAMENT_STAGE_ID": t.get("TOURNAMENT_STAGE_ID"),
+            "event_count": len(evs),
+            "sample_events": sample_names,
+        })
+    # Kalshi events for this sport that don't pair with FL.
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    unmatched_kalshi = []
+    matched_count = 0
+    for r in records:
+        if (r.get("_sport") or "") != kalshi_sport:
+            continue
+        title = r.get("title") or ""
+        if not title or _market_type_from_title(title):
+            continue
+        try:
+            mg = match_game(title, kalshi_sport)
+        except Exception:
+            mg = None
+        if mg and _kalshi_title_corroborates_fl_game(title, mg):
+            matched_count += 1
+            continue
+        unmatched_kalshi.append({
+            "title": title,
+            "event_ticker": r.get("event_ticker"),
+            "series_ticker": r.get("series_ticker"),
+            "match_game_returned": bool(mg),
+            "match_game_home": mg.get("home_name") if mg else None,
+            "match_game_away": mg.get("away_name") if mg else None,
+            "match_game_home_abbr": mg.get("home_abbr") if mg else None,
+            "match_game_away_abbr": mg.get("away_abbr") if mg else None,
+        })
+    return {
+        "sport_id": sport_id,
+        "kalshi_sport": kalshi_sport,
+        "fl_tournament_count": len(out_tournaments),
+        "fl_tournaments": out_tournaments,
+        "kalshi_matched_count": matched_count,
+        "kalshi_unmatched_count": len(unmatched_kalshi),
+        "kalshi_unmatched_sample": unmatched_kalshi[:30],
+    }
 
 
 @app.get("/api/sports/{sport_id}/feed")

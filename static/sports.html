@@ -382,6 +382,14 @@ function activeSportId() {
   return 1;  // default soccer
 }
 
+function titleCase(s) {
+  // 'EUROPE' → 'Europe', 'south america' → 'South America'.
+  // Only changes case — leaves the rest untouched. Used to
+  // normalize FL's shouty COUNTRY_NAME / NAME_PART_1 values for
+  // the COL 1 country header.
+  return String(s || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
 function escH(s) {
   if (s == null) return '';
   return String(s)
@@ -596,7 +604,12 @@ function renderCol1() {
     // ("Europe", "South America", "World"). Fall back to that
     // before lumping into 'International' so they show up in the
     // sidebar under their actual region.
-    const country = t.COUNTRY_NAME || t.NAME_PART_1 || 'International';
+    // Title-case the value so FL's uppercase 'EUROPE' / 'ENGLAND'
+    // doesn't render shouty in the sidebar — bucket keys collapse
+    // to the same case so 'Europe' from one tournament and
+    // 'EUROPE' from another all sit together.
+    const rawCountry = t.COUNTRY_NAME || t.NAME_PART_1 || 'International';
+    const country = titleCase(rawCountry);
     if (!byCountry[country]) byCountry[country] = [];
     byCountry[country].push({
       stageId: t.TOURNAMENT_STAGE_ID || '',
