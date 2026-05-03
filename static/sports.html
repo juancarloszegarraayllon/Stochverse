@@ -351,6 +351,23 @@ function fmtTime(unixSec) {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
+function leagueDisplayName(t) {
+  // Prefer NAME_PART_2 (clean league name, e.g. "Premier League")
+  // when FL ships it. Fall back to peeling the country prefix off
+  // NAME (which arrives as "England: Premier League" for many
+  // tournaments) so the league name still leads the row even when
+  // FL omits the split fields. Final fallback: full NAME as-is.
+  if (t.NAME_PART_2) return t.NAME_PART_2;
+  const name = t.NAME || '';
+  const country = t.COUNTRY_NAME || t.NAME_PART_1 || '';
+  if (country && name.startsWith(country + ':')) {
+    return name.substring(country.length + 1).trim();
+  }
+  const idx = name.indexOf(':');
+  if (idx > 0 && idx < name.length - 1) return name.substring(idx + 1).trim();
+  return name;
+}
+
 function renderCol2() {
   const col2 = document.getElementById('sp-col2');
   if (!_eventsCache || !_eventsCache.length) {
@@ -370,7 +387,7 @@ function renderCol2() {
     // before "England". Country sits beside it in smaller all-caps as
     // secondary context (matches Sofascore's tournament header style).
     html += '<div class="sp-c2-tournament-head">';
-    html += '<span class="sp-c2-league-name">' + escH(t.NAME_PART_2 || t.NAME || '') + '</span>';
+    html += '<span class="sp-c2-league-name">' + escH(leagueDisplayName(t)) + '</span>';
     if (t.COUNTRY_NAME) html += '<span class="sp-c2-country">' + escH(t.COUNTRY_NAME) + '</span>';
     html += '</div>';
     html += '<div class="sp-c2-events">';
