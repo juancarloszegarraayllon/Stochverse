@@ -6869,11 +6869,22 @@ def _collect_outrights_for_sport(sport_name: str) -> list:
         a sub-market — those belong to a parent game)
       - must NOT match any FL game via match_game + corroboration
         (otherwise the regular index would have surfaced it)
-      - need ≥2 outcomes so there's something to render
+      - title is NOT a head-to-head match (X vs Y / X @ Y / X v. Y).
+        Those are individual fixtures that just failed to pair with
+        FL — usually a name-abbreviation gap (Kalshi 'Chen vs Zhou'
+        vs FL 'Zhuo Chen vs Ziyu Zhou'). They don't belong in
+        Outrights even though match_game() didn't pair them.
+      - ≥3 outcomes — real outrights have many candidates (8+ teams
+        in UCL, 30+ in MVP). 2-outcome markets are almost always
+        either head-to-heads (filtered above) or yes/no propositions
+        that aren't tournament outrights either.
     """
+    import re
     from flashlive_feed import match_game
     if not sport_name:
         return []
+    # Catches " vs ", " v. ", " v ", " @ ", " at " — case-insensitive
+    head_to_head_re = re.compile(r"\s+(?:vs|v\.?|@|at)\s+", re.IGNORECASE)
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
     out: list = []
@@ -6886,6 +6897,8 @@ def _collect_outrights_for_sport(sport_name: str) -> list:
             continue
         if _market_type_from_title(title):
             continue
+        if head_to_head_re.search(title):
+            continue
         try:
             mg = match_game(title, sport_name)
         except Exception:
@@ -6893,7 +6906,7 @@ def _collect_outrights_for_sport(sport_name: str) -> list:
         if mg and _kalshi_title_corroborates_fl_game(title, mg):
             continue
         outcomes = _extract_all_outcomes(r)
-        if len(outcomes) < 2:
+        if len(outcomes) < 3:
             continue
         ticker = r.get("event_ticker") or ""
         if not ticker or ticker in seen:
