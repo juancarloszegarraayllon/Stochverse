@@ -7287,6 +7287,42 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
             except Exception:
                 pass
             agg_lookups_done += 1
+        # Series score for non-soccer playoff sports (NBA / NHL /
+        # MLB / NFL). The cache passthrough below handles the
+        # already-FL-paired case; for unpaired Kalshi h2h we fresh-
+        # query ESPN's in-memory game list (cheap — no HTTP) on
+        # the bare title. ESPN's match_game returns series_home_wins
+        # / series_away_wins / series_summary for playoff games and
+        # leaves them None for regular-season games, which is the
+        # exact gating we want — playoffs render 'SERIES X-Y',
+        # regular-season renders nothing.
+        series_h_wins = primary.get("series_home_wins")
+        series_a_wins = primary.get("series_away_wins")
+        series_summary = primary.get("series_summary") or ""
+        if (series_h_wins is None or series_a_wins is None) and sport_name in (
+                "Basketball", "Hockey", "Baseball", "American Football"):
+            try:
+                from espn_feed import match_game as espn_match
+                eg = espn_match(bare_title, sport_name)
+                if eg:
+                    if series_h_wins is None: series_h_wins = eg.get("series_home_wins")
+                    if series_a_wins is None: series_a_wins = eg.get("series_away_wins")
+                    if not series_summary: series_summary = eg.get("series_summary") or ""
+            except Exception:
+                pass
+            # Fall back to FlashLive if ESPN didn't pair this match
+            # — FL also surfaces series fields on US-sport playoffs
+            # via INFO_NOTICE parsing (see flashlive_feed.py:684).
+            if series_h_wins is None or series_a_wins is None:
+                try:
+                    from flashlive_feed import match_game as fl_match
+                    fg = fl_match(bare_title, sport_name)
+                    if fg:
+                        if series_h_wins is None: series_h_wins = fg.get("series_home_wins")
+                        if series_a_wins is None: series_a_wins = fg.get("series_away_wins")
+                        if not series_summary: series_summary = fg.get("series_summary") or ""
+                except Exception:
+                    pass
         ev = {
             "EVENT_ID": "kalshi-h2h-" + primary_ticker,
             "START_TIME": None,
@@ -7306,17 +7342,16 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
                 "aggregate_home": agg_h,
                 "aggregate_away": agg_a,
                 "aggregate_label": agg_label,
-                # Playoff series score — pass through from cache
-                # if present. Universal: NBA/NHL/MLB best-of-N
-                # series get a 'SERIES X-Y' label, same way soccer
-                # cup-ties get 'AGG X-Y'. Cache populates these
-                # fields when FL/ESPN matched the game; for
-                # genuinely-unpaired Kalshi-only h2h with no FL
-                # pair, these stay null until a background
-                # enricher lands.
-                "series_home_wins": primary.get("series_home_wins"),
-                "series_away_wins": primary.get("series_away_wins"),
-                "series_summary":   primary.get("series_summary"),
+                # Playoff series score for NBA / NHL / MLB / NFL.
+                # Cache passthrough first (FL-paired case), then a
+                # fresh ESPN/FL match_game lookup above for
+                # unpaired Kalshi h2h. Both sources only populate
+                # these fields when the underlying game IS in a
+                # playoff series — regular-season games leave them
+                # null and the frontend renders nothing.
+                "series_home_wins": series_h_wins,
+                "series_away_wins": series_a_wins,
+                "series_summary":   series_summary,
             },
         }
         by_league.setdefault(league, []).append(ev)
