@@ -7011,6 +7011,204 @@ def _collect_outrights_for_sport(sport_name: str) -> list:
     return out
 
 
+# Soccer league → continent / region. Mirrors FL's 'Other
+# Competitions' bucket names. Used by _collect_unpaired_h2h_for_sport
+# to bucket Kalshi h2h markets that don't pair with any FL fixture
+# today (UCL men's market with Bayern vs PSG when FL hasn't shipped
+# the men's UCL match-day fixture yet, etc.).
+_LEAGUE_TO_REGION = {
+    "Champions League": "Europe",
+    "Champions League Women": "Europe",
+    "Europa League": "Europe",
+    "Conference League": "Europe",
+    "EPL": "England",
+    "La Liga": "Spain",
+    "La Liga 2": "Spain",
+    "Serie A": "Italy",
+    "Serie B": "Italy",
+    "Bundesliga": "Germany",
+    "Bundesliga 2": "Germany",
+    "Ligue 1": "France",
+    "MLS": "USA",
+    "Liga MX": "Mexico",
+    "Brasileirao": "Brazil",
+    "EFL Championship": "England",
+    "Scottish Premiership": "Scotland",
+    "Eredivisie": "Netherlands",
+    "Liga Portugal": "Portugal",
+    "Saudi Pro League": "Saudi Arabia",
+    "Super Lig": "Turkey",
+    "A-League": "Australia & Oceania",
+    "K League": "South Korea",
+    "J League": "Japan",
+}
+
+
+def _league_to_region(league_name: str) -> str:
+    """Map a league name to its FL continent bucket. Direct hit via
+    _LEAGUE_TO_REGION first; falls back to keyword scan for less-
+    common leagues. Used as NAME_PART_1 on synthetic tournament
+    records so the frontend's bucketCountry() routes them correctly.
+    Empty string if we can't classify — the tournament still shows
+    but ends up in 'International'.
+    """
+    if not league_name:
+        return ""
+    if league_name in _LEAGUE_TO_REGION:
+        return _LEAGUE_TO_REGION[league_name]
+    upper = league_name.upper()
+    if any(x in upper for x in ("UCL", "UEFA", "UECL", "UEL", "EUROPA", "CONFERENCE")):
+        return "Europe"
+    if any(x in upper for x in ("LIBERTADORES", "SUDAMERICANA", "CONMEBOL")):
+        return "South America"
+    if any(x in upper for x in ("WORLD CUP", "FIFA")):
+        return "World"
+    if any(x in upper for x in ("CONCACAF", "GOLD CUP")):
+        return "North & Central America"
+    if any(x in upper for x in ("AFC", "AFCON")):
+        return "Asia"
+    if "CAF" in upper:
+        return "Africa"
+    return ""
+
+
+def _collect_unpaired_h2h_for_sport(sport_name: str,
+                                     matched_kalshi_tickers: set) -> list:
+    """Collect Kalshi head-to-head markets (X vs Y) that don't pair
+    with any FL fixture in today's events list. These are individual
+    matchups that Kalshi has open for trading but FL hasn't
+    surfaced yet (e.g. tomorrow's UCL match — Kalshi opens the
+    market days ahead, FL only ships fixtures on match-day).
+
+    Without this, those markets are invisible on /sports because:
+      - The regular index needs an FL pair (no pair → not added).
+      - The Outrights collector skips h2h titles by design (they're
+        matches, not season futures).
+
+    Returns a list of synthetic tournament dicts grouped by the
+    Kalshi series_ticker → league mapping (KXUCL → 'Champions
+    League', KXCONMEBOLLIB → 'Copa Libertadores', etc.). NAME_PART_1
+    is set to the inferred FL region (Europe / South America /
+    World / etc.) so the frontend bucketCountry() routes them under
+    the right continent.
+    """
+    from flashlive_feed import match_game
+    if not sport_name:
+        return []
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    # Group: league_name → list of event dicts
+    by_league: dict = {}
+    seen_tickers: set = set()
+    for r in records:
+        if (r.get("_sport") or "") != sport_name:
+            continue
+        title = r.get("title") or ""
+        if not title:
+            continue
+        # Headline only — sub-markets pair with their parent game
+        if _market_type_from_title(title):
+            continue
+        # Must look like an h2h match (NOT an outright/futures)
+        if not _is_head_to_head_title(title):
+            continue
+        # Skip if this ticker is already in the matched index (FL
+        # paired it). matched_kalshi_tickers is the running set
+        # populated by the regular index walk in /api/sports/.../feed.
+        ticker = r.get("event_ticker") or ""
+        if not ticker or ticker in seen_tickers:
+            continue
+        if ticker in matched_kalshi_tickers:
+            continue
+        # Re-run match_game + corroboration to confirm no FL pair.
+        # (The matched_kalshi_tickers check above is enough in
+        # practice; this is belt-and-suspenders against the rare
+        # case where /v1/events/list filtered the matched event
+        # but the cache still has it.)
+        try:
+            mg = match_game(title, sport_name)
+        except Exception:
+            mg = None
+        if mg and _kalshi_title_corroborates_fl_game(title, mg):
+            continue
+        # Look up the league via the series_ticker. Soccer has the
+        # detailed SOCCER_COMP map; other sports fall through to
+        # the prefix as a poor-man's league name (still better than
+        # nothing — gives the user a grouping signal).
+        series = (r.get("series_ticker") or "").upper()
+        league = ""
+        if sport_name == "Soccer" and series in SOCCER_COMP:
+            league = SOCCER_COMP[series]
+        if not league:
+            # Strip the trailing market-suffix (GAME/SPREAD/TOTAL/
+            # BTTS/1H) from the series ticker to get the bare comp
+            # code, which is at least stable per-tournament.
+            base = series
+            for suf in ("GAME", "SPREAD", "TOTAL", "BTTS", "1H", "WGAME", "W"):
+                if base.endswith(suf):
+                    base = base[:-len(suf)]
+                    break
+            league = base.replace("KX", "").title() if base else "Other"
+        outcomes = _extract_all_outcomes(r)
+        if not outcomes:
+            continue
+        seen_tickers.add(ticker)
+        markets = [{
+            "event_ticker": ticker,
+            "title": title,
+            "series_ticker": r.get("series_ticker", ""),
+            "market_type": "",
+            "outcomes": outcomes,
+        }]
+        # Try to derive HOME/AWAY names from the title for the
+        # teams cell + matchup line. Title is shaped 'X vs Y' so
+        # split on the h2h regex hit.
+        m = _HEAD_TO_HEAD_TITLE_RE.search(title)
+        home_name = ""
+        away_name = ""
+        if m:
+            home_name = title[:m.start()].strip()
+            away_name = title[m.end():].strip()
+            # Strip any trailing colon-suffix from away (already
+            # filtered above but defensive).
+            if ":" in away_name:
+                away_name = away_name.split(":", 1)[0].strip()
+        ev = {
+            "EVENT_ID": "kalshi-h2h-" + ticker,
+            "START_TIME": None,
+            "HOME_NAME": home_name,
+            "AWAY_NAME": away_name,
+            "HOME_SCORE_CURRENT": None,
+            "AWAY_SCORE_CURRENT": None,
+            "STAGE_TYPE": "SCHEDULED",
+            "_kalshi_h2h_only": True,
+            "kalshi": {
+                "event_ticker": ticker,
+                "title": title,
+                "series_ticker": r.get("series_ticker", ""),
+                "count": 1,
+                "markets": markets,
+                "primary_prices": None,
+                "aggregate_home": None,
+                "aggregate_away": None,
+                "aggregate_label": None,
+            },
+        }
+        by_league.setdefault(league, []).append(ev)
+    out = []
+    for league, evs in by_league.items():
+        region = _league_to_region(league)
+        out.append({
+            "TOURNAMENT_STAGE_ID": "kalshi-h2h-" + league.replace(" ", "-").lower(),
+            "NAME": (region + ": " + league) if region else league,
+            "NAME_PART_1": region,
+            "NAME_PART_2": league,
+            "COUNTRY_NAME": region,
+            "events": evs,
+        })
+    return out
+
+
 def _build_kalshi_index_for_sport(sport_name: str) -> dict:
     """Walk the Kalshi cache, return {fl_event_id: [kalshi_records]}
     for sports events whose title matches an FL game. Multiple
@@ -7597,13 +7795,30 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                 "events": events_out,
             })
 
+    # Kalshi h2h markets without an FL pair (e.g. UCL men's match
+    # tomorrow — Kalshi opens the market days ahead, FL hasn't
+    # surfaced the fixture yet). Bucketed by inferred league →
+    # region so they appear under Europe / South America / etc.
+    # alongside FL fixtures. Run AFTER the regular index walk so
+    # we know which tickers FL paired.
+    unpaired_h2h_tournaments = (
+        _collect_unpaired_h2h_for_sport(kalshi_sport, matched_kalshi_tickers)
+        if kalshi_sport else []
+    )
+    for t in unpaired_h2h_tournaments:
+        for ev in t["events"]:
+            tk = (ev.get("kalshi") or {}).get("event_ticker")
+            if tk:
+                matched_kalshi_tickers.add(tk)
+
     # Outrights at the top — synthetic tournaments bucket under
     # 'Outrights' country in COL 1, so the user sees them grouped
-    # at the top of the leagues sidebar.
+    # at the top of the leagues sidebar. Unpaired h2h tournaments
+    # come right after, then FL-paired tournaments.
     return {
         "fl_sport_id": sport_id,
         "kalshi_sport": kalshi_sport,
-        "tournaments": outright_tournaments + out_tournaments,
+        "tournaments": outright_tournaments + unpaired_h2h_tournaments + out_tournaments,
         "matched_kalshi_count": len(matched_kalshi_tickers),
         "source": "flashlive+kalshi",
     }
