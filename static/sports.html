@@ -261,6 +261,18 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-time-state.live{color:var(--red);font-weight:700}
 .sp-c2-teams{font-size:13px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
 .sp-c2-team{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Team crest / national-flag icon next to a team name. Source
+   is FL's HOME_IMAGES / AWAY_IMAGES (already in the events-list
+   payload — no extra API calls). National-team fixtures ship a
+   country flag, club fixtures ship a crest; we render the URL
+   verbatim and FL's CDN handles both. loading=lazy so offscreen
+   rows don't fetch until the user scrolls them in. Game-events
+   only — outright / Kalshi-only-h2h rows don't have these
+   fields populated. */
+.sp-c2-team-icon{width:14px;height:14px;vertical-align:middle;margin-right:5px;object-fit:contain;flex-shrink:0;display:inline-block}
+.sp-c2-matchup .sp-c2-team-icon{margin-right:5px;margin-left:0}
+.sp-c2-matchup .sp-c2-team-icon + *{margin-left:0}
+.sp-c2-matchup .sp-c2-team-icon:last-child{margin-right:0;margin-left:5px}
 /* Matchup header inside the teams cell — shown for matched events
    that are displaying sub-market outcomes (BTTS / Totals / First
    Goalscorer / Spreads / etc.). Carries the actual fixture name
@@ -1241,6 +1253,18 @@ function renderEventRow(ev, market, isMarketRow) {
   const hasTeamNames = !!(ev.HOME_NAME || ev.AWAY_NAME);
   const winnerShape = isWinnerShapedOutcomes(outcomes, ev.HOME_NAME, ev.AWAY_NAME);
   const showMatchup = matched && hasTeamNames && !winnerShape && outcomes.length > 0;
+  // Team images come straight from FL's events-list response:
+  // HOME_IMAGES / AWAY_IMAGES are arrays of CDN URLs. National
+  // teams ship the country flag, clubs ship the crest — same
+  // distinction the homepage relies on. No extra API calls.
+  const homeImg = (ev.HOME_IMAGES && ev.HOME_IMAGES[0]) || '';
+  const awayImg = (ev.AWAY_IMAGES && ev.AWAY_IMAGES[0]) || '';
+  const homeIconHtml = homeImg
+    ? '<img class="sp-c2-team-icon" src="' + escH(homeImg) + '" alt="" loading="lazy">'
+    : '';
+  const awayIconHtml = awayImg
+    ? '<img class="sp-c2-team-icon" src="' + escH(awayImg) + '" alt="" loading="lazy">'
+    : '';
   if (showMatchup) {
     const hs = ev.HOME_SCORE_CURRENT;
     const as = ev.AWAY_SCORE_CURRENT;
@@ -1256,24 +1280,32 @@ function renderEventRow(ev, market, isMarketRow) {
       // Wrap the inline score numbers in a span so they render in
       // the same bold tabular style as the vertical score column —
       // visually consistent across both layouts.
-      matchupHtml = escH(homeName) +
+      matchupHtml = homeIconHtml + escH(homeName) +
         ' <span class="sp-c2-matchup-score">' + escH(hs != null ? hs : 0) + '</span>' +
         ' - <span class="sp-c2-matchup-score">' + escH(as != null ? as : 0) + '</span> ' +
-        escH(awayName);
+        escH(awayName) + awayIconHtml;
     } else {
-      matchupHtml = escH(homeName) + ' vs ' + escH(awayName);
+      matchupHtml = homeIconHtml + escH(homeName) + ' vs ' + escH(awayName) + awayIconHtml;
     }
     html += '<span class="sp-c2-matchup" title="' + escH(matchupTitle) +
             '">' + matchupHtml + '</span>';
   }
   if (matched && outcomes.length) {
     // Show outcome labels (home / away / tie for Winner; spread
-    // variants for Spreads; etc.). Score column to the right
-    // stays anchored to the home/away pair regardless of how
-    // many outcome rows we render here.
+    // variants for Spreads; etc.). Match outcome label against
+    // HOME_NAME / AWAY_NAME to attach the right team icon —
+    // 'Tie' / sub-market labels get no icon. Score column to the
+    // right stays anchored to the home/away pair regardless of
+    // how many outcome rows we render here.
+    const homeLc = (ev.HOME_NAME || '').toLowerCase();
+    const awayLc = (ev.AWAY_NAME || '').toLowerCase();
     for (const o of outcomes) {
+      const lblLc = (o.label || '').toLowerCase();
+      let icon = '';
+      if (lblLc === homeLc) icon = homeIconHtml;
+      else if (lblLc === awayLc) icon = awayIconHtml;
       html += '<span class="sp-c2-team" title="' + escH(o.label || '') +
-              '">' + escH(o.label || '') + '</span>';
+              '">' + icon + escH(o.label || '') + '</span>';
     }
     if (hasMore) {
       const lbl = expanded ? 'Show less' : '+ ' + (allOutcomes.length - MAX_VISIBLE) + ' more';
@@ -1284,8 +1316,8 @@ function renderEventRow(ev, market, isMarketRow) {
     // No outcomes (unmatched OR matched but no market for the
     // active sub-market type) and no matchup header above.
     // Render plain team names so the user still sees the fixture.
-    html += '<span class="sp-c2-team">' + escH(ev.HOME_NAME || '') + '</span>';
-    html += '<span class="sp-c2-team">' + escH(ev.AWAY_NAME || '') + '</span>';
+    html += '<span class="sp-c2-team">' + homeIconHtml + escH(ev.HOME_NAME || '') + '</span>';
+    html += '<span class="sp-c2-team">' + awayIconHtml + escH(ev.AWAY_NAME || '') + '</span>';
   }
   // In Market view, append the market type below the labels so
   // users can scan which market each row represents.
