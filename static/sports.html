@@ -1150,7 +1150,7 @@ function renderEventRow(ev, market, isMarketRow) {
   // selection key).
   const state = eventState(ev);
   const time = state === 'finished' ? 'FT' : fmtTime(ev.START_TIME);
-  const stLbl = state === 'live' ? (ev.STAGE || 'LIVE') :
+  const stLbl = state === 'live' ? liveClockLabel(ev) :
                 state === 'finished' ? '' :
                 state === 'upcoming' ? '' : '';
   const matched = !!(ev.kalshi && ev.kalshi.event_ticker);
@@ -1205,7 +1205,13 @@ function renderEventRow(ev, market, isMarketRow) {
   // here; until then the column is gone and the grid is one
   // column slimmer.
   html += '<div class="sp-c2-time">' + escH(time);
-  if (stLbl) html += '<span class="sp-c2-time-state' + (state === 'live' ? ' live' : '') + '">' + escH(stLbl) + '</span>';
+  if (stLbl) {
+    const liveAttr = state === 'live'
+      ? ' data-event-id="' + escH(ev.EVENT_ID || '') + '"'
+      : '';
+    html += '<span class="sp-c2-time-state' + (state === 'live' ? ' live' : '') + '"' +
+            liveAttr + '>' + escH(stLbl) + '</span>';
+  }
   html += '</div>';
   // Build the visible outcome list (capped at MAX_VISIBLE unless
   // the user toggled "+ N more" on this event). The same list
@@ -1397,6 +1403,85 @@ function renderAggOrSeries(ev) {
            escH(k.series_home_wins) + '-' + escH(k.series_away_wins) + '</span>';
   }
   return '';
+}
+
+function liveClockLabel(ev) {
+  // Computes the live-state label for an in-progress event:
+  //   Soccer:  '63'' / '45+3'' / 'HT' — derived from STAGE +
+  //            STAGE_START_TIME using the same period offsets
+  //            flashlive_feed.py uses, so we tick client-side
+  //            without re-fetching every minute.
+  //   Other sports: prefer ev.GAME_TIME if FL ships it, fall
+  //            back to a humanized STAGE name. ESPN-routed
+  //            sports (Basketball/Hockey/Football) inherit the
+  //            display_clock when /sports rolls in _live_state
+  //            in a future pass; for now humanized STAGE keeps
+  //            the row labeled.
+  const stage = String(ev.STAGE || '').toUpperCase();
+  const stageStartRaw = ev.STAGE_START_TIME;
+  const stageStart = stageStartRaw ? parseInt(stageStartRaw, 10) : 0;
+  // Soccer halftime sentinel — short-circuit before any clock math
+  if (stage === 'HALF_TIME') return 'HT';
+  if (stage === 'BREAK_AFTER_FIRST_HALF') return 'HT';
+  // Soccer running clock — minute = base + (now - stage_start)/60.
+  // Period offsets mirror flashlive_feed.py SOCCER_PERIOD_OFFSETS.
+  const SOCCER_OFFSETS = {
+    'FIRST_HALF':              [0, 45],
+    'SECOND_HALF':              [45, 90],
+    'EXTRA_TIME_FIRST_HALF':    [90, 105],
+    'BREAK_AFTER_NORMAL_TIME':  null,        // pre-ET break → no clock
+    'EXTRA_TIME_SECOND_HALF':   [105, 120],
+    'BREAK_AFTER_FIRST_EXTRA':  null,
+    'PENALTIES':                null,
+  };
+  if (stage in SOCCER_OFFSETS && stageStart > 0) {
+    const range = SOCCER_OFFSETS[stage];
+    if (!range) return stage.replace(/_/g, ' ');
+    const [base, end] = range;
+    const elapsedSec = Math.max(0, (Date.now() / 1000) - stageStart);
+    const elapsedMin = Math.floor(elapsedSec / 60);
+    const minute = Math.max(base + 1, base + elapsedMin);
+    if (minute > end) return end + '+' + (minute - end) + "'";
+    return minute + "'";
+  }
+  // Non-soccer fallback — FL ships GAME_TIME for some sports
+  // (basketball quarter clock, hockey period clock, etc.). When
+  // present it's already a formatted string ('Q3 8:42' or
+  // similar); use it as-is.
+  if (ev.GAME_TIME != null && ev.GAME_TIME !== '') {
+    return String(ev.GAME_TIME);
+  }
+  // Last resort: humanize the STAGE token.
+  return stage.replace(/_/g, ' ') || 'LIVE';
+}
+
+// Tick live clocks every 30 s — minute precision is plenty for
+// soccer ('63'' → '64'' once a minute), and lighter than a 1-Hz
+// interval. Updates the .sp-c2-time-state.live spans in place
+// instead of re-rendering the whole COL 2 (which would jitter
+// the user's scroll position). Cheap because the only data
+// source is the cached _eventsCache the client already has.
+let _liveTickInterval = null;
+function tickLiveClocks() {
+  if (!_eventsCache) return;
+  const labels = document.querySelectorAll('.sp-c2-time-state.live[data-event-id]');
+  if (labels.length === 0) return;
+  const evById = {};
+  for (const t of _eventsCache) {
+    for (const ev of (t.events || t.EVENTS || [])) {
+      if (ev.EVENT_ID) evById[ev.EVENT_ID] = ev;
+    }
+  }
+  for (const el of labels) {
+    const ev = evById[el.dataset.eventId];
+    if (!ev) continue;
+    const newLabel = liveClockLabel(ev);
+    if (el.textContent !== newLabel) el.textContent = newLabel;
+  }
+}
+function startLiveTick() {
+  if (_liveTickInterval) return;
+  _liveTickInterval = setInterval(tickLiveClocks, 30000);
 }
 
 function eventShowsScoreInColumn(ev) {
@@ -1889,6 +1974,11 @@ if (activeSportId() === 2) document.body.classList.add('sport-tennis');
 document.querySelectorAll('.sp-splitter').forEach(setupSplitter);
 loadSportNav();
 loadEvents();
+// Start the live-clock ticker once on init — it self-skips when
+// no .sp-c2-time-state.live spans are in the DOM, so the cost
+// while no live games are showing is one querySelectorAll every
+// 30 s. Idle.
+startLiveTick();
 </script>
 
 <!-- Calendar modal — toggled by the day-picker label. Sofascore-
