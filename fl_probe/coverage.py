@@ -77,19 +77,49 @@ def main() -> None:
     print("## Strategic summary")
     print()
     print("Coverage falls into three buckets, each with a different")
-    print("intended end state:")
+    print("intended end state. Numbers below recompute on every run —")
+    print("they reflect the live state of the codebase + spec.")
     print()
+    # Three buckets — group tags by intent. Numbers below recompute
+    # automatically as wrappers are added.
+    EVENT_LEVEL = {"events"}                          # modal + list-main-odds
+    DRILL_IN = {"players", "teams", "tournaments", "news"}
+    UTILITY = {"sports", "search", "rankings", "images"}
+
+    def bucket_stats(tags: set) -> tuple:
+        items = [it for tag in tags for it in by_tag.get(tag, [])]
+        n = len(items)
+        c = sum(1 for _, _, is_cov in items if is_cov)
+        pct = round(100 * c / n) if n else 0
+        return c, n, pct
+
+    ev_c, ev_n, ev_p = bucket_stats(EVENT_LEVEL)
+    di_c, di_n, di_p = bucket_stats(DRILL_IN)
+    ut_c, ut_n, ut_p = bucket_stats(UTILITY)
+
+    def bucket_emoji(pct: int) -> str:
+        if pct >= 80:
+            return "⭐"
+        if pct >= 50:
+            return "🟡"
+        return "🚧"
+
     print("| Bucket | Coverage | Status |")
     print("|---|---|---|")
-    print("| **Event-level (modal)** | 31/35 = 89% | "
-          "⭐ Near-complete. Only Round-1 #3 Odds (3 endpoints) + "
-          "racing-details (no FL data) + cricket commentary-alt are gaps |")
-    print("| **Drill-in (Step E)** | 8/24 = 33% | "
-          "🚧 Intentionally pending. Players, full Teams family, "
-          "Tournaments beyond standings, News module |")
-    print("| **Utility** | 2/4 = 50% | "
-          "🟡 Basics there. `/sports/events-count` and `/images/data` "
-          "not wrapped |")
+    print(f"| **Event-level (modal + bulk slate)** | "
+          f"{ev_c}/{ev_n} = {ev_p}% | "
+          f"{bucket_emoji(ev_p)} Modal endpoint family. Gaps here are "
+          f"deliberate (Round-1 #3 Odds, parked Q1 cricket-alt, "
+          f"racing-details = no FL data per probe v4). |")
+    print(f"| **Drill-in (browse + profile pages)** | "
+          f"{di_c}/{di_n} = {di_p}% | "
+          f"{bucket_emoji(di_p)} L1/L2 nav pages (sport, tournament) + "
+          f"post-MVP team/player profile + news module. |")
+    print(f"| **Utility** | "
+          f"{ut_c}/{ut_n} = {ut_p}% | "
+          f"{bucket_emoji(ut_p)} Cross-cutting endpoints — search, "
+          f"rankings, sport meta. `/v1/images/data` typically "
+          f"unnecessary (URLs already inline elsewhere). |")
     print()
     print("## Per-endpoint detail")
     print()

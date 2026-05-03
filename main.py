@@ -6765,6 +6765,205 @@ async def get_event_highlights(ticker: str):
     except Exception as e:
         return {"error": str(e)[:200]}
 
+
+# ── FL hierarchy pass-through routes ────────────────────────────────
+# Phase 1 of the Sports browse build (DETAILED_EVENT_STATS_SCHEMA.md
+# Step E + FL_API_COVERAGE.md gap-fill). Thin wrappers around FL
+# endpoints that aren't event-id-bound — used by L0 / L1 / L2 pages
+# and post-MVP drill-in pages. Each is a near-trivial pass-through
+# returning {data, source} or {error}; richer caching can be layered
+# on per-endpoint as traffic profile demands.
+
+@app.get("/api/fl/sports-events-count")
+async def fl_sports_events_count(timezone: int = 0):
+    """Live event counts per sport for the L0 sport selector
+    (e.g., 'Soccer 37 live, Tennis 8, Basketball 12'). FL spec
+    bounds: timezone -12..12.
+    """
+    from flashlive_feed import _fl_get
+    if not -12 <= timezone <= 12:
+        return {"error": "timezone must be between -12 and 12"}
+    data = await _fl_get("/v1/sports/events-count", {"timezone": timezone})
+    if not data:
+        return {"error": "no events-count data available"}
+    return {"data": data, "source": "flashlive"}
+
+
+@app.get("/api/fl/list-main-odds")
+async def fl_list_main_odds(sport_id: int, timezone: int = 0,
+                             indent_days: int = 0):
+    """Sport+date bulk odds slate — used by L1 sport-page event
+    cards to show the headline odds inline. FL spec bounds:
+    sport_id 1..42, timezone -12..12, indent_days -7..7.
+    """
+    from flashlive_feed import _fl_get
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    if not -12 <= timezone <= 12:
+        return {"error": "timezone must be between -12 and 12"}
+    if not -7 <= indent_days <= 7:
+        return {"error": "indent_days must be between -7 and 7"}
+    data = await _fl_get("/v1/events/list-main-odds", {
+        "sport_id": sport_id, "timezone": timezone,
+        "indent_days": indent_days,
+    })
+    if not data:
+        return {"error": "no main-odds data available"}
+    return {"data": data, "source": "flashlive"}
+
+
+@app.get("/api/fl/tournaments-popular")
+async def fl_tournaments_popular():
+    """Globally popular tournaments across all sports — drives the
+    'Pinned leagues' sidebar on L1.
+    """
+    from flashlive_feed import _fl_get
+    data = await _fl_get("/v1/tournaments/popular", {})
+    if not data:
+        return {"error": "no popular-tournaments data available"}
+    return {"data": data, "source": "flashlive"}
+
+
+@app.get("/api/fl/sports/{sport_id}/stages")
+async def fl_sport_stages(sport_id: int):
+    """List of all tournament stages for a sport — useful for
+    building per-country/per-tournament filters on L1.
+    """
+    from flashlive_feed import _fl_get
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    data = await _fl_get("/v1/tournaments/stages", {"sport_id": sport_id})
+    if not data:
+        return {"error": "no stages data available"}
+    return {"data": data, "source": "flashlive"}
+
+
+@app.get("/api/fl/tournaments/{stage_id}/seasons")
+async def fl_tournament_seasons(stage_id: str):
+    """Year-by-year season archive for a tournament stage (football).
+    Used by the L2 tournament page season-picker dropdown.
+    """
+    from flashlive_feed import _fl_get
+    if not stage_id or len(stage_id) < 6 or len(stage_id) > 10:
+        return {"error": "invalid stage_id format"}
+    data = await _fl_get("/v1/tournaments/stages/seasons",
+                         {"tournament_stage_id": stage_id})
+    if not data:
+        return {"error": "no seasons data available"}
+    return {"data": data, "source": "flashlive"}
+
+
+@app.get("/api/fl/seasons/{season_id}/data")
+async def fl_season_data(season_id: str):
+    """Season-level metadata (start/end dates, stages list) — used
+    by the L2 tournament page when a non-current season is selected.
+    """
+    from flashlive_feed import _fl_get
+    if not season_id or len(season_id) < 6 or len(season_id) > 10:
+        return {"error": "invalid season_id format"}
+    data = await _fl_get("/v1/tournaments/seasons/data",
+                         {"season_id": season_id})
+    if not data:
+        return {"error": "no season data available"}
+    return {"data": data, "source": "flashlive"}
+
+
+@app.get("/api/fl/tournaments/{stage_id}/fixtures")
+async def fl_tournament_fixtures(stage_id: str, page: int = 1):
+    """Upcoming events for a tournament stage. Paginated (FL spec
+    bounds: page 1..1000). Drives the L2 'Fixtures' tab.
+    """
+    from flashlive_feed import _fl_get
+    if not stage_id or len(stage_id) < 6 or len(stage_id) > 10:
+        return {"error": "invalid stage_id format"}
+    if not 1 <= page <= 1000:
+        return {"error": "page must be between 1 and 1000"}
+    data = await _fl_get("/v1/tournaments/fixtures", {
+        "tournament_stage_id": stage_id, "page": page,
+    })
+    if not data:
+        return {"error": "no fixtures data available"}
+    return {"data": data, "page": page, "source": "flashlive"}
+
+
+@app.get("/api/fl/tournaments/{stage_id}/results")
+async def fl_tournament_results(stage_id: str, page: int = 1):
+    """Past events for a tournament stage. Paginated (FL covers
+    archive back to 1990 for soccer). Drives the L2 'Results' tab.
+    """
+    from flashlive_feed import _fl_get
+    if not stage_id or len(stage_id) < 6 or len(stage_id) > 10:
+        return {"error": "invalid stage_id format"}
+    if not 1 <= page <= 1000:
+        return {"error": "page must be between 1 and 1000"}
+    data = await _fl_get("/v1/tournaments/results", {
+        "tournament_stage_id": stage_id, "page": page,
+    })
+    if not data:
+        return {"error": "no results data available"}
+    return {"data": data, "page": page, "source": "flashlive"}
+
+
+@app.get("/api/fl/rankings/{sport_id}")
+async def fl_rankings_list(sport_id: int):
+    """Available ranking types for a sport (e.g., Tennis ATP Singles,
+    WTA Singles, ATP Singles Race). Drives L0/L1 'Rankings' nav.
+    """
+    from flashlive_feed import _fl_get
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    data = await _fl_get("/v1/rankings/list", {"sport_id": sport_id})
+    if not data:
+        return {"error": "no rankings list available"}
+    return {"data": data, "source": "flashlive"}
+
+
+@app.get("/api/fl/ranking/{ranking_id}/data")
+async def fl_ranking_data(ranking_id: str):
+    """Detailed ranking data (positions, players, points). Used by
+    the post-MVP rankings drill-in page.
+    """
+    from flashlive_feed import _fl_get
+    if not ranking_id or len(ranking_id) < 6 or len(ranking_id) > 10:
+        return {"error": "invalid ranking_id format"}
+    data = await _fl_get("/v1/rankings/data", {"ranking_id": ranking_id})
+    if not data:
+        return {"error": "no ranking data available"}
+    return {"data": data, "source": "flashlive"}
+
+
+@app.get("/api/fl/teams/{team_id}/news")
+async def fl_team_news(team_id: str):
+    """News articles tagged to a team. Used by post-MVP team
+    profile page.
+    """
+    from flashlive_feed import _fl_get
+    if not team_id or len(team_id) < 1 or len(team_id) > 10:
+        return {"error": "invalid team_id format"}
+    data = await _fl_get("/v1/teams/news", {"team_id": team_id})
+    if not data:
+        return {"error": "no team news available"}
+    return {"data": data, "source": "flashlive"}
+
+
+@app.get("/api/fl/teams/{team_id}/transfers")
+async def fl_team_transfers(team_id: str, page: int = 1):
+    """Transfer history for a team. Paginated. Used by post-MVP
+    team profile page.
+    """
+    from flashlive_feed import _fl_get
+    if not team_id or len(team_id) < 6 or len(team_id) > 10:
+        return {"error": "invalid team_id format"}
+    if not 1 <= page <= 1000:
+        return {"error": "page must be between 1 and 1000"}
+    data = await _fl_get("/v1/teams/transfers", {
+        "team_id": team_id, "page": page,
+    })
+    if not data:
+        return {"error": "no team transfers data available"}
+    return {"data": data, "page": page, "source": "flashlive"}
+
+
 # FlashLive uses two distinct kinds of sub-section labels inside a
 # DATA array. We classify them so the frontend can decide what to do
 # with each.

@@ -5,24 +5,25 @@
 > `flashlive_feed.py`, `enrichment/*.py`). Re-run when
 > adding new wrappers or after FL ships new endpoints.
 >
-> **Headline:** 41/69 FL endpoints reached by
+> **Headline:** 53/69 FL endpoints reached by
 > backend (20 `/api/event/{ticker}/*` wrappers).
-> Last regenerated: 2026-05-02.
+> Last regenerated: 2026-05-03.
 
 ## Strategic summary
 
 Coverage falls into three buckets, each with a different
-intended end state:
+intended end state. Numbers below recompute on every run —
+they reflect the live state of the codebase + spec.
 
 | Bucket | Coverage | Status |
 |---|---|---|
-| **Event-level (modal)** | 31/35 = 89% | ⭐ Near-complete. Only Round-1 #3 Odds (3 endpoints) + racing-details (no FL data) + cricket commentary-alt are gaps |
-| **Drill-in (Step E)** | 8/24 = 33% | 🚧 Intentionally pending. Players, full Teams family, Tournaments beyond standings, News module |
-| **Utility** | 2/4 = 50% | 🟡 Basics there. `/sports/events-count` and `/images/data` not wrapped |
+| **Event-level (modal + bulk slate)** | 32/35 = 91% | ⭐ Modal endpoint family. Gaps here are deliberate (Round-1 #3 Odds, parked Q1 cricket-alt, racing-details = no FL data per probe v4). |
+| **Drill-in (browse + profile pages)** | 16/28 = 57% | 🟡 L1/L2 nav pages (sport, tournament) + post-MVP team/player profile + news module. |
+| **Utility** | 5/6 = 83% | ⭐ Cross-cutting endpoints — search, rankings, sport meta. `/v1/images/data` typically unnecessary (URLs already inline elsewhere). |
 
 ## Per-endpoint detail
 
-### `events` — 31/35 covered
+### `events` — 32/35 covered
 
 | Status | Path | Required params (excl. locale) | Summary |
 |---|---|---|---|
@@ -38,7 +39,7 @@ intended end state:
 | ✅ | `/v1/events/last-change` | event_id | Events Last Change |
 | ✅ | `/v1/events/lineups` | event_id | Events Lineups |
 | ✅ | `/v1/events/list` | sport_id, timezone, indent_days | Events List |
-| ⚪ | `/v1/events/list-main-odds` | sport_id, timezone, indent_days | Events List Main Odds |
+| ✅ | `/v1/events/list-main-odds` | sport_id, timezone, indent_days | Events List Main Odds |
 | ✅ | `/v1/events/live-list` | sport_id, timezone | Live Events Data |
 | ✅ | `/v1/events/live-odds-alt` | bet_type, event_id, book_id | Events Live Odds Alt |
 | ✅ | `/v1/events/live-update` | sport_id | Events Live Update |
@@ -90,12 +91,12 @@ intended end state:
 | ⚪ | `/v1/players/last-events` | sport_id, player_id | Players Last Events |
 | ⚪ | `/v1/players/transfers` | sport_id, player_id | Players Transfers |
 
-### `rankings` — 0/2 covered
+### `rankings` — 2/2 covered
 
 | Status | Path | Required params (excl. locale) | Summary |
 |---|---|---|---|
-| ⚪ | `/v1/rankings/data` | ranking_id | Rankings Data |
-| ⚪ | `/v1/rankings/list` | sport_id | Rankings List |
+| ✅ | `/v1/rankings/data` | ranking_id | Rankings Data |
+| ✅ | `/v1/rankings/list` | sport_id | Rankings List |
 
 ### `search` — 1/1 covered
 
@@ -103,36 +104,36 @@ intended end state:
 |---|---|---|---|
 | ✅ | `/v1/search/multi-search` | query | Multi Search |
 
-### `sports` — 1/2 covered
+### `sports` — 2/2 covered
 
 | Status | Path | Required params (excl. locale) | Summary |
 |---|---|---|---|
-| ⚪ | `/v1/sports/events-count` | timezone | Sports Events Count |
+| ✅ | `/v1/sports/events-count` | timezone | Sports Events Count |
 | ✅ | `/v1/sports/list` | (none) | Sports List |
 
-### `teams` — 4/6 covered
+### `teams` — 6/6 covered
 
 | Status | Path | Required params (excl. locale) | Summary |
 |---|---|---|---|
 | ✅ | `/v1/teams/data` | sport_id, team_id | Teams Data |
 | ✅ | `/v1/teams/fixtures` | sport_id, team_id, page | Teams Fixtures |
-| ⚪ | `/v1/teams/news` | team_id | Teams News |
+| ✅ | `/v1/teams/news` | team_id | Teams News |
 | ✅ | `/v1/teams/results` | sport_id, team_id, page | Teams Results |
 | ✅ | `/v1/teams/squad` | sport_id, team_id | Teams Squad |
-| ⚪ | `/v1/teams/transfers` | team_id, page | Teams Transfers |
+| ✅ | `/v1/teams/transfers` | team_id, page | Teams Transfers |
 
-### `tournaments` — 4/10 covered
+### `tournaments` — 10/10 covered
 
 | Status | Path | Required params (excl. locale) | Summary |
 |---|---|---|---|
-| ⚪ | `/v1/tournaments/fixtures` | tournament_stage_id, page | Tournaments Fixtures |
+| ✅ | `/v1/tournaments/fixtures` | tournament_stage_id, page | Tournaments Fixtures |
 | ✅ | `/v1/tournaments/list` | sport_id | Tournaments List |
-| ⚪ | `/v1/tournaments/popular` | (none) | Tournaments Popular |
-| ⚪ | `/v1/tournaments/results` | tournament_stage_id, page | Tournaments Results |
-| ⚪ | `/v1/tournaments/seasons/data` | season_id | Tournaments Season |
-| ⚪ | `/v1/tournaments/stages` | sport_id | Tournaments Stages |
+| ✅ | `/v1/tournaments/popular` | (none) | Tournaments Popular |
+| ✅ | `/v1/tournaments/results` | tournament_stage_id, page | Tournaments Results |
+| ✅ | `/v1/tournaments/seasons/data` | season_id | Tournaments Season |
+| ✅ | `/v1/tournaments/stages` | sport_id | Tournaments Stages |
 | ✅ | `/v1/tournaments/stages/data` | tournament_stage_id | Tournaments Data |
-| ⚪ | `/v1/tournaments/stages/seasons` | tournament_stage_id | Tournaments Stages Seasons |
+| ✅ | `/v1/tournaments/stages/seasons` | tournament_stage_id | Tournaments Stages Seasons |
 | ✅ | `/v1/tournaments/standings` | standing_type, tournament_stage_id, tournament_season_id | Tournaments Standings |
 | ✅ | `/v1/tournaments/standings/tabs` | tournament_stage_id, tournament_season_id | Tournaments Standings Tabs |
 
