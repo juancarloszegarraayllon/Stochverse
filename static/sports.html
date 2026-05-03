@@ -63,15 +63,24 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c1-filter:hover{color:var(--text)}
 .sp-c1-filter.active{background:var(--red);color:#fff;border-color:var(--red)}
 .sp-c1-list{padding:6px 0}
-.sp-c1-league{padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--text-dim);border-left:2px solid transparent}
+.sp-c1-league{padding:7px 12px 7px 28px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--text-dim);border-left:2px solid transparent}
 .sp-c1-league:hover{background:var(--bg-card)}
 .sp-c1-league:hover .sp-c1-league-name{color:var(--text)}
 .sp-c1-league.active{background:var(--green-bg);border-left-color:var(--green)}
 .sp-c1-league.active .sp-c1-league-name{color:var(--green)}
 .sp-c1-league-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 .sp-c1-league-name{color:var(--text);font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3}
-.sp-c1-league-country{color:var(--text-dim);font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sp-c1-league-count{font-size:10px;font-variant-numeric:tabular-nums;color:var(--text-muted);flex-shrink:0}
+/* All-leagues entry at top — no country wrapper, full padding. */
+.sp-c1-league.sp-c1-all{padding-left:14px;font-weight:600}
+.sp-c1-league.sp-c1-all .sp-c1-league-name{color:var(--text)}
+/* Country section header — collapsible, all-caps small. */
+.sp-c1-country{display:flex;align-items:center;gap:8px;padding:9px 12px;background:var(--bg2);cursor:pointer;font-size:10px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:.5px;border-top:1px solid var(--border);user-select:none}
+.sp-c1-country:hover{background:var(--bg-card)}
+.sp-c1-country-arrow{color:var(--text-dim);font-size:9px;width:10px;display:inline-block;transition:transform .12s ease}
+.sp-c1-country.collapsed .sp-c1-country-arrow{transform:rotate(-90deg)}
+.sp-c1-country-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sp-c1-country-count{color:var(--text-muted);font-weight:500;font-variant-numeric:tabular-nums}
 
 /* COL 2 — events list grouped by tournament.
    Each tournament has a header + collapsible list of event rows. */
@@ -264,6 +273,7 @@ async function loadSportNav() {
 let _eventsCache = null;
 let _activeStateFilter = 'all';
 let _activeLeagueFilter = null;  // tournament_stage_id, or null = all
+const _collapsedCountries = new Set();  // Set of country names
 
 async function loadEvents() {
   const sid = activeSportId();
@@ -313,41 +323,71 @@ function renderCol1() {
     col1.innerHTML = '<div style="padding:24px 14px;color:var(--text-muted);font-size:12px;text-align:center">No leagues today.</div>';
     return;
   }
-  let html = '';
-  // Add an "All leagues" pseudo-entry at top.
+  // Group leagues by country (Sofascore-style). Each country gets
+  // its own section header; leagues nest under. Eliminates the
+  // repetitive 'ARGENTINA' subtitle on every row when the same
+  // country has many leagues active.
+  const byCountry = {};
   let totalEvents = 0;
   for (const t of _eventsCache) {
-    for (const ev of (t.EVENTS || [])) {
-      if (passesStateFilter(ev)) totalEvents++;
-    }
+    const evs = (t.EVENTS || []).filter(passesStateFilter);
+    if (!evs.length) continue;
+    totalEvents += evs.length;
+    const country = t.COUNTRY_NAME || 'Other';
+    if (!byCountry[country]) byCountry[country] = [];
+    byCountry[country].push({
+      stageId: t.TOURNAMENT_STAGE_ID || '',
+      name: leagueDisplayName(t),
+      count: evs.length,
+    });
   }
-  const allCls = 'sp-c1-league' + (_activeLeagueFilter == null ? ' active' : '');
+
+  let html = '';
+  // 'All leagues' pseudo-entry at top (no country wrapper).
+  const allCls = 'sp-c1-league sp-c1-all' + (_activeLeagueFilter == null ? ' active' : '');
   html += '<div class="' + allCls + '" data-stage-id="">';
   html += '<div class="sp-c1-league-info">';
   html += '<span class="sp-c1-league-name">All leagues</span>';
   html += '</div>';
   html += '<span class="sp-c1-league-count">' + totalEvents + '</span>';
   html += '</div>';
-  // Then each tournament (with its filtered event count).
-  // Two-line item: league name primary (white), country small
-  // (dim, all-caps) — matches the COL 2 tournament header pattern.
-  for (const t of _eventsCache) {
-    const stageId = t.TOURNAMENT_STAGE_ID || '';
-    const evs = (t.EVENTS || []).filter(passesStateFilter);
-    if (!evs.length) continue;
-    const cls = 'sp-c1-league' + (_activeLeagueFilter === stageId ? ' active' : '');
-    html += '<div class="' + cls + '" data-stage-id="' + escH(stageId) + '">';
-    html += '<div class="sp-c1-league-info">';
-    html += '<span class="sp-c1-league-name">' + escH(leagueDisplayName(t)) + '</span>';
-    if (t.COUNTRY_NAME) {
-      html += '<span class="sp-c1-league-country">' + escH(t.COUNTRY_NAME) + '</span>';
+
+  // Country sections — alphabetical, each with its own collapsible
+  // header. Leagues within a country sorted alphabetically too.
+  const countries = Object.keys(byCountry).sort();
+  for (const country of countries) {
+    const leagues = byCountry[country].sort((a, b) => a.name.localeCompare(b.name));
+    const collapsed = _collapsedCountries.has(country);
+    const total = leagues.reduce((s, l) => s + l.count, 0);
+    const cls = 'sp-c1-country' + (collapsed ? ' collapsed' : '');
+    html += '<div class="' + cls + '" data-country="' + escH(country) + '">';
+    html += '<span class="sp-c1-country-arrow">▾</span>';
+    html += '<span class="sp-c1-country-name">' + escH(country) + '</span>';
+    html += '<span class="sp-c1-country-count">' + total + '</span>';
+    html += '</div>';
+    if (!collapsed) {
+      for (const l of leagues) {
+        const lcls = 'sp-c1-league' + (_activeLeagueFilter === l.stageId ? ' active' : '');
+        html += '<div class="' + lcls + '" data-stage-id="' + escH(l.stageId) + '">';
+        html += '<div class="sp-c1-league-info">';
+        html += '<span class="sp-c1-league-name">' + escH(l.name) + '</span>';
+        html += '</div>';
+        html += '<span class="sp-c1-league-count">' + l.count + '</span>';
+        html += '</div>';
+      }
     }
-    html += '</div>';
-    html += '<span class="sp-c1-league-count">' + evs.length + '</span>';
-    html += '</div>';
   }
   col1.innerHTML = html;
-  // Wire click handlers
+  // Country header → toggle collapse
+  col1.querySelectorAll('.sp-c1-country').forEach(el => {
+    el.addEventListener('click', () => {
+      const c = el.dataset.country;
+      if (_collapsedCountries.has(c)) _collapsedCountries.delete(c);
+      else _collapsedCountries.add(c);
+      renderCol1();
+    });
+  });
+  // League click → filter COL 2
   col1.querySelectorAll('.sp-c1-league').forEach(el => {
     el.addEventListener('click', () => {
       const sid = el.dataset.stageId || null;
