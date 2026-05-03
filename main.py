@@ -6852,26 +6852,58 @@ def _normalize_team(name: str) -> str:
 
 
 def _build_kalshi_index_for_sport(sport_name: str) -> dict:
-    """Walk the Kalshi cache, return {normalized_team_pair:
-    [kalshi_record, ...]} for events of this sport. Used by
-    /api/sports/{sport_id}/feed to enrich FL events with Kalshi
-    market data without an N×M scan."""
+    """Walk the Kalshi cache, return {fl_event_id: kalshi_record}
+    for sports events whose title matches an FL game. Uses the
+    proven match_game() in flashlive_feed.py — handles team-name
+    aliases (PSG ↔ Paris Saint-Germain, etc.) that naive string
+    matching can't.
+
+    Why fl_event_id keying: lets the feed endpoint do an O(1)
+    lookup per FL event without re-running match_game. match_game
+    is reasonably fast but called once per Kalshi event (here)
+    instead of N×M is the right shape.
+    """
+    from flashlive_feed import match_game
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
     idx: dict = {}
     for r in records:
         if (r.get("_sport") or "") != sport_name:
             continue
-        home = r.get("home_name") or r.get("home") or ""
-        away = r.get("away_name") or r.get("away") or ""
-        if not home or not away:
+        title = r.get("title") or ""
+        if not title:
             continue
-        # Normalize both directions so home/away orientation
-        # mismatches between Kalshi and FL still match.
-        nh, na = _normalize_team(home), _normalize_team(away)
-        for key in (f"{nh}|{na}", f"{na}|{nh}"):
-            idx.setdefault(key, []).append(r)
+        try:
+            mg = match_game(title, sport_name)
+        except Exception:
+            mg = None
+        if not mg:
+            continue
+        fl_id = mg.get("event_id")
+        if not fl_id:
+            continue
+        # First Kalshi record per FL game wins (Kalshi can have
+        # multiple market tickers for the same match — Winner /
+        # Spread / Totals — sharing the same teams; we keep the
+        # first seen and the frontend can fan out via /api/event
+        # /<ticker> if it needs all of them).
+        idx.setdefault(fl_id, r)
     return idx
+
+
+def _parse_title_teams(title: str) -> tuple:
+    """Best-effort split of 'Team A vs Team B' into (home, away).
+    Used for Kalshi-only-feed display where we have no FL match
+    to lean on. Returns ('', '') if the title isn't a vs-pattern.
+    """
+    if not title:
+        return ("", "")
+    for sep in (" vs ", " v ", " @ ", " - "):
+        if sep in title:
+            parts = title.split(sep, 1)
+            if len(parts) == 2:
+                return (parts[0].strip(), parts[1].strip())
+    return ("", "")
 
 
 @app.get("/api/sports/{sport_id}/feed")
@@ -6890,17 +6922,17 @@ async def sports_feed(sport_id: int, timezone: int = 0,
             "events": [
               {
                 ...FL event fields (EVENT_ID, HOME_NAME, etc.)...
-                "kalshi": {ticker, prices, markets} | null
+                "kalshi": {event_ticker, title} | null
               }
             ]
           }
         ]
       }
 
-    Note: Kalshi-only events (no FL match) are NOT in this
-    response. They're returned separately by /api/sports/kalshi-
-    only-feed since they need a different rendering strategy
-    (Kalshi-only sports like Lacrosse have no FL events at all).
+    The kalshi field is intentionally minimal — just enough to
+    show a 'matched' indicator + ticker in COL 2. Full market
+    data (prices, orderbook) comes via the existing
+    /api/event/{ticker} family on demand when COL 3 opens.
     """
     from flashlive_feed import _fl_get
     if not 1 <= sport_id <= 42:
@@ -6926,18 +6958,8 @@ async def sports_feed(sport_id: int, timezone: int = 0,
         events_out: list = []
         for ev in (t.get("EVENTS") or []):
             ev_out = dict(ev)  # shallow copy; we add 'kalshi' key
-            home = ev.get("HOME_NAME") or ""
-            away = ev.get("AWAY_NAME") or ""
-            kalshi_match = None
-            if home and away:
-                key = f"{_normalize_team(home)}|{_normalize_team(away)}"
-                candidates = kalshi_idx.get(key) or []
-                if candidates:
-                    # Pick the Kalshi event with the closest start_time;
-                    # multiple Kalshi markets can share the same teams
-                    # (e.g., Winner / Spread / Totals tabs collapsed
-                    # into one ticker family).
-                    kalshi_match = candidates[0]
+            fl_event_id = ev.get("EVENT_ID") or ""
+            kalshi_match = kalshi_idx.get(fl_event_id)
             if kalshi_match:
                 ticker = kalshi_match.get("event_ticker") or ""
                 if ticker:
@@ -6945,10 +6967,7 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                 ev_out["kalshi"] = {
                     "event_ticker": ticker,
                     "title": kalshi_match.get("title", ""),
-                    "url": kalshi_match.get("url", ""),
-                    "markets": kalshi_match.get("markets")
-                                or kalshi_match.get("_markets") or [],
-                    "live_state": kalshi_match.get("_live_state"),
+                    "series_ticker": kalshi_match.get("series_ticker", ""),
                 }
             else:
                 ev_out["kalshi"] = None
@@ -6977,7 +6996,8 @@ async def sports_kalshi_only_feed(sport: str):
     """Feed for Kalshi-only sports (Lacrosse, Chess, Squash, WSOP,
     SailGP — sports Kalshi trades but FL doesn't carry). Returns
     Kalshi events as a flat list since there's no FL tournament
-    structure to group by.
+    structure to group by. Title is parsed for home/away display
+    where the Kalshi cache doesn't carry those fields directly.
     """
     sport = (sport or "").strip()
     if not sport:
@@ -6988,14 +7008,17 @@ async def sports_kalshi_only_feed(sport: str):
     for r in records:
         if (r.get("_sport") or "") != sport:
             continue
+        title = r.get("title") or ""
+        home, away = _parse_title_teams(title)
         out.append({
             "event_ticker": r.get("event_ticker"),
-            "title": r.get("title"),
-            "url": r.get("url"),
-            "home_name": r.get("home_name"),
-            "away_name": r.get("away_name"),
-            "markets": r.get("markets") or r.get("_markets") or [],
-            "live_state": r.get("_live_state"),
+            "title": title,
+            "series_ticker": r.get("series_ticker"),
+            "home": home,
+            "away": away,
+            "is_game": bool(home and away),
+            "kickoff_dt": r.get("_kickoff_dt"),
+            "is_live": bool(r.get("_is_live")),
             "_sport": r.get("_sport"),
         })
     return {"sport": sport, "events": out, "count": len(out),
