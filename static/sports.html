@@ -718,9 +718,21 @@ function renderCol2() {
   let html = '';
   let any = false;
   // Header with match summary + Game/Market view toggle.
-  const totalEvents = _eventsCache.reduce((s, t) =>
-    s + (t.events || []).filter(passesStateFilter).length, 0);
-  if (_matchedKalshiCount > 0 || totalEvents > 0) {
+  // Pill counts are STATE-filter-aware but ignore the onlyMatched
+  // toggle (since 'On Kalshi' IS that toggle — its own count
+  // shouldn't change when it's clicked). This way Live → '5
+  // events / 4 on Kalshi' shows you the state slice and the
+  // Kalshi overlap inside that slice consistently.
+  let totalEvents = 0;
+  let filteredKalshiCount = 0;
+  for (const t of _eventsCache) {
+    for (const ev of (t.events || [])) {
+      if (_activeStateFilter !== 'all' && eventState(ev) !== _activeStateFilter) continue;
+      totalEvents += 1;
+      if (ev.kalshi && ev.kalshi.event_ticker) filteredKalshiCount += 1;
+    }
+  }
+  if (filteredKalshiCount > 0 || totalEvents > 0) {
     html += '<div class="sp-c2-summary">';
     // 'All events' and 'On Kalshi' are mutually-exclusive filter
     // pills — same shape, one always active. Default _onlyMatched
@@ -729,10 +741,10 @@ function renderCol2() {
     html += '<button class="' + allCls + '" id="sp-c2-show-all" type="button">';
     html += totalEvents + ' events';
     html += '</button>';
-    if (_matchedKalshiCount > 0) {
+    if (filteredKalshiCount > 0) {
       const pillCls = 'sp-c2-summary-pill' + (_onlyMatched ? ' active' : '');
       html += '<button class="' + pillCls + '" id="sp-c2-only-kalshi" type="button">';
-      html += _matchedKalshiCount + ' on Kalshi';
+      html += filteredKalshiCount + ' on Kalshi';
       html += '</button>';
     }
     // Game / Market view toggle — same pattern as the homepage's
