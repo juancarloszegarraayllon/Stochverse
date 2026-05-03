@@ -7014,7 +7014,9 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
     rare in practice since labels and FL names usually share
     obvious tokens).
     """
-    out = {"home_yes": None, "away_yes": None, "tie_yes": None}
+    out = {"home_yes": None, "home_no": None,
+           "away_yes": None, "away_no": None,
+           "tie_yes": None, "tie_no": None}
     # Cache records use two different field names depending on
     # path: raw records (data_all) carry `outcomes`, grouped
     # records (data, post-_group_game_markets) carry `_outcomes`.
@@ -7041,10 +7043,10 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
         if not label:
             continue
         label_lc = label.lower()
-        # Cache stores price as cents under '_yb' (yes_bid). Diagnostic
-        # smoke test on v0.6.9 surfaced the underscore-prefix convention —
-        # this is the canonical storage key. Fallbacks for the rare
-        # raw-Kalshi-passthrough case (yes_bid / yes_bid_dollars).
+        # Cache stores prices as cents under underscore-prefixed
+        # keys: '_yb' (yes_bid), '_ya' (yes_ask), '_nb' (no_bid),
+        # '_na' (no_ask). Per the v0.6.9 diagnostic. Fallbacks for
+        # the rare raw-Kalshi-passthrough case.
         yes_bid = o.get("_yb")
         if yes_bid is None:
             yes_bid = o.get("yes_bid")
@@ -7055,12 +7057,25 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
                     yes_bid = int(round(float(yb_dollars) * 100))
                 except (TypeError, ValueError):
                     yes_bid = None
+        # NO bid for the homepage-style red NO button display.
+        no_bid = o.get("_nb")
+        if no_bid is None:
+            no_bid = o.get("no_bid")
+        if no_bid is None:
+            nb_dollars = o.get("no_bid_dollars")
+            if nb_dollars is not None:
+                try:
+                    no_bid = int(round(float(nb_dollars) * 100))
+                except (TypeError, ValueError):
+                    no_bid = None
         # Tie / Draw catch — these are short labels that won't
         # token-match either team; handle first so they don't fall
         # through to noisy team-name matching.
         if label_lc in ("tie", "draw", "no winner", "no result"):
-            if yes_bid is not None:
+            if yes_bid is not None and out["tie_yes"] is None:
                 out["tie_yes"] = yes_bid
+            if no_bid is not None and out["tie_no"] is None:
+                out["tie_no"] = no_bid
             continue
         h_score = score(label_lc, home_toks)
         a_score = score(label_lc, away_toks)
@@ -7069,9 +7084,13 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
         if h_score > a_score:
             if out["home_yes"] is None and yes_bid is not None:
                 out["home_yes"] = yes_bid
+            if out["home_no"] is None and no_bid is not None:
+                out["home_no"] = no_bid
         elif a_score > h_score:
             if out["away_yes"] is None and yes_bid is not None:
                 out["away_yes"] = yes_bid
+            if out["away_no"] is None and no_bid is not None:
+                out["away_no"] = no_bid
         # h_score == a_score (ambiguous) → don't assign
     return out
 

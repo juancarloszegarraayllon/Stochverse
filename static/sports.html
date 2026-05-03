@@ -140,7 +140,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-league-name{font-size:12px;font-weight:700;color:var(--text);letter-spacing:.3px}
 .sp-c2-country{font-size:10px;font-weight:500;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px}
 .sp-c2-events{padding:0}
-.sp-c2-event{display:grid;grid-template-columns:20px 64px 1fr 40px 60px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:center;transition:background .1s ease;border-left:2px solid transparent}
+.sp-c2-event{display:grid;grid-template-columns:20px 64px 1fr 40px 168px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:center;transition:background .1s ease;border-left:2px solid transparent}
 .sp-c2-event:hover{background:var(--bg-card)}
 .sp-c2-event.selected{background:var(--green-bg);border-left-color:var(--green)}
 .sp-c2-event:last-child{border-bottom:none}
@@ -154,12 +154,18 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    will stack additional source markers (P, DK, FD, ...). */
 .sp-c2-indicator{display:flex;align-items:center;justify-content:center}
 .sp-c2-kalshi-badge{display:inline-flex;width:18px;height:18px;line-height:1;border-radius:50%;background:var(--green-bg);color:var(--green);font-size:10px;font-weight:700;align-items:center;justify-content:center;border:1px solid var(--green-line)}
-/* Right market cell — Kalshi YES prices for matched events
-   (stacked home / away to align with scores). '—' for FL-only
-   events. Future: Polymarket / sportsbook chips stack below. */
-.sp-c2-marketcell{display:flex;flex-direction:column;gap:2px;align-items:flex-end;font-size:11px;font-variant-numeric:tabular-nums}
-.sp-c2-price{color:var(--text);font-weight:600;padding:2px 6px;border-radius:3px;background:var(--green-bg);border:1px solid var(--green-line);min-width:36px;text-align:center}
-.sp-c2-price-empty{color:var(--text-muted);min-width:36px;text-align:center}
+/* Right market cell — Kalshi PROBABILITY + YES + NO chips per
+   outcome (home / away / tie), stacked to align with the team /
+   score rows. Matches the homepage card style: green-bordered
+   button for YES, red-bordered for NO, dim probability text
+   alongside. Future Polymarket / sportsbook chips will stack
+   into additional rows here. */
+.sp-c2-marketcell{display:flex;flex-direction:column;gap:2px;font-size:10px;font-variant-numeric:tabular-nums}
+.sp-c2-price-row{display:grid;grid-template-columns:32px 1fr 1fr;gap:4px;align-items:center}
+.sp-c2-prob{color:var(--text-dim);text-align:right;font-size:10px;font-weight:500}
+.sp-c2-yes{color:var(--green);font-weight:700;padding:2px 0;border-radius:3px;background:transparent;border:1px solid var(--green-line);text-align:center;font-size:10px;line-height:1}
+.sp-c2-no{color:var(--red);font-weight:700;padding:2px 0;border-radius:3px;background:transparent;border:1px solid #4d1a1a;text-align:center;font-size:10px;line-height:1}
+.sp-c2-price-empty{color:var(--text-muted);text-align:center;font-size:10px}
 .sp-c2-no-market{color:var(--text-muted);font-size:14px}
 .sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums}
 .sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);margin-top:2px;text-transform:uppercase}
@@ -373,7 +379,6 @@ async function loadSportNav() {
     const name = (s.NAME || '').toLowerCase()
       .replace(/_/g, ' ')
       .replace(/\b\w/g, c => c.toUpperCase());
-    const icon = SPORT_ICONS[sid] || '•';
     const count = counts[sid];
     const cls = 'sp-nav-item' + (sid === active ? ' active' : '');
     html += '<a class="' + cls + '" href="/sports/' + sid + '">';
@@ -861,23 +866,37 @@ function renderEventRow(ev, market, isMarketRow) {
             escH(ev.kalshi.aggregate_away) + '</span>';
   }
   html += '</div>';
-  // Right market cell — Kalshi YES prices stacked home/away
-  // to align with the scores column. FL-only events show '—'
-  // (placeholder until Polymarket / sportsbook integrations).
+  // Right market cell — Kalshi PROBABILITY + YES + NO chips per
+  // outcome (home / away / tie), stacked to align with team /
+  // score rows. Matches the homepage card style — green-bordered
+  // YES button + red-bordered NO button + dim probability text.
+  // FL-only events show '—' until Polymarket / sportsbook
+  // integrations stack their chips into additional rows here.
   html += '<div class="sp-c2-marketcell">';
   if (matched && ev.kalshi.primary_prices) {
     const p = ev.kalshi.primary_prices;
-    const fmtPrice = (cents) => cents != null
-      ? '<span class="sp-c2-price">' + cents + '¢</span>'
-      : '<span class="sp-c2-price-empty">–</span>';
-    html += fmtPrice(p.home_yes);
-    html += fmtPrice(p.away_yes);
+    const renderPriceRow = (yes, no) => {
+      let row = '<div class="sp-c2-price-row">';
+      // Probability % is the YES price (1¢ = 1% probability).
+      row += '<span class="sp-c2-prob">' +
+        (yes != null ? yes + '%' : '–') + '</span>';
+      row += '<span class="sp-c2-yes">' +
+        (yes != null ? yes + '¢' : '–') + '</span>';
+      row += '<span class="sp-c2-no">' +
+        (no != null ? no + '¢' : '–') + '</span>';
+      row += '</div>';
+      return row;
+    };
+    html += renderPriceRow(p.home_yes, p.home_no);
+    html += renderPriceRow(p.away_yes, p.away_no);
+    // Tie row — only render if a tie outcome was matched. Many
+    // sports (basketball, hockey, tennis, etc.) don't have ties.
+    if (p.tie_yes != null || p.tie_no != null) {
+      html += renderPriceRow(p.tie_yes, p.tie_no);
+    }
   } else if (matched) {
-    // Matched but no winner-shape prices (e.g., the only Kalshi
-    // ticker for this match is a sub-market). Show a subtle dot
-    // pair to acknowledge the match without misleading prices.
-    html += '<span class="sp-c2-price-empty">·</span>';
-    html += '<span class="sp-c2-price-empty">·</span>';
+    html += '<div class="sp-c2-price-empty">·</div>';
+    html += '<div class="sp-c2-price-empty">·</div>';
   } else {
     html += '<span class="sp-c2-no-market" title="No markets yet">—</span>';
   }
