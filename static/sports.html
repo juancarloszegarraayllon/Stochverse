@@ -13,7 +13,7 @@
 /* Tennis needs the full sets/serve/games/point breakdown — wider
    score column. Activated by `body.sport-tennis` set on page load
    from the URL's sport_id. */
-body.sport-tennis{--sp-score-w:80px}
+body.sport-tennis{--sp-score-w:120px}
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.4;height:100%;overflow:hidden}
 
@@ -236,11 +236,15 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    the --sp-score-w variable (set wider for the tennis sport
    page so all 4 sub-cells fit). */
 .sp-c2-scores.tennis-score{display:flex;flex-direction:column;gap:2px;text-align:left}
-.sp-c2-scores .tn-row{display:grid;grid-template-columns:14px 8px 18px 24px;gap:4px;align-items:center;font-size:11px;font-weight:700;line-height:1}
-.sp-c2-scores .tn-sets{text-align:center;color:var(--text-muted);font-weight:600}
-.sp-c2-scores .tn-serve{color:var(--green);font-size:9px;text-align:center}
-.sp-c2-scores .tn-games{text-align:center;color:var(--text)}
-.sp-c2-scores .tn-point{text-align:center;color:var(--text-dim);font-weight:600}
+/* Tennis row uses flex (not grid) because the set-history box
+   count varies by match progress: 1 box when the first set is
+   in progress, up to 5 for a five-set marathon. Fixed widths on
+   each cell keep the home + away rows column-aligned vertically. */
+.sp-c2-scores .tn-row{display:flex;gap:4px;align-items:center;font-size:11px;font-weight:700;line-height:1;min-height:13px}
+.sp-c2-scores .tn-sets{width:14px;text-align:center;color:var(--text-muted);font-weight:600;flex-shrink:0}
+.sp-c2-scores .tn-serve{width:8px;color:var(--green);font-size:9px;text-align:center;flex-shrink:0}
+.sp-c2-scores .tn-games{width:14px;text-align:center;color:var(--text);flex-shrink:0}
+.sp-c2-scores .tn-point{width:24px;text-align:center;color:var(--text-dim);font-weight:600;flex-shrink:0;margin-left:4px}
 .sp-c2-fav{color:var(--text-muted);text-align:center;cursor:pointer;font-size:14px}
 .sp-c2-fav:hover{color:var(--green)}
 
@@ -984,20 +988,30 @@ function renderEventRow(ev, market, isMarketRow) {
     : allOutcomes;
   const hasMore = allOutcomes.length > MAX_VISIBLE;
   html += '<div class="sp-c2-teams">';
-  // For matched events showing sub-market outcomes (BTTS / Totals
-  // / First Goalscorer / Spreads / etc.), the outcome labels alone
-  // ('Both Teams To Score', 'Over 2.5') don't tell the user which
-  // game it is. Prepend a matchup header so 'Bayern vs Barcelona'
-  // is always visible. Skip the header for Winner outcomes
-  // because the labels are already the team names — adding the
-  // header would just duplicate them. Outright events have no
-  // matchup; they don't get a header either.
-  const activeMkt = rowMarketOverride || (matched ? pickMarketForGameRow(ev) : null);
-  const isWinnerActive = activeMkt && (activeMkt.market_type || '') === '';
+  // Matchup header — shows 'Home <score> - <score> Away' above
+  // the outcome labels when the outcomes don't already include
+  // team-name context. Detection is by SHAPE of the outcome list,
+  // not by market_type, so it covers Winner, First Half Winner,
+  // Set Winner, etc. (anything where the labels ARE the team
+  // names + Tie) without needing a per-market-type whitelist.
+  // Outright events (no team names) skip the header. Score is
+  // baked into the matchup line itself so the standalone score
+  // column stays empty for these rows (cleaner than a stranded
+  // '0' floating in its own column).
   const hasTeamNames = !!(ev.HOME_NAME || ev.AWAY_NAME);
-  const showMatchup = matched && hasTeamNames && !isWinnerActive;
+  const winnerShape = isWinnerShapedOutcomes(outcomes, ev.HOME_NAME, ev.AWAY_NAME);
+  const showMatchup = matched && hasTeamNames && !winnerShape && outcomes.length > 0;
   if (showMatchup) {
-    const matchup = (ev.HOME_NAME || '') + ' vs ' + (ev.AWAY_NAME || '');
+    const hs = ev.HOME_SCORE_CURRENT;
+    const as = ev.AWAY_SCORE_CURRENT;
+    const haveScores = (hs != null) || (as != null);
+    let matchup;
+    if (haveScores) {
+      matchup = (ev.HOME_NAME || '') + ' ' + (hs != null ? hs : 0) +
+                ' - ' + (as != null ? as : 0) + ' ' + (ev.AWAY_NAME || '');
+    } else {
+      matchup = (ev.HOME_NAME || '') + ' vs ' + (ev.AWAY_NAME || '');
+    }
     html += '<span class="sp-c2-matchup" title="' + escH(matchup) +
             '">' + escH(matchup) + '</span>';
   }
@@ -1036,15 +1050,26 @@ function renderEventRow(ev, market, isMarketRow) {
   const isTennisEv = activeSportId() === 2;
   if (isTennisEv) {
     html += renderTennisScoreCell(ev, showMatchup);
+  } else if (showMatchup) {
+    // Score is baked into the matchup header line ('Home X - Y
+    // Away'), so the standalone score column stays empty for
+    // these rows. Aggregate label still renders here when present
+    // — the AGG context belongs next to the score, not the
+    // matchup name.
+    html += '<div class="sp-c2-scores">';
+    if (matched && ev.kalshi.aggregate_home != null && ev.kalshi.aggregate_away != null) {
+      html += '<span class="sp-c2-agg" title="Aggregate score">agg ' +
+              escH(ev.kalshi.aggregate_home) + '-' +
+              escH(ev.kalshi.aggregate_away) + '</span>';
+    }
+    html += '</div>';
   } else {
     html += '<div class="sp-c2-scores">';
-    if (showMatchup) html += '<span></span>';  // align scores with outcome rows below the matchup header
     html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
     html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
     // Aggregate score (two-leg knockout ties — soccer cup
     // competitions). Only shows when matched event has aggregate
-    // data from SofaScore enrichment. Tiny "agg X-Y" line below
-    // the leg score so users see the tie standing.
+    // data from SofaScore enrichment.
     if (matched && ev.kalshi.aggregate_home != null && ev.kalshi.aggregate_away != null) {
       html += '<span class="sp-c2-agg" title="Aggregate score">agg ' +
               escH(ev.kalshi.aggregate_home) + '-' +
@@ -1113,51 +1138,77 @@ function collectOutcomesForRender(ev, marketOverride) {
   return [];
 }
 
+function isWinnerShapedOutcomes(outcomes, homeName, awayName) {
+  // True when every outcome label IS one of: home team name, away
+  // team name, or a tie/draw word. Used to skip the matchup header
+  // (which would just duplicate the team names already showing as
+  // outcome labels). Covers Winner, First Half Winner, Half-time
+  // Winner, Set Winner, etc. — any market shaped like 'home /
+  // away / tie' regardless of its market_type label. Doesn't trip
+  // on Spreads ('Freiburg wins by over 2.5') because the label
+  // doesn't EQUAL 'Freiburg' — it just contains it.
+  if (!outcomes || outcomes.length < 2 || outcomes.length > 3) return false;
+  const tieWords = new Set(['tie', 'draw', 'no winner', 'no result']);
+  const home = (homeName || '').trim().toLowerCase();
+  const away = (awayName || '').trim().toLowerCase();
+  if (!home || !away) return false;
+  for (const o of outcomes) {
+    const lbl = (o.label || '').trim().toLowerCase();
+    if (lbl !== home && lbl !== away && !tieWords.has(lbl)) return false;
+  }
+  return true;
+}
+
 function renderTennisScoreCell(ev, hasMatchupHeader) {
-  // Tennis-specific score cell — replaces home/away score numbers
-  // with the full sets / serve-dot / current-games / current-point
-  // breakdown that matches the homepage tennis-row layout. FL
-  // ships these on each event:
+  // Tennis-specific score cell — full sets / serve-dot / per-set
+  // games (history + current) / current-point. Matches the
+  // homepage tennis-row layout so a 2-set match with set 1
+  // completed shows '0 ● 4 3 0' (sets-won, serve, set-1-games,
+  // current-set-games, current-point) instead of just the
+  // current set.
+  //
+  // FL ships these on each event:
   //   HOME_SCORE_CURRENT / AWAY_SCORE_CURRENT — sets won
+  //   HOME_SCORE_PART_<n> / AWAY_SCORE_PART_<n> — games per set
+  //     (n=1..5; populated as each set completes; the last
+  //     populated set is the in-progress one)
   //   HOME_SCORE_PART_GAME / AWAY_SCORE_PART_GAME — current point
   //     (0/15/30/40/A)
-  //   HOME_SCORE_PART_<n> / AWAY_SCORE_PART_<n> — games per set;
-  //     last populated set is the current set
   //   SERVICE — '1' home / '2' away (empty between points)
-  // Player names live in the teams cell to the left, so this cell
-  // is purely numeric.
   const sets_h = ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '';
   const sets_a = ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '';
-  // Find the latest populated set to get current games.
-  let games_h = '', games_a = '';
-  for (let si = 5; si >= 1; si--) {
+  // Collect every populated set in order — both completed and
+  // in-progress. The home / away rows iterate the same list so
+  // the per-set boxes line up vertically.
+  const setHistory = [];
+  for (let si = 1; si <= 5; si++) {
     const h = ev['HOME_SCORE_PART_' + si];
     const a = ev['AWAY_SCORE_PART_' + si];
-    if (h != null || a != null) {
-      games_h = h != null ? h : '';
-      games_a = a != null ? a : '';
-      break;
-    }
+    if (h != null || a != null) setHistory.push({ h: h, a: a });
   }
   const point_h = ev.HOME_SCORE_PART_GAME != null ? ev.HOME_SCORE_PART_GAME : '';
   const point_a = ev.AWAY_SCORE_PART_GAME != null ? ev.AWAY_SCORE_PART_GAME : '';
   const svc = String(ev.SERVICE || '').trim().toUpperCase();
   const homeServes = svc === '1' || svc === 'HOME' || svc === 'H';
   const awayServes = svc === '2' || svc === 'AWAY' || svc === 'A';
+
+  function buildRow(sets, serves, who, point) {
+    let row = '<div class="tn-row">';
+    row += '<span class="tn-sets">' + escH(sets) + '</span>';
+    row += '<span class="tn-serve">' + (serves ? '●' : '') + '</span>';
+    for (const s of setHistory) {
+      const v = who === 'h' ? s.h : s.a;
+      row += '<span class="tn-games">' + escH(v != null ? v : '') + '</span>';
+    }
+    row += '<span class="tn-point">' + escH(point) + '</span>';
+    row += '</div>';
+    return row;
+  }
+
   let html = '<div class="sp-c2-scores tennis-score">';
   if (hasMatchupHeader) html += '<div class="tn-row"></div>';  // align below matchup
-  html += '<div class="tn-row">';
-  html += '<span class="tn-sets">' + escH(sets_h) + '</span>';
-  html += '<span class="tn-serve">' + (homeServes ? '●' : '') + '</span>';
-  html += '<span class="tn-games">' + escH(games_h) + '</span>';
-  html += '<span class="tn-point">' + escH(point_h) + '</span>';
-  html += '</div>';
-  html += '<div class="tn-row">';
-  html += '<span class="tn-sets">' + escH(sets_a) + '</span>';
-  html += '<span class="tn-serve">' + (awayServes ? '●' : '') + '</span>';
-  html += '<span class="tn-games">' + escH(games_a) + '</span>';
-  html += '<span class="tn-point">' + escH(point_a) + '</span>';
-  html += '</div>';
+  html += buildRow(sets_h, homeServes, 'h', point_h);
+  html += buildRow(sets_a, awayServes, 'a', point_a);
   html += '</div>';
   return html;
 }
