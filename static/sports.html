@@ -82,6 +82,42 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c1-tab:hover{color:var(--text)}
 .sp-c1-tab.active{color:var(--green);border-bottom-color:var(--green)}
 .sp-c1-filters{display:flex;gap:6px;padding:10px 12px;flex-wrap:wrap;border-bottom:1px solid var(--border);position:sticky;top:38px;background:var(--bg);z-index:5}
+/* Search box at the top of COL 1 — substring filter on country
+   + league names. Sticky below the filters strip. */
+.sp-c1-search-wrap{padding:8px 12px;border-bottom:1px solid var(--border);position:sticky;top:80px;background:var(--bg);z-index:4}
+.sp-c1-search{width:100%;padding:7px 10px;font-size:11px;background:var(--bg-card);border:1px solid var(--border);color:var(--text);border-radius:4px;font-family:inherit;box-sizing:border-box}
+.sp-c1-search:focus{outline:none;border-color:var(--green-line)}
+.sp-c1-search::placeholder{color:var(--text-muted)}
+/* Day picker — Sofascore-style left-arrow / center-label /
+   right-arrow trio. Center label opens the calendar modal. */
+.sp-c2-daypicker{display:inline-flex;align-items:stretch;border:1px solid var(--border);border-radius:14px;overflow:hidden;font-family:inherit}
+.sp-c2-dp-arrow{background:transparent;border:0;color:var(--text-dim);width:26px;font-size:14px;cursor:pointer;padding:0;font-family:inherit}
+.sp-c2-dp-arrow:hover:not(:disabled){color:var(--text);background:var(--bg-card)}
+.sp-c2-dp-arrow:disabled{opacity:0.35;cursor:not-allowed}
+.sp-c2-dp-label{background:transparent;border:0;border-left:1px solid var(--border);border-right:1px solid var(--border);color:var(--text);padding:3px 14px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;letter-spacing:.3px;min-width:90px;text-align:center}
+.sp-c2-dp-label:hover{background:var(--bg-card);color:var(--green)}
+/* Calendar modal — overlays the page when the day-picker label
+   is clicked. Click the backdrop or × to close. */
+.sp-cal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:50;display:flex;align-items:center;justify-content:center}
+.sp-cal-overlay[hidden]{display:none}
+.sp-cal-modal{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:20px 22px;width:340px;max-width:calc(100vw - 32px);position:relative;font-family:inherit}
+.sp-cal-close{position:absolute;top:8px;right:10px;background:transparent;border:0;color:var(--text-dim);font-size:20px;cursor:pointer;line-height:1;padding:4px 8px;font-family:inherit}
+.sp-cal-close:hover{color:var(--text)}
+.sp-cal-month-row{display:flex;align-items:center;justify-content:space-between;padding:0 4px 12px;gap:8px}
+.sp-cal-month-arrow{background:transparent;border:0;color:var(--text);font-size:18px;width:32px;height:32px;cursor:pointer;border-radius:4px;font-family:inherit}
+.sp-cal-month-arrow:hover{background:var(--bg-card)}
+.sp-cal-month-name{flex:1;text-align:center;font-size:14px;font-weight:600;color:var(--text)}
+.sp-cal-weekdays{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;font-size:10px;color:var(--text-muted);text-align:center;padding:4px 0;text-transform:uppercase;letter-spacing:.3px}
+.sp-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;padding:4px 0}
+.sp-cal-day{background:transparent;border:0;color:var(--text);font-size:13px;font-weight:500;height:36px;border-radius:50%;cursor:pointer;font-family:inherit;font-variant-numeric:tabular-nums;padding:0;display:flex;align-items:center;justify-content:center}
+.sp-cal-day:hover:not(:disabled){background:var(--bg-card)}
+.sp-cal-day.muted{color:var(--text-muted)}
+.sp-cal-day.today{color:var(--green)}
+.sp-cal-day.selected{background:var(--green);color:#000;font-weight:700}
+.sp-cal-day.selected:hover{background:var(--green)}
+.sp-cal-day:disabled{opacity:0.35;cursor:not-allowed}
+.sp-cal-today-btn{display:block;margin:14px auto 0;background:var(--green-bg);color:var(--green);border:1px solid var(--green-line);padding:6px 22px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;letter-spacing:.5px}
+.sp-cal-today-btn:hover{background:var(--green-line)}
 .sp-c1-filter{font-size:11px;padding:5px 10px;border-radius:14px;background:var(--bg-card);color:var(--text-dim);cursor:pointer;border:1px solid transparent;font-weight:500}
 .sp-c1-filter:hover{color:var(--text)}
 .sp-c1-filter.active{background:var(--red);color:#fff;border-color:var(--red)}
@@ -344,6 +380,10 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
       <span class="sp-c1-filter" data-state="finished">Finished</span>
       <span class="sp-c1-filter" data-state="upcoming">Upcoming</span>
     </div>
+    <div class="sp-c1-search-wrap">
+      <input type="search" id="sp-c1-search" class="sp-c1-search"
+             placeholder="Search countries or leagues…" autocomplete="off">
+    </div>
     <div class="sp-c1-list" id="sp-c1-list">
       <div style="padding:24px 14px;color:var(--text-muted);font-size:12px;text-align:center">Loading leagues…</div>
     </div>
@@ -454,6 +494,89 @@ function escH(s) {
   return String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// Day-picker label — Today / Tomorrow / Yesterday for the
+// nearby offsets, weekday + short date for further out. UTC-day
+// math so it matches FL's indent_days semantics.
+function dayLabel(indent) {
+  if (indent === 0) return 'Today';
+  if (indent === 1) return 'Tomorrow';
+  if (indent === -1) return 'Yesterday';
+  const d = new Date();
+  d.setDate(d.getDate() + indent);
+  return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function setIndentDays(newIndent) {
+  newIndent = Math.max(-7, Math.min(7, newIndent));
+  if (newIndent === _indentDays) return;
+  _indentDays = newIndent;
+  loadEvents();
+}
+
+// Calendar — month browse state pinned in _calendarMonth (1st of
+// the displayed month). Clicking a day computes the day delta
+// from today (in calendar days) and routes through setIndentDays.
+function openCalendar() {
+  const today = new Date();
+  const sel = new Date();
+  sel.setDate(today.getDate() + _indentDays);
+  _calendarMonth = new Date(sel.getFullYear(), sel.getMonth(), 1);
+  _calendarOpen = true;
+  renderCalendar();
+  document.getElementById('sp-cal-overlay').hidden = false;
+}
+
+function closeCalendar() {
+  _calendarOpen = false;
+  document.getElementById('sp-cal-overlay').hidden = true;
+}
+
+function renderCalendar() {
+  const monthName = _calendarMonth.toLocaleDateString([], { month: 'long', year: 'numeric' });
+  document.getElementById('sp-cal-month-name').textContent = monthName;
+  const grid = document.getElementById('sp-cal-grid');
+  // Compute days to render: leading blanks for the first weekday,
+  // then 1..lastDay. We render as buttons; out-of-range (more than
+  // ±7 days from today) days are disabled because FL's indent_days
+  // window doesn't go further.
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const minDate = new Date(today); minDate.setDate(today.getDate() - 7);
+  const maxDate = new Date(today); maxDate.setDate(today.getDate() + 7);
+  const sel = new Date(today); sel.setDate(today.getDate() + _indentDays);
+  const firstDay = new Date(_calendarMonth.getFullYear(), _calendarMonth.getMonth(), 1);
+  const lastDay = new Date(_calendarMonth.getFullYear(), _calendarMonth.getMonth() + 1, 0);
+  const startWeekday = firstDay.getDay();  // 0 = Sun
+  let html = '';
+  // Leading blanks
+  for (let i = 0; i < startWeekday; i++) html += '<div></div>';
+  for (let d = 1; d <= lastDay.getDate(); d++) {
+    const cur = new Date(_calendarMonth.getFullYear(), _calendarMonth.getMonth(), d);
+    const isToday = cur.getTime() === today.getTime();
+    const isSelected = cur.getTime() === sel.getTime();
+    const inRange = cur >= minDate && cur <= maxDate;
+    const cls = ['sp-cal-day'];
+    if (isToday) cls.push('today');
+    if (isSelected) cls.push('selected');
+    if (!inRange) cls.push('muted');
+    const disabled = !inRange ? ' disabled' : '';
+    html += '<button class="' + cls.join(' ') + '" data-cal-day="' +
+            cur.toISOString().slice(0, 10) + '" type="button"' + disabled + '>' + d + '</button>';
+  }
+  grid.innerHTML = html;
+  grid.querySelectorAll('.sp-cal-day:not([disabled])').forEach(el => {
+    el.addEventListener('click', () => {
+      const iso = el.dataset.calDay;
+      const picked = new Date(iso + 'T00:00:00');
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const delta = Math.round((picked - today) / 86400000);
+      setIndentDays(delta);
+      closeCalendar();
+    });
+  });
 }
 
 // Top sport nav — populate from /api/fl/sports-list + events-count.
@@ -570,6 +693,15 @@ let _activeStateFilter = 'live';
 let _activeLeagueFilter = null;  // tournament_stage_id, or null = all
 let _onlyMatched = false;        // toggled by clicking the "X on Kalshi" pill
 let _viewMode = 'game';          // 'game' (one row per match) or 'market' (one row per ticker)
+// Day picker — offset from today in UTC days. -7..+7 maps to FL's
+// indent_days param. Re-fetches events on change. Calendar modal
+// opens on click of the center label.
+let _indentDays = 0;
+let _calendarOpen = false;
+let _calendarMonth = null;       // Date pinned to first of the month being browsed
+// Search query for COL 1 — substring match on country + league
+// names. Empty = no filter.
+let _searchQuery = '';
 // Per-event active market type, keyed by EVENT_ID. Default '' = headline Winner.
 // Each matched event with multiple market types renders its own
 // inline tab strip — clicking a tab updates this map and re-renders
@@ -600,7 +732,7 @@ async function loadEvents() {
     //   events: [{...FL fields..., kalshi: {event_ticker} | null}]}]}.
     // Each event carries a .kalshi field — rich (matched market) vs
     // lite (FL-only, no markets yet).
-    const r = await fetch('/api/sports/' + sid + '/feed?indent_days=0');
+    const r = await fetch('/api/sports/' + sid + '/feed?indent_days=' + _indentDays);
     const json = await r.json();
     if (json.error) {
       col2.innerHTML = '<div class="sp-c2-empty">' + escH(json.error) + '</div>';
@@ -656,12 +788,22 @@ function renderCol1() {
   for (const t of _eventsCache) {
     const evs = (t.events || t.EVENTS || []).filter(passesStateFilter);
     if (!evs.length) continue;
-    totalEvents += evs.length;
     const country = bucketCountry(t);
+    const leagueName = leagueDisplayName(t);
+    // Search filter — match query against either the country
+    // bucket OR the specific league name. So 'champ' surfaces
+    // 'Champions League' regardless of country, and 'spain'
+    // surfaces every La Liga / Copa del Rey under Spain.
+    if (_searchQuery) {
+      const inCountry = country.toLowerCase().includes(_searchQuery);
+      const inLeague = leagueName.toLowerCase().includes(_searchQuery);
+      if (!inCountry && !inLeague) continue;
+    }
+    totalEvents += evs.length;
     if (!byCountry[country]) byCountry[country] = [];
     byCountry[country].push({
       stageId: t.TOURNAMENT_STAGE_ID || '',
-      name: leagueDisplayName(t),
+      name: leagueName,
       count: evs.length,
     });
   }
@@ -791,6 +933,18 @@ function renderCol2() {
       html += filteredKalshiCount + ' on Kalshi';
       html += '</button>';
     }
+    // Day-picker — Sofascore-style: ← arrow, center label
+    // (Today / Tomorrow / Mon May 5), → arrow. Clicking the
+    // center label opens the calendar modal for arbitrary date
+    // selection. Capped at -7..+7 to stay inside FL's window.
+    html += '<div class="sp-c2-daypicker" id="sp-c2-daypicker">';
+    html += '<button class="sp-c2-dp-arrow" id="sp-c2-dp-prev" type="button" ' +
+            'title="Previous day" ' + (_indentDays <= -7 ? 'disabled' : '') + '>‹</button>';
+    html += '<button class="sp-c2-dp-label" id="sp-c2-dp-label" type="button">' +
+            escH(dayLabel(_indentDays)) + '</button>';
+    html += '<button class="sp-c2-dp-arrow" id="sp-c2-dp-next" type="button" ' +
+            'title="Next day" ' + (_indentDays >= 7 ? 'disabled' : '') + '>›</button>';
+    html += '</div>';
     // Game / Market view toggle — same pattern as the homepage's
     // GRID/LIST style switcher.
     html += '<div class="sp-c2-viewtoggle" role="tablist">';
@@ -916,6 +1070,14 @@ function renderCol2() {
       renderCol2();
     });
   });
+  // Day-picker — left/right arrows and the center label that
+  // opens the full calendar modal. Re-fetches events on change.
+  const dpPrev = col2.querySelector('#sp-c2-dp-prev');
+  const dpNext = col2.querySelector('#sp-c2-dp-next');
+  const dpLabel = col2.querySelector('#sp-c2-dp-label');
+  if (dpPrev) dpPrev.addEventListener('click', () => setIndentDays(_indentDays - 1));
+  if (dpNext) dpNext.addEventListener('click', () => setIndentDays(_indentDays + 1));
+  if (dpLabel) dpLabel.addEventListener('click', openCalendar);
   // Per-event market-type tabs — one strip per matched event.
   // Updates the per-event map then re-renders so just this event's
   // outcomes and chips swap. stopPropagation so the row's click
@@ -1657,6 +1819,43 @@ renderCol2 = function() {
   if (tickers.length) PriceWS.subscribe(tickers);
 };
 
+// Calendar modal — close button, backdrop click, month nav,
+// Today button. Wired once at init since the modal lives in the
+// static body markup (not re-rendered).
+document.getElementById('sp-cal-close').addEventListener('click', closeCalendar);
+document.getElementById('sp-cal-overlay').addEventListener('click', (e) => {
+  // Only close if click was on the backdrop, not the modal itself.
+  if (e.target.id === 'sp-cal-overlay') closeCalendar();
+});
+document.getElementById('sp-cal-month-prev').addEventListener('click', () => {
+  _calendarMonth = new Date(_calendarMonth.getFullYear(), _calendarMonth.getMonth() - 1, 1);
+  renderCalendar();
+});
+document.getElementById('sp-cal-month-next').addEventListener('click', () => {
+  _calendarMonth = new Date(_calendarMonth.getFullYear(), _calendarMonth.getMonth() + 1, 1);
+  renderCalendar();
+});
+document.getElementById('sp-cal-today').addEventListener('click', () => {
+  setIndentDays(0);
+  closeCalendar();
+});
+// Esc closes the calendar.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && _calendarOpen) closeCalendar();
+});
+
+// COL 1 search input — substring-match against country + league
+// names. Empty query removes the filter. Debounce by relying on
+// 'input' event firing per keystroke and letting renderCol1 do
+// its own light work.
+const searchEl = document.getElementById('sp-c1-search');
+if (searchEl) {
+  searchEl.addEventListener('input', () => {
+    _searchQuery = searchEl.value.toLowerCase().trim();
+    renderCol1();
+  });
+}
+
 // Initial load
 loadColWidths();
 // Tennis sport needs a wider score column (sets/serve/games/point
@@ -1667,6 +1866,25 @@ document.querySelectorAll('.sp-splitter').forEach(setupSplitter);
 loadSportNav();
 loadEvents();
 </script>
+
+<!-- Calendar modal — toggled by the day-picker label. Sofascore-
+     style month grid with Today button. Renders into this fixed
+     container so it overlays the COL layout. -->
+<div class="sp-cal-overlay" id="sp-cal-overlay" hidden>
+  <div class="sp-cal-modal" role="dialog" aria-label="Pick a date">
+    <button class="sp-cal-close" id="sp-cal-close" type="button" aria-label="Close">×</button>
+    <div class="sp-cal-month-row">
+      <button class="sp-cal-month-arrow" id="sp-cal-month-prev" type="button" aria-label="Previous month">‹</button>
+      <div class="sp-cal-month-name" id="sp-cal-month-name"></div>
+      <button class="sp-cal-month-arrow" id="sp-cal-month-next" type="button" aria-label="Next month">›</button>
+    </div>
+    <div class="sp-cal-weekdays">
+      <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+    </div>
+    <div class="sp-cal-grid" id="sp-cal-grid"></div>
+    <button class="sp-cal-today-btn" id="sp-cal-today" type="button">TODAY</button>
+  </div>
+</div>
 
 </body>
 </html>
