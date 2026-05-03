@@ -85,15 +85,26 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 /* COL 2 — events list grouped by tournament.
    Each tournament has a header + collapsible list of event rows. */
 .sp-c2-empty{padding:60px 24px;text-align:center;color:var(--text-muted);font-size:13px}
+/* Summary header at top of COL 2 — total event count + matched count. */
+.sp-c2-summary{padding:10px 14px;background:var(--bg);border-bottom:1px solid var(--border);font-size:11px;color:var(--text-dim);position:sticky;top:0;z-index:5}
+.sp-c2-summary-total{color:var(--text);font-weight:600}
+.sp-c2-summary-matched{color:var(--green);font-weight:600}
 .sp-c2-tournament{border-bottom:1px solid var(--border)}
 .sp-c2-tournament-head{padding:10px 14px;background:var(--bg2);display:flex;align-items:baseline;gap:8px;border-top:1px solid var(--border)}
 .sp-c2-league-name{font-size:12px;font-weight:700;color:var(--text);letter-spacing:.3px}
 .sp-c2-country{font-size:10px;font-weight:500;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px}
 .sp-c2-events{padding:0}
-.sp-c2-event{display:grid;grid-template-columns:64px 1fr 60px 28px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:center;transition:background .1s ease}
+.sp-c2-event{display:grid;grid-template-columns:64px 1fr 50px 36px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:center;transition:background .1s ease;border-left:2px solid transparent}
 .sp-c2-event:hover{background:var(--bg-card)}
-.sp-c2-event.selected{background:var(--green-bg)}
+.sp-c2-event.selected{background:var(--green-bg);border-left-color:var(--green)}
 .sp-c2-event:last-child{border-bottom:none}
+/* Matched (Kalshi market exists) gets a subtle accent. Lite (FL only)
+   stays neutral so the eye is drawn to actionable rows. */
+.sp-c2-event.sp-c2-matched .sp-c2-team{color:var(--text)}
+.sp-c2-event.sp-c2-lite .sp-c2-team{color:var(--text-dim)}
+.sp-c2-marketcell{text-align:center}
+.sp-c2-kalshi-badge{display:inline-block;width:22px;height:22px;line-height:22px;border-radius:11px;background:var(--green-bg);color:var(--green);font-size:11px;font-weight:700;text-align:center;border:1px solid var(--green-line)}
+.sp-c2-no-market{color:var(--text-muted);font-size:14px}
 .sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums}
 .sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);margin-top:2px;text-transform:uppercase}
 .sp-c2-time-state.live{color:var(--red);font-weight:700}
@@ -111,6 +122,24 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c3-empty-icon{font-size:32px;margin-bottom:12px;opacity:.4}
 .sp-c3-empty-title{font-size:14px;color:var(--text-dim);margin-bottom:6px}
 .sp-c3-empty-hint{font-size:12px;color:var(--text-muted)}
+/* COL 3 populated detail */
+.sp-c3-detail{padding:16px}
+.sp-c3-tournament{font-size:11px;color:var(--text-dim);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px}
+.sp-c3-league-name{color:var(--text);font-weight:600}
+.sp-c3-country{color:var(--text-muted)}
+.sp-c3-header{padding:14px 0 18px;border-bottom:1px solid var(--border);margin-bottom:18px}
+.sp-c3-state{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+.sp-c3-state.live{color:var(--red);font-weight:700}
+.sp-c3-teams-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;font-size:15px}
+.sp-c3-team-name{color:var(--text);font-weight:600}
+.sp-c3-score{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums;font-size:18px}
+.sp-c3-section{margin-bottom:18px}
+.sp-c3-section-head{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;font-weight:700;padding-bottom:6px;border-bottom:1px solid var(--border);margin-bottom:10px}
+.sp-c3-cta{display:inline-block;padding:8px 14px;background:var(--green-bg);color:var(--green);border:1px solid var(--green-line);border-radius:4px;text-decoration:none;font-size:12px;font-weight:600;letter-spacing:.3px;transition:background .12s ease,color .12s ease}
+.sp-c3-cta:hover{background:var(--green);color:var(--bg)}
+.sp-c3-cta-sub{font-size:11px;color:var(--text-muted);margin-top:8px;line-height:1.4}
+.sp-c3-no-market{color:var(--text-dim);font-size:13px;font-style:italic}
+.sp-c3-stats-placeholder{font-size:12px;color:var(--text-muted);font-style:italic;line-height:1.5;padding:8px 0}
 
 /* Mobile fallback — collapse to single column with the existing
    modal pattern. COL 1 + COL 3 hidden, COL 2 expands full-width.
@@ -271,6 +300,8 @@ async function loadSportNav() {
 // tournament. COL 1 lists tournaments with counts; COL 2 lists
 // events grouped under tournament headers.
 let _eventsCache = null;
+let _matchedKalshiCount = 0;
+let _selectedEventId = null;     // currently-selected FL EVENT_ID for COL 3
 let _activeStateFilter = 'all';
 let _activeLeagueFilter = null;  // tournament_stage_id, or null = all
 const _collapsedCountries = new Set();  // Set of country names
@@ -282,16 +313,20 @@ async function loadEvents() {
   col1.innerHTML = '<div style="padding:24px 14px;color:var(--text-muted);font-size:12px;text-align:center">Loading…</div>';
   col2.innerHTML = '<div class="sp-c2-empty">Loading events…</div>';
   try {
-    const tz = -new Date().getTimezoneOffset() / 60;
-    const r = await fetch('/api/fl/events-list?sport_id=' + sid +
-      '&timezone=' + Math.round(tz) + '&indent_days=0');
+    // Phase 2b: use the merged feed endpoint instead of raw FL list.
+    // Response: {tournaments: [{TOURNAMENT_STAGE_ID, NAME, COUNTRY_NAME,
+    //   events: [{...FL fields..., kalshi: {event_ticker} | null}]}]}.
+    // Each event carries a .kalshi field — rich (matched market) vs
+    // lite (FL-only, no markets yet).
+    const r = await fetch('/api/sports/' + sid + '/feed?indent_days=0');
     const json = await r.json();
     if (json.error) {
       col2.innerHTML = '<div class="sp-c2-empty">' + escH(json.error) + '</div>';
       col1.innerHTML = '';
       return;
     }
-    _eventsCache = (json.data && json.data.DATA) || [];
+    _eventsCache = json.tournaments || [];
+    _matchedKalshiCount = json.matched_kalshi_count || 0;
     renderCol1();
     renderCol2();
   } catch (e) {
@@ -330,7 +365,7 @@ function renderCol1() {
   const byCountry = {};
   let totalEvents = 0;
   for (const t of _eventsCache) {
-    const evs = (t.EVENTS || []).filter(passesStateFilter);
+    const evs = (t.events || t.EVENTS || []).filter(passesStateFilter);
     if (!evs.length) continue;
     totalEvents += evs.length;
     const country = t.COUNTRY_NAME || 'Other';
@@ -429,10 +464,22 @@ function renderCol2() {
   }
   let html = '';
   let any = false;
+  // Header with match summary — gives the user a sense of how
+  // many events have a Kalshi market vs FL-only at a glance.
+  const totalEvents = _eventsCache.reduce((s, t) =>
+    s + (t.events || []).filter(passesStateFilter).length, 0);
+  if (_matchedKalshiCount > 0 || totalEvents > 0) {
+    html += '<div class="sp-c2-summary">';
+    html += '<span class="sp-c2-summary-total">' + totalEvents + ' events</span>';
+    if (_matchedKalshiCount > 0) {
+      html += ' · <span class="sp-c2-summary-matched">' + _matchedKalshiCount + ' on Kalshi</span>';
+    }
+    html += '</div>';
+  }
   for (const t of _eventsCache) {
     const stageId = t.TOURNAMENT_STAGE_ID || '';
     if (_activeLeagueFilter && _activeLeagueFilter !== stageId) continue;
-    const evs = (t.EVENTS || []).filter(passesStateFilter);
+    const evs = (t.events || t.EVENTS || []).filter(passesStateFilter);
     if (!evs.length) continue;
     any = true;
     html += '<div class="sp-c2-tournament">';
@@ -450,7 +497,15 @@ function renderCol2() {
       const stLbl = state === 'live' ? (ev.STAGE || 'LIVE') :
                     state === 'finished' ? '' :
                     state === 'upcoming' ? '' : '';
-      html += '<div class="sp-c2-event" data-event-id="' + escH(ev.EVENT_ID || '') + '">';
+      const matched = !!(ev.kalshi && ev.kalshi.event_ticker);
+      const evClasses = [
+        'sp-c2-event',
+        matched ? 'sp-c2-matched' : 'sp-c2-lite',
+        ev.EVENT_ID === _selectedEventId ? 'selected' : '',
+      ].filter(Boolean).join(' ');
+      html += '<div class="' + evClasses + '" data-event-id="' + escH(ev.EVENT_ID || '') + '"';
+      if (matched) html += ' data-ticker="' + escH(ev.kalshi.event_ticker) + '"';
+      html += '>';
       html += '<div class="sp-c2-time">' + escH(time);
       if (stLbl) html += '<span class="sp-c2-time-state' + (state === 'live' ? ' live' : '') + '">' + escH(stLbl) + '</span>';
       html += '</div>';
@@ -462,19 +517,31 @@ function renderCol2() {
       html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
       html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
       html += '</div>';
-      html += '<div class="sp-c2-fav" title="Favourite">☆</div>';
+      // Right column: Kalshi badge for matched, "no markets" for lite.
+      // Future-compatible: when Polymarket / sportsbook integration lands,
+      // the lite slot becomes those market chips.
+      html += '<div class="sp-c2-marketcell">';
+      if (matched) {
+        html += '<span class="sp-c2-kalshi-badge" title="On Kalshi">K</span>';
+      } else {
+        html += '<span class="sp-c2-no-market" title="No markets yet — Polymarket / sportsbook integration coming">—</span>';
+      }
+      html += '</div>';
       html += '</div>';
     }
     html += '</div></div>';
   }
   col2.innerHTML = any ? html :
     '<div class="sp-c2-empty">No events match the current filter.</div>';
-  // Wire click → COL 3 (placeholder for now; wires up in next commit)
+  // Click event → select + populate COL 3
   col2.querySelectorAll('.sp-c2-event').forEach(el => {
     el.addEventListener('click', () => {
       col2.querySelectorAll('.sp-c2-event.selected').forEach(x => x.classList.remove('selected'));
       el.classList.add('selected');
-      // TODO Phase 2b: render detail in COL 3 from FL event_id
+      const evId = el.dataset.eventId;
+      const ticker = el.dataset.ticker || null;
+      _selectedEventId = evId;
+      renderCol3(evId, ticker);
     });
   });
 }
@@ -489,6 +556,92 @@ document.querySelectorAll('.sp-c1-filter').forEach(el => {
     renderCol2();
   });
 });
+
+// ── COL 3: event detail panel ──
+// Populated when user clicks an event in COL 2. For matched
+// events (Kalshi market exists) we show the basic FL header
+// + a 'View on Stochverse ↗' button that opens the existing
+// homepage modal (which has the full block-component stack —
+// Stats, Lineups, Player Stats, etc.). For FL-only events we
+// show the FL data inline since there's no Kalshi modal target.
+async function renderCol3(flEventId, ticker) {
+  const col3 = document.getElementById('sp-col3');
+  // Find the FL event in our cache so we can render header
+  // immediately without an extra fetch.
+  let ev = null;
+  let tournament = null;
+  for (const t of (_eventsCache || [])) {
+    for (const e of (t.events || [])) {
+      if (e.EVENT_ID === flEventId) { ev = e; tournament = t; break; }
+    }
+    if (ev) break;
+  }
+  if (!ev) {
+    col3.innerHTML = '<div class="sp-c3-empty"><div class="sp-c3-empty-title">Event not found</div></div>';
+    return;
+  }
+  const state = eventState(ev);
+  const time = state === 'finished' ? 'FT' : fmtTime(ev.START_TIME);
+  const stLbl = state === 'live' ? (ev.STAGE || 'LIVE') :
+                state === 'finished' ? 'Finished' :
+                state === 'upcoming' ? 'Scheduled' : '';
+  const matched = !!ticker;
+
+  let html = '<div class="sp-c3-detail">';
+  // Tournament context up top
+  html += '<div class="sp-c3-tournament">';
+  html += '<span class="sp-c3-league-name">' + escH(leagueDisplayName(tournament || {})) + '</span>';
+  if (tournament && tournament.COUNTRY_NAME) {
+    html += ' <span class="sp-c3-country">' + escH(tournament.COUNTRY_NAME) + '</span>';
+  }
+  html += '</div>';
+  // Header — score line + state
+  html += '<div class="sp-c3-header">';
+  html += '<div class="sp-c3-state' + (state === 'live' ? ' live' : '') + '">';
+  if (stLbl) html += escH(stLbl);
+  if (time) html += ' · ' + escH(time);
+  html += '</div>';
+  html += '<div class="sp-c3-teams-row">';
+  html += '<div class="sp-c3-team-name">' + escH(ev.HOME_NAME || '') + '</div>';
+  html += '<div class="sp-c3-score">' +
+    escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '–') + '</div>';
+  html += '</div>';
+  html += '<div class="sp-c3-teams-row">';
+  html += '<div class="sp-c3-team-name">' + escH(ev.AWAY_NAME || '') + '</div>';
+  html += '<div class="sp-c3-score">' +
+    escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '–') + '</div>';
+  html += '</div>';
+  html += '</div>';
+
+  // Markets section: for matched events, link out to Stochverse
+  // modal (full feature set). For FL-only, "no markets yet"
+  // placeholder that's future-compatible with Polymarket /
+  // sportsbook integration.
+  html += '<div class="sp-c3-section">';
+  html += '<div class="sp-c3-section-head">Markets</div>';
+  if (matched) {
+    html += '<a class="sp-c3-cta" href="/?event=' + escH(ticker) + '" target="_blank" rel="noopener">';
+    html += 'View prices & trade ↗';
+    html += '</a>';
+    html += '<div class="sp-c3-cta-sub">Opens the full Kalshi market view in a new tab.</div>';
+  } else {
+    html += '<div class="sp-c3-no-market">No markets yet</div>';
+    html += '<div class="sp-c3-cta-sub">Polymarket and sportsbook odds for this event will appear here once those integrations land.</div>';
+  }
+  html += '</div>';
+
+  // Stats section: placeholder for now (Phase 2c will inline
+  // the existing block components — Stats, Lineups, Player Stats —
+  // pulled from /api/event/{ticker}/normalized for matched events
+  // or directly from FL endpoints for FL-only events).
+  html += '<div class="sp-c3-section">';
+  html += '<div class="sp-c3-section-head">Stats</div>';
+  html += '<div class="sp-c3-stats-placeholder">Stats panel coming in Phase 2c — Summary, Stats, Lineups, Player Stats blocks rendered inline here.</div>';
+  html += '</div>';
+
+  html += '</div>';
+  col3.innerHTML = html;
+}
 
 // ── Column splitter: drag-to-resize for COL 1 and COL 3 ──
 // Bounds: COL 1 in [200, 480]px, COL 3 in [320, 720]px. Below
