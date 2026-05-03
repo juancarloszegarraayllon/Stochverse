@@ -90,12 +90,17 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c1-search::placeholder{color:var(--text-muted)}
 /* Day picker — Sofascore-style left-arrow / center-label /
    right-arrow trio. Center label opens the calendar modal. */
-.sp-c2-daypicker{display:inline-flex;align-items:stretch;border:1px solid var(--border);border-radius:14px;overflow:hidden;font-family:inherit;height:24px;margin-left:auto}
+/* Day picker styled to match the .sp-c1-filter pill family —
+   same pill-shape background, height, padding, font weight so it
+   reads as a sibling control rather than a foreign widget.
+   Internal arrow buttons hover-highlight individually but the
+   wrapper stays a single visual unit. */
+.sp-c2-daypicker{display:inline-flex;align-items:stretch;background:var(--bg-card);border:1px solid transparent;border-radius:14px;overflow:hidden;font-family:inherit;height:24px;margin-left:auto}
 .sp-c2-dp-arrow{background:transparent;border:0;color:var(--text-dim);width:22px;font-size:13px;cursor:pointer;padding:0;font-family:inherit;line-height:1}
-.sp-c2-dp-arrow:hover:not(:disabled){color:var(--text);background:var(--bg-card)}
+.sp-c2-dp-arrow:hover:not(:disabled){color:var(--text);background:rgba(255,255,255,0.06)}
 .sp-c2-dp-arrow:disabled{opacity:0.35;cursor:not-allowed}
-.sp-c2-dp-label{background:transparent;border:0;border-left:1px solid var(--border);border-right:1px solid var(--border);color:var(--text);padding:0 10px;font-size:10px;font-weight:600;cursor:pointer;font-family:inherit;letter-spacing:.2px;min-width:80px;text-align:center;line-height:1}
-.sp-c2-dp-label:hover{background:var(--bg-card);color:var(--green)}
+.sp-c2-dp-label{background:transparent;border:0;color:var(--text-dim);padding:0 10px;font-size:11px;font-weight:500;cursor:pointer;font-family:inherit;letter-spacing:.2px;min-width:80px;text-align:center;line-height:1}
+.sp-c2-dp-label:hover{color:var(--text)}
 /* Calendar modal — overlays the page when the day-picker label
    is clicked. Click the backdrop or × to close. */
 .sp-cal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:50;display:flex;align-items:center;justify-content:center}
@@ -517,6 +522,23 @@ function setIndentDays(newIndent) {
   newIndent = Math.max(-7, Math.min(7, newIndent));
   if (newIndent === _indentDays) return;
   _indentDays = newIndent;
+  // Auto-adjust the state filter to match what's possible on the
+  // picked date. Without this, picking 'Tue, May 5' (future) with
+  // Live still selected silently shows zero events because Live
+  // can only ever match TODAY's currently-playing games.
+  //   - past day:    'finished' (those games are all done)
+  //   - future day:  'upcoming' (those games haven't started)
+  //   - today:       leave the user's choice alone
+  // Skip the override if the user explicitly picked 'all' — that
+  // signal is intentionally cross-date.
+  if (_activeStateFilter !== 'all') {
+    if (newIndent < 0) _activeStateFilter = 'finished';
+    else if (newIndent > 0) _activeStateFilter = 'upcoming';
+    else _activeStateFilter = 'live';
+    document.querySelectorAll('.sp-c1-filter').forEach(el => {
+      el.classList.toggle('active', el.dataset.state === _activeStateFilter);
+    });
+  }
   refreshDayPickerUI();
   loadEvents();
 }
