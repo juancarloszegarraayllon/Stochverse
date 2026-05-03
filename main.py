@@ -7879,12 +7879,18 @@ async def sports_feed(sport_id: int, timezone: int = 0,
     # UTC days). Drives both the unpaired-h2h date filter and the
     # outrights gate below — outrights are season-long futures
     # without a specific date, so they only show on 'today'; for
-    # any other day the user is browsing fixtures, not futures.
+    # the unpaired-h2h pipeline below filters on it.
     from datetime import date as _date, timedelta as _td
     target_date = _date.today() + _td(days=indent_days) if indent_days != 0 else _date.today()
-    is_today = (indent_days == 0)
+    # Outrights stay visible across the whole calendar window —
+    # they're season-long futures (World Cup Winner, MVP, etc.)
+    # whose trading window typically runs months. Picking a date
+    # in the middle of the World Cup should surface 'World Cup
+    # Winner' as relevant context, not hide it. Kalshi closes
+    # outrights once they settle, so the cache itself is the
+    # 'is this market still open' filter.
     outright_tournaments = (_collect_outrights_for_sport(kalshi_sport)
-                            if kalshi_sport and is_today else [])
+                            if kalshi_sport else [])
 
     out_tournaments: list = []
     matched_kalshi_tickers: set = set()
