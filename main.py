@@ -6908,30 +6908,49 @@ def _build_kalshi_index_for_sport(sport_name: str) -> dict:
     return idx
 
 
+_SPORT_VOCAB_TOKENS = frozenset({
+    # Sport names (in team names like 'Brussels Basketball')
+    "basketball", "basket", "football", "soccer", "hockey",
+    "tennis", "baseball", "cricket", "rugby", "golf", "boxing",
+    "esports", "volleyball", "handball", "darts", "snooker",
+    "lacrosse", "chess", "squash", "futsal", "bandy", "floorball",
+    "kabaddi", "netball", "pesapallo", "biathlon", "badminton",
+    "skiing", "motorsport", "autoracing", "motoracing", "cycling",
+    # Generic 'team' decorations
+    "club", "city", "team", "united", "athletic", "athletico",
+    "atletico", "sporting", "real", "national", "international",
+    # Gender / age modifiers
+    "women", "womens", "ladies", "men", "mens", "youth",
+    "junior", "u17", "u19", "u21", "u23",
+    # Generic competition decorations sometimes glued to team
+    "champions", "league", "premier", "division",
+})
+
+
 def _kalshi_title_corroborates_fl_game(kalshi_title: str, fl_game: dict) -> bool:
     """Defensive double-check on a match_game() result. Returns
-    True iff the FL game's home_name AND away_name BOTH have all
-    their non-trivial (>=3-char) tokens present as whole words
-    in the Kalshi title (case-insensitive).
+    True iff each side of the FL game has at least one
+    'distinguishing' token (>=4 chars, not generic sport
+    vocabulary) that appears as a whole word in the Kalshi title.
 
-    Earlier version used substring matching with a >=4-char
-    threshold — but generic sport vocabulary like 'basketball'
-    is a >=4-char token AND appears as substring in any Kalshi
-    title containing 'basketball'. So 'Brussels Basketball'
-    would pass (basketball in title) and 'LWD Basket' would
-    pass (basket in 'basketball'), even when the title is
-    'Pro Basketball #1 Overall Pick' — clearly a futures, not
-    a Brussels vs LWD game.
+    History of this check:
+      v1: >=4-char SUBSTRING match. Failed because 'basketball'
+          is >=4 and matches as substring inside 'Pro Basketball
+          Champion' titles → 65 false positives per event.
+      v2: >=3-char WHOLE-WORD ALL-tokens-required. Too strict —
+          rejected legitimate 'Minnesota at San Antonio' Kalshi
+          titles when FL had full names like 'Minnesota
+          Timberwolves vs San Antonio Spurs' (timberwolves and
+          spurs absent from Kalshi titles).
+      v3 (this): >=4-char WHOLE-WORD AT-LEAST-ONE-required, with
+          a sport-vocab stop list to drop generic tokens, and a
+          fallback to >=3-char tokens when a team has no
+          longer-word tokens at all (e.g., 'PSG').
 
-    Whole-word matching with ALL-tokens-required is much stricter:
-      - 'Brussels Basketball' requires 'brussels' AND 'basketball'
-      - 'Pro Basketball #1 Overall Pick' has 'basketball' but
-        not 'brussels' → reject
-      - 'Bayern Munich' requires 'bayern' AND 'munich'
-      - 'Bayern Munich vs PSG' has both → accept
-      - 'Real Madrid vs Bayern Munich' has bayern + munich
-        but Kalshi title for OUR game (Bayern vs PSG) would
-        also need 'psg' → still rejects when only bayern matches
+    The sport-vocab stop list is conservative — only includes
+    tokens that demonstrably caused false positives. We can
+    grow it as new false positives surface in
+    'kalshi-fl match: N rejected' log lines.
     """
     if not kalshi_title or not fl_game:
         return False
@@ -6942,24 +6961,27 @@ def _kalshi_title_corroborates_fl_game(kalshi_title: str, fl_game: dict) -> bool
     import re
     title_lc = kalshi_title.lower()
 
-    def all_tokens_match(team_name: str) -> bool:
-        # Tokenize team name on non-alphanumeric. Keep tokens
-        # >=3 chars (drops 'fc', 'sc', '1', etc. which are noise
-        # — and either way they're rarely distinguishing).
-        tokens = [t for t in re.split(r"[^a-z0-9]+", team_name.lower())
-                  if len(t) >= 3]
-        if not tokens:
-            # Very short team name with no distinguishing tokens
-            # (e.g., 'FC' alone). Rare; reject conservatively.
-            return False
-        for tok in tokens:
-            # Whole-word match — \b boundaries prevent 'basket'
-            # from matching inside 'basketball'.
-            if not re.search(r'\b' + re.escape(tok) + r'\b', title_lc):
-                return False
-        return True
+    def has_distinguishing_token(team_name: str) -> bool:
+        toks_all = [t for t in re.split(r"[^a-z0-9]+", team_name.lower()) if t]
+        # Strict: >=4 chars + not generic sport vocab
+        toks_strict = [t for t in toks_all
+                       if len(t) >= 4 and t not in _SPORT_VOCAB_TOKENS]
+        for tok in toks_strict:
+            if re.search(r'\b' + re.escape(tok) + r'\b', title_lc):
+                return True
+        # Fallback for teams with only short tokens (e.g., 'PSG',
+        # 'AC Milan', 'FC Basel'): >=3 chars whole-word match.
+        # Only used when strict-token list is empty so we don't
+        # fall back to noisy short tokens when a longer one was
+        # available but absent.
+        if not toks_strict:
+            toks_short = [t for t in toks_all if len(t) >= 3]
+            for tok in toks_short:
+                if re.search(r'\b' + re.escape(tok) + r'\b', title_lc):
+                    return True
+        return False
 
-    return all_tokens_match(home) and all_tokens_match(away)
+    return has_distinguishing_token(home) and has_distinguishing_token(away)
 
 
 def _market_type_from_title(title: str) -> str:
