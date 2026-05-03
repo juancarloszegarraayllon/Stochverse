@@ -167,6 +167,22 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-no{color:var(--red);font-weight:700;padding:2px 0;border-radius:3px;background:transparent;border:1px solid #4d1a1a;text-align:center;font-size:10px;line-height:1}
 .sp-c2-price-empty{color:var(--text-muted);text-align:center;font-size:10px}
 .sp-c2-no-market{color:var(--text-muted);font-size:14px}
+/* Price update flash — same pattern as the homepage cards.
+   Green when bid moves up, red when down. Auto-clears after
+   the animation completes (0.9s). */
+@keyframes sp-flash-up{0%{background-color:rgba(0,255,0,0.55)}100%{background-color:transparent}}
+@keyframes sp-flash-down{0%{background-color:rgba(255,51,51,0.55)}100%{background-color:transparent}}
+.sp-c2-yes.sp-flash-up,.sp-c2-no.sp-flash-up,.sp-c2-prob.sp-flash-up{animation:sp-flash-up 0.9s ease-out}
+.sp-c2-yes.sp-flash-down,.sp-c2-no.sp-flash-down,.sp-c2-prob.sp-flash-down{animation:sp-flash-down 0.9s ease-out}
+/* Sticky column headers above the events list — labels for the
+   PROBABILITY / YES / NO chip layout in the right cell, plus
+   spacers for indicator/time/teams/scores so the labels align
+   with their actual columns. */
+.sp-c2-header{display:grid;grid-template-columns:20px 64px 1fr 40px 168px;gap:8px;padding:8px 14px;background:var(--bg2);border-bottom:1px solid var(--border);position:sticky;top:38px;z-index:3;font-size:9px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+.sp-c2-header-prices{display:grid;grid-template-columns:32px 1fr 1fr;gap:4px;text-align:center}
+.sp-c2-header-prob{text-align:right;color:var(--text-muted)}
+.sp-c2-header-yes{color:var(--green)}
+.sp-c2-header-no{color:var(--red)}
 .sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums}
 .sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);margin-top:2px;text-transform:uppercase}
 .sp-c2-time-state.live{color:var(--red);font-weight:700}
@@ -640,6 +656,22 @@ function renderCol2() {
     html += '</div>';
     html += '</div>';
 
+    // Column headers — labels for the right-cell PROBABILITY /
+    // YES / NO chip layout. Sticky at top of the list so users
+    // see them while scrolling through events.
+    if (_matchedKalshiCount > 0) {
+      html += '<div class="sp-c2-header">';
+      html += '<div></div>';        // indicator spacer
+      html += '<div></div>';        // time spacer
+      html += '<div></div>';        // teams spacer
+      html += '<div></div>';        // scores spacer
+      html += '<div class="sp-c2-header-prices">';
+      html += '<span class="sp-c2-header-prob">PROB</span>';
+      html += '<span class="sp-c2-header-yes">YES</span>';
+      html += '<span class="sp-c2-header-no">NO</span>';
+      html += '</div>';
+      html += '</div>';
+    }
     // Market-type tab strip (Game view only). Sets which Kalshi
     // sub-market is shown on the right of each row — Winner,
     // Spread, Total Points, etc. Mirrors the homepage's per-card
@@ -868,31 +900,33 @@ function renderEventRow(ev, market, isMarketRow) {
   html += '</div>';
   // Right market cell — Kalshi PROBABILITY + YES + NO chips per
   // outcome (home / away / tie), stacked to align with team /
-  // score rows. Matches the homepage card style — green-bordered
-  // YES button + red-bordered NO button + dim probability text.
-  // FL-only events show '—' until Polymarket / sportsbook
-  // integrations stack their chips into additional rows here.
+  // score rows. Matches the homepage card convention:
+  //   PROB%  →  yes_bid (1¢ = 1% probability)
+  //   YES    →  yes_ask (what to PAY to buy YES)
+  //   NO     →  no_ask  (what to PAY to buy NO)
+  // data-side attributes let the polling layer find each chip
+  // and flash on price moves without re-rendering the row.
   html += '<div class="sp-c2-marketcell">';
   if (matched && ev.kalshi.primary_prices) {
     const p = ev.kalshi.primary_prices;
-    const renderPriceRow = (yes, no) => {
-      let row = '<div class="sp-c2-price-row">';
-      // Probability % is the YES price (1¢ = 1% probability).
-      row += '<span class="sp-c2-prob">' +
-        (yes != null ? yes + '%' : '–') + '</span>';
-      row += '<span class="sp-c2-yes">' +
+    const renderPriceRow = (side, prob, yes, no, ticker) => {
+      const tickerAttr = ticker ? ' data-ticker="' + escH(ticker) + '"' : '';
+      let row = '<div class="sp-c2-price-row" data-side="' + side + '"' + tickerAttr + '>';
+      row += '<span class="sp-c2-prob" data-fld="prob">' +
+        (prob != null ? prob + '%' : '–') + '</span>';
+      row += '<span class="sp-c2-yes" data-fld="yes">' +
         (yes != null ? yes + '¢' : '–') + '</span>';
-      row += '<span class="sp-c2-no">' +
+      row += '<span class="sp-c2-no" data-fld="no">' +
         (no != null ? no + '¢' : '–') + '</span>';
       row += '</div>';
       return row;
     };
-    html += renderPriceRow(p.home_yes, p.home_no);
-    html += renderPriceRow(p.away_yes, p.away_no);
-    // Tie row — only render if a tie outcome was matched. Many
-    // sports (basketball, hockey, tennis, etc.) don't have ties.
-    if (p.tie_yes != null || p.tie_no != null) {
-      html += renderPriceRow(p.tie_yes, p.tie_no);
+    html += renderPriceRow('home', p.home_prob, p.home_yes, p.home_no, p.home_ticker);
+    html += renderPriceRow('away', p.away_prob, p.away_yes, p.away_no, p.away_ticker);
+    // Tie row only when a tie outcome was matched (most sports
+    // don't have ties — basketball / hockey / tennis / etc.).
+    if (p.tie_yes != null || p.tie_no != null || p.tie_prob != null) {
+      html += renderPriceRow('tie', p.tie_prob, p.tie_yes, p.tie_no, p.tie_ticker);
     }
   } else if (matched) {
     html += '<div class="sp-c2-price-empty">·</div>';
@@ -1117,6 +1151,123 @@ function setupSplitter(splitterEl) {
     saveColWidth(key, b.default);
   });
 }
+
+// ── Live price WebSocket — same pattern as the homepage's
+// PriceStream. Connects to /ws/prices, subscribes to the per-
+// outcome market tickers we render, and patches chips in place
+// when prices move. Flash animation matches the homepage.
+//
+// Self-contained (~80 lines) so sports.html doesn't have to
+// pull the full bundle just for this.
+const PriceWS = (function() {
+  let ws = null;
+  const subscribed = new Set();   // tickers we've asked for
+  const handlers = [];            // onUpdate callbacks
+  let retry = 0;
+  let heartbeat = null;
+
+  function connect() {
+    try {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(proto + '//' + location.host + '/ws/prices');
+    } catch (e) { return scheduleReconnect(); }
+    ws.onopen = () => {
+      retry = 0;
+      if (subscribed.size > 0) {
+        ws.send(JSON.stringify({
+          action: 'subscribe', tickers: Array.from(subscribed),
+        }));
+      }
+      heartbeat = setInterval(() => {
+        try { ws.send(JSON.stringify({action: 'ping'})); } catch (e) {}
+      }, 25000);
+    };
+    ws.onmessage = (ev) => {
+      let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'price') dispatch(msg.ticker, msg.data);
+      else if (msg.type === 'snapshot') {
+        const u = msg.updates || [];
+        for (let i = 0; i < u.length; i++) dispatch(u[i].ticker, u[i].data);
+      }
+    };
+    ws.onclose = () => {
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+      scheduleReconnect();
+    };
+  }
+  function scheduleReconnect() {
+    retry = Math.min(retry + 1, 6);
+    setTimeout(connect, Math.min(1000 * Math.pow(2, retry), 30000));
+  }
+  function dispatch(ticker, data) {
+    for (const h of handlers) { try { h(ticker, data); } catch (e) {} }
+  }
+  return {
+    connect: connect,
+    subscribe: (tickers) => {
+      const added = [];
+      for (const t of tickers) {
+        const u = String(t || '').toUpperCase();
+        if (!u || subscribed.has(u)) continue;
+        subscribed.add(u);
+        added.push(u);
+      }
+      if (added.length && ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({action: 'subscribe', tickers: added}));
+      }
+    },
+    onUpdate: (cb) => handlers.push(cb),
+  };
+})();
+
+// Apply a price update to the chip in COL 2 for a given ticker.
+// data carries yes_bid / yes_ask / no_bid / no_ask in cents.
+// On change: update text + add flash class (auto-clears via
+// animationend listener).
+function applyPriceUpdate(ticker, data) {
+  if (!ticker) return;
+  const row = document.querySelector(
+    '.sp-c2-price-row[data-ticker="' + ticker + '"]');
+  if (!row) return;
+  const updateField = (field, newVal, cls) => {
+    if (newVal == null) return;
+    const cell = row.querySelector('[data-fld="' + field + '"]');
+    if (!cell) return;
+    const newText = newVal + (field === 'prob' ? '%' : '¢');
+    if (cell.textContent === newText) return;
+    // Compare numeric value to choose flash direction.
+    const oldNum = parseInt(cell.textContent, 10);
+    const direction = isNaN(oldNum) || newVal === oldNum ? '' :
+                      (newVal > oldNum ? 'sp-flash-up' : 'sp-flash-down');
+    cell.textContent = newText;
+    if (direction) {
+      cell.classList.remove('sp-flash-up', 'sp-flash-down');
+      // Force reflow so the animation restarts even if the same
+      // class was just removed.
+      void cell.offsetWidth;
+      cell.classList.add(direction);
+    }
+  };
+  if (data.yes_bid != null) updateField('prob', data.yes_bid);
+  if (data.yes_ask != null) updateField('yes',  data.yes_ask);
+  if (data.no_ask  != null) updateField('no',   data.no_ask);
+}
+
+PriceWS.onUpdate(applyPriceUpdate);
+PriceWS.connect();
+
+// After events render, gather all price-row tickers and subscribe
+// to them. Hook into renderCol2's tail by wrapping the original.
+const _origRenderCol2 = renderCol2;
+renderCol2 = function() {
+  _origRenderCol2();
+  const tickers = [];
+  document.querySelectorAll('.sp-c2-price-row[data-ticker]').forEach(el => {
+    const t = el.dataset.ticker;
+    if (t) tickers.push(t);
+  });
+  if (tickers.length) PriceWS.subscribe(tickers);
+};
 
 // Initial load
 loadColWidths();

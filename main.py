@@ -7014,9 +7014,19 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
     rare in practice since labels and FL names usually share
     obvious tokens).
     """
-    out = {"home_yes": None, "home_no": None,
-           "away_yes": None, "away_no": None,
-           "tie_yes": None, "tie_no": None}
+    out = {
+        # Probability comes from yes_bid (1:1 mapping to %).
+        # yes_ask is what you PAY to buy YES; no_ask is what you
+        # pay to buy NO. The PROBABILITY/YES/NO chip layout on
+        # /sports COL 2 uses prob (yes_bid) for the % column,
+        # yes_ask for the green YES chip, no_ask for the red NO
+        # chip — matches Kalshi's convention.
+        # *_ticker is the per-outcome market ticker — what the
+        # frontend WebSocket subscribes to for live ticks.
+        "home_prob": None, "home_yes": None, "home_no": None, "home_ticker": None,
+        "away_prob": None, "away_yes": None, "away_no": None, "away_ticker": None,
+        "tie_prob":  None, "tie_yes":  None, "tie_no":  None, "tie_ticker":  None,
+    }
     # Cache records use two different field names depending on
     # path: raw records (data_all) carry `outcomes`, grouped
     # records (data, post-_group_game_markets) carry `_outcomes`.
@@ -7046,51 +7056,62 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
         # Cache stores prices as cents under underscore-prefixed
         # keys: '_yb' (yes_bid), '_ya' (yes_ask), '_nb' (no_bid),
         # '_na' (no_ask). Per the v0.6.9 diagnostic. Fallbacks for
-        # the rare raw-Kalshi-passthrough case.
-        yes_bid = o.get("_yb")
-        if yes_bid is None:
-            yes_bid = o.get("yes_bid")
-        if yes_bid is None:
-            yb_dollars = o.get("yes_bid_dollars")
-            if yb_dollars is not None:
-                try:
-                    yes_bid = int(round(float(yb_dollars) * 100))
-                except (TypeError, ValueError):
-                    yes_bid = None
-        # NO bid for the homepage-style red NO button display.
-        no_bid = o.get("_nb")
-        if no_bid is None:
-            no_bid = o.get("no_bid")
-        if no_bid is None:
-            nb_dollars = o.get("no_bid_dollars")
-            if nb_dollars is not None:
-                try:
-                    no_bid = int(round(float(nb_dollars) * 100))
-                except (TypeError, ValueError):
-                    no_bid = None
+        # the rare raw-Kalshi-passthrough case (different stage of
+        # the pipeline stores them as 'yes_bid' / 'yes_bid_dollars').
+        def _coerce_cents(rec, *keys) -> int:
+            """Try each key, return first non-None as int cents.
+            Last fallback: '<key>_dollars' * 100."""
+            for k in keys:
+                v = rec.get(k)
+                if v is not None:
+                    try:
+                        return int(v)
+                    except (TypeError, ValueError):
+                        pass
+                vd = rec.get(k + "_dollars")
+                if vd is not None:
+                    try:
+                        return int(round(float(vd) * 100))
+                    except (TypeError, ValueError):
+                        pass
+            return None
+
+        # yes_bid → probability column (1¢ = 1% on Kalshi)
+        prob = (o.get("_yb")
+                if o.get("_yb") is not None
+                else _coerce_cents(o, "yes_bid"))
+        # yes_ask → green YES button (what to PAY to buy YES)
+        yes_ask = (o.get("_ya")
+                   if o.get("_ya") is not None
+                   else _coerce_cents(o, "yes_ask"))
+        # no_ask → red NO button (what to PAY to buy NO)
+        no_ask = (o.get("_na")
+                  if o.get("_na") is not None
+                  else _coerce_cents(o, "no_ask"))
+        outcome_ticker = o.get("ticker") or ""
         # Tie / Draw catch — these are short labels that won't
         # token-match either team; handle first so they don't fall
         # through to noisy team-name matching.
         if label_lc in ("tie", "draw", "no winner", "no result"):
-            if yes_bid is not None and out["tie_yes"] is None:
-                out["tie_yes"] = yes_bid
-            if no_bid is not None and out["tie_no"] is None:
-                out["tie_no"] = no_bid
+            if out["tie_prob"]   is None: out["tie_prob"]   = prob
+            if out["tie_yes"]    is None: out["tie_yes"]    = yes_ask
+            if out["tie_no"]     is None: out["tie_no"]     = no_ask
+            if out["tie_ticker"] is None: out["tie_ticker"] = outcome_ticker
             continue
         h_score = score(label_lc, home_toks)
         a_score = score(label_lc, away_toks)
         if h_score == 0 and a_score == 0:
             continue
         if h_score > a_score:
-            if out["home_yes"] is None and yes_bid is not None:
-                out["home_yes"] = yes_bid
-            if out["home_no"] is None and no_bid is not None:
-                out["home_no"] = no_bid
+            if out["home_prob"]   is None: out["home_prob"]   = prob
+            if out["home_yes"]    is None: out["home_yes"]    = yes_ask
+            if out["home_no"]     is None: out["home_no"]     = no_ask
+            if out["home_ticker"] is None: out["home_ticker"] = outcome_ticker
         elif a_score > h_score:
-            if out["away_yes"] is None and yes_bid is not None:
-                out["away_yes"] = yes_bid
-            if out["away_no"] is None and no_bid is not None:
-                out["away_no"] = no_bid
+            if out["away_prob"]   is None: out["away_prob"]   = prob
+            if out["away_yes"]    is None: out["away_yes"]    = yes_ask
+            if out["away_no"]     is None: out["away_no"]     = no_ask
+            if out["away_ticker"] is None: out["away_ticker"] = outcome_ticker
         # h_score == a_score (ambiguous) → don't assign
     return out
 
