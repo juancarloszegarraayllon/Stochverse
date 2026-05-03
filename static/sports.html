@@ -87,10 +87,13 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-empty{padding:60px 24px;text-align:center;color:var(--text-muted);font-size:13px}
 /* Summary header at top of COL 2 — total event count + matched count. */
 .sp-c2-summary{padding:10px 14px;background:var(--bg);border-bottom:1px solid var(--border);font-size:11px;color:var(--text-dim);position:sticky;top:0;z-index:5}
-.sp-c2-summary-total{color:var(--text);font-weight:600}
-.sp-c2-summary-pill{display:inline-block;padding:2px 8px;border-radius:11px;background:var(--green-bg);color:var(--green);font-size:11px;font-weight:600;border:1px solid var(--green-line);cursor:pointer;font-family:inherit;transition:background .12s ease,color .12s ease}
-.sp-c2-summary-pill:hover{background:var(--green-line);color:var(--green)}
-.sp-c2-summary-pill.active{background:var(--green);color:var(--bg);border-color:var(--green)}
+/* Filter pills in COL 2 summary — 'All events' and 'On Kalshi'
+   are mutually-exclusive; styled identically so they read as a
+   pair. Inactive: outlined dim. Active: solid green. */
+.sp-c2-summary-pill{display:inline-flex;align-items:center;padding:3px 10px;border-radius:11px;background:transparent;color:var(--text-dim);font-size:11px;font-weight:600;border:1px solid var(--border);cursor:pointer;font-family:inherit;transition:background .12s ease,color .12s ease,border-color .12s ease;font-variant-numeric:tabular-nums}
+.sp-c2-summary-pill:hover{color:var(--text);border-color:var(--text-dim)}
+.sp-c2-summary-pill.active{background:var(--green-bg);color:var(--green);border-color:var(--green-line)}
+.sp-c2-summary-pill.active:hover{background:var(--green-line)}
 /* Game / Market view toggle — pushed to the right side of the
    summary bar. Mirrors the homepage's GRID/LIST switcher. */
 .sp-c2-viewtoggle{margin-left:auto;display:inline-flex;border:1px solid var(--border);border-radius:4px;overflow:hidden}
@@ -522,11 +525,16 @@ function renderCol2() {
     s + (t.events || []).filter(passesStateFilter).length, 0);
   if (_matchedKalshiCount > 0 || totalEvents > 0) {
     html += '<div class="sp-c2-summary">';
-    html += '<span class="sp-c2-summary-total">' + totalEvents + ' events</span>';
+    // 'All events' and 'On Kalshi' are mutually-exclusive filter
+    // pills — same shape, one always active. Default _onlyMatched
+    // = false → 'All events' is the active one.
+    const allCls = 'sp-c2-summary-pill' + (!_onlyMatched ? ' active' : '');
+    html += '<button class="' + allCls + '" id="sp-c2-show-all" type="button">';
+    html += totalEvents + ' events';
+    html += '</button>';
     if (_matchedKalshiCount > 0) {
-      // 'On Kalshi' filter pill — toggles _onlyMatched.
       const pillCls = 'sp-c2-summary-pill' + (_onlyMatched ? ' active' : '');
-      html += ' · <button class="' + pillCls + '" id="sp-c2-only-kalshi" type="button">';
+      html += '<button class="' + pillCls + '" id="sp-c2-only-kalshi" type="button">';
       html += _matchedKalshiCount + ' on Kalshi';
       html += '</button>';
     }
@@ -583,13 +591,28 @@ function renderCol2() {
       renderCol3(evId, ticker);
     });
   });
-  // 'On Kalshi' pill → toggles filter, re-renders.
-  const pill = col2.querySelector('#sp-c2-only-kalshi');
-  if (pill) {
-    pill.addEventListener('click', () => {
-      _onlyMatched = !_onlyMatched;
-      renderCol1();
-      renderCol2();
+  // 'All events' / 'On Kalshi' filter pills — mutual toggle.
+  // Each sets _onlyMatched explicitly (rather than flipping)
+  // so a click on the active pill is a no-op rather than
+  // accidentally turning off the filter the user already picked.
+  const allPill = col2.querySelector('#sp-c2-show-all');
+  if (allPill) {
+    allPill.addEventListener('click', () => {
+      if (_onlyMatched) {
+        _onlyMatched = false;
+        renderCol1();
+        renderCol2();
+      }
+    });
+  }
+  const matchedPill = col2.querySelector('#sp-c2-only-kalshi');
+  if (matchedPill) {
+    matchedPill.addEventListener('click', () => {
+      if (!_onlyMatched) {
+        _onlyMatched = true;
+        renderCol1();
+        renderCol2();
+      }
     });
   }
   // Game / Market view toggle.
