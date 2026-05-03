@@ -84,10 +84,6 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c1-filters{display:flex;gap:6px;padding:10px 12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--border);position:sticky;top:38px;background:var(--bg);z-index:5}
 /* Search box at the top of COL 1 — substring filter on country
    + league names. Sticky below the filters strip. */
-.sp-c1-search-wrap{padding:8px 12px;border-bottom:1px solid var(--border);position:sticky;top:90px;background:var(--bg);z-index:4}
-.sp-c1-search{width:100%;padding:7px 10px;font-size:11px;background:var(--bg-card);border:1px solid var(--border);color:var(--text);border-radius:4px;font-family:inherit;box-sizing:border-box}
-.sp-c1-search:focus{outline:none;border-color:var(--green-line)}
-.sp-c1-search::placeholder{color:var(--text-muted)}
 /* Day picker — Sofascore-style left-arrow / center-label /
    right-arrow trio. Center label opens the calendar modal. */
 /* Day picker styled to match the .sp-c1-filter pill family —
@@ -395,10 +391,6 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
         <button class="sp-c2-dp-label" id="sp-c2-dp-label" type="button">Today</button>
         <button class="sp-c2-dp-arrow" id="sp-c2-dp-next" type="button" title="Next day">›</button>
       </div>
-    </div>
-    <div class="sp-c1-search-wrap">
-      <input type="search" id="sp-c1-search" class="sp-c1-search"
-             placeholder="Search countries or leagues…" autocomplete="off">
     </div>
     <div class="sp-c1-list" id="sp-c1-list">
       <div style="padding:24px 14px;color:var(--text-muted);font-size:12px;text-align:center">Loading leagues…</div>
@@ -753,9 +745,6 @@ let _viewMode = 'game';          // 'game' (one row per match) or 'market' (one 
 let _indentDays = 0;
 let _calendarOpen = false;
 let _calendarMonth = null;       // Date pinned to first of the month being browsed
-// Search query for COL 1 — substring match on country + league
-// names. Empty = no filter.
-let _searchQuery = '';
 // Per-event active market type, keyed by EVENT_ID. Default '' = headline Winner.
 // Each matched event with multiple market types renders its own
 // inline tab strip — clicking a tab updates this map and re-renders
@@ -844,15 +833,6 @@ function renderCol1() {
     if (!evs.length) continue;
     const country = bucketCountry(t);
     const leagueName = leagueDisplayName(t);
-    // Search filter — match query against either the country
-    // bucket OR the specific league name. So 'champ' surfaces
-    // 'Champions League' regardless of country, and 'spain'
-    // surfaces every La Liga / Copa del Rey under Spain.
-    if (_searchQuery) {
-      const inCountry = country.toLowerCase().includes(_searchQuery);
-      const inLeague = leagueName.toLowerCase().includes(_searchQuery);
-      if (!inCountry && !inLeague) continue;
-    }
     totalEvents += evs.length;
     if (!byCountry[country]) byCountry[country] = [];
     byCountry[country].push({
@@ -1899,18 +1879,6 @@ if (dpPrev) dpPrev.addEventListener('click', () => setIndentDays(_indentDays - 1
 if (dpNext) dpNext.addEventListener('click', () => setIndentDays(_indentDays + 1));
 if (dpLabel) dpLabel.addEventListener('click', openCalendar);
 refreshDayPickerUI();
-
-// COL 1 search input — substring-match against country + league
-// names. Empty query removes the filter. Debounce by relying on
-// 'input' event firing per keystroke and letting renderCol1 do
-// its own light work.
-const searchEl = document.getElementById('sp-c1-search');
-if (searchEl) {
-  searchEl.addEventListener('input', () => {
-    _searchQuery = searchEl.value.toLowerCase().trim();
-    renderCol1();
-  });
-}
 
 // Initial load
 loadColWidths();
