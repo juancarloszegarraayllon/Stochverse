@@ -7073,7 +7073,8 @@ def _league_to_region(league_name: str) -> str:
 
 
 def _collect_unpaired_h2h_for_sport(sport_name: str,
-                                     matched_kalshi_tickers: set) -> list:
+                                     matched_kalshi_tickers: set,
+                                     target_date=None) -> list:
     """Collect Kalshi head-to-head markets (X vs Y) that don't pair
     with any FL fixture in today's events list. These are individual
     matchups that Kalshi has open for trading but FL hasn't
@@ -7147,6 +7148,16 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         bare = title.split(":", 1)[0].strip() if ":" in title else title.strip()
         if not _is_head_to_head_title(bare):
             continue
+        # Date filter — when the user picked a specific day in the
+        # calendar (target_date != None), drop matchups whose
+        # ticker doesn't encode that date. Tickers carry the match
+        # date inline (KXUCLGAME-26MAY06BMUPSG → 2026-05-06).
+        # Records without a parseable date pass through (props /
+        # season-long markets shouldn't be filtered out by day).
+        if target_date is not None:
+            ticker_date = parse_game_date_from_ticker(r.get("event_ticker") or "")
+            if ticker_date is not None and ticker_date != target_date:
+                continue
         series_base = _series_base(r.get("series_ticker") or "")
         key = (series_base, _matchup_key(bare))
         matchups.setdefault(key, {"bare": bare, "records": []})
@@ -7820,7 +7831,16 @@ async def sports_feed(sport_id: int, timezone: int = 0,
 
     kalshi_sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
     kalshi_idx = _build_kalshi_index_for_sport(kalshi_sport) if kalshi_sport else {}
-    outright_tournaments = _collect_outrights_for_sport(kalshi_sport) if kalshi_sport else []
+    # Compute the target date the user actually picked (today + N
+    # UTC days). Drives both the unpaired-h2h date filter and the
+    # outrights gate below — outrights are season-long futures
+    # without a specific date, so they only show on 'today'; for
+    # any other day the user is browsing fixtures, not futures.
+    from datetime import date as _date, timedelta as _td
+    target_date = _date.today() + _td(days=indent_days) if indent_days != 0 else _date.today()
+    is_today = (indent_days == 0)
+    outright_tournaments = (_collect_outrights_for_sport(kalshi_sport)
+                            if kalshi_sport and is_today else [])
 
     out_tournaments: list = []
     matched_kalshi_tickers: set = set()
@@ -7928,7 +7948,7 @@ async def sports_feed(sport_id: int, timezone: int = 0,
     # alongside FL fixtures. Run AFTER the regular index walk so
     # we know which tickers FL paired.
     unpaired_h2h_tournaments = (
-        _collect_unpaired_h2h_for_sport(kalshi_sport, matched_kalshi_tickers)
+        _collect_unpaired_h2h_for_sport(kalshi_sport, matched_kalshi_tickers, target_date)
         if kalshi_sport else []
     )
     for t in unpaired_h2h_tournaments:

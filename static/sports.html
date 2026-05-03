@@ -84,17 +84,17 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c1-filters{display:flex;gap:6px;padding:10px 12px;flex-wrap:wrap;border-bottom:1px solid var(--border);position:sticky;top:38px;background:var(--bg);z-index:5}
 /* Search box at the top of COL 1 — substring filter on country
    + league names. Sticky below the filters strip. */
-.sp-c1-search-wrap{padding:8px 12px;border-bottom:1px solid var(--border);position:sticky;top:80px;background:var(--bg);z-index:4}
+.sp-c1-search-wrap{padding:8px 12px;border-bottom:1px solid var(--border);position:sticky;top:90px;background:var(--bg);z-index:4}
 .sp-c1-search{width:100%;padding:7px 10px;font-size:11px;background:var(--bg-card);border:1px solid var(--border);color:var(--text);border-radius:4px;font-family:inherit;box-sizing:border-box}
 .sp-c1-search:focus{outline:none;border-color:var(--green-line)}
 .sp-c1-search::placeholder{color:var(--text-muted)}
 /* Day picker — Sofascore-style left-arrow / center-label /
    right-arrow trio. Center label opens the calendar modal. */
-.sp-c2-daypicker{display:inline-flex;align-items:stretch;border:1px solid var(--border);border-radius:14px;overflow:hidden;font-family:inherit}
-.sp-c2-dp-arrow{background:transparent;border:0;color:var(--text-dim);width:26px;font-size:14px;cursor:pointer;padding:0;font-family:inherit}
+.sp-c2-daypicker{display:inline-flex;align-items:stretch;border:1px solid var(--border);border-radius:14px;overflow:hidden;font-family:inherit;height:24px;margin-left:auto}
+.sp-c2-dp-arrow{background:transparent;border:0;color:var(--text-dim);width:22px;font-size:13px;cursor:pointer;padding:0;font-family:inherit;line-height:1}
 .sp-c2-dp-arrow:hover:not(:disabled){color:var(--text);background:var(--bg-card)}
 .sp-c2-dp-arrow:disabled{opacity:0.35;cursor:not-allowed}
-.sp-c2-dp-label{background:transparent;border:0;border-left:1px solid var(--border);border-right:1px solid var(--border);color:var(--text);padding:3px 14px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;letter-spacing:.3px;min-width:90px;text-align:center}
+.sp-c2-dp-label{background:transparent;border:0;border-left:1px solid var(--border);border-right:1px solid var(--border);color:var(--text);padding:0 10px;font-size:10px;font-weight:600;cursor:pointer;font-family:inherit;letter-spacing:.2px;min-width:80px;text-align:center;line-height:1}
 .sp-c2-dp-label:hover{background:var(--bg-card);color:var(--green)}
 /* Calendar modal — overlays the page when the day-picker label
    is clicked. Click the backdrop or × to close. */
@@ -379,6 +379,11 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
       <span class="sp-c1-filter active" data-state="live">Live</span>
       <span class="sp-c1-filter" data-state="finished">Finished</span>
       <span class="sp-c1-filter" data-state="upcoming">Upcoming</span>
+      <div class="sp-c2-daypicker" id="sp-c1-daypicker">
+        <button class="sp-c2-dp-arrow" id="sp-c2-dp-prev" type="button" title="Previous day">‹</button>
+        <button class="sp-c2-dp-label" id="sp-c2-dp-label" type="button">Today</button>
+        <button class="sp-c2-dp-arrow" id="sp-c2-dp-next" type="button" title="Next day">›</button>
+      </div>
     </div>
     <div class="sp-c1-search-wrap">
       <input type="search" id="sp-c1-search" class="sp-c1-search"
@@ -512,7 +517,20 @@ function setIndentDays(newIndent) {
   newIndent = Math.max(-7, Math.min(7, newIndent));
   if (newIndent === _indentDays) return;
   _indentDays = newIndent;
+  refreshDayPickerUI();
   loadEvents();
+}
+
+function refreshDayPickerUI() {
+  // Sync the static day-picker DOM (in COL 1) with _indentDays.
+  // Called on every change so label + arrow disabled state stay
+  // accurate without re-rendering the whole COL 1.
+  const lbl = document.getElementById('sp-c2-dp-label');
+  const prev = document.getElementById('sp-c2-dp-prev');
+  const next = document.getElementById('sp-c2-dp-next');
+  if (lbl) lbl.textContent = dayLabel(_indentDays);
+  if (prev) prev.disabled = _indentDays <= -7;
+  if (next) next.disabled = _indentDays >= 7;
 }
 
 // Calendar — month browse state pinned in _calendarMonth (1st of
@@ -933,18 +951,6 @@ function renderCol2() {
       html += filteredKalshiCount + ' on Kalshi';
       html += '</button>';
     }
-    // Day-picker — Sofascore-style: ← arrow, center label
-    // (Today / Tomorrow / Mon May 5), → arrow. Clicking the
-    // center label opens the calendar modal for arbitrary date
-    // selection. Capped at -7..+7 to stay inside FL's window.
-    html += '<div class="sp-c2-daypicker" id="sp-c2-daypicker">';
-    html += '<button class="sp-c2-dp-arrow" id="sp-c2-dp-prev" type="button" ' +
-            'title="Previous day" ' + (_indentDays <= -7 ? 'disabled' : '') + '>‹</button>';
-    html += '<button class="sp-c2-dp-label" id="sp-c2-dp-label" type="button">' +
-            escH(dayLabel(_indentDays)) + '</button>';
-    html += '<button class="sp-c2-dp-arrow" id="sp-c2-dp-next" type="button" ' +
-            'title="Next day" ' + (_indentDays >= 7 ? 'disabled' : '') + '>›</button>';
-    html += '</div>';
     // Game / Market view toggle — same pattern as the homepage's
     // GRID/LIST style switcher.
     html += '<div class="sp-c2-viewtoggle" role="tablist">';
@@ -1070,14 +1076,6 @@ function renderCol2() {
       renderCol2();
     });
   });
-  // Day-picker — left/right arrows and the center label that
-  // opens the full calendar modal. Re-fetches events on change.
-  const dpPrev = col2.querySelector('#sp-c2-dp-prev');
-  const dpNext = col2.querySelector('#sp-c2-dp-next');
-  const dpLabel = col2.querySelector('#sp-c2-dp-label');
-  if (dpPrev) dpPrev.addEventListener('click', () => setIndentDays(_indentDays - 1));
-  if (dpNext) dpNext.addEventListener('click', () => setIndentDays(_indentDays + 1));
-  if (dpLabel) dpLabel.addEventListener('click', openCalendar);
   // Per-event market-type tabs — one strip per matched event.
   // Updates the per-event map then re-renders so just this event's
   // outcomes and chips swap. stopPropagation so the row's click
@@ -1859,6 +1857,17 @@ document.getElementById('sp-cal-today').addEventListener('click', () => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && _calendarOpen) closeCalendar();
 });
+
+// Day-picker — left/right arrows + center label (opens calendar
+// modal). Static markup in COL 1 next to the state pills, so we
+// wire once at init rather than on every renderCol2.
+const dpPrev = document.getElementById('sp-c2-dp-prev');
+const dpNext = document.getElementById('sp-c2-dp-next');
+const dpLabel = document.getElementById('sp-c2-dp-label');
+if (dpPrev) dpPrev.addEventListener('click', () => setIndentDays(_indentDays - 1));
+if (dpNext) dpNext.addEventListener('click', () => setIndentDays(_indentDays + 1));
+if (dpLabel) dpLabel.addEventListener('click', openCalendar);
+refreshDayPickerUI();
 
 // COL 1 search input — substring-match against country + league
 // names. Empty query removes the filter. Debounce by relying on

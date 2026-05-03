@@ -453,7 +453,7 @@ async function renderGolfByTicker(
 }
 
 window.StochverseBundle = {
-  version: '0.7.21',
+  version: '0.7.22',
   loadedAt: Date.now(),
   renderBracket: renderBracketByTicker,
   renderStandingsType: renderStandingsTypeByTicker,
