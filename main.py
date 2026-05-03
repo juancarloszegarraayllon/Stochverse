@@ -10240,7 +10240,20 @@ async def ws_prices(websocket: WebSocket):
         return
     sub = BrowserSubscriber()
     register_browser(sub)
-    await websocket.send_json({"type": "hello", "ts": int(time.time() * 1000)})
+    # Initial hello — must be protected: if the browser tab closed
+    # between accept() and now (refresh, network drop, dev-tools
+    # close), this raises WebSocketDisconnect / ConnectionClosed /
+    # ClientDisconnected. That's an expected disconnect, not an
+    # error worth flooding Sentry with — clean up and return.
+    try:
+        await websocket.send_json({"type": "hello", "ts": int(time.time() * 1000)})
+    except Exception:
+        unregister_browser(sub)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        return
 
     async def _reader():
         """Accept subscribe/unsubscribe messages from the client."""
