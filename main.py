@@ -6852,16 +6852,16 @@ def _normalize_team(name: str) -> str:
 
 
 def _build_kalshi_index_for_sport(sport_name: str) -> dict:
-    """Walk the Kalshi cache, return {fl_event_id: kalshi_record}
-    for sports events whose title matches an FL game. Uses the
-    proven match_game() in flashlive_feed.py — handles team-name
-    aliases (PSG ↔ Paris Saint-Germain, etc.) that naive string
-    matching can't.
+    """Walk the Kalshi cache, return {fl_event_id: [kalshi_records]}
+    for sports events whose title matches an FL game. Multiple
+    records per FL event = multiple market types for the same
+    match (Winner / Spread / Total Points / Steals / Rebounds /
+    etc.) — the frontend uses this for the +N markets badge in
+    Game view and the per-market expansion in Market view.
 
-    Why fl_event_id keying: lets the feed endpoint do an O(1)
-    lookup per FL event without re-running match_game. match_game
-    is reasonably fast but called once per Kalshi event (here)
-    instead of N×M is the right shape.
+    Uses the proven match_game() in flashlive_feed.py — handles
+    team-name aliases (PSG ↔ Paris Saint-Germain, etc.) that
+    naive string matching can't.
     """
     from flashlive_feed import match_game
     get_data()
@@ -6882,13 +6882,24 @@ def _build_kalshi_index_for_sport(sport_name: str) -> dict:
         fl_id = mg.get("event_id")
         if not fl_id:
             continue
-        # First Kalshi record per FL game wins (Kalshi can have
-        # multiple market tickers for the same match — Winner /
-        # Spread / Totals — sharing the same teams; we keep the
-        # first seen and the frontend can fan out via /api/event
-        # /<ticker> if it needs all of them).
-        idx.setdefault(fl_id, r)
+        idx.setdefault(fl_id, []).append(r)
     return idx
+
+
+def _market_type_from_title(title: str) -> str:
+    """Best-effort extraction of the market type from a Kalshi
+    title. Kalshi uses 'Team A vs Team B: Market Type' for
+    sub-markets (e.g., 'Philadelphia at Boston: Steals') and
+    just 'Team A vs Team B' for the headline winner market.
+    Returns the market type or '' if it's the headline.
+    """
+    if not title:
+        return ""
+    # Last colon-separated segment is the market type if the
+    # title has the 'Match: Market' shape.
+    if ":" in title:
+        return title.rsplit(":", 1)[1].strip()
+    return ""
 
 
 def _parse_title_teams(title: str) -> tuple:
@@ -6959,15 +6970,37 @@ async def sports_feed(sport_id: int, timezone: int = 0,
         for ev in (t.get("EVENTS") or []):
             ev_out = dict(ev)  # shallow copy; we add 'kalshi' key
             fl_event_id = ev.get("EVENT_ID") or ""
-            kalshi_match = kalshi_idx.get(fl_event_id)
-            if kalshi_match:
-                ticker = kalshi_match.get("event_ticker") or ""
-                if ticker:
-                    matched_kalshi_tickers.add(ticker)
+            kalshi_matches = kalshi_idx.get(fl_event_id) or []
+            if kalshi_matches:
+                # Pick a 'primary' market — prefer the one whose
+                # title has no ':' suffix (= headline Winner),
+                # else first in list. Used as the row-level click
+                # target in Game view; siblings power the +N
+                # badge and Market view expansion.
+                primary = None
+                for r in kalshi_matches:
+                    if not _market_type_from_title(r.get("title", "")):
+                        primary = r
+                        break
+                if not primary:
+                    primary = kalshi_matches[0]
+                markets = []
+                for r in kalshi_matches:
+                    ticker = r.get("event_ticker") or ""
+                    if ticker:
+                        matched_kalshi_tickers.add(ticker)
+                    markets.append({
+                        "event_ticker": ticker,
+                        "title": r.get("title", ""),
+                        "series_ticker": r.get("series_ticker", ""),
+                        "market_type": _market_type_from_title(r.get("title", "")),
+                    })
                 ev_out["kalshi"] = {
-                    "event_ticker": ticker,
-                    "title": kalshi_match.get("title", ""),
-                    "series_ticker": kalshi_match.get("series_ticker", ""),
+                    "event_ticker": primary.get("event_ticker", ""),
+                    "title": primary.get("title", ""),
+                    "series_ticker": primary.get("series_ticker", ""),
+                    "count": len(markets),
+                    "markets": markets,
                 }
             else:
                 ev_out["kalshi"] = None

@@ -91,6 +91,22 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-summary-pill{display:inline-block;padding:2px 8px;border-radius:11px;background:var(--green-bg);color:var(--green);font-size:11px;font-weight:600;border:1px solid var(--green-line);cursor:pointer;font-family:inherit;transition:background .12s ease,color .12s ease}
 .sp-c2-summary-pill:hover{background:var(--green-line);color:var(--green)}
 .sp-c2-summary-pill.active{background:var(--green);color:var(--bg);border-color:var(--green)}
+/* Game / Market view toggle — pushed to the right side of the
+   summary bar. Mirrors the homepage's GRID/LIST switcher. */
+.sp-c2-viewtoggle{margin-left:auto;display:inline-flex;border:1px solid var(--border);border-radius:4px;overflow:hidden}
+.sp-c2-summary{display:flex;align-items:center;gap:8px}
+.sp-c2-vt-btn{padding:3px 10px;background:transparent;color:var(--text-dim);border:0;font-size:11px;font-weight:600;font-family:inherit;cursor:pointer;transition:background .12s ease,color .12s ease}
+.sp-c2-vt-btn:hover{color:var(--text)}
+.sp-c2-vt-btn.active{background:var(--green-bg);color:var(--green)}
+.sp-c2-vt-btn + .sp-c2-vt-btn{border-left:1px solid var(--border)}
+/* +N markets badge — sits next to the K in the indicator column
+   in Game view. Tiny, inline, communicates the market count
+   without taking up its own grid cell. */
+.sp-c2-count-badge{display:inline-block;font-size:9px;font-weight:700;color:var(--green);background:transparent;padding-left:1px;letter-spacing:.2px}
+.sp-c2-indicator{flex-direction:column;gap:2px}
+/* Market-type label — small dim line under team names in Market
+   view so users know which market the row is about. */
+.sp-c2-market-type{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px;margin-top:3px;font-weight:600}
 .sp-c2-tournament{border-bottom:1px solid var(--border)}
 .sp-c2-tournament-head{padding:10px 14px;background:var(--bg2);display:flex;align-items:baseline;gap:8px;border-top:1px solid var(--border)}
 .sp-c2-league-name{font-size:12px;font-weight:700;color:var(--text);letter-spacing:.3px}
@@ -149,6 +165,14 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c3-cta{display:inline-block;padding:8px 14px;background:var(--green-bg);color:var(--green);border:1px solid var(--green-line);border-radius:4px;text-decoration:none;font-size:12px;font-weight:600;letter-spacing:.3px;transition:background .12s ease,color .12s ease}
 .sp-c3-cta:hover{background:var(--green);color:var(--bg)}
 .sp-c3-cta-sub{font-size:11px;color:var(--text-muted);margin-top:8px;line-height:1.4}
+/* Markets list in COL 3 — one row per market type for matched
+   events. Each row links to the existing /?event=ticker modal. */
+.sp-c3-markets{display:flex;flex-direction:column;gap:2px;margin-bottom:6px}
+.sp-c3-market-row{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;text-decoration:none;color:var(--text);font-size:12px;font-weight:500;transition:background .12s ease,border-color .12s ease}
+.sp-c3-market-row:hover{background:var(--green-bg);border-color:var(--green-line);color:var(--green)}
+.sp-c3-market-label{flex:1}
+.sp-c3-market-arrow{color:var(--text-dim);font-size:12px;margin-left:8px}
+.sp-c3-market-row:hover .sp-c3-market-arrow{color:var(--green)}
 .sp-c3-no-market{color:var(--text-dim);font-size:13px;font-style:italic}
 .sp-c3-stats-placeholder{font-size:12px;color:var(--text-muted);font-style:italic;line-height:1.5;padding:8px 0}
 
@@ -313,10 +337,20 @@ async function loadSportNav() {
 let _eventsCache = null;
 let _matchedKalshiCount = 0;
 let _selectedEventId = null;     // currently-selected FL EVENT_ID for COL 3
+let _selectedTicker = null;      // currently-selected Kalshi ticker (Market view)
 let _activeStateFilter = 'all';
 let _activeLeagueFilter = null;  // tournament_stage_id, or null = all
 let _onlyMatched = false;        // toggled by clicking the "X on Kalshi" pill
+let _viewMode = 'game';          // 'game' (one row per match) or 'market' (one row per ticker)
 const _collapsedCountries = new Set();  // Set of country names
+
+// View mode persists across reloads — same pattern as the
+// column splitter widths.
+const VIEW_LS_KEY = 'sv:sports:view';
+try {
+  const saved = localStorage.getItem(VIEW_LS_KEY);
+  if (saved === 'game' || saved === 'market') _viewMode = saved;
+} catch (e) { /* private mode */ }
 
 async function loadEvents() {
   const sid = activeSportId();
@@ -483,22 +517,27 @@ function renderCol2() {
   }
   let html = '';
   let any = false;
-  // Header with match summary — gives the user a sense of how
-  // many events have a Kalshi market vs FL-only at a glance.
+  // Header with match summary + Game/Market view toggle.
   const totalEvents = _eventsCache.reduce((s, t) =>
     s + (t.events || []).filter(passesStateFilter).length, 0);
   if (_matchedKalshiCount > 0 || totalEvents > 0) {
     html += '<div class="sp-c2-summary">';
     html += '<span class="sp-c2-summary-total">' + totalEvents + ' events</span>';
     if (_matchedKalshiCount > 0) {
-      // Pill is clickable — toggles _onlyMatched filter so users
-      // can quickly drop the FL-only rows and focus on tradable
-      // markets.
+      // 'On Kalshi' filter pill — toggles _onlyMatched.
       const pillCls = 'sp-c2-summary-pill' + (_onlyMatched ? ' active' : '');
       html += ' · <button class="' + pillCls + '" id="sp-c2-only-kalshi" type="button">';
       html += _matchedKalshiCount + ' on Kalshi';
       html += '</button>';
     }
+    // Game / Market view toggle — same pattern as the homepage's
+    // GRID/LIST style switcher.
+    html += '<div class="sp-c2-viewtoggle" role="tablist">';
+    html += '<button class="sp-c2-vt-btn' + (_viewMode === 'game' ? ' active' : '') +
+            '" data-view="game" type="button" role="tab">Game</button>';
+    html += '<button class="sp-c2-vt-btn' + (_viewMode === 'market' ? ' active' : '') +
+            '" data-view="market" type="button" role="tab">Markets</button>';
+    html += '</div>';
     html += '</div>';
   }
   for (const t of _eventsCache) {
@@ -508,55 +547,25 @@ function renderCol2() {
     if (!evs.length) continue;
     any = true;
     html += '<div class="sp-c2-tournament">';
-    // League name takes prominence — users recognise "Premier League"
-    // before "England". Country sits beside it in smaller all-caps as
-    // secondary context (matches Sofascore's tournament header style).
     html += '<div class="sp-c2-tournament-head">';
     html += '<span class="sp-c2-league-name">' + escH(leagueDisplayName(t)) + '</span>';
     if (t.COUNTRY_NAME) html += '<span class="sp-c2-country">' + escH(t.COUNTRY_NAME) + '</span>';
     html += '</div>';
     html += '<div class="sp-c2-events">';
     for (const ev of evs) {
-      const state = eventState(ev);
-      const time = state === 'finished' ? 'FT' : fmtTime(ev.START_TIME);
-      const stLbl = state === 'live' ? (ev.STAGE || 'LIVE') :
-                    state === 'finished' ? '' :
-                    state === 'upcoming' ? '' : '';
-      const matched = !!(ev.kalshi && ev.kalshi.event_ticker);
-      const evClasses = [
-        'sp-c2-event',
-        matched ? 'sp-c2-matched' : 'sp-c2-lite',
-        ev.EVENT_ID === _selectedEventId ? 'selected' : '',
-      ].filter(Boolean).join(' ');
-      html += '<div class="' + evClasses + '" data-event-id="' + escH(ev.EVENT_ID || '') + '"';
-      if (matched) html += ' data-ticker="' + escH(ev.kalshi.event_ticker) + '"';
-      html += '>';
-      // Left indicator column — Kalshi marker on matched rows so
-      // users can see at a glance which events have a market. The
-      // right cell is reserved for prices (Phase 2c).
-      html += '<div class="sp-c2-indicator">';
-      if (matched) {
-        html += '<span class="sp-c2-kalshi-badge" title="On Kalshi">K</span>';
+      // In Market view, each Kalshi ticker becomes its own row;
+      // in Game view, each match is one row with a +N badge if
+      // multiple markets exist.
+      if (_viewMode === 'market' && ev.kalshi && ev.kalshi.markets) {
+        // Expand to one row per market — matched events only.
+        // Lite events still get one row each (no markets to
+        // expand into).
+        for (const m of ev.kalshi.markets) {
+          html += renderEventRow(ev, m, /*isMarketRow=*/true);
+        }
+      } else {
+        html += renderEventRow(ev, null, /*isMarketRow=*/false);
       }
-      html += '</div>';
-      html += '<div class="sp-c2-time">' + escH(time);
-      if (stLbl) html += '<span class="sp-c2-time-state' + (state === 'live' ? ' live' : '') + '">' + escH(stLbl) + '</span>';
-      html += '</div>';
-      html += '<div class="sp-c2-teams">';
-      html += '<span class="sp-c2-team">' + escH(ev.HOME_NAME || '') + '</span>';
-      html += '<span class="sp-c2-team">' + escH(ev.AWAY_NAME || '') + '</span>';
-      html += '</div>';
-      html += '<div class="sp-c2-scores">';
-      html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
-      html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
-      html += '</div>';
-      // Right market cell — empty placeholder today; will hold
-      // YES% price chips (Kalshi / Polymarket / sportsbook) when
-      // Phase 2c wires up prices.
-      html += '<div class="sp-c2-marketcell">';
-      html += matched ? '' : '<span class="sp-c2-no-market" title="No markets yet">—</span>';
-      html += '</div>';
-      html += '</div>';
     }
     html += '</div></div>';
   }
@@ -570,12 +579,11 @@ function renderCol2() {
       const evId = el.dataset.eventId;
       const ticker = el.dataset.ticker || null;
       _selectedEventId = evId;
+      _selectedTicker = ticker;
       renderCol3(evId, ticker);
     });
   });
-  // 'On Kalshi' pill — toggles _onlyMatched. Re-render both
-  // columns so the league counts in COL 1 reflect the filtered
-  // set.
+  // 'On Kalshi' pill → toggles filter, re-renders.
   const pill = col2.querySelector('#sp-c2-only-kalshi');
   if (pill) {
     pill.addEventListener('click', () => {
@@ -584,6 +592,74 @@ function renderCol2() {
       renderCol2();
     });
   }
+  // Game / Market view toggle.
+  col2.querySelectorAll('.sp-c2-vt-btn').forEach(el => {
+    el.addEventListener('click', () => {
+      _viewMode = el.dataset.view;
+      try { localStorage.setItem(VIEW_LS_KEY, _viewMode); } catch (e) {}
+      renderCol2();
+    });
+  });
+}
+
+function renderEventRow(ev, market, isMarketRow) {
+  // market is non-null in Market view (the specific Kalshi
+  // ticker for this row). isMarketRow flips a few visuals
+  // (smaller font on the market-type label, ticker in the
+  // selection key).
+  const state = eventState(ev);
+  const time = state === 'finished' ? 'FT' : fmtTime(ev.START_TIME);
+  const stLbl = state === 'live' ? (ev.STAGE || 'LIVE') :
+                state === 'finished' ? '' :
+                state === 'upcoming' ? '' : '';
+  const matched = !!(ev.kalshi && ev.kalshi.event_ticker);
+  const rowTicker = isMarketRow && market ? market.event_ticker
+                  : (matched ? ev.kalshi.event_ticker : null);
+  const isSelected = isMarketRow
+    ? (ev.EVENT_ID === _selectedEventId && rowTicker === _selectedTicker)
+    : (ev.EVENT_ID === _selectedEventId && !_selectedTicker);
+  const evClasses = [
+    'sp-c2-event',
+    matched ? 'sp-c2-matched' : 'sp-c2-lite',
+    isSelected ? 'selected' : '',
+  ].filter(Boolean).join(' ');
+  let html = '<div class="' + evClasses + '" data-event-id="' + escH(ev.EVENT_ID || '') + '"';
+  if (rowTicker) html += ' data-ticker="' + escH(rowTicker) + '"';
+  html += '>';
+  // Left indicator column — Kalshi K (+ count badge in Game view
+  // when an event has multiple markets).
+  html += '<div class="sp-c2-indicator">';
+  if (matched) {
+    html += '<span class="sp-c2-kalshi-badge" title="On Kalshi">K</span>';
+    if (!isMarketRow && ev.kalshi.count > 1) {
+      html += '<span class="sp-c2-count-badge" title="' +
+        escH(ev.kalshi.count + ' markets') + '">+' + (ev.kalshi.count - 1) + '</span>';
+    }
+  }
+  html += '</div>';
+  html += '<div class="sp-c2-time">' + escH(time);
+  if (stLbl) html += '<span class="sp-c2-time-state' + (state === 'live' ? ' live' : '') + '">' + escH(stLbl) + '</span>';
+  html += '</div>';
+  html += '<div class="sp-c2-teams">';
+  html += '<span class="sp-c2-team">' + escH(ev.HOME_NAME || '') + '</span>';
+  html += '<span class="sp-c2-team">' + escH(ev.AWAY_NAME || '') + '</span>';
+  // In Market view, append the market type below the team names
+  // so users can scan which market each row represents.
+  if (isMarketRow && market && market.market_type) {
+    html += '<span class="sp-c2-market-type">' + escH(market.market_type) + '</span>';
+  }
+  html += '</div>';
+  html += '<div class="sp-c2-scores">';
+  html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
+  html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
+  html += '</div>';
+  // Right market cell — placeholder until prices land in
+  // Phase 2c-prices.
+  html += '<div class="sp-c2-marketcell">';
+  html += matched ? '' : '<span class="sp-c2-no-market" title="No markets yet">—</span>';
+  html += '</div>';
+  html += '</div>';
+  return html;
 }
 
 // State-filter pill clicks
@@ -653,17 +729,25 @@ async function renderCol3(flEventId, ticker) {
   html += '</div>';
   html += '</div>';
 
-  // Markets section: for matched events, link out to Stochverse
-  // modal (full feature set). For FL-only, "no markets yet"
-  // placeholder that's future-compatible with Polymarket /
-  // sportsbook integration.
+  // Markets section: for matched events, list ALL Kalshi markets
+  // for this match (Winner, Spread, Total Points, Steals, etc.)
+  // each with its own 'View' link to the full Kalshi modal. For
+  // FL-only events, a 'no markets yet' placeholder that's
+  // future-compatible with Polymarket / sportsbook integration.
   html += '<div class="sp-c3-section">';
   html += '<div class="sp-c3-section-head">Markets</div>';
   if (matched) {
-    html += '<a class="sp-c3-cta" href="/?event=' + escH(ticker) + '" target="_blank" rel="noopener">';
-    html += 'View prices & trade ↗';
-    html += '</a>';
-    html += '<div class="sp-c3-cta-sub">Opens the full Kalshi market view in a new tab.</div>';
+    const markets = (ev.kalshi && ev.kalshi.markets) || [];
+    html += '<div class="sp-c3-markets">';
+    for (const m of markets) {
+      const label = m.market_type || 'Winner';
+      html += '<a class="sp-c3-market-row" href="/?event=' + escH(m.event_ticker) + '" target="_blank" rel="noopener">';
+      html += '<span class="sp-c3-market-label">' + escH(label) + '</span>';
+      html += '<span class="sp-c3-market-arrow">↗</span>';
+      html += '</a>';
+    }
+    html += '</div>';
+    html += '<div class="sp-c3-cta-sub">Click a market → opens the full Kalshi view in a new tab.</div>';
   } else {
     html += '<div class="sp-c3-no-market">No markets yet</div>';
     html += '<div class="sp-c3-cta-sub">Polymarket and sportsbook odds for this event will appear here once those integrations land.</div>';
