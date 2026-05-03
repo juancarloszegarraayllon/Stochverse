@@ -7014,9 +7014,7 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
     rare in practice since labels and FL names usually share
     obvious tokens).
     """
-    out = {"home_yes": None, "away_yes": None, "tie_yes": None,
-           "_dbg_labels": [], "_dbg_outcome_keys": None,
-           "_dbg_first_outcome": None}
+    out = {"home_yes": None, "away_yes": None, "tie_yes": None}
     # Cache records use two different field names depending on
     # path: raw records (data_all) carry `outcomes`, grouped
     # records (data, post-_group_game_markets) carry `_outcomes`.
@@ -7027,28 +7025,6 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
                 or [])
     if not outcomes:
         return out
-    # Diagnostic: capture the keys present on the first outcome,
-    # plus the first outcome's full content (price-related fields
-    # only) so we can verify the price-field name in the smoke
-    # test response. Will be removed once the field name is known.
-    if outcomes:
-        first = outcomes[0]
-        if isinstance(first, dict):
-            out["_dbg_outcome_keys"] = sorted(list(first.keys()))[:30]
-            # Pull out anything that LOOKS like a price field —
-            # bid/ask/last/dollars/cents — so we can see exactly
-            # what's there without hauling the entire object.
-            price_dump = {}
-            for k, v in first.items():
-                kl = k.lower()
-                if any(needle in kl for needle in
-                       ("yes", "no", "bid", "ask", "price", "last",
-                        "dollar", "cent")):
-                    price_dump[k] = v
-            out["_dbg_first_outcome"] = {
-                "label": first.get("label"),
-                "_price_fields": price_dump,
-            }
     import re
     home_lc = (home_name or "").lower()
     away_lc = (away_name or "").lower()
@@ -7065,12 +7041,13 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
         if not label:
             continue
         label_lc = label.lower()
-        out["_dbg_labels"].append(label)
-        # Outcome may store yes_bid as int cents OR as float
-        # dollars depending on transformation stage. Cents is the
-        # common form (set at lines 1649-1650 of main.py via
-        # _cents_from). Coerce to int cents for output.
-        yes_bid = o.get("yes_bid")
+        # Cache stores price as cents under '_yb' (yes_bid). Diagnostic
+        # smoke test on v0.6.9 surfaced the underscore-prefix convention —
+        # this is the canonical storage key. Fallbacks for the rare
+        # raw-Kalshi-passthrough case (yes_bid / yes_bid_dollars).
+        yes_bid = o.get("_yb")
+        if yes_bid is None:
+            yes_bid = o.get("yes_bid")
         if yes_bid is None:
             yb_dollars = o.get("yes_bid_dollars")
             if yb_dollars is not None:
@@ -7201,6 +7178,14 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                 away_name = ev.get("AWAY_NAME") or ""
                 primary_prices = _extract_winner_prices(
                     primary, home_name, away_name)
+                # Aggregate score (two-leg knockout ties — soccer cup
+                # competitions). Comes from the cache's soccer-aggregate
+                # enrichment via SofaScore (see _enrich_soccer_aggregate
+                # at main.py:2429). Only present for soccer events that
+                # are part of a multi-leg tie; null for everything else.
+                # Live-state may also carry the leg/aggregate label
+                # for richer rendering ('PSG LEADS AGGREGATE').
+                live = primary.get("_live_state") or {}
                 ev_out["kalshi"] = {
                     "event_ticker": primary.get("event_ticker", ""),
                     "title": primary.get("title", ""),
@@ -7208,6 +7193,10 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                     "count": len(markets),
                     "markets": markets,
                     "primary_prices": primary_prices,
+                    "aggregate_home": primary.get("aggregate_home"),
+                    "aggregate_away": primary.get("aggregate_away"),
+                    "aggregate_label": (live.get("aggregate_label")
+                                        if isinstance(live, dict) else None),
                 }
             else:
                 ev_out["kalshi"] = None

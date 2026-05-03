@@ -21,15 +21,31 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-header a.sp-back{color:var(--text-dim);text-decoration:none;font-size:12px;padding:6px 10px;border-radius:4px}
 .sp-header a.sp-back:hover{color:var(--text);background:var(--bg-card)}
 
-/* Top sport nav strip — horizontally scrollable like Sofascore.
-   Each sport is a button with icon + name + optional live count. */
-.sp-nav{height:var(--sport-nav-h);display:flex;align-items:center;gap:2px;padding:0 8px;border-bottom:1px solid var(--border);background:var(--bg2);overflow-x:auto;overflow-y:hidden;scrollbar-width:none;white-space:nowrap;flex-shrink:0}
+/* Top sport nav strip — horizontally scrollable, with edge fade
+   gradients and arrow buttons that surface when content overflows.
+   Tab-style layout (uppercase text, active-state underline) matches
+   the COL 1 sub-tabs for a coherent header system. */
+.sp-nav-wrap{position:relative;height:var(--sport-nav-h);border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0;display:flex;align-items:center}
+.sp-nav{flex:1;display:flex;align-items:center;gap:0;padding:0 36px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;white-space:nowrap;height:100%;scroll-behavior:smooth}
 .sp-nav::-webkit-scrollbar{display:none}
-.sp-nav-item{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:6px;cursor:pointer;color:var(--text-dim);font-size:13px;font-weight:500;background:transparent;border:0;transition:background .12s ease,color .12s ease;white-space:nowrap}
-.sp-nav-item:hover{color:var(--text);background:var(--bg-card)}
-.sp-nav-item.active{color:var(--green);background:var(--green-bg)}
-.sp-nav-count{font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;background:var(--bg-card);color:var(--text-dim);font-variant-numeric:tabular-nums}
-.sp-nav-item.active .sp-nav-count{background:var(--green-line);color:var(--green)}
+.sp-nav-item{display:inline-flex;align-items:center;gap:6px;padding:0 14px;height:100%;cursor:pointer;color:var(--text-dim);font-size:11px;font-weight:600;background:transparent;border:0;border-bottom:2px solid transparent;text-transform:uppercase;letter-spacing:.5px;text-decoration:none;transition:color .12s ease,border-color .12s ease;white-space:nowrap;font-family:inherit}
+.sp-nav-item:hover{color:var(--text)}
+.sp-nav-item.active{color:var(--green);border-bottom-color:var(--green)}
+.sp-nav-count{font-size:9px;font-weight:600;padding:1px 5px;border-radius:7px;background:var(--bg-card);color:var(--text-muted);font-variant-numeric:tabular-nums;letter-spacing:0;text-transform:none}
+.sp-nav-item.active .sp-nav-count{background:var(--green-bg);color:var(--green)}
+/* Edge fades: hint that content extends past the visible area.
+   Become invisible when the nav is at the start/end of its scroll. */
+.sp-nav-fade{position:absolute;top:0;bottom:0;width:36px;pointer-events:none;z-index:1;transition:opacity .15s ease}
+.sp-nav-fade-l{left:32px;background:linear-gradient(to right, var(--bg) 0%, transparent 100%)}
+.sp-nav-fade-r{right:32px;background:linear-gradient(to left, var(--bg) 0%, transparent 100%)}
+.sp-nav-fade.hidden{opacity:0}
+/* Scroll arrow buttons — sit on either edge, click to scroll
+   the strip ~200px in that direction. Hidden when no overflow. */
+.sp-nav-arrow{flex-shrink:0;width:32px;height:100%;background:var(--bg);color:var(--text-dim);border:0;border-bottom:1px solid transparent;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;font-family:inherit;z-index:2;transition:color .12s ease,opacity .15s ease}
+.sp-nav-arrow:hover{color:var(--green)}
+.sp-nav-arrow.hidden{opacity:0;pointer-events:none}
+.sp-nav-arrow-l{border-right:1px solid var(--border)}
+.sp-nav-arrow-r{border-left:1px solid var(--border)}
 
 /* Main 3-column grid. Heights are calculated so each column
    gets its own scrollbar without page-level scroll. The grid uses
@@ -151,6 +167,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-teams{font-size:13px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
 .sp-c2-team{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sp-c2-scores{font-size:13px;font-weight:700;text-align:right;font-variant-numeric:tabular-nums;display:flex;flex-direction:column;gap:2px}
+.sp-c2-agg{font-size:9px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.3px;margin-top:2px}
 .sp-c2-fav{color:var(--text-muted);text-align:center;cursor:pointer;font-size:14px}
 .sp-c2-fav:hover{color:var(--green)}
 
@@ -212,10 +229,20 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 </header>
 
 <!-- Top sport nav: populated from /api/fl/sports-list + counts.
-     Active sport pulled from the URL path (/sports/:sport_id). -->
-<nav class="sp-nav" id="sp-nav" aria-label="Sport selector">
-  <span style="color:var(--text-muted);padding:0 14px;font-size:12px">Loading sports…</span>
-</nav>
+     Active sport pulled from the URL path (/sports/:sport_id).
+     Wrapper holds scroll-affordance arrows + edge fades so users
+     discover that the strip overflows on narrow viewports. -->
+<div class="sp-nav-wrap" aria-label="Sport selector">
+  <button class="sp-nav-arrow sp-nav-arrow-l hidden" id="sp-nav-arrow-l"
+          type="button" title="Scroll left" aria-label="Scroll sports left">‹</button>
+  <div class="sp-nav-fade sp-nav-fade-l hidden" id="sp-nav-fade-l"></div>
+  <nav class="sp-nav" id="sp-nav">
+    <span style="color:var(--text-muted);padding:0 14px;font-size:12px">Loading sports…</span>
+  </nav>
+  <div class="sp-nav-fade sp-nav-fade-r hidden" id="sp-nav-fade-r"></div>
+  <button class="sp-nav-arrow sp-nav-arrow-r hidden" id="sp-nav-arrow-r"
+          type="button" title="Scroll right" aria-label="Scroll sports right">›</button>
+</div>
 
 <main class="sp-main" id="sp-main">
 
@@ -269,12 +296,8 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 // COL 3 detail rendering ships in a follow-up commit so the user
 // can visually verify the scaffold + nav + leagues + events first.
 
-const SPORT_ICONS = {
-  1: '⚽', 2: '🎾', 3: '🏀', 4: '🏒', 5: '🏈', 6: '⚾', 7: '🤾',
-  8: '🏉', 12: '🏐', 13: '🏏', 14: '🎯', 15: '🎱', 16: '🥊',
-  18: 'AR', 19: 'RL', 22: '🤽', 23: '⛳', 25: '🏓', 28: '🥋',
-  21: '🏸', 36: '🎮', 35: '🐎', 31: '🏎', 32: '🏎', 33: '🏎',
-};
+// (Sport icons removed per visual feedback — uppercase text-only
+// labels with active-state underline read more professional.)
 
 // Pull active sport_id from URL path (/sports/3 → 3) or query string.
 function activeSportId() {
@@ -354,7 +377,6 @@ async function loadSportNav() {
     const count = counts[sid];
     const cls = 'sp-nav-item' + (sid === active ? ' active' : '');
     html += '<a class="' + cls + '" href="/sports/' + sid + '">';
-    html += '<span class="sp-nav-icon">' + escH(icon) + '</span>';
     html += '<span class="sp-nav-name">' + escH(name) + '</span>';
     if (count != null && count > 0) {
       html += '<span class="sp-nav-count">' + escH(count) + '</span>';
@@ -362,6 +384,40 @@ async function loadSportNav() {
     html += '</a>';
   }
   nav.innerHTML = html;
+  setupNavScroll();
+}
+
+// Sport-nav scroll affordance: arrow buttons + edge fades that
+// surface when the strip overflows. Arrows scroll the strip ~200px
+// per click. Fades indicate there's more content past the visible
+// edge. Both update on scroll/resize.
+function setupNavScroll() {
+  const nav = document.getElementById('sp-nav');
+  const aL = document.getElementById('sp-nav-arrow-l');
+  const aR = document.getElementById('sp-nav-arrow-r');
+  const fL = document.getElementById('sp-nav-fade-l');
+  const fR = document.getElementById('sp-nav-fade-r');
+  if (!nav || !aL || !aR || !fL || !fR) return;
+
+  function update() {
+    const sl = nav.scrollLeft;
+    const sw = nav.scrollWidth;
+    const cw = nav.clientWidth;
+    const overflow = sw > cw + 1;
+    const atStart = sl < 4;
+    const atEnd = sl + cw >= sw - 4;
+    aL.classList.toggle('hidden', !overflow || atStart);
+    aR.classList.toggle('hidden', !overflow || atEnd);
+    fL.classList.toggle('hidden', !overflow || atStart);
+    fR.classList.toggle('hidden', !overflow || atEnd);
+  }
+
+  aL.onclick = () => { nav.scrollBy({ left: -240, behavior: 'smooth' }); };
+  aR.onclick = () => { nav.scrollBy({ left:  240, behavior: 'smooth' }); };
+  nav.addEventListener('scroll', update, { passive: true });
+  window.addEventListener('resize', update);
+  // Initial after content has rendered.
+  requestAnimationFrame(update);
 }
 
 // COL 1 + COL 2 — fetch events for the active sport, group by
@@ -795,6 +851,15 @@ function renderEventRow(ev, market, isMarketRow) {
   html += '<div class="sp-c2-scores">';
   html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
   html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
+  // Aggregate score (two-leg knockout ties — soccer cup
+  // competitions). Only shows when matched event has aggregate
+  // data from SofaScore enrichment. Tiny "agg X-Y" line below
+  // the leg score so users see the tie standing.
+  if (matched && ev.kalshi.aggregate_home != null && ev.kalshi.aggregate_away != null) {
+    html += '<span class="sp-c2-agg" title="Aggregate score">agg ' +
+            escH(ev.kalshi.aggregate_home) + '-' +
+            escH(ev.kalshi.aggregate_away) + '</span>';
+  }
   html += '</div>';
   // Right market cell — Kalshi YES prices stacked home/away
   // to align with the scores column. FL-only events show '—'
