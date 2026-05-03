@@ -316,8 +316,28 @@ async function loadSportNav() {
   }
   const sports = (sportsListData.data && sportsListData.data.DATA) || [];
   // Build count map by sport_id from /events-count if available.
+  // FL's response shape isn't strictly an array — defensively
+  // handle both array (DATA: [{SPORT_ID, COUNT}, ...]) and object
+  // (DATA: {1: 37, 2: 8, ...} — sport_id keyed) variants. Throws
+  // were silent until v0.6.7 broke the nav loader entirely.
   const counts = {};
-  const cd = (countsData && countsData.data && countsData.data.DATA) || [];
+  let cdRaw = countsData && countsData.data && countsData.data.DATA;
+  if (Array.isArray(cdRaw)) {
+    for (const c of cdRaw) {
+      const sid = c.SPORT_ID || c.ID;
+      const n = c.LIVE_EVENT_COUNT || c.EVENT_COUNT || c.COUNT;
+      if (sid != null && n != null) counts[sid] = n;
+    }
+  } else if (cdRaw && typeof cdRaw === 'object') {
+    for (const sid of Object.keys(cdRaw)) {
+      const n = cdRaw[sid];
+      if (n != null && typeof n === 'number') counts[sid] = n;
+    }
+  }
+  // Legacy unused vars for the loop below; preserved to match
+  // earlier shape but skip the iteration since counts is already
+  // built. Replaces the broken `for (const c of cd)` loop.
+  const cd = [];
   for (const c of cd) {
     const sid = c.SPORT_ID || c.ID;
     const n = c.LIVE_EVENT_COUNT || c.EVENT_COUNT || c.COUNT;

@@ -7015,7 +7015,8 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
     obvious tokens).
     """
     out = {"home_yes": None, "away_yes": None, "tie_yes": None,
-           "_dbg_labels": []}
+           "_dbg_labels": [], "_dbg_outcome_keys": None,
+           "_dbg_first_outcome": None}
     # Cache records use two different field names depending on
     # path: raw records (data_all) carry `outcomes`, grouped
     # records (data, post-_group_game_markets) carry `_outcomes`.
@@ -7026,6 +7027,28 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
                 or [])
     if not outcomes:
         return out
+    # Diagnostic: capture the keys present on the first outcome,
+    # plus the first outcome's full content (price-related fields
+    # only) so we can verify the price-field name in the smoke
+    # test response. Will be removed once the field name is known.
+    if outcomes:
+        first = outcomes[0]
+        if isinstance(first, dict):
+            out["_dbg_outcome_keys"] = sorted(list(first.keys()))[:30]
+            # Pull out anything that LOOKS like a price field —
+            # bid/ask/last/dollars/cents — so we can see exactly
+            # what's there without hauling the entire object.
+            price_dump = {}
+            for k, v in first.items():
+                kl = k.lower()
+                if any(needle in kl for needle in
+                       ("yes", "no", "bid", "ask", "price", "last",
+                        "dollar", "cent")):
+                    price_dump[k] = v
+            out["_dbg_first_outcome"] = {
+                "label": first.get("label"),
+                "_price_fields": price_dump,
+            }
     import re
     home_lc = (home_name or "").lower()
     away_lc = (away_name or "").lower()
