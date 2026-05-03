@@ -32,16 +32,25 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-nav-item.active .sp-nav-count{background:var(--green-line);color:var(--green)}
 
 /* Main 3-column grid. Heights are calculated so each column
-   gets its own scrollbar without page-level scroll. */
-.sp-main{display:grid;grid-template-columns:var(--col1-w) 1fr var(--col3-w);height:calc(100vh - var(--header-h) - var(--sport-nav-h));overflow:hidden}
+   gets its own scrollbar without page-level scroll. The grid uses
+   --col1-w / --col3-w which user-resizable splitters update via
+   inline style + localStorage persistence (init.js). */
+.sp-main{display:grid;grid-template-columns:var(--col1-w) 4px 1fr 4px var(--col3-w);height:calc(100vh - var(--header-h) - var(--sport-nav-h));overflow:hidden}
 .sp-col{height:100%;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
 .sp-col::-webkit-scrollbar{width:8px}
 .sp-col::-webkit-scrollbar-track{background:transparent}
 .sp-col::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
 .sp-col::-webkit-scrollbar-thumb:hover{background:#333}
-.sp-col1{border-right:1px solid var(--border);background:var(--bg)}
-.sp-col2{background:var(--bg);border-right:1px solid var(--border)}
+.sp-col1{background:var(--bg)}
+.sp-col2{background:var(--bg)}
 .sp-col3{background:var(--bg2)}
+/* Splitter bars between columns. Thin, dark, hoverable green so
+   users can find them without crowding the layout. Drag handler
+   in JS updates --col1-w / --col3-w on the .sp-main element. */
+.sp-splitter{background:var(--border);cursor:col-resize;position:relative;transition:background .12s ease}
+.sp-splitter:hover,.sp-splitter.dragging{background:var(--green-line)}
+.sp-splitter::after{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:2px;height:24px;background:var(--text-muted);border-radius:1px;opacity:0;transition:opacity .12s ease}
+.sp-splitter:hover::after,.sp-splitter.dragging::after{opacity:.6}
 
 /* COL 1 — leagues sidebar.
    Each tournament = collapsible group with country flag/name + count. */
@@ -64,8 +73,9 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    Each tournament has a header + collapsible list of event rows. */
 .sp-c2-empty{padding:60px 24px;text-align:center;color:var(--text-muted);font-size:13px}
 .sp-c2-tournament{border-bottom:1px solid var(--border)}
-.sp-c2-tournament-head{padding:10px 14px;background:var(--bg2);font-size:11px;font-weight:600;color:var(--text);display:flex;align-items:center;gap:8px;letter-spacing:.3px;text-transform:uppercase}
-.sp-c2-country{color:var(--text-dim);font-weight:500}
+.sp-c2-tournament-head{padding:10px 14px;background:var(--bg2);display:flex;align-items:baseline;gap:8px;border-top:1px solid var(--border)}
+.sp-c2-league-name{font-size:12px;font-weight:700;color:var(--text);letter-spacing:.3px}
+.sp-c2-country{font-size:10px;font-weight:500;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px}
 .sp-c2-events{padding:0}
 .sp-c2-event{display:grid;grid-template-columns:64px 1fr 60px 28px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:center;transition:background .1s ease}
 .sp-c2-event:hover{background:var(--bg-card)}
@@ -117,7 +127,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
   <span style="color:var(--text-muted);padding:0 14px;font-size:12px">Loading sports…</span>
 </nav>
 
-<main class="sp-main">
+<main class="sp-main" id="sp-main">
 
   <!-- COL 1 — leagues sidebar -->
   <aside class="sp-col sp-col1" id="sp-col1">
@@ -137,10 +147,20 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
     </div>
   </aside>
 
+  <!-- Splitter between COL 1 and COL 2. Drag to resize COL 1
+       width; persists to localStorage via splitter.js. -->
+  <div class="sp-splitter" id="sp-split-1" data-resize="col1"
+       title="Drag to resize"></div>
+
   <!-- COL 2 — events stream, grouped by tournament -->
   <section class="sp-col sp-col2" id="sp-col2">
     <div class="sp-c2-empty" id="sp-col2-empty">Loading events…</div>
   </section>
+
+  <!-- Splitter between COL 2 and COL 3. Drag to resize COL 3
+       width (from the right edge); same persistence. -->
+  <div class="sp-splitter" id="sp-split-2" data-resize="col3"
+       title="Drag to resize"></div>
 
   <!-- COL 3 — selected event detail. Placeholder until COL 3
        wiring lands in the next commit. -->
@@ -346,9 +366,12 @@ function renderCol2() {
     if (!evs.length) continue;
     any = true;
     html += '<div class="sp-c2-tournament">';
+    // League name takes prominence — users recognise "Premier League"
+    // before "England". Country sits beside it in smaller all-caps as
+    // secondary context (matches Sofascore's tournament header style).
     html += '<div class="sp-c2-tournament-head">';
-    if (t.COUNTRY_NAME) html += '<span class="sp-c2-country">' + escH(t.COUNTRY_NAME) + '</span> ▸ ';
-    html += escH(t.NAME_PART_2 || t.NAME || '');
+    html += '<span class="sp-c2-league-name">' + escH(t.NAME_PART_2 || t.NAME || '') + '</span>';
+    if (t.COUNTRY_NAME) html += '<span class="sp-c2-country">' + escH(t.COUNTRY_NAME) + '</span>';
     html += '</div>';
     html += '<div class="sp-c2-events">';
     for (const ev of evs) {
@@ -397,7 +420,101 @@ document.querySelectorAll('.sp-c1-filter').forEach(el => {
   });
 });
 
+// ── Column splitter: drag-to-resize for COL 1 and COL 3 ──
+// Bounds: COL 1 in [200, 480]px, COL 3 in [320, 720]px. Below
+// these the layout starts breaking; above wastes screen real
+// estate. Persists to localStorage so user prefs survive reload.
+//
+// Disabled at <900px (mobile fallback uses single-column anyway).
+const SPLIT_BOUNDS = {
+  col1: { min: 200, max: 480, default: 280, var: '--col1-w' },
+  col3: { min: 320, max: 720, default: 480, var: '--col3-w' },
+};
+const SPLIT_LS_KEY = 'sv:sports:cols';
+
+function loadColWidths() {
+  if (window.innerWidth < 900) return;
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(SPLIT_LS_KEY) || '{}');
+  } catch (e) { saved = {}; }
+  const main = document.getElementById('sp-main');
+  for (const key of ['col1', 'col3']) {
+    const b = SPLIT_BOUNDS[key];
+    const w = saved[key];
+    if (typeof w === 'number' && w >= b.min && w <= b.max) {
+      main.style.setProperty(b.var, w + 'px');
+    }
+  }
+}
+
+function saveColWidth(key, px) {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(SPLIT_LS_KEY) || '{}');
+  } catch (e) { saved = {}; }
+  saved[key] = px;
+  try {
+    localStorage.setItem(SPLIT_LS_KEY, JSON.stringify(saved));
+  } catch (e) { /* localStorage may be unavailable in private mode */ }
+}
+
+function setupSplitter(splitterEl) {
+  const key = splitterEl.dataset.resize;       // 'col1' or 'col3'
+  const b = SPLIT_BOUNDS[key];
+  const main = document.getElementById('sp-main');
+  let dragging = false;
+  let startX = 0;
+  let startW = 0;
+
+  function getCurrentW() {
+    const cs = getComputedStyle(main).getPropertyValue(b.var).trim();
+    return parseInt(cs, 10) || b.default;
+  }
+
+  function onDown(e) {
+    if (window.innerWidth < 900) return;
+    dragging = true;
+    splitterEl.classList.add('dragging');
+    startX = e.clientX;
+    startW = getCurrentW();
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  }
+
+  function onMove(e) {
+    if (!dragging) return;
+    let delta = e.clientX - startX;
+    // COL 3 grows when you drag the right splitter LEFT (delta
+    // negative shrinks main area, expanding col3). Invert for col3.
+    if (key === 'col3') delta = -delta;
+    let next = Math.max(b.min, Math.min(b.max, startW + delta));
+    main.style.setProperty(b.var, next + 'px');
+  }
+
+  function onUp() {
+    if (!dragging) return;
+    dragging = false;
+    splitterEl.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    saveColWidth(key, getCurrentW());
+  }
+
+  splitterEl.addEventListener('mousedown', onDown);
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+  // Double-click resets to default (Sofascore convention).
+  splitterEl.addEventListener('dblclick', () => {
+    main.style.setProperty(b.var, b.default + 'px');
+    saveColWidth(key, b.default);
+  });
+}
+
 // Initial load
+loadColWidths();
+document.querySelectorAll('.sp-splitter').forEach(setupSplitter);
 loadSportNav();
 loadEvents();
 </script>
