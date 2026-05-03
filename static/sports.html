@@ -81,7 +81,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c1-tab{flex:1;text-align:center;padding:10px 8px;cursor:pointer;color:var(--text-dim);border-bottom:2px solid transparent;font-weight:500}
 .sp-c1-tab:hover{color:var(--text)}
 .sp-c1-tab.active{color:var(--green);border-bottom-color:var(--green)}
-.sp-c1-filters{display:flex;gap:6px;padding:10px 12px;flex-wrap:wrap;border-bottom:1px solid var(--border);position:sticky;top:38px;background:var(--bg);z-index:5}
+.sp-c1-filters{display:flex;gap:6px;padding:10px 12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--border);position:sticky;top:38px;background:var(--bg);z-index:5}
 /* Search box at the top of COL 1 — substring filter on country
    + league names. Sticky below the filters strip. */
 .sp-c1-search-wrap{padding:8px 12px;border-bottom:1px solid var(--border);position:sticky;top:90px;background:var(--bg);z-index:4}
@@ -95,11 +95,17 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    reads as a sibling control rather than a foreign widget.
    Internal arrow buttons hover-highlight individually but the
    wrapper stays a single visual unit. */
-.sp-c2-daypicker{display:inline-flex;align-items:stretch;background:var(--bg-card);border:1px solid transparent;border-radius:14px;overflow:hidden;font-family:inherit;height:24px;margin-left:auto}
-.sp-c2-dp-arrow{background:transparent;border:0;color:var(--text-dim);width:22px;font-size:13px;cursor:pointer;padding:0;font-family:inherit;line-height:1}
+/* Day-picker — same .sp-c1-filter pill family: matching height,
+   pill background, 14px radius. Internal arrow buttons + label
+   share the wrapper's vertical centering so 'Today' renders
+   dead-center next to '<' and '>'. margin-left:auto pushes the
+   picker to the right end of the filters row when there's space;
+   wraps to a new line otherwise. */
+.sp-c2-daypicker{display:inline-flex;align-items:center;background:var(--bg-card);border:1px solid transparent;border-radius:14px;overflow:hidden;font-family:inherit;height:24px;box-sizing:border-box;margin-left:auto}
+.sp-c2-dp-arrow{background:transparent;border:0;color:var(--text-dim);width:22px;height:100%;font-size:13px;cursor:pointer;padding:0;font-family:inherit;display:inline-flex;align-items:center;justify-content:center}
 .sp-c2-dp-arrow:hover:not(:disabled){color:var(--text);background:rgba(255,255,255,0.06)}
 .sp-c2-dp-arrow:disabled{opacity:0.35;cursor:not-allowed}
-.sp-c2-dp-label{background:transparent;border:0;color:var(--text-dim);padding:0 10px;font-size:11px;font-weight:500;cursor:pointer;font-family:inherit;letter-spacing:.2px;min-width:80px;text-align:center;line-height:1}
+.sp-c2-dp-label{background:transparent;border:0;color:var(--text-dim);padding:0 10px;font-size:11px;font-weight:500;cursor:pointer;font-family:inherit;letter-spacing:.2px;min-width:80px;height:100%;display:inline-flex;align-items:center;justify-content:center}
 .sp-c2-dp-label:hover{color:var(--text)}
 /* Calendar modal — overlays the page when the day-picker label
    is clicked. Click the backdrop or × to close. */
@@ -123,7 +129,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-cal-day:disabled{opacity:0.35;cursor:not-allowed}
 .sp-cal-today-btn{display:block;margin:14px auto 0;background:var(--green-bg);color:var(--green);border:1px solid var(--green-line);padding:6px 22px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;letter-spacing:.5px}
 .sp-cal-today-btn:hover{background:var(--green-line)}
-.sp-c1-filter{font-size:11px;padding:5px 10px;border-radius:14px;background:var(--bg-card);color:var(--text-dim);cursor:pointer;border:1px solid transparent;font-weight:500}
+.sp-c1-filter{font-size:11px;height:24px;padding:0 12px;box-sizing:border-box;border-radius:14px;background:var(--bg-card);color:var(--text-dim);cursor:pointer;border:1px solid transparent;font-weight:500;display:inline-flex;align-items:center;justify-content:center}
 .sp-c1-filter:hover{color:var(--text)}
 .sp-c1-filter.active{background:var(--red);color:#fff;border-color:var(--red)}
 .sp-c1-list{padding:6px 0}
@@ -191,7 +197,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-event:hover{background:var(--bg-card)}
 .sp-c2-event.selected{background:var(--green-bg);border-left-color:var(--green)}
 .sp-c2-event:last-child{border-bottom:none}
-.sp-c2-event-row{display:grid;grid-template-columns:20px 64px 1fr var(--sp-score-w) 180px;gap:8px;padding:10px 14px;align-items:start}
+.sp-c2-event-row{display:grid;grid-template-columns:64px 1fr var(--sp-score-w) 180px;gap:8px;padding:10px 14px;align-items:start}
 /* Per-event tab strip — appears at the top of matched events that
    have multiple market types. Sits inside the event's accent
    border, so visually it belongs to THIS event. Horizontal scroll
@@ -236,7 +242,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    (PROB / YES / NO)' lines up with the chip columns. Renders
    only when at least one event in the tournament has a Kalshi
    match — otherwise there'd be nothing to label. */
-.sp-c2-tournament-cols{display:grid;grid-template-columns:20px 64px 1fr var(--sp-score-w) 180px;gap:8px;padding:4px 14px 6px;background:transparent;border-bottom:1px solid var(--border);font-size:8px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+.sp-c2-tournament-cols{display:grid;grid-template-columns:64px 1fr var(--sp-score-w) 180px;gap:8px;padding:4px 14px 6px;background:transparent;border-bottom:1px solid var(--border);font-size:8px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
 .sp-c2-tcol-score{text-align:center;align-self:end}
 /* Kalshi cell — single 3-column grid with two rows. The KALSHI
    title spans cols 2-3 only (above YES + NO, NOT above PROB) so
@@ -1009,7 +1015,6 @@ function renderCol2() {
     html += '</div>';
     if (tournamentHasMatch) {
       html += '<div class="sp-c2-tournament-cols">';
-      html += '<div></div>';  // indicator spacer
       html += '<div></div>';  // time spacer
       html += '<div></div>';  // teams spacer
       html += '<div class="sp-c2-tcol-score">' + (tournamentNeedsScoreCol ? 'Score' : '') + '</div>';
@@ -1204,17 +1209,13 @@ function renderEventRow(ev, market, isMarketRow) {
   }
   // Main row — indicator / time / teams / scores / marketcell.
   html += '<div class="sp-c2-event-row">';
-  // Left indicator column — Kalshi K (+ count badge in Game view
-  // when an event has multiple markets).
-  html += '<div class="sp-c2-indicator">';
-  if (matched) {
-    html += '<span class="sp-c2-kalshi-badge" title="On Kalshi">K</span>';
-    if (!isMarketRow && ev.kalshi.count > 1) {
-      html += '<span class="sp-c2-count-badge" title="' +
-        escH(ev.kalshi.count + ' markets') + '">+' + (ev.kalshi.count - 1) + '</span>';
-    }
-  }
-  html += '</div>';
+  // Left indicator column — was the Kalshi K + count badge.
+  // Removed: 'Kalshi' is already labelled in the column header,
+  // and the available-markets count is implicit in the per-event
+  // tab strip directly above the row. When Polymarket / sportsbook
+  // sources land we'll re-introduce a tiny multi-source indicator
+  // here; until then the column is gone and the grid is one
+  // column slimmer.
   html += '<div class="sp-c2-time">' + escH(time);
   if (stLbl) html += '<span class="sp-c2-time-state' + (state === 'live' ? ' live' : '') + '">' + escH(stLbl) + '</span>';
   html += '</div>';
