@@ -74,11 +74,14 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 
 /* COL 1 — leagues sidebar.
    Each tournament = collapsible group with country flag/name + count. */
-.sp-c1-tabs{display:flex;border-bottom:1px solid var(--border);font-size:12px}
+/* COL 1 top — All/Favourites/Competitions tabs + state-filter
+   pills sticky at the top of the leagues sidebar so they stay
+   visible while the league list scrolls. */
+.sp-c1-tabs{display:flex;border-bottom:1px solid var(--border);font-size:12px;position:sticky;top:0;background:var(--bg);z-index:6}
 .sp-c1-tab{flex:1;text-align:center;padding:10px 8px;cursor:pointer;color:var(--text-dim);border-bottom:2px solid transparent;font-weight:500}
 .sp-c1-tab:hover{color:var(--text)}
 .sp-c1-tab.active{color:var(--green);border-bottom-color:var(--green)}
-.sp-c1-filters{display:flex;gap:6px;padding:10px 12px;flex-wrap:wrap;border-bottom:1px solid var(--border)}
+.sp-c1-filters{display:flex;gap:6px;padding:10px 12px;flex-wrap:wrap;border-bottom:1px solid var(--border);position:sticky;top:38px;background:var(--bg);z-index:5}
 .sp-c1-filter{font-size:11px;padding:5px 10px;border-radius:14px;background:var(--bg-card);color:var(--text-dim);cursor:pointer;border:1px solid transparent;font-weight:500}
 .sp-c1-filter:hover{color:var(--text)}
 .sp-c1-filter.active{background:var(--red);color:#fff;border-color:var(--red)}
@@ -336,8 +339,8 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
       <div class="sp-c1-tab" data-tab="competitions">Competitions</div>
     </div>
     <div class="sp-c1-filters" id="sp-c1-filters">
-      <span class="sp-c1-filter active" data-state="all">All</span>
-      <span class="sp-c1-filter" data-state="live">Live</span>
+      <span class="sp-c1-filter" data-state="all">All</span>
+      <span class="sp-c1-filter active" data-state="live">Live</span>
       <span class="sp-c1-filter" data-state="finished">Finished</span>
       <span class="sp-c1-filter" data-state="upcoming">Upcoming</span>
     </div>
@@ -563,7 +566,7 @@ let _eventsCache = null;
 let _matchedKalshiCount = 0;
 let _selectedEventId = null;     // currently-selected FL EVENT_ID for COL 3
 let _selectedTicker = null;      // currently-selected Kalshi ticker (Market view)
-let _activeStateFilter = 'all';
+let _activeStateFilter = 'live';
 let _activeLeagueFilter = null;  // tournament_stage_id, or null = all
 let _onlyMatched = false;        // toggled by clicking the "X on Kalshi" pill
 let _viewMode = 'game';          // 'game' (one row per match) or 'market' (one row per ticker)

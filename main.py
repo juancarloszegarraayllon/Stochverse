@@ -7155,14 +7155,31 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
     # already FL-paired (matched_kalshi_tickers) OR if the bare
     # matchup pairs with FL via match_game + corroboration. Build
     # a synthetic event row carrying ALL the matchup's markets.
-    # Hard cap on total events to keep the response bounded — at
-    # 600+ Kalshi events per sport, an unbounded loop blocks the
-    # event loop long enough to trigger the browser's 'page
-    # unresponsive' warning.
-    MAX_UNPAIRED = 100
+    # Cap on total events to keep the response bounded — pass 1
+    # routinely yields 200-300 matchups for soccer (lots of
+    # leagues), so we sort cup-style competitions first to
+    # guarantee UCL / UEL / Libertadores etc. survive the cap.
+    MAX_UNPAIRED = 500
+
+    def _cup_priority(item):
+        # Lower number = higher priority. Cup competitions and
+        # international fixtures sort before regular leagues so
+        # they're not the ones dropped by the cap. Within each
+        # priority class we sort by matchup key for stability.
+        (sb, mk), _ = item
+        cup_prefixes = ("KXUCL", "KXUEL", "KXUECL", "KXCONMEBOL",
+                        "KXCONCACAF", "KXFACUP", "KXDFBPOKAL",
+                        "KXCOPADELREY", "KXCOPPAITALIA", "KXKNVBCUP",
+                        "KXMLSCUP", "KXWC", "KXMENWORLDCUP")
+        for prefix in cup_prefixes:
+            if sb.startswith(prefix):
+                return (0, mk)
+        return (1, mk)
+
+    sorted_matchups = sorted(matchups.items(), key=_cup_priority)
     by_league: dict = {}
     total_events = 0
-    for (series, _), bundle in matchups.items():
+    for (series, _), bundle in sorted_matchups:
         if total_events >= MAX_UNPAIRED:
             break
         bare_title = bundle["bare"]
