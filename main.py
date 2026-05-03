@@ -6913,7 +6913,7 @@ def _is_head_to_head_title(title: str) -> bool:
     return bool(_HEAD_TO_HEAD_TITLE_RE.search(title))
 
 
-def _collect_outrights_for_sport(sport_name: str) -> list:
+def _collect_outrights_for_sport(sport_name: str, target_date=None) -> list:
     """Collect Kalshi events for `sport_name` that don't pair with
     any FL game — these are tournament/season outrights (Champions
     League Winner, Super Bowl Winner, MVP, etc.) that have no
@@ -6957,6 +6957,20 @@ def _collect_outrights_for_sport(sport_name: str) -> list:
             continue
         if _is_head_to_head_title(title):
             continue
+        # Expiration filter — hide outrights whose Kalshi market
+        # has already closed by the picked date. _exp_dt is the
+        # cache-build's resolved expected_expiration_time as an
+        # ISO string. Without target_date set, all outrights pass.
+        if target_date is not None:
+            exp_iso = r.get("_exp_dt") or ""
+            if exp_iso:
+                try:
+                    from datetime import datetime as _dt
+                    exp_d = _dt.fromisoformat(exp_iso.replace("Z", "+00:00")).date()
+                    if target_date > exp_d:
+                        continue
+                except Exception:
+                    pass
         try:
             mg = match_game(title, sport_name)
         except Exception:
@@ -7882,14 +7896,14 @@ async def sports_feed(sport_id: int, timezone: int = 0,
     # the unpaired-h2h pipeline below filters on it.
     from datetime import date as _date, timedelta as _td
     target_date = _date.today() + _td(days=indent_days) if indent_days != 0 else _date.today()
-    # Outrights stay visible across the whole calendar window —
-    # they're season-long futures (World Cup Winner, MVP, etc.)
-    # whose trading window typically runs months. Picking a date
-    # in the middle of the World Cup should surface 'World Cup
-    # Winner' as relevant context, not hide it. Kalshi closes
-    # outrights once they settle, so the cache itself is the
-    # 'is this market still open' filter.
-    outright_tournaments = (_collect_outrights_for_sport(kalshi_sport)
+    # Outrights stay visible across the whole calendar window
+    # UNTIL their market expires. _collect_outrights_for_sport
+    # now uses each Kalshi event's _exp_dt (resolved
+    # expected_expiration_time) to drop outrights whose trading
+    # window has already closed by the picked date. So 'World Cup
+    # Winner 2026' shows from now through ~July 19 2026; picking
+    # Aug 1 2026 hides it.
+    outright_tournaments = (_collect_outrights_for_sport(kalshi_sport, target_date)
                             if kalshi_sport else [])
 
     out_tournaments: list = []

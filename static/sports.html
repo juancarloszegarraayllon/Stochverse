@@ -1405,62 +1405,81 @@ function renderAggOrSeries(ev) {
   return '';
 }
 
-function liveClockLabel(ev) {
-  // Computes the live-state label for an in-progress event:
-  //   Soccer:  '63'' / '45+3'' / 'HT' — derived from STAGE +
-  //            STAGE_START_TIME using the same period offsets
-  //            flashlive_feed.py uses, so we tick client-side
-  //            without re-fetching every minute.
-  //   Other sports: prefer ev.GAME_TIME if FL ships it, fall
-  //            back to a humanized STAGE name. ESPN-routed
-  //            sports (Basketball/Hockey/Football) inherit the
-  //            display_clock when /sports rolls in _live_state
-  //            in a future pass; for now humanized STAGE keeps
-  //            the row labeled.
-  const stage = String(ev.STAGE || '').toUpperCase();
-  const stageStartRaw = ev.STAGE_START_TIME;
-  const stageStart = stageStartRaw ? parseInt(stageStartRaw, 10) : 0;
-  // Soccer halftime sentinel — short-circuit before any clock math
-  if (stage === 'HALF_TIME') return 'HT';
-  if (stage === 'BREAK_AFTER_FIRST_HALF') return 'HT';
-  // Soccer running clock — minute = base + (now - stage_start)/60.
-  // Period offsets mirror flashlive_feed.py SOCCER_PERIOD_OFFSETS.
-  const SOCCER_OFFSETS = {
-    'FIRST_HALF':              [0, 45],
-    'SECOND_HALF':              [45, 90],
-    'EXTRA_TIME_FIRST_HALF':    [90, 105],
-    'BREAK_AFTER_NORMAL_TIME':  null,        // pre-ET break → no clock
-    'EXTRA_TIME_SECOND_HALF':   [105, 120],
-    'BREAK_AFTER_FIRST_EXTRA':  null,
-    'PENALTIES':                null,
-  };
-  if (stage in SOCCER_OFFSETS && stageStart > 0) {
-    const range = SOCCER_OFFSETS[stage];
-    if (!range) return stage.replace(/_/g, ' ');
-    const [base, end] = range;
-    const elapsedSec = Math.max(0, (Date.now() / 1000) - stageStart);
-    const elapsedMin = Math.floor(elapsedSec / 60);
-    const minute = Math.max(base + 1, base + elapsedMin);
-    if (minute > end) return end + '+' + (minute - end) + "'";
-    return minute + "'";
+// Soccer period offsets — matches the homepage's
+// computeSoccerMinute exactly so /sports and homepage agree on
+// the displayed clock value for any live game.
+const _SOCCER_PERIOD_OFFSETS = {1: 0, 2: 45, 3: 90, 4: 105};
+const _SOCCER_PERIOD_END     = {1: 45, 2: 90, 3: 105, 4: 120};
+
+function _stageToPeriod(stage) {
+  const s = (stage || '').toUpperCase();
+  if (s === 'FIRST_HALF')              return 1;
+  if (s === 'SECOND_HALF')             return 2;
+  if (s === 'EXTRA_TIME_FIRST_HALF')   return 3;
+  if (s === 'EXTRA_TIME_SECOND_HALF')  return 4;
+  return 0;
+}
+
+function _computeSoccerMinute(stageStartMs, period) {
+  // Port of homepage's computeSoccerMinute. Format mirrors
+  // FlashScore with seconds:
+  //   '1H 32:15' / '2H 67:42' / '1H 45+3:27' / 'ET 95:08'
+  // First second of a half displays as '1:00' / '46:00' —
+  // broadcast convention rounds the minute up inside the first
+  // 60 seconds.
+  if (!stageStartMs || !_SOCCER_PERIOD_OFFSETS.hasOwnProperty(period)) return null;
+  const elapsedSec = Math.max(0, Math.floor((Date.now() - stageStartMs) / 1000));
+  const elapsedMin = Math.floor(elapsedSec / 60);
+  const elapsedSecOnly = elapsedSec % 60;
+  const pad = (n) => (n < 10 ? '0' + n : '' + n);
+  const base = _SOCCER_PERIOD_OFFSETS[period];
+  const endMark = _SOCCER_PERIOD_END[period];
+  const prefix = (period === 1) ? '1H' : (period === 2) ? '2H' : 'ET';
+  let minute = base + elapsedMin;
+  let body;
+  if (minute > endMark) {
+    body = endMark + '+' + (minute - endMark) + ':' + pad(elapsedSecOnly);
+  } else {
+    if (minute < base + 1) minute = base + 1;
+    body = minute + ':' + pad(elapsedSecOnly);
   }
-  // Non-soccer fallback — FL ships GAME_TIME for some sports
-  // (basketball quarter clock, hockey period clock, etc.). When
-  // present it's already a formatted string ('Q3 8:42' or
-  // similar); use it as-is.
+  return prefix + ' ' + body;
+}
+
+function liveClockLabel(ev) {
+  // Live-state label for an in-progress event. Same format as
+  // the homepage live badge:
+  //   Soccer:        '1H 32:15' / '2H 67:42' / '1H 45+3:27' / 'HT'
+  //   Hockey:        'P{period} M:SS'  (when GAME_TIME is set)
+  //   Basketball/FB: 'Q{period} M:SS'  (when GAME_TIME is set)
+  //   Otherwise:     humanized STAGE.
+  // Ticked client-side every 500 ms so the seconds count down
+  // visibly without requiring a backend refresh.
+  const stage = String(ev.STAGE || '').toUpperCase();
+  if (stage === 'HALF_TIME' || stage === 'BREAK_AFTER_FIRST_HALF') return 'HT';
+  // Soccer second-precise clock
+  const period = _stageToPeriod(stage);
+  if (period > 0) {
+    const stageStartSec = parseInt(ev.STAGE_START_TIME, 10);
+    if (stageStartSec > 0) {
+      const result = _computeSoccerMinute(stageStartSec * 1000, period);
+      if (result) return result;
+    }
+  }
+  // Non-soccer fallback — FL ships GAME_TIME pre-formatted
+  // ('Q3 8:42' for basketball, 'P2 12:34' for hockey). When
+  // present it's already MM:SS; use as-is.
   if (ev.GAME_TIME != null && ev.GAME_TIME !== '') {
     return String(ev.GAME_TIME);
   }
-  // Last resort: humanize the STAGE token.
   return stage.replace(/_/g, ' ') || 'LIVE';
 }
 
-// Tick live clocks every 30 s — minute precision is plenty for
-// soccer ('63'' → '64'' once a minute), and lighter than a 1-Hz
-// interval. Updates the .sp-c2-time-state.live spans in place
-// instead of re-rendering the whole COL 2 (which would jitter
-// the user's scroll position). Cheap because the only data
-// source is the cached _eventsCache the client already has.
+// 500 ms tick — matches the homepage's tickLiveClocks cadence so
+// the seconds count up visibly. Updates only the live state
+// spans in place; no COL 2 re-render. Self-skips when no live
+// rows are visible — when nothing's live the cost is one
+// querySelectorAll every 500 ms (cheap).
 let _liveTickInterval = null;
 function tickLiveClocks() {
   if (!_eventsCache) return;
@@ -1481,7 +1500,7 @@ function tickLiveClocks() {
 }
 function startLiveTick() {
   if (_liveTickInterval) return;
-  _liveTickInterval = setInterval(tickLiveClocks, 30000);
+  _liveTickInterval = setInterval(tickLiveClocks, 500);
 }
 
 function eventShowsScoreInColumn(ev) {
