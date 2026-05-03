@@ -7159,7 +7159,10 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         title = r.get("title") or ""
         if not title:
             continue
-        bare = title.split(":", 1)[0].strip() if ":" in title else title.strip()
+        # Bare matchup — handles both 'Bayern vs PSG: Spreads'
+        # (matchup left) and 'NHL Game: Tampa vs Montreal' (matchup
+        # right) shapes via _bare_matchup_from_title.
+        bare = _bare_matchup_from_title(title)
         if not _is_head_to_head_title(bare):
             continue
         # Date filter — when the user picked a specific day in the
@@ -7538,18 +7541,60 @@ def _kalshi_title_corroborates_fl_game(kalshi_title: str, fl_game: dict) -> bool
 
 def _market_type_from_title(title: str) -> str:
     """Best-effort extraction of the market type from a Kalshi
-    title. Kalshi uses 'Team A vs Team B: Market Type' for
-    sub-markets (e.g., 'Philadelphia at Boston: Steals') and
-    just 'Team A vs Team B' for the headline winner market.
+    title. Two shapes appear in the wild:
+
+      Shape A — soccer / EPL / etc.:
+        'Bayern vs PSG'              → headline, market_type=''
+        'Bayern vs PSG: Spreads'     → market_type='Spreads'
+        Matchup is BEFORE the colon, market type AFTER.
+
+      Shape B — NHL / NBA / NFL / MLB:
+        'NHL Game: Montreal Canadiens vs Tampa Bay Lightning'
+                                     → headline, market_type=''
+        'NHL Game: Montreal Canadiens vs Tampa Bay Lightning: Spreads'
+                                     → market_type='Spreads'
+        League/sport context BEFORE the colon, matchup AFTER.
+
+    The disambiguator is whether the suffix (after the last ':')
+    looks like a head-to-head matchup (X vs Y / X @ Y / X v. Y).
+    If yes, it's the matchup itself — there's no market type, this
+    is the headline winner. If no, it's a real sub-market label.
+
     Returns the market type or '' if it's the headline.
     """
     if not title:
         return ""
-    # Last colon-separated segment is the market type if the
-    # title has the 'Match: Market' shape.
-    if ":" in title:
-        return title.rsplit(":", 1)[1].strip()
-    return ""
+    if ":" not in title:
+        return ""
+    suffix = title.rsplit(":", 1)[1].strip()
+    # Suffix contains the head-to-head pattern → it's the matchup,
+    # not a market type. Common in NHL/NBA Kalshi titles.
+    if _is_head_to_head_title(suffix):
+        return ""
+    return suffix
+
+
+def _bare_matchup_from_title(title: str) -> str:
+    """Extract just the 'X vs Y' matchup portion of a Kalshi title,
+    handling both shapes _market_type_from_title knows about. Used
+    by the unpaired-h2h grouping so titles like 'NHL Game: Tampa
+    Bay vs Montreal' and 'Tampa Bay vs Montreal' both resolve to
+    the same bare matchup string for bucketing.
+    """
+    if not title:
+        return ""
+    if ":" not in title:
+        return title.strip()
+    # Find the segment that looks like the matchup. Walk colon-
+    # split parts; first one matching the h2h shape wins.
+    parts = [p.strip() for p in title.split(":")]
+    for p in parts:
+        if _is_head_to_head_title(p):
+            return p
+    # Neither side h2h — fall back to the left side (legacy
+    # behaviour). Caller's _is_head_to_head_title check upstream
+    # would normally have already filtered the record.
+    return parts[0]
 
 
 def _to_cents(v) -> int:
@@ -7999,6 +8044,38 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                 # Live-state may also carry the leg/aggregate label
                 # for richer rendering ('PSG LEADS AGGREGATE').
                 live = primary.get("_live_state") or {}
+                # Aggregate fallback for matched soccer cup ties.
+                # Cache build's _enrich_soccer_aggregate is best-
+                # effort and sometimes runs before SofaScore has
+                # the leg-2 data, leaving aggregate_home null on
+                # the cache record. Re-query SofaScore here for
+                # known cup-tie series tickers (KXUCL/KXUEL/UECL/
+                # CONMEBOL/domestic-cups). Same AGG_LOOKUP_CAP
+                # the unpaired path uses — both paths share the
+                # budget so total /sports SofaScore lookups stay
+                # bounded per request.
+                _agg_h = primary.get("aggregate_home")
+                _agg_a = primary.get("aggregate_away")
+                _agg_label = (live.get("aggregate_label")
+                              if isinstance(live, dict) else None)
+                _series = (primary.get("series_ticker") or "").upper()
+                _cup_prefixes = ("KXUCL", "KXUEL", "KXUECL",
+                                 "KXCONMEBOLLIB", "KXCONMEBOLSUD",
+                                 "KXFACUP", "KXDFBPOKAL", "KXCOPADELREY",
+                                 "KXCOPPAITALIA", "KXKNVBCUP", "KXMLSCUP")
+                if (kalshi_sport == "Soccer" and (_agg_h is None or _agg_a is None)
+                        and any(_series.startswith(p) for p in _cup_prefixes)):
+                    try:
+                        from sofascore_feed import match_game as _sofa_match
+                        _sg = _sofa_match(primary.get("title", ""), "Soccer")
+                        if _sg and _sg.get("is_two_leg"):
+                            if _agg_h is None: _agg_h = _sg.get("aggregate_home")
+                            if _agg_a is None: _agg_a = _sg.get("aggregate_away")
+                            if not _agg_label and _sg.get("leg_number") and _sg.get("round_name"):
+                                _agg_label = (_sg.get("round_name", "") + " · LEG " +
+                                              str(_sg.get("leg_number")))
+                    except Exception:
+                        pass
                 ev_out["kalshi"] = {
                     "event_ticker": primary.get("event_ticker", ""),
                     "title": primary.get("title", ""),
@@ -8006,10 +8083,9 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                     "count": len(markets),
                     "markets": markets,
                     "primary_prices": primary_prices,
-                    "aggregate_home": primary.get("aggregate_home"),
-                    "aggregate_away": primary.get("aggregate_away"),
-                    "aggregate_label": (live.get("aggregate_label")
-                                        if isinstance(live, dict) else None),
+                    "aggregate_home": _agg_h,
+                    "aggregate_away": _agg_a,
+                    "aggregate_label": _agg_label,
                     # Playoff series score for best-of-N sports
                     # (NBA / NHL / MLB / NFL playoffs). Different
                     # data shape from soccer aggregate but same UX
