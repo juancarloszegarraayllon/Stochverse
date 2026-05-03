@@ -6802,6 +6802,206 @@ async def fl_sports_list():
     return {"data": data, "source": "flashlive"}
 
 
+# ── Sport name mapping (Kalshi <-> FL) ─────────────────────────
+# Kalshi's _sport field uses Stochverse's internal sport names
+# (Soccer, Tennis, Basketball, ...). FL keys events by sport_id
+# (1, 2, 3, ...). This map bridges the two for the /api/sports
+# /{sport_id}/feed endpoint.
+#
+# Special cases:
+#   - "Rugby" on Kalshi → both Rugby Union (8) and Rugby League
+#     (19) on FL; we return both as candidates so downstream
+#     matching searches both
+#   - Kalshi-only sports (Lacrosse, Chess, Squash, WSOP, SailGP)
+#     have no FL equivalent — the feed for those returns Kalshi
+#     events only with "no_fl_coverage" hint
+_FL_SPORT_BY_NAME = {
+    "Soccer": [1], "Tennis": [2], "Basketball": [3], "Hockey": [4],
+    "Football": [5], "Baseball": [6], "Handball": [7],
+    "Floorball": [9], "Bandy": [10], "Futsal": [11],
+    "Volleyball": [12], "Cricket": [13], "Darts": [14],
+    "Snooker": [15], "Boxing": [16], "Beach Volleyball": [17],
+    "Aussie Rules": [18], "Badminton": [21], "Water Polo": [22],
+    "Golf": [23], "Field Hockey": [24], "Table Tennis": [25],
+    "Beach Soccer": [26], "MMA": [28], "Netball": [29],
+    "Pesapallo": [30], "Motorsport": [31], "Esports": [36],
+    # Rugby disambiguation — both Union (8) and League (19)
+    "Rugby": [8, 19],
+    # Kalshi-only — empty list signals no FL coverage
+    "Lacrosse": [], "Chess": [], "Squash": [], "WSOP": [],
+    "SailGP": [],
+}
+
+# Reverse: FL sport_id → Kalshi sport name (for the feed
+# endpoint, given an fl_sport_id we need to know which Kalshi
+# sport bucket to pull events from for the merge).
+_KALSHI_SPORT_BY_FL_ID = {}
+for _name, _fl_ids in _FL_SPORT_BY_NAME.items():
+    for _fid in _fl_ids:
+        _KALSHI_SPORT_BY_FL_ID[_fid] = _name
+
+
+def _normalize_team(name: str) -> str:
+    """Lower-case + strip punctuation for fuzzy team matching
+    between Kalshi and FL. 'PSG' / 'Paris Saint-Germain' will
+    still differ — full normalization is in flashlive_feed —
+    but this catches simple casing/punctuation mismatches."""
+    if not name:
+        return ""
+    return "".join(c.lower() for c in name if c.isalnum())
+
+
+def _build_kalshi_index_for_sport(sport_name: str) -> dict:
+    """Walk the Kalshi cache, return {normalized_team_pair:
+    [kalshi_record, ...]} for events of this sport. Used by
+    /api/sports/{sport_id}/feed to enrich FL events with Kalshi
+    market data without an N×M scan."""
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    idx: dict = {}
+    for r in records:
+        if (r.get("_sport") or "") != sport_name:
+            continue
+        home = r.get("home_name") or r.get("home") or ""
+        away = r.get("away_name") or r.get("away") or ""
+        if not home or not away:
+            continue
+        # Normalize both directions so home/away orientation
+        # mismatches between Kalshi and FL still match.
+        nh, na = _normalize_team(home), _normalize_team(away)
+        for key in (f"{nh}|{na}", f"{na}|{nh}"):
+            idx.setdefault(key, []).append(r)
+    return idx
+
+
+@app.get("/api/sports/{sport_id}/feed")
+async def sports_feed(sport_id: int, timezone: int = 0,
+                       indent_days: int = 0):
+    """Sport-page feed — FL events for the sport_id merged with
+    matched Kalshi market data. Drives /sports/:sport_id COL 2.
+
+    Response:
+      {
+        "fl_sport_id": 1,
+        "kalshi_sport": "Soccer",
+        "tournaments": [
+          {
+            "TOURNAMENT_STAGE_ID", "NAME", "COUNTRY_NAME",
+            "events": [
+              {
+                ...FL event fields (EVENT_ID, HOME_NAME, etc.)...
+                "kalshi": {ticker, prices, markets} | null
+              }
+            ]
+          }
+        ]
+      }
+
+    Note: Kalshi-only events (no FL match) are NOT in this
+    response. They're returned separately by /api/sports/kalshi-
+    only-feed since they need a different rendering strategy
+    (Kalshi-only sports like Lacrosse have no FL events at all).
+    """
+    from flashlive_feed import _fl_get
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    if not -12 <= timezone <= 12:
+        return {"error": "timezone must be between -12 and 12"}
+    if not -7 <= indent_days <= 7:
+        return {"error": "indent_days must be between -7 and 7"}
+
+    fl_data = await _fl_get("/v1/events/list", {
+        "sport_id": sport_id, "timezone": timezone,
+        "indent_days": indent_days,
+    })
+    if not fl_data:
+        return {"error": "no FL events available"}
+
+    kalshi_sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
+    kalshi_idx = _build_kalshi_index_for_sport(kalshi_sport) if kalshi_sport else {}
+
+    out_tournaments: list = []
+    matched_kalshi_tickers: set = set()
+    for t in (fl_data.get("DATA") or []):
+        events_out: list = []
+        for ev in (t.get("EVENTS") or []):
+            ev_out = dict(ev)  # shallow copy; we add 'kalshi' key
+            home = ev.get("HOME_NAME") or ""
+            away = ev.get("AWAY_NAME") or ""
+            kalshi_match = None
+            if home and away:
+                key = f"{_normalize_team(home)}|{_normalize_team(away)}"
+                candidates = kalshi_idx.get(key) or []
+                if candidates:
+                    # Pick the Kalshi event with the closest start_time;
+                    # multiple Kalshi markets can share the same teams
+                    # (e.g., Winner / Spread / Totals tabs collapsed
+                    # into one ticker family).
+                    kalshi_match = candidates[0]
+            if kalshi_match:
+                ticker = kalshi_match.get("event_ticker") or ""
+                if ticker:
+                    matched_kalshi_tickers.add(ticker)
+                ev_out["kalshi"] = {
+                    "event_ticker": ticker,
+                    "title": kalshi_match.get("title", ""),
+                    "url": kalshi_match.get("url", ""),
+                    "markets": kalshi_match.get("markets")
+                                or kalshi_match.get("_markets") or [],
+                    "live_state": kalshi_match.get("_live_state"),
+                }
+            else:
+                ev_out["kalshi"] = None
+            events_out.append(ev_out)
+        if events_out:
+            out_tournaments.append({
+                "TOURNAMENT_STAGE_ID": t.get("TOURNAMENT_STAGE_ID"),
+                "NAME": t.get("NAME"),
+                "NAME_PART_1": t.get("NAME_PART_1"),
+                "NAME_PART_2": t.get("NAME_PART_2"),
+                "COUNTRY_NAME": t.get("COUNTRY_NAME"),
+                "events": events_out,
+            })
+
+    return {
+        "fl_sport_id": sport_id,
+        "kalshi_sport": kalshi_sport,
+        "tournaments": out_tournaments,
+        "matched_kalshi_count": len(matched_kalshi_tickers),
+        "source": "flashlive+kalshi",
+    }
+
+
+@app.get("/api/sports/kalshi-only-feed")
+async def sports_kalshi_only_feed(sport: str):
+    """Feed for Kalshi-only sports (Lacrosse, Chess, Squash, WSOP,
+    SailGP — sports Kalshi trades but FL doesn't carry). Returns
+    Kalshi events as a flat list since there's no FL tournament
+    structure to group by.
+    """
+    sport = (sport or "").strip()
+    if not sport:
+        return {"error": "sport name required"}
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    out = []
+    for r in records:
+        if (r.get("_sport") or "") != sport:
+            continue
+        out.append({
+            "event_ticker": r.get("event_ticker"),
+            "title": r.get("title"),
+            "url": r.get("url"),
+            "home_name": r.get("home_name"),
+            "away_name": r.get("away_name"),
+            "markets": r.get("markets") or r.get("_markets") or [],
+            "live_state": r.get("_live_state"),
+            "_sport": r.get("_sport"),
+        })
+    return {"sport": sport, "events": out, "count": len(out),
+            "source": "kalshi-only"}
+
+
 @app.get("/api/fl/events-list")
 async def fl_events_list(sport_id: int, timezone: int = 0,
                          indent_days: int = 0):
