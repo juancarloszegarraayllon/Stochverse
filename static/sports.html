@@ -179,14 +179,19 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    (PROB / YES / NO)' lines up with the chip columns. Renders
    only when at least one event in the tournament has a Kalshi
    match — otherwise there'd be nothing to label. */
-.sp-c2-tournament-cols{display:grid;grid-template-columns:20px 64px 1fr 40px 180px;gap:8px;padding:4px 14px 6px;background:transparent;border-bottom:1px solid var(--border);font-size:9px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+.sp-c2-tournament-cols{display:grid;grid-template-columns:20px 64px 1fr 40px 180px;gap:8px;padding:4px 14px 6px;background:transparent;border-bottom:1px solid var(--border);font-size:8px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
 .sp-c2-tcol-score{text-align:center;align-self:end}
-.sp-c2-tcol-kalshi{display:flex;flex-direction:column;align-items:stretch}
-.sp-c2-tcol-kalshi-title{text-align:center;color:var(--text);padding-bottom:2px}
-.sp-c2-tcol-kalshi-cols{display:grid;grid-template-columns:32px 1fr 1fr;gap:4px;font-size:8px}
-.sp-c2-tcol-kalshi-cols .lh-prob{text-align:right;color:var(--text-muted)}
-.sp-c2-tcol-kalshi-cols .lh-yes{text-align:center;color:var(--green)}
-.sp-c2-tcol-kalshi-cols .lh-no{text-align:center;color:var(--red)}
+/* Kalshi cell — single 3-column grid with two rows. The KALSHI
+   title spans cols 2-3 only (above YES + NO, NOT above PROB) so
+   it centers between the two chip columns. PROB / YES / NO labels
+   sit on row 2 directly above their chip columns in the rows
+   below. All labels share the parent's 8px so SCORE / PROB / YES /
+   NO render at the same visual weight. */
+.sp-c2-tcol-kalshi{display:grid;grid-template-columns:32px 1fr 1fr;grid-template-rows:auto auto;gap:0 4px}
+.sp-c2-tcol-kalshi-title{grid-column:2 / 4;grid-row:1;text-align:center;color:var(--text);padding-bottom:1px}
+.sp-c2-tcol-kalshi .lh-prob{grid-column:1;grid-row:2;text-align:right;color:var(--text-muted)}
+.sp-c2-tcol-kalshi .lh-yes{grid-column:2;grid-row:2;text-align:center;color:var(--green)}
+.sp-c2-tcol-kalshi .lh-no{grid-column:3;grid-row:2;text-align:center;color:var(--red)}
 /* Load-more toggle inside the teams cell — green text link
    appearing under the visible outcomes when there are more than
    4 to display. Click expands / collapses the full list. */
@@ -197,6 +202,13 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-time-state.live{color:var(--red);font-weight:700}
 .sp-c2-teams{font-size:13px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
 .sp-c2-team{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Matchup header inside the teams cell — shown for matched events
+   that are displaying sub-market outcomes (BTTS / Totals / First
+   Goalscorer / Spreads / etc.). Carries the actual fixture name
+   ('Bayern vs Barcelona') above the outcome labels so users can
+   tell which game the row refers to even when outcome labels
+   don't include team names. */
+.sp-c2-matchup{font-size:11px;font-weight:600;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-bottom:2px;margin-bottom:2px;border-bottom:1px dashed var(--border)}
 .sp-c2-scores{font-size:13px;font-weight:700;text-align:right;font-variant-numeric:tabular-nums;display:flex;flex-direction:column;gap:2px}
 .sp-c2-agg{font-size:9px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.3px;margin-top:2px}
 .sp-c2-fav{color:var(--text-muted);text-align:center;cursor:pointer;font-size:14px}
@@ -727,11 +739,9 @@ function renderCol2() {
       html += '<div class="sp-c2-tcol-score">Score</div>';
       html += '<div class="sp-c2-tcol-kalshi">';
       html += '<span class="sp-c2-tcol-kalshi-title">Kalshi</span>';
-      html += '<div class="sp-c2-tcol-kalshi-cols">';
       html += '<span class="lh-prob">PROB</span>';
       html += '<span class="lh-yes">YES</span>';
       html += '<span class="lh-no">NO</span>';
-      html += '</div>';
       html += '</div>';
       html += '</div>';
     }
@@ -850,22 +860,19 @@ function collectMarketTypes(tournaments) {
 }
 
 function pickMarketForGameRow(ev) {
-  // In Game view, the row's right cell shows the data for the
-  // currently-selected market type (_activeMarketType). Returns
-  // the matching market record from ev.kalshi.markets, or null
-  // if this event doesn't have that market type (in which case
-  // the row falls back to the headline Winner if available).
+  // In Game view, return the market matching _activeMarketType
+  // exactly. NO fallback across types — falling back to Winner
+  // when the user picked Spreads / BTTS / Totals would silently
+  // show wrong outcomes (e.g. 'Tie' under the Spreads tab for an
+  // event that has no Spreads market). When there's no exact
+  // match we return null and the renderer leaves the chips empty
+  // while still showing team names so the user can see which
+  // game it is.
   if (!ev.kalshi || !ev.kalshi.markets) return null;
-  // Try active type first
   for (const m of ev.kalshi.markets) {
     if ((m.market_type || '') === _activeMarketType) return m;
   }
-  // Fall back to headline Winner
-  for (const m of ev.kalshi.markets) {
-    if ((m.market_type || '') === '') return m;
-  }
-  // Last resort: first market
-  return ev.kalshi.markets[0] || null;
+  return null;
 }
 
 function renderEventRow(ev, market, isMarketRow) {
@@ -930,6 +937,23 @@ function renderEventRow(ev, market, isMarketRow) {
     : allOutcomes;
   const hasMore = allOutcomes.length > MAX_VISIBLE;
   html += '<div class="sp-c2-teams">';
+  // For matched events showing sub-market outcomes (BTTS / Totals
+  // / First Goalscorer / Spreads / etc.), the outcome labels alone
+  // ('Both Teams To Score', 'Over 2.5') don't tell the user which
+  // game it is. Prepend a matchup header so 'Bayern vs Barcelona'
+  // is always visible. Skip the header for Winner outcomes
+  // because the labels are already the team names — adding the
+  // header would just duplicate them. Outright events have no
+  // matchup; they don't get a header either.
+  const activeMkt = rowMarketOverride || (matched ? pickMarketForGameRow(ev) : null);
+  const isWinnerActive = activeMkt && (activeMkt.market_type || '') === '';
+  const hasTeamNames = !!(ev.HOME_NAME || ev.AWAY_NAME);
+  const showMatchup = matched && hasTeamNames && !isWinnerActive;
+  if (showMatchup) {
+    const matchup = (ev.HOME_NAME || '') + ' vs ' + (ev.AWAY_NAME || '');
+    html += '<span class="sp-c2-matchup" title="' + escH(matchup) +
+            '">' + escH(matchup) + '</span>';
+  }
   if (matched && outcomes.length) {
     // Show outcome labels (home / away / tie for Winner; spread
     // variants for Spreads; etc.). Score column to the right
@@ -944,7 +968,10 @@ function renderEventRow(ev, market, isMarketRow) {
       html += '<button class="sp-c2-loadmore" data-event-id="' +
               escH(ev.EVENT_ID || '') + '" type="button">' + escH(lbl) + '</button>';
     }
-  } else {
+  } else if (!showMatchup && hasTeamNames) {
+    // No outcomes (unmatched OR matched but no market for the
+    // active sub-market type) and no matchup header above.
+    // Render plain team names so the user still sees the fixture.
     html += '<span class="sp-c2-team">' + escH(ev.HOME_NAME || '') + '</span>';
     html += '<span class="sp-c2-team">' + escH(ev.AWAY_NAME || '') + '</span>';
   }
