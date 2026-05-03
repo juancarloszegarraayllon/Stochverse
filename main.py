@@ -7107,10 +7107,36 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         return []
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
-    # Pass 1: group by (series_ticker, bare matchup name) so
-    # headline + sub-market records for the same X vs Y match end
-    # up together. Bare matchup = title with any ':<market_type>'
-    # suffix stripped.
+
+    def _series_base(s: str) -> str:
+        # KXUCLGAME / KXUCLSPREAD / KXUCLTOTAL / KXUCLBTTS / KXUCL1H
+        # all collapse to KXUCL so sub-markets group with their
+        # parent Winner. Without this, Spreads/Totals/BTTS each have
+        # a distinct series_ticker and end up as separate event rows.
+        b = (s or "").upper()
+        for suf in ("GAME", "SPREAD", "TOTAL", "BTTS", "1H", "WGAME"):
+            if b.endswith(suf):
+                b = b[:-len(suf)]
+                break
+        return b
+
+    def _matchup_key(bare: str) -> str:
+        # Sort the two teams so 'PSG vs Bayern Munich' and
+        # 'Bayern Munich vs PSG' produce the same key. The same
+        # tie shows up under both orderings depending on how the
+        # market was titled — without sorting they'd render as
+        # two separate event rows for the same fixture.
+        m = _HEAD_TO_HEAD_TITLE_RE.search(bare)
+        if not m:
+            return bare.lower().strip()
+        a = bare[:m.start()].strip().lower()
+        b = bare[m.end():].strip().lower()
+        return " vs ".join(sorted([a, b]))
+
+    # Pass 1: group records by (series_base, sorted matchup) so all
+    # Winner / Spreads / Totals / BTTS / 1H Winner records for the
+    # same fixture land in one bucket regardless of original team
+    # ordering or sub-market series suffix.
     matchups: dict = {}
     for r in records:
         if (r.get("_sport") or "") != sport_name:
@@ -7121,16 +7147,24 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         bare = title.split(":", 1)[0].strip() if ":" in title else title.strip()
         if not _is_head_to_head_title(bare):
             continue
-        series = (r.get("series_ticker") or "").upper()
-        key = (series, bare.lower())
+        series_base = _series_base(r.get("series_ticker") or "")
+        key = (series_base, _matchup_key(bare))
         matchups.setdefault(key, {"bare": bare, "records": []})
         matchups[key]["records"].append(r)
     # Pass 2: for each matchup, drop if any of its tickers is
     # already FL-paired (matched_kalshi_tickers) OR if the bare
     # matchup pairs with FL via match_game + corroboration. Build
     # a synthetic event row carrying ALL the matchup's markets.
+    # Hard cap on total events to keep the response bounded — at
+    # 600+ Kalshi events per sport, an unbounded loop blocks the
+    # event loop long enough to trigger the browser's 'page
+    # unresponsive' warning.
+    MAX_UNPAIRED = 100
     by_league: dict = {}
+    total_events = 0
     for (series, _), bundle in matchups.items():
+        if total_events >= MAX_UNPAIRED:
+            break
         bare_title = bundle["bare"]
         recs = bundle["records"]
         # Already FL-paired? Skip — those are in the regular index.
@@ -7167,17 +7201,15 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         markets.sort(key=lambda m: (m["market_type"] != "", m["market_type"].lower()))
         if primary is None:
             primary = recs[0]
-        # League → region for COL 1 bucketing
+        # League → region for COL 1 bucketing. SOCCER_COMP keys are
+        # full series tickers (KXUCLGAME / KXUCLSPREAD / …), so look
+        # up using the primary record's full series, not series_base.
+        primary_series = (primary.get("series_ticker") or "").upper()
         league = ""
-        if sport_name == "Soccer" and series in SOCCER_COMP:
-            league = SOCCER_COMP[series]
+        if sport_name == "Soccer" and primary_series in SOCCER_COMP:
+            league = SOCCER_COMP[primary_series]
         if not league:
-            base = series
-            for suf in ("GAME", "SPREAD", "TOTAL", "BTTS", "1H", "WGAME", "W"):
-                if base.endswith(suf):
-                    base = base[:-len(suf)]
-                    break
-            league = base.replace("KX", "").title() if base else "Other"
+            league = (series.replace("KX", "").title() if series else "Other")
         # Home/away from the bare title for the matchup line
         m = _HEAD_TO_HEAD_TITLE_RE.search(bare_title)
         home_name = ""
@@ -7186,30 +7218,21 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
             home_name = bare_title[:m.start()].strip()
             away_name = bare_title[m.end():].strip()
         primary_ticker = primary.get("event_ticker") or markets[0]["event_ticker"]
-        # Aggregate / leg label — passed straight through from the
-        # cache. Populated by _enrich_soccer_aggregate upstream
-        # for soccer two-leg ties; null for non-cup events.
+        # Aggregate — only pass through what's already on the cache
+        # record. We DO NOT do a fresh SofaScore lookup per matchup
+        # here because the unpaired-h2h pipeline can iterate 100+
+        # matchups per request and a per-matchup HTTP call to
+        # SofaScore stacks up enough latency to trigger the
+        # browser's 'page unresponsive' warning. The cache's
+        # _enrich_soccer_aggregate run upstream populates aggregate
+        # for matched FL games; for genuinely unpaired h2h
+        # (Kalshi-only futures), aggregate just won't render until
+        # we add a background SofaScore enricher. Acceptable trade
+        # — chips, tab strip, matchup line all still work.
         live = primary.get("_live_state") or {}
         agg_label = live.get("aggregate_label") if isinstance(live, dict) else None
         agg_h = primary.get("aggregate_home")
         agg_a = primary.get("aggregate_away")
-        # Soccer cup ties — even without an FL pair, ask SofaScore
-        # directly for aggregate info. Knockout-tie info doesn't
-        # depend on FL having today's fixture, so a Bayern vs PSG
-        # leg-2 market gets 'AGG 4-5 LEG 2/2' on /sports the same
-        # way it does on the homepage card.
-        if sport_name == "Soccer" and (agg_h is None or agg_a is None):
-            try:
-                from sofascore_feed import match_game as sofa_match
-                sg = sofa_match(bare_title, "Soccer")
-                if sg and sg.get("is_two_leg"):
-                    if agg_h is None: agg_h = sg.get("aggregate_home")
-                    if agg_a is None: agg_a = sg.get("aggregate_away")
-                    if not agg_label and sg.get("leg_number") and sg.get("round_name"):
-                        agg_label = (sg.get("round_name", "") + " · LEG " +
-                                     str(sg.get("leg_number")))
-            except Exception:
-                pass
         ev = {
             "EVENT_ID": "kalshi-h2h-" + primary_ticker,
             "START_TIME": None,
@@ -7232,6 +7255,7 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
             },
         }
         by_league.setdefault(league, []).append(ev)
+        total_events += 1
     out = []
     for league, evs in by_league.items():
         region = _league_to_region(league)
