@@ -7819,15 +7819,24 @@ async def sports_feed(sport_id: int, timezone: int = 0,
         return {"error": "sport_id must be between 1 and 42"}
     if not -12 <= timezone <= 12:
         return {"error": "timezone must be between -12 and 12"}
-    if not -7 <= indent_days <= 7:
-        return {"error": "indent_days must be between -7 and 7"}
+    # Calendar UI lets the user pick ±60 days. FL's events-list
+    # only accepts ±7 — beyond that we skip the FL call but still
+    # run the Kalshi pipelines (Outrights + unpaired h2h), which
+    # together cover anything Kalshi has open for that future
+    # date. For World-Cup-distance events (months ahead), Kalshi
+    # often has the market open before FL ships the fixture.
+    if not -60 <= indent_days <= 60:
+        return {"error": "indent_days must be between -60 and 60"}
 
-    fl_data = await _fl_get("/v1/events/list", {
-        "sport_id": sport_id, "timezone": timezone,
-        "indent_days": indent_days,
-    })
-    if not fl_data:
-        return {"error": "no FL events available"}
+    fl_data = None
+    if -7 <= indent_days <= 7:
+        fl_data = await _fl_get("/v1/events/list", {
+            "sport_id": sport_id, "timezone": timezone,
+            "indent_days": indent_days,
+        })
+        # FL outage / quota miss isn't fatal — fall through and
+        # serve Kalshi-only events. Same applies for out-of-range
+        # picks above.
 
     kalshi_sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
     kalshi_idx = _build_kalshi_index_for_sport(kalshi_sport) if kalshi_sport else {}
@@ -7851,7 +7860,7 @@ async def sports_feed(sport_id: int, timezone: int = 0,
             tk = (ev.get("kalshi") or {}).get("event_ticker")
             if tk:
                 matched_kalshi_tickers.add(tk)
-    for t in (fl_data.get("DATA") or []):
+    for t in ((fl_data or {}).get("DATA") or []):
         events_out: list = []
         for ev in (t.get("EVENTS") or []):
             ev_out = dict(ev)  # shallow copy; we add 'kalshi' key

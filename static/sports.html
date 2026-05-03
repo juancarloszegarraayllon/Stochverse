@@ -525,7 +525,11 @@ function dayLabel(indent) {
 }
 
 function setIndentDays(newIndent) {
-  newIndent = Math.max(-7, Math.min(7, newIndent));
+  // ±60 day window. FL only ships ±7; backend skips the FL call
+  // beyond that and serves Kalshi-only data (Outrights stay
+  // Today-only, unpaired h2h is date-filtered). Lets users find
+  // World Cup / Champions League final / etc. months ahead.
+  newIndent = Math.max(-60, Math.min(60, newIndent));
   if (newIndent === _indentDays) return;
   _indentDays = newIndent;
   // Auto-adjust the state filter to match what's possible on the
@@ -557,8 +561,8 @@ function refreshDayPickerUI() {
   const prev = document.getElementById('sp-c2-dp-prev');
   const next = document.getElementById('sp-c2-dp-next');
   if (lbl) lbl.textContent = dayLabel(_indentDays);
-  if (prev) prev.disabled = _indentDays <= -7;
-  if (next) next.disabled = _indentDays >= 7;
+  if (prev) prev.disabled = _indentDays <= -60;
+  if (next) next.disabled = _indentDays >= 60;
 }
 
 // Calendar — month browse state pinned in _calendarMonth (1st of
@@ -589,8 +593,12 @@ function renderCalendar() {
   // window doesn't go further.
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const minDate = new Date(today); minDate.setDate(today.getDate() - 7);
-  const maxDate = new Date(today); maxDate.setDate(today.getDate() + 7);
+  // Picker range matches the backend: ±60 days. Within ±7 gets
+  // FL fixtures + Kalshi; beyond ±7 is Kalshi-only (still useful
+  // for finding World Cup, championship finals, etc. that Kalshi
+  // markets months ahead of FL's events-list window).
+  const minDate = new Date(today); minDate.setDate(today.getDate() - 60);
+  const maxDate = new Date(today); maxDate.setDate(today.getDate() + 60);
   const sel = new Date(today); sel.setDate(today.getDate() + _indentDays);
   const firstDay = new Date(_calendarMonth.getFullYear(), _calendarMonth.getMonth(), 1);
   const lastDay = new Date(_calendarMonth.getFullYear(), _calendarMonth.getMonth() + 1, 0);
