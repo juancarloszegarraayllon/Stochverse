@@ -7000,6 +7000,76 @@ def _market_type_from_title(title: str) -> str:
     return ""
 
 
+def _to_cents(v) -> int:
+    """Coerce any cache value (float, int, None) to integer cents.
+    Float-precision artefacts like 56.000000000000001 round to 56;
+    None passes through. Used for every price chip on /sports."""
+    if v is None:
+        return None
+    try:
+        return int(round(float(v)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_all_outcomes(kalshi_record: dict) -> list:
+    """Pull every outcome from a Kalshi cache record into a clean
+    list. Each outcome:
+      {label, prob, yes, no, ticker}
+        prob:  yes_bid in cents (probability % when YES is true)
+        yes:   yes_ask in cents (what you PAY to buy YES)
+        no:    no_ask  in cents (what you PAY to buy NO)
+        ticker: per-outcome market ticker (WS subscription target)
+
+    Used for non-Winner markets (Spreads, Totals, Player Props,
+    etc.) where outcome labels are arbitrary strings rather than
+    home/away/tie. Frontend renders one chip row per outcome with
+    the label inline.
+    """
+    outcomes = (kalshi_record.get("outcomes")
+                or kalshi_record.get("_outcomes")
+                or [])
+    out: list = []
+
+    def _coerce_cents(rec, *keys):
+        for k in keys:
+            v = rec.get(k)
+            if v is not None:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    pass
+            vd = rec.get(k + "_dollars")
+            if vd is not None:
+                try:
+                    return int(round(float(vd) * 100))
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    for o in outcomes:
+        label = str(o.get("label") or "").strip()
+        if not label:
+            continue
+        prob = (_to_cents(o.get("_yb"))
+                if o.get("_yb") is not None
+                else _coerce_cents(o, "yes_bid"))
+        yes_ask = (_to_cents(o.get("_ya"))
+                   if o.get("_ya") is not None
+                   else _coerce_cents(o, "yes_ask"))
+        no_ask = (_to_cents(o.get("_na"))
+                  if o.get("_na") is not None
+                  else _coerce_cents(o, "no_ask"))
+        out.append({
+            "label": label,
+            "prob": prob,
+            "yes": yes_ask,
+            "no": no_ask,
+            "ticker": o.get("ticker") or "",
+        })
+    return out
+
+
 def _extract_winner_prices(kalshi_record: dict, home_name: str,
                             away_name: str) -> dict:
     """For a Kalshi headline-Winner record (3-way: home/away/tie),
@@ -7077,15 +7147,15 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
             return None
 
         # yes_bid → probability column (1¢ = 1% on Kalshi)
-        prob = (o.get("_yb")
+        prob = (_to_cents(o.get("_yb"))
                 if o.get("_yb") is not None
                 else _coerce_cents(o, "yes_bid"))
         # yes_ask → green YES button (what to PAY to buy YES)
-        yes_ask = (o.get("_ya")
+        yes_ask = (_to_cents(o.get("_ya"))
                    if o.get("_ya") is not None
                    else _coerce_cents(o, "yes_ask"))
         # no_ask → red NO button (what to PAY to buy NO)
-        no_ask = (o.get("_na")
+        no_ask = (_to_cents(o.get("_na"))
                   if o.get("_na") is not None
                   else _coerce_cents(o, "no_ask"))
         outcome_ticker = o.get("ticker") or ""
@@ -7208,6 +7278,13 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                         "title": r.get("title", ""),
                         "series_ticker": r.get("series_ticker", ""),
                         "market_type": _market_type_from_title(r.get("title", "")),
+                        # All outcomes for this market — used by the
+                        # frontend when the user picks a non-Winner
+                        # market type (Spreads, Totals, player props,
+                        # etc.) where the home/away/tie shape doesn't
+                        # apply. Each outcome has its own label, prices,
+                        # and per-outcome ticker for WS subscription.
+                        "outcomes": _extract_all_outcomes(r),
                     })
                 # Extract YES prices for home / away / tie from the
                 # primary (headline Winner) market — used for the
