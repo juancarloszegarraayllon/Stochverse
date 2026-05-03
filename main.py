@@ -6851,6 +6851,95 @@ def _normalize_team(name: str) -> str:
     return "".join(c.lower() for c in name if c.isalnum())
 
 
+def _collect_outrights_for_sport(sport_name: str) -> list:
+    """Collect Kalshi events for `sport_name` that don't pair with
+    any FL game — these are tournament/season outrights (Champions
+    League Winner, Super Bowl Winner, MVP, etc.) that have no
+    individual FL fixture backing them.
+
+    Returns a list of synthetic tournament dicts (same shape as the
+    FL tournaments in /v1/events/list), one per outright market,
+    each carrying a single event row whose `outcomes` is the full
+    field. Bucketed under COUNTRY_NAME='Outrights' so they group
+    together at the top of COL 1.
+
+    Filters:
+      - sport must match (`_sport` field set by the cache builder)
+      - title must be a headline market (no ':' suffix that signals
+        a sub-market — those belong to a parent game)
+      - must NOT match any FL game via match_game + corroboration
+        (otherwise the regular index would have surfaced it)
+      - need ≥2 outcomes so there's something to render
+    """
+    from flashlive_feed import match_game
+    if not sport_name:
+        return []
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    out: list = []
+    seen: set = set()
+    for r in records:
+        if (r.get("_sport") or "") != sport_name:
+            continue
+        title = r.get("title") or ""
+        if not title:
+            continue
+        if _market_type_from_title(title):
+            continue
+        try:
+            mg = match_game(title, sport_name)
+        except Exception:
+            mg = None
+        if mg and _kalshi_title_corroborates_fl_game(title, mg):
+            continue
+        outcomes = _extract_all_outcomes(r)
+        if len(outcomes) < 2:
+            continue
+        ticker = r.get("event_ticker") or ""
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        markets = [{
+            "event_ticker": ticker,
+            "title": title,
+            "series_ticker": r.get("series_ticker", ""),
+            "market_type": "",
+            "outcomes": outcomes,
+        }]
+        ev = {
+            "EVENT_ID": "outright-" + ticker,
+            "START_TIME": None,
+            "HOME_NAME": "",
+            "AWAY_NAME": "",
+            "HOME_SCORE_CURRENT": None,
+            "AWAY_SCORE_CURRENT": None,
+            "STAGE_TYPE": "OUTRIGHT",
+            "_outright": True,
+            "kalshi": {
+                "event_ticker": ticker,
+                "title": title,
+                "series_ticker": r.get("series_ticker", ""),
+                "count": 1,
+                "markets": markets,
+                "primary_prices": None,
+                "aggregate_home": None,
+                "aggregate_away": None,
+                "aggregate_label": None,
+            },
+        }
+        out.append({
+            "TOURNAMENT_STAGE_ID": "outright-" + ticker,
+            "NAME": title,
+            "NAME_PART_1": "Outrights",
+            "NAME_PART_2": title,
+            "COUNTRY_NAME": "Outrights",
+            "events": [ev],
+        })
+        if len(out) >= 50:
+            break
+    return out
+
+
 def _build_kalshi_index_for_sport(sport_name: str) -> dict:
     """Walk the Kalshi cache, return {fl_event_id: [kalshi_records]}
     for sports events whose title matches an FL game. Multiple
@@ -7246,9 +7335,17 @@ async def sports_feed(sport_id: int, timezone: int = 0,
 
     kalshi_sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
     kalshi_idx = _build_kalshi_index_for_sport(kalshi_sport) if kalshi_sport else {}
+    outright_tournaments = _collect_outrights_for_sport(kalshi_sport) if kalshi_sport else []
 
     out_tournaments: list = []
     matched_kalshi_tickers: set = set()
+    # Outrights count toward the matched_kalshi_count footer pill so
+    # users see the total Kalshi-backed events for the sport.
+    for t in outright_tournaments:
+        for ev in t["events"]:
+            tk = (ev.get("kalshi") or {}).get("event_ticker")
+            if tk:
+                matched_kalshi_tickers.add(tk)
     for t in (fl_data.get("DATA") or []):
         events_out: list = []
         for ev in (t.get("EVENTS") or []):
@@ -7328,10 +7425,13 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                 "events": events_out,
             })
 
+    # Outrights at the top — synthetic tournaments bucket under
+    # 'Outrights' country in COL 1, so the user sees them grouped
+    # at the top of the leagues sidebar.
     return {
         "fl_sport_id": sport_id,
         "kalshi_sport": kalshi_sport,
-        "tournaments": out_tournaments,
+        "tournaments": outright_tournaments + out_tournaments,
         "matched_kalshi_count": len(matched_kalshi_tickers),
         "source": "flashlive+kalshi",
     }

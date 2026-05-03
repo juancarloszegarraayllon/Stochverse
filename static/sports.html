@@ -140,7 +140,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-league-name{font-size:12px;font-weight:700;color:var(--text);letter-spacing:.3px}
 .sp-c2-country{font-size:10px;font-weight:500;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px}
 .sp-c2-events{padding:0}
-.sp-c2-event{display:grid;grid-template-columns:20px 64px 1fr 40px 260px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:start;transition:background .1s ease;border-left:2px solid transparent}
+.sp-c2-event{display:grid;grid-template-columns:20px 64px 1fr 40px 180px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:start;transition:background .1s ease;border-left:2px solid transparent}
 .sp-c2-event:hover{background:var(--bg-card)}
 .sp-c2-event.selected{background:var(--green-bg);border-left-color:var(--green)}
 .sp-c2-event:last-child{border-bottom:none}
@@ -152,22 +152,15 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    for lite rows (kept as a column so all rows align). When
    Polymarket / sportsbook integrations land, the same column
    will stack additional source markers (P, DK, FD, ...). */
-.sp-c2-indicator{display:flex;align-items:center;justify-content:center}
+.sp-c2-indicator{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:2px}
 .sp-c2-kalshi-badge{display:inline-flex;width:18px;height:18px;line-height:1;border-radius:50%;background:var(--green-bg);color:var(--green);font-size:10px;font-weight:700;align-items:center;justify-content:center;border:1px solid var(--green-line)}
-/* Right market cell — Kalshi PROBABILITY + YES + NO chips per
-   outcome (home / away / tie), stacked to align with the team /
-   score rows. Matches the homepage card style: green-bordered
-   button for YES, red-bordered for NO, dim probability text
-   alongside. Future Polymarket / sportsbook chips will stack
-   into additional rows here. */
+/* Right market cell — Kalshi PROB / YES / NO chip rows aligned
+   1:1 with the outcome labels in the teams cell to the left.
+   Each row's data-ticker is the WS subscription target. Future
+   Polymarket / sportsbook chips will stack into additional rows
+   here. */
 .sp-c2-marketcell{display:flex;flex-direction:column;gap:2px;font-size:10px;font-variant-numeric:tabular-nums;align-self:start}
-/* Outcome row — label + 3 chips. Mirrors the homepage card row:
-   one row per outcome (Espanyol / Real Madrid / Tie for Winner;
-   N spread variants for Spreads; etc.). The label column flexes;
-   the 3 chip columns are fixed-width so chips line up across rows.
-   Long labels truncate with ellipsis. */
-.sp-c2-out-row{display:grid;grid-template-columns:1fr 32px 40px 40px;gap:4px;align-items:center;padding:1px 0}
-.sp-c2-out-label{font-size:10px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.sp-c2-chip-row{display:grid;grid-template-columns:32px 1fr 1fr;gap:4px;align-items:center;min-height:18px}
 .sp-c2-prob{color:var(--text-dim);text-align:right;font-size:10px;font-weight:500}
 .sp-c2-yes{color:var(--green);font-weight:700;padding:2px 0;border-radius:3px;background:transparent;border:1px solid var(--green-line);text-align:center;font-size:10px;line-height:1}
 .sp-c2-no{color:var(--red);font-weight:700;padding:2px 0;border-radius:3px;background:transparent;border:1px solid #4d1a1a;text-align:center;font-size:10px;line-height:1}
@@ -180,15 +173,24 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 @keyframes sp-flash-down{0%{background-color:rgba(255,51,51,0.55)}100%{background-color:transparent}}
 .sp-c2-yes.sp-flash-up,.sp-c2-no.sp-flash-up,.sp-c2-prob.sp-flash-up{animation:sp-flash-up 0.9s ease-out}
 .sp-c2-yes.sp-flash-down,.sp-c2-no.sp-flash-down,.sp-c2-prob.sp-flash-down{animation:sp-flash-down 0.9s ease-out}
-/* Per-event mini-header — PROB / YES / NO labels rendered ABOVE
-   each event's chip rows (not sticky). Matches the homepage
-   prediction-card layout where every card carries its own column
-   labels. Same 32px / 1fr / 1fr grid as .sp-c2-price-row so the
-   labels line up perfectly with the chips below. */
-.sp-c2-evhead{display:grid;grid-template-columns:1fr 32px 40px 40px;gap:4px;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);padding-bottom:2px;margin-bottom:1px;border-bottom:1px solid var(--border)}
-.sp-c2-evhead-prob{text-align:right}
-.sp-c2-evhead-yes{color:var(--green);text-align:center}
-.sp-c2-evhead-no{color:var(--red);text-align:center}
+/* List header — Score and Kalshi group labels above the event
+   rows (sticky below the market-type tab strip). PROB / YES / NO
+   sub-labels under "Kalshi" align with the chip columns below.
+   Replaces per-event mini-headers, which felt like a doubled
+   table inside each row. */
+.sp-c2-list-header{display:grid;grid-template-columns:20px 64px 1fr 40px 180px;gap:8px;padding:6px 14px 8px;background:var(--bg2);border-bottom:1px solid var(--border);position:sticky;top:38px;z-index:3;font-size:9px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+.sp-c2-list-header-score{text-align:center;align-self:end}
+.sp-c2-list-header-kalshi{display:flex;flex-direction:column;align-items:stretch}
+.sp-c2-list-header-kalshi-title{text-align:center;color:var(--text);padding-bottom:2px}
+.sp-c2-list-header-kalshi-cols{display:grid;grid-template-columns:32px 1fr 1fr;gap:4px;font-size:8px}
+.sp-c2-list-header-kalshi-cols .lh-prob{text-align:right;color:var(--text-muted)}
+.sp-c2-list-header-kalshi-cols .lh-yes{text-align:center;color:var(--green)}
+.sp-c2-list-header-kalshi-cols .lh-no{text-align:center;color:var(--red)}
+/* Load-more toggle inside the teams cell — green text link
+   appearing under the visible outcomes when there are more than
+   4 to display. Click expands / collapses the full list. */
+.sp-c2-loadmore{background:transparent;border:none;color:var(--green);font-size:9px;font-weight:700;padding:2px 0;text-align:left;cursor:pointer;text-transform:uppercase;letter-spacing:.4px}
+.sp-c2-loadmore:hover{text-decoration:underline}
 .sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums}
 .sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);margin-top:2px;text-transform:uppercase}
 .sp-c2-time-state.live{color:var(--red);font-weight:700}
@@ -460,6 +462,7 @@ let _onlyMatched = false;        // toggled by clicking the "X on Kalshi" pill
 let _viewMode = 'game';          // 'game' (one row per match) or 'market' (one row per ticker)
 let _activeMarketType = '';      // active market type in Game view (empty = headline Winner)
 const _collapsedCountries = new Set();  // Set of country names
+const _expandedEvents = new Set();      // Event IDs with full outcome list shown (Load more toggled)
 
 // View mode persists across reloads — same pattern as the
 // column splitter widths.
@@ -565,7 +568,15 @@ function renderCol1() {
 
   // Country sections — alphabetical, each with its own collapsible
   // header. Leagues within a country sorted alphabetically too.
+  // Special-case 'Outrights' to the very top so tournament/season
+  // futures (Champions League Winner, Super Bowl Winner, MVP) are
+  // the first thing the user sees.
   const countries = Object.keys(byCountry).sort();
+  const orIdx = countries.indexOf('Outrights');
+  if (orIdx > 0) {
+    countries.splice(orIdx, 1);
+    countries.unshift('Outrights');
+  }
   for (const country of countries) {
     const leagues = byCountry[country].sort((a, b) => a.name.localeCompare(b.name));
     const collapsed = _collapsedCountries.has(country);
@@ -690,6 +701,26 @@ function renderCol2() {
         html += '</div>';
       }
     }
+    // Column headers — Score group label + Kalshi group label
+    // with PROB/YES/NO sub-labels. One sticky bar at the top of
+    // the events list (not per-event), matching the mockup's
+    // grouped-header style.
+    if (_matchedKalshiCount > 0) {
+      html += '<div class="sp-c2-list-header">';
+      html += '<div></div>';  // indicator spacer
+      html += '<div></div>';  // time spacer
+      html += '<div></div>';  // teams spacer
+      html += '<div class="sp-c2-list-header-score">Score</div>';
+      html += '<div class="sp-c2-list-header-kalshi">';
+      html += '<span class="sp-c2-list-header-kalshi-title">Kalshi</span>';
+      html += '<div class="sp-c2-list-header-kalshi-cols">';
+      html += '<span class="lh-prob">PROB</span>';
+      html += '<span class="lh-yes">YES</span>';
+      html += '<span class="lh-no">NO</span>';
+      html += '</div>';
+      html += '</div>';
+      html += '</div>';
+    }
   }
   for (const t of _eventsCache) {
     const stageId = t.TOURNAMENT_STAGE_ID || '';
@@ -732,6 +763,19 @@ function renderCol2() {
       _selectedEventId = evId;
       _selectedTicker = ticker;
       renderCol3(evId, ticker);
+    });
+  });
+  // Load-more / show-less toggle inside the teams cell. stop
+  // propagation so clicking the button doesn't also fire the
+  // row-select handler above (which would steal focus).
+  col2.querySelectorAll('.sp-c2-loadmore').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const evId = el.dataset.eventId;
+      if (!evId) return;
+      if (_expandedEvents.has(evId)) _expandedEvents.delete(evId);
+      else _expandedEvents.add(evId);
+      renderCol2();
     });
   });
   // 'All events' / 'On Kalshi' filter pills — mutual toggle.
@@ -869,13 +913,38 @@ function renderEventRow(ev, market, isMarketRow) {
   html += '<div class="sp-c2-time">' + escH(time);
   if (stLbl) html += '<span class="sp-c2-time-state' + (state === 'live' ? ' live' : '') + '">' + escH(stLbl) + '</span>';
   html += '</div>';
+  // Build the visible outcome list (capped at MAX_VISIBLE unless
+  // the user toggled "+ N more" on this event). The same list
+  // drives both the teams cell (labels) and the marketcell
+  // (chips) so they stay in lockstep.
+  const allOutcomes = matched ? collectOutcomesForRender(ev) : [];
+  const MAX_VISIBLE = 4;
+  const expanded = _expandedEvents.has(ev.EVENT_ID);
+  const outcomes = (allOutcomes.length > MAX_VISIBLE && !expanded)
+    ? allOutcomes.slice(0, MAX_VISIBLE)
+    : allOutcomes;
+  const hasMore = allOutcomes.length > MAX_VISIBLE;
   html += '<div class="sp-c2-teams">';
-  html += '<span class="sp-c2-team">' + escH(ev.HOME_NAME || '') + '</span>';
-  html += '<span class="sp-c2-team">' + escH(ev.AWAY_NAME || '') + '</span>';
-  // In Market view, append the market type below the team names
-  // so users can scan which market each row represents. Headline
-  // markets (no colon suffix in title) get labelled 'Winner' so
-  // every row in Market view has an explicit label.
+  if (matched && outcomes.length) {
+    // Show outcome labels (home / away / tie for Winner; spread
+    // variants for Spreads; etc.). Score column to the right
+    // stays anchored to the home/away pair regardless of how
+    // many outcome rows we render here.
+    for (const o of outcomes) {
+      html += '<span class="sp-c2-team" title="' + escH(o.label || '') +
+              '">' + escH(o.label || '') + '</span>';
+    }
+    if (hasMore) {
+      const lbl = expanded ? 'Show less' : '+ ' + (allOutcomes.length - MAX_VISIBLE) + ' more';
+      html += '<button class="sp-c2-loadmore" data-event-id="' +
+              escH(ev.EVENT_ID || '') + '" type="button">' + escH(lbl) + '</button>';
+    }
+  } else {
+    html += '<span class="sp-c2-team">' + escH(ev.HOME_NAME || '') + '</span>';
+    html += '<span class="sp-c2-team">' + escH(ev.AWAY_NAME || '') + '</span>';
+  }
+  // In Market view, append the market type below the labels so
+  // users can scan which market each row represents.
   if (isMarketRow && market) {
     const mtypeLabel = market.market_type || 'Winner';
     html += '<span class="sp-c2-market-type">' + escH(mtypeLabel) + '</span>';
@@ -894,37 +963,16 @@ function renderEventRow(ev, market, isMarketRow) {
             escH(ev.kalshi.aggregate_away) + '</span>';
   }
   html += '</div>';
-  // Right market cell — Kalshi PROBABILITY + YES + NO chips.
-  // Two render modes depending on the active market type:
-  //   - Winner (market_type=''): home/away/tie aligned to team rows
-  //     using primary_prices (compact, matches scores column)
-  //   - Other (Spreads, Totals, player props): one row per outcome
-  //     with the label inline (because outcomes aren't team-shaped)
-  // PROB %  ← yes_bid (1¢ = 1%)
-  // YES     ← yes_ask (what to PAY to buy YES)
-  // NO      ← no_ask  (what to PAY to buy NO)
+  // Right market cell — chip rows only (PROB / YES / NO), one per
+  // outcome. Labels live in the teams cell to the left so each
+  // chip row reads horizontally with its corresponding label.
+  // Outcome → chip row is 1:1 in display order.
   html += '<div class="sp-c2-marketcell">';
-  if (matched) {
-    // Build a unified outcome list regardless of market type so
-    // every event renders like the homepage card: one labelled row
-    // per outcome (Espanyol / Real Madrid / Tie for Winner;
-    // four spread variants for Spreads; etc.).
-    const outcomes = collectOutcomesForRender(ev);
-    if (outcomes.length) {
-      // Per-event mini-header — label / PROB / YES / NO. Aligns
-      // with the outcome rows below (same 4-col grid).
-      html += '<div class="sp-c2-evhead">';
-      html += '<span></span>';
-      html += '<span class="sp-c2-evhead-prob">PROB</span>';
-      html += '<span class="sp-c2-evhead-yes">YES</span>';
-      html += '<span class="sp-c2-evhead-no">NO</span>';
-      html += '</div>';
-      for (const o of outcomes) html += renderOutcomeRow(o);
-    } else {
-      html += '<span class="sp-c2-no-market" title="No prices yet">—</span>';
-    }
+  if (matched && outcomes.length) {
+    for (const o of outcomes) html += renderChipRow(o);
   } else {
-    html += '<span class="sp-c2-no-market" title="No markets yet">—</span>';
+    html += '<span class="sp-c2-no-market" title="' +
+            (matched ? 'No prices yet' : 'No markets yet') + '">—</span>';
   }
   html += '</div>';
   html += '</div>';
@@ -968,14 +1016,13 @@ function collectOutcomesForRender(ev) {
   return [];
 }
 
-function renderOutcomeRow(o) {
-  // One labelled chip row matching the homepage card style:
-  //   <label>            <prob%>  <yes¢>  <no¢>
-  // Each row carries its own data-ticker for WS subscription.
+function renderChipRow(o) {
+  // One PROB / YES / NO chip row aligned 1:1 with the outcome
+  // label rendered in the teams cell to the left. Each row's
+  // data-ticker is the per-outcome WS subscription target so
+  // prices flash on the chip when the bid moves.
   const tickerAttr = o.ticker ? ' data-ticker="' + escH(o.ticker) + '"' : '';
-  let row = '<div class="sp-c2-out-row"' + tickerAttr + '>';
-  row += '<div class="sp-c2-out-label" title="' + escH(o.label || '') + '">' +
-         escH(o.label || '') + '</div>';
+  let row = '<div class="sp-c2-chip-row"' + tickerAttr + '>';
   row += '<span class="sp-c2-prob" data-fld="prob">' +
     (o.prob != null ? o.prob + '%' : '–') + '</span>';
   row += '<span class="sp-c2-yes" data-fld="yes">' +
@@ -1276,7 +1323,7 @@ function applyPriceUpdate(ticker, data) {
   // Outcome rows carry data-ticker (event-level wrappers also do,
   // but those don't contain [data-fld] cells, so be specific).
   const row = document.querySelector(
-    '.sp-c2-out-row[data-ticker="' + ticker + '"]');
+    '.sp-c2-chip-row[data-ticker="' + ticker + '"]');
   if (!row) return;
   const updateField = (field, newVal, cls) => {
     if (newVal == null) return;
@@ -1316,7 +1363,7 @@ const _origRenderCol2 = renderCol2;
 renderCol2 = function() {
   _origRenderCol2();
   const tickers = [];
-  document.querySelectorAll('.sp-c2-out-row[data-ticker]').forEach(el => {
+  document.querySelectorAll('.sp-c2-chip-row[data-ticker]').forEach(el => {
     const t = el.dataset.ticker;
     if (t) tickers.push(t);
   });
