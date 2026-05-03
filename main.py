@@ -6862,11 +6862,21 @@ def _build_kalshi_index_for_sport(sport_name: str) -> dict:
     Uses the proven match_game() in flashlive_feed.py — handles
     team-name aliases (PSG ↔ Paris Saint-Germain, etc.) that
     naive string matching can't.
+
+    Adds a defensive sanity check on top of match_game: verifies
+    that BOTH the FL home_name and FL away_name token-overlap
+    the Kalshi title. Without this, observed false-positives
+    where a Kalshi 'Minnesota at San Antonio' matched FL
+    'Sandringham vs Mt Gambier' (basketball — both events have
+    'San' substring overlap somewhere in their phrase lists,
+    but the actual full team names don't appear in the Kalshi
+    title at all).
     """
     from flashlive_feed import match_game
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
     idx: dict = {}
+    rejected = 0
     for r in records:
         if (r.get("_sport") or "") != sport_name:
             continue
@@ -6882,8 +6892,52 @@ def _build_kalshi_index_for_sport(sport_name: str) -> dict:
         fl_id = mg.get("event_id")
         if not fl_id:
             continue
+        # Sanity check: the matched FL game's home_name and away
+        # name should both have at least one ≥4-char token in
+        # the Kalshi title. Cheap but effective gate against the
+        # phrase-overlap false positives match_game lets through.
+        if not _kalshi_title_corroborates_fl_game(title, mg):
+            rejected += 1
+            continue
         idx.setdefault(fl_id, []).append(r)
+    if rejected:
+        logging.getLogger("stochverse").info(
+            "kalshi-fl match: %d rejected by sanity check (sport=%s)",
+            rejected, sport_name,
+        )
     return idx
+
+
+def _kalshi_title_corroborates_fl_game(kalshi_title: str, fl_game: dict) -> bool:
+    """Defensive double-check on a match_game() result. Returns
+    True iff both fl_game.home_name and fl_game.away_name have
+    at least one token ≥4 chars that appears (case-insensitively)
+    in kalshi_title. Catches the 'phrase substring overlap'
+    false positives where match_game returns a game whose actual
+    team names don't appear in the Kalshi title.
+    """
+    if not kalshi_title or not fl_game:
+        return False
+    home = (fl_game.get("home_name") or "").lower()
+    away = (fl_game.get("away_name") or "").lower()
+    title_lc = kalshi_title.lower()
+    if not home or not away:
+        return False
+
+    def has_token_hit(team_name: str) -> bool:
+        # Split on whitespace and punctuation, look for any
+        # ≥4-char token in the title. 4 chars is the threshold
+        # below which English/Spanish team-name fragments get
+        # noisy ('san', 'mt', 'fc', 'sc' etc. all match too
+        # broadly).
+        import re
+        tokens = re.split(r"[^a-z0-9]+", team_name)
+        for tok in tokens:
+            if len(tok) >= 4 and tok in title_lc:
+                return True
+        return False
+
+    return has_token_hit(home) and has_token_hit(away)
 
 
 def _market_type_from_title(title: str) -> str:
