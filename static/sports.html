@@ -140,7 +140,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-league-name{font-size:12px;font-weight:700;color:var(--text);letter-spacing:.3px}
 .sp-c2-country{font-size:10px;font-weight:500;color:var(--text-dim);text-transform:uppercase;letter-spacing:.4px}
 .sp-c2-events{padding:0}
-.sp-c2-event{display:grid;grid-template-columns:20px 64px 1fr 40px 168px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:center;transition:background .1s ease;border-left:2px solid transparent}
+.sp-c2-event{display:grid;grid-template-columns:20px 64px 1fr 40px 260px;gap:8px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);align-items:start;transition:background .1s ease;border-left:2px solid transparent}
 .sp-c2-event:hover{background:var(--bg-card)}
 .sp-c2-event.selected{background:var(--green-bg);border-left-color:var(--green)}
 .sp-c2-event:last-child{border-bottom:none}
@@ -160,8 +160,14 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    button for YES, red-bordered for NO, dim probability text
    alongside. Future Polymarket / sportsbook chips will stack
    into additional rows here. */
-.sp-c2-marketcell{display:flex;flex-direction:column;gap:2px;font-size:10px;font-variant-numeric:tabular-nums}
-.sp-c2-price-row{display:grid;grid-template-columns:32px 1fr 1fr;gap:4px;align-items:center}
+.sp-c2-marketcell{display:flex;flex-direction:column;gap:2px;font-size:10px;font-variant-numeric:tabular-nums;align-self:start}
+/* Outcome row — label + 3 chips. Mirrors the homepage card row:
+   one row per outcome (Espanyol / Real Madrid / Tie for Winner;
+   N spread variants for Spreads; etc.). The label column flexes;
+   the 3 chip columns are fixed-width so chips line up across rows.
+   Long labels truncate with ellipsis. */
+.sp-c2-out-row{display:grid;grid-template-columns:1fr 32px 40px 40px;gap:4px;align-items:center;padding:1px 0}
+.sp-c2-out-label{font-size:10px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
 .sp-c2-prob{color:var(--text-dim);text-align:right;font-size:10px;font-weight:500}
 .sp-c2-yes{color:var(--green);font-weight:700;padding:2px 0;border-radius:3px;background:transparent;border:1px solid var(--green-line);text-align:center;font-size:10px;line-height:1}
 .sp-c2-no{color:var(--red);font-weight:700;padding:2px 0;border-radius:3px;background:transparent;border:1px solid #4d1a1a;text-align:center;font-size:10px;line-height:1}
@@ -179,7 +185,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    prediction-card layout where every card carries its own column
    labels. Same 32px / 1fr / 1fr grid as .sp-c2-price-row so the
    labels line up perfectly with the chips below. */
-.sp-c2-evhead{display:grid;grid-template-columns:32px 1fr 1fr;gap:4px;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);padding-bottom:2px;margin-bottom:1px;border-bottom:1px solid var(--border)}
+.sp-c2-evhead{display:grid;grid-template-columns:1fr 32px 40px 40px;gap:4px;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);padding-bottom:2px;margin-bottom:1px;border-bottom:1px solid var(--border)}
 .sp-c2-evhead-prob{text-align:right}
 .sp-c2-evhead-yes{color:var(--green);text-align:center}
 .sp-c2-evhead-no{color:var(--red);text-align:center}
@@ -532,7 +538,13 @@ function renderCol1() {
     const evs = (t.events || t.EVENTS || []).filter(passesStateFilter);
     if (!evs.length) continue;
     totalEvents += evs.length;
-    const country = t.COUNTRY_NAME || 'Other';
+    // Country / region bucket. International competitions
+    // (UEFA Champions League, Copa Libertadores, World Cup) carry
+    // no COUNTRY_NAME — FL parks them under NAME_PART_1 instead
+    // ("Europe", "South America", "World"). Fall back to that
+    // before lumping into 'International' so they show up in the
+    // sidebar under their actual region.
+    const country = t.COUNTRY_NAME || t.NAME_PART_1 || 'International';
     if (!byCountry[country]) byCountry[country] = [];
     byCountry[country].push({
       stageId: t.TOURNAMENT_STAGE_ID || '',
@@ -893,35 +905,23 @@ function renderEventRow(ev, market, isMarketRow) {
   // NO      ← no_ask  (what to PAY to buy NO)
   html += '<div class="sp-c2-marketcell">';
   if (matched) {
-    const activeMarket = pickMarketForGameRow(ev);
-    const isWinner = activeMarket && (activeMarket.market_type || '') === '';
-    // Per-event PROB / YES / NO mini-header — same layout as the
-    // homepage card. Sits above the chip rows of THIS event only,
-    // so each card carries its own column labels (no sticky bar).
-    html += '<div class="sp-c2-evhead">';
-    html += '<span class="sp-c2-evhead-prob">PROB</span>';
-    html += '<span class="sp-c2-evhead-yes">YES</span>';
-    html += '<span class="sp-c2-evhead-no">NO</span>';
-    html += '</div>';
-    if (isWinner && ev.kalshi.primary_prices) {
-      // Winner — compact home/away/tie layout aligned to score rows.
-      const p = ev.kalshi.primary_prices;
-      html += renderWinnerPriceRow('home', p.home_prob, p.home_yes, p.home_no, p.home_ticker);
-      html += renderWinnerPriceRow('away', p.away_prob, p.away_yes, p.away_no, p.away_ticker);
-      if (p.tie_yes != null || p.tie_no != null || p.tie_prob != null) {
-        html += renderWinnerPriceRow('tie', p.tie_prob, p.tie_yes, p.tie_no, p.tie_ticker);
-      }
-    } else if (activeMarket && activeMarket.outcomes && activeMarket.outcomes.length) {
-      // Sub-market — render every outcome with its label.
-      // Outcome labels can be long ('Bayern Munich wins by over
-      // 2.5 goals'); the .sp-c2-mkt-row layout truncates with
-      // ellipsis to avoid breaking the row width.
-      for (const o of activeMarket.outcomes) {
-        html += renderOutcomePriceRow(o);
-      }
+    // Build a unified outcome list regardless of market type so
+    // every event renders like the homepage card: one labelled row
+    // per outcome (Espanyol / Real Madrid / Tie for Winner;
+    // four spread variants for Spreads; etc.).
+    const outcomes = collectOutcomesForRender(ev);
+    if (outcomes.length) {
+      // Per-event mini-header — label / PROB / YES / NO. Aligns
+      // with the outcome rows below (same 4-col grid).
+      html += '<div class="sp-c2-evhead">';
+      html += '<span></span>';
+      html += '<span class="sp-c2-evhead-prob">PROB</span>';
+      html += '<span class="sp-c2-evhead-yes">YES</span>';
+      html += '<span class="sp-c2-evhead-no">NO</span>';
+      html += '</div>';
+      for (const o of outcomes) html += renderOutcomeRow(o);
     } else {
-      html += '<div class="sp-c2-price-empty">·</div>';
-      html += '<div class="sp-c2-price-empty">·</div>';
+      html += '<span class="sp-c2-no-market" title="No prices yet">—</span>';
     }
   } else {
     html += '<span class="sp-c2-no-market" title="No markets yet">—</span>';
@@ -931,34 +931,57 @@ function renderEventRow(ev, market, isMarketRow) {
   return html;
 }
 
-function renderWinnerPriceRow(side, prob, yes, no, ticker) {
-  const tickerAttr = ticker ? ' data-ticker="' + escH(ticker) + '"' : '';
-  let row = '<div class="sp-c2-price-row" data-side="' + side + '"' + tickerAttr + '>';
-  row += '<span class="sp-c2-prob" data-fld="prob">' +
-    (prob != null ? prob + '%' : '–') + '</span>';
-  row += '<span class="sp-c2-yes" data-fld="yes">' +
-    (yes != null ? yes + '¢' : '–') + '</span>';
-  row += '<span class="sp-c2-no" data-fld="no">' +
-    (no != null ? no + '¢' : '–') + '</span>';
-  row += '</div>';
-  return row;
+function collectOutcomesForRender(ev) {
+  // Return a uniform [{label, prob, yes, no, ticker}, …] list for
+  // the active market on this event. Winner: home / away / tie
+  // (built from primary_prices using FL team names). Other markets
+  // (Spreads, Totals, player props): pass-through outcomes from
+  // the cache, which already carry self-describing labels like
+  // "Real Madrid wins by over 2.5 goals".
+  if (!ev.kalshi) return [];
+  const activeMarket = pickMarketForGameRow(ev);
+  const isWinner = activeMarket && (activeMarket.market_type || '') === '';
+  if (isWinner && ev.kalshi.primary_prices) {
+    const p = ev.kalshi.primary_prices;
+    const out = [];
+    const has = (a, b, c) => a != null || b != null || c != null;
+    if (has(p.home_prob, p.home_yes, p.home_no)) {
+      out.push({ label: ev.HOME_NAME || 'Home',
+                 prob: p.home_prob, yes: p.home_yes, no: p.home_no,
+                 ticker: p.home_ticker });
+    }
+    if (has(p.away_prob, p.away_yes, p.away_no)) {
+      out.push({ label: ev.AWAY_NAME || 'Away',
+                 prob: p.away_prob, yes: p.away_yes, no: p.away_no,
+                 ticker: p.away_ticker });
+    }
+    if (has(p.tie_prob, p.tie_yes, p.tie_no)) {
+      out.push({ label: 'Tie',
+                 prob: p.tie_prob, yes: p.tie_yes, no: p.tie_no,
+                 ticker: p.tie_ticker });
+    }
+    return out;
+  }
+  if (activeMarket && activeMarket.outcomes && activeMarket.outcomes.length) {
+    return activeMarket.outcomes;
+  }
+  return [];
 }
 
-function renderOutcomePriceRow(o) {
-  // Sub-market outcomes have arbitrary labels — show the label
-  // inline above the chip row (Sofascore-style stacked layout).
-  // Each outcome gets its own data-ticker for WS subscription.
+function renderOutcomeRow(o) {
+  // One labelled chip row matching the homepage card style:
+  //   <label>            <prob%>  <yes¢>  <no¢>
+  // Each row carries its own data-ticker for WS subscription.
   const tickerAttr = o.ticker ? ' data-ticker="' + escH(o.ticker) + '"' : '';
-  let row = '<div class="sp-c2-mkt-row"' + tickerAttr + '>';
-  row += '<div class="sp-c2-mkt-label">' + escH(o.label || '') + '</div>';
-  row += '<div class="sp-c2-price-row">';
+  let row = '<div class="sp-c2-out-row"' + tickerAttr + '>';
+  row += '<div class="sp-c2-out-label" title="' + escH(o.label || '') + '">' +
+         escH(o.label || '') + '</div>';
   row += '<span class="sp-c2-prob" data-fld="prob">' +
     (o.prob != null ? o.prob + '%' : '–') + '</span>';
   row += '<span class="sp-c2-yes" data-fld="yes">' +
     (o.yes != null ? o.yes + '¢' : '–') + '</span>';
   row += '<span class="sp-c2-no" data-fld="no">' +
     (o.no != null ? o.no + '¢' : '–') + '</span>';
-  row += '</div>';
   row += '</div>';
   return row;
 }
@@ -1250,11 +1273,10 @@ const PriceWS = (function() {
 // animationend listener).
 function applyPriceUpdate(ticker, data) {
   if (!ticker) return;
-  // Tickers can live on either .sp-c2-price-row (Winner rows) or
-  // .sp-c2-mkt-row (sub-market wrapper for outcome layouts). The
-  // [data-fld] selectors inside both work the same way.
+  // Outcome rows carry data-ticker (event-level wrappers also do,
+  // but those don't contain [data-fld] cells, so be specific).
   const row = document.querySelector(
-    '[data-ticker="' + ticker + '"]');
+    '.sp-c2-out-row[data-ticker="' + ticker + '"]');
   if (!row) return;
   const updateField = (field, newVal, cls) => {
     if (newVal == null) return;
@@ -1294,9 +1316,7 @@ const _origRenderCol2 = renderCol2;
 renderCol2 = function() {
   _origRenderCol2();
   const tickers = [];
-  document.querySelectorAll(
-    '.sp-c2-price-row[data-ticker], .sp-c2-mkt-row[data-ticker]'
-  ).forEach(el => {
+  document.querySelectorAll('.sp-c2-out-row[data-ticker]').forEach(el => {
     const t = el.dataset.ticker;
     if (t) tickers.push(t);
   });
