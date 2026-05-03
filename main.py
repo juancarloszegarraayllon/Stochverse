@@ -6851,6 +6851,68 @@ def _normalize_team(name: str) -> str:
     return "".join(c.lower() for c in name if c.isalnum())
 
 
+# ──────────────────────────────────────────────────────────────────
+# Universal market-shape rules — apply across EVERY sport.
+#
+# Defined here as module-level constants so the same logic is used
+# wherever Kalshi titles are classified (outrights collector today;
+# tomorrow possibly the matched-events fallback path or any other
+# bucket that needs to tell 'this is a head-to-head' from 'this is
+# a tournament future'). Tuning either one in a single place
+# propagates everywhere.
+#
+# _HEAD_TO_HEAD_TITLE_RE — pattern for head-to-head match titles
+# observed across sports we cover. Whitespace-bounded so we don't
+# falsely fire on substrings of words ("Vsevolod", "Atomic", etc.).
+#
+# Sport coverage cross-check:
+#   Soccer        — 'Real Madrid vs Barcelona', 'Arsenal v Chelsea'
+#   Basketball    — 'Lakers @ Warriors', 'Lakers at Warriors'
+#   American FB   — 'Chiefs vs Eagles', 'Chiefs at Eagles'
+#   Baseball      — 'Yankees @ Red Sox', 'Yankees vs Red Sox'
+#   Hockey        — 'Rangers vs Bruins'
+#   Tennis        — 'Chen vs Zhou', 'Alcaraz v. Sinner'
+#   MMA / Boxing  — 'Fighter A vs Fighter B'
+#   Cricket / Rugby — 'England vs Australia'
+#   Esports       — 'Team Liquid vs Cloud9'
+#   Handball / Volleyball / Hockey / etc. — same 'vs' convention
+#
+# What it intentionally does NOT match (these are real outrights):
+#   'Champions League Winner'     — no separator
+#   'Heisman Trophy Winner'       — no separator
+#   "Men's French Open Winner"    — no separator
+#   'Super Bowl LX MVP'           — no separator
+#   'Top Scorer Premier League'   — no separator
+#
+# Edge case we accept as a mild false-positive risk:
+#   'Premier League: Most Wins'   — could conceivably contain ' v '
+#   inside an outcome name, but the title itself wouldn't, so we're
+#   safe here.
+_HEAD_TO_HEAD_TITLE_RE = __import__("re").compile(
+    r"\s+(?:vs\.?|versus|v\.?|@|at)\s+",
+    __import__("re").IGNORECASE,
+)
+
+# _OUTRIGHT_MIN_OUTCOMES — real tournament/season outrights have
+# many candidates: 8-32 teams in Champions League, ~30 players for
+# MVP, ~10-15 horses in a Triple Crown race, etc. Anything with 2
+# outcomes is almost always either a head-to-head (filtered by the
+# regex above) or a yes/no proposition that doesn't belong in the
+# Outrights bucket either. 3 is the floor.
+_OUTRIGHT_MIN_OUTCOMES = 3
+
+
+def _is_head_to_head_title(title: str) -> bool:
+    """True if `title` looks like a head-to-head match between two
+    teams/players (X vs Y / X @ Y / X versus Y / etc.). Universal
+    across sports — see _HEAD_TO_HEAD_TITLE_RE for coverage notes.
+    Returns False on empty input.
+    """
+    if not title:
+        return False
+    return bool(_HEAD_TO_HEAD_TITLE_RE.search(title))
+
+
 def _collect_outrights_for_sport(sport_name: str) -> list:
     """Collect Kalshi events for `sport_name` that don't pair with
     any FL game — these are tournament/season outrights (Champions
@@ -6869,22 +6931,18 @@ def _collect_outrights_for_sport(sport_name: str) -> list:
         a sub-market — those belong to a parent game)
       - must NOT match any FL game via match_game + corroboration
         (otherwise the regular index would have surfaced it)
-      - title is NOT a head-to-head match (X vs Y / X @ Y / X v. Y).
-        Those are individual fixtures that just failed to pair with
-        FL — usually a name-abbreviation gap (Kalshi 'Chen vs Zhou'
-        vs FL 'Zhuo Chen vs Ziyu Zhou'). They don't belong in
-        Outrights even though match_game() didn't pair them.
-      - ≥3 outcomes — real outrights have many candidates (8+ teams
-        in UCL, 30+ in MVP). 2-outcome markets are almost always
-        either head-to-heads (filtered above) or yes/no propositions
-        that aren't tournament outrights either.
+      - title is NOT a head-to-head match (X vs Y / X @ Y / X v. Y
+        — see _is_head_to_head_title). Universal across sports;
+        catches the name-abbreviation gap (Kalshi 'Chen vs Zhou'
+        not pairing with FL 'Zhuo Chen vs Ziyu Zhou') without
+        misclassifying them as tournament futures.
+      - ≥_OUTRIGHT_MIN_OUTCOMES outcomes (3). Real outrights have
+        many candidates; 2-outcome markets are head-to-heads or
+        yes/no props.
     """
-    import re
     from flashlive_feed import match_game
     if not sport_name:
         return []
-    # Catches " vs ", " v. ", " v ", " @ ", " at " — case-insensitive
-    head_to_head_re = re.compile(r"\s+(?:vs|v\.?|@|at)\s+", re.IGNORECASE)
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
     out: list = []
@@ -6897,7 +6955,7 @@ def _collect_outrights_for_sport(sport_name: str) -> list:
             continue
         if _market_type_from_title(title):
             continue
-        if head_to_head_re.search(title):
+        if _is_head_to_head_title(title):
             continue
         try:
             mg = match_game(title, sport_name)
@@ -6906,7 +6964,7 @@ def _collect_outrights_for_sport(sport_name: str) -> list:
         if mg and _kalshi_title_corroborates_fl_game(title, mg):
             continue
         outcomes = _extract_all_outcomes(r)
-        if len(outcomes) < 3:
+        if len(outcomes) < _OUTRIGHT_MIN_OUTCOMES:
             continue
         ticker = r.get("event_ticker") or ""
         if not ticker or ticker in seen:
