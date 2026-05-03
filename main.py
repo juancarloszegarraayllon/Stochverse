@@ -7412,9 +7412,16 @@ async def debug_sport_buckets(sport_id: int, timezone: int = 0,
             "NAME_PART_1": t.get("NAME_PART_1"),
             "NAME_PART_2": t.get("NAME_PART_2"),
             "COUNTRY_NAME": t.get("COUNTRY_NAME"),
+            "COUNTRY_ID": t.get("COUNTRY_ID"),
+            "CATEGORY_NAME": t.get("CATEGORY_NAME"),
+            "CATEGORY_ID": t.get("CATEGORY_ID"),
+            "TOURNAMENT_ID": t.get("TOURNAMENT_ID"),
             "TOURNAMENT_STAGE_ID": t.get("TOURNAMENT_STAGE_ID"),
             "event_count": len(evs),
             "sample_events": sample_names,
+            # Full key set — useful for spotting fields we don't
+            # know about yet (e.g. CONTINENT_NAME, REGION_ID).
+            "_all_keys": sorted([k for k in t.keys() if k != "EVENTS"]),
         })
     # Kalshi events for this sport that don't pair with FL.
     get_data()

@@ -222,6 +222,11 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    tell which game the row refers to even when outcome labels
    don't include team names. */
 .sp-c2-matchup{font-size:11px;font-weight:600;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-bottom:2px;margin-bottom:2px;border-bottom:1px dashed var(--border)}
+/* Inline match score inside the matchup line — mirrors the bold
+   tabular numbers used in the standalone score column so 'Aston
+   Villa 0 - 2 Tottenham' reads the same as the vertical 0/2
+   pair would. */
+.sp-c2-matchup-score{font-size:13px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;padding:0 2px}
 .sp-c2-scores{font-size:13px;font-weight:700;text-align:center;font-variant-numeric:tabular-nums;display:flex;flex-direction:column;gap:2px}
 .sp-c2-agg{font-size:9px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.3px;margin-top:2px}
 /* Empty chip-row spacer — used when the teams cell shows a
@@ -392,6 +397,53 @@ function titleCase(s) {
   // normalize FL's shouty COUNTRY_NAME / NAME_PART_1 values for
   // the COL 1 country header.
   return String(s || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// FL's continental bucket names (matches the IDs from FL's
+// 'Other Competitions' list: Africa=1, NCAm=2, SAm=3, Asia=5,
+// Europe=6, AusOc=7, World=8). Used as a normalization target
+// when a tournament's region info has to be parsed out of the
+// NAME field — we recognize one of these as the bucket label.
+const _CONTINENT_BUCKETS = [
+  'Africa', 'Asia', 'Australia & Oceania', 'Europe',
+  'North & Central America', 'South America', 'World',
+];
+
+function bucketCountry(t) {
+  // Decide which COL 1 country/region a tournament lives under.
+  // Order of fallbacks (each handles a different shape of FL data):
+  //   1. COUNTRY_NAME — populated for nation-bound leagues
+  //      (ENGLAND, GERMANY, etc.). Title-cased so 'ENGLAND'
+  //      renders 'England'.
+  //   2. NAME_PART_1 — FL's split for tournaments whose name has
+  //      a prefix like 'EUROPE: Champions League'. Title-cased.
+  //   3. NAME prefix — when neither field is populated, parse the
+  //      part before ':' in NAME. Catches 'Europe: Champions
+  //      League' or 'World: World Cup' shipped as a single string.
+  //   4. Match against FL's known continent bucket names — if
+  //      anything we have matches one of those, bucket together.
+  //   5. Default 'International' for the rest.
+  const c1 = (t.COUNTRY_NAME || '').trim();
+  if (c1) return titleCase(c1);
+  const c2 = (t.NAME_PART_1 || '').trim();
+  if (c2) return titleCase(c2);
+  const name = (t.NAME || '').trim();
+  if (name.indexOf(':') > 0) {
+    const prefix = name.split(':', 1)[0].trim();
+    if (prefix && prefix.length <= 30) return titleCase(prefix);
+  }
+  // Last resort — scan NAME for any continent token directly. UCL
+  // sometimes ships as 'UEFA Champions League' with no prefix at
+  // all; if 'UEFA' or 'UCL' appears we still want to bucket under
+  // Europe rather than 'International'.
+  const upper = name.toUpperCase();
+  if (/\bUEFA\b|\bUCL\b|\bEUROPA\b/.test(upper)) return 'Europe';
+  if (/\bCONMEBOL\b|\bLIBERTADORES\b|\bSUDAMERICANA\b/.test(upper)) return 'South America';
+  if (/\bCONCACAF\b|\bGOLD CUP\b/.test(upper)) return 'North & Central America';
+  if (/\bAFC\b|\bAFCON\b|\bAFCAS\b/.test(upper)) return 'Asia';
+  if (/\bCAF\b/.test(upper)) return 'Africa';
+  if (/\bWORLD CUP\b|\bFIFA\b/.test(upper)) return 'World';
+  return 'International';
 }
 
 function escH(s) {
@@ -602,18 +654,7 @@ function renderCol1() {
     const evs = (t.events || t.EVENTS || []).filter(passesStateFilter);
     if (!evs.length) continue;
     totalEvents += evs.length;
-    // Country / region bucket. International competitions
-    // (UEFA Champions League, Copa Libertadores, World Cup) carry
-    // no COUNTRY_NAME — FL parks them under NAME_PART_1 instead
-    // ("Europe", "South America", "World"). Fall back to that
-    // before lumping into 'International' so they show up in the
-    // sidebar under their actual region.
-    // Title-case the value so FL's uppercase 'EUROPE' / 'ENGLAND'
-    // doesn't render shouty in the sidebar — bucket keys collapse
-    // to the same case so 'Europe' from one tournament and
-    // 'EUROPE' from another all sit together.
-    const rawCountry = t.COUNTRY_NAME || t.NAME_PART_1 || 'International';
-    const country = titleCase(rawCountry);
+    const country = bucketCountry(t);
     if (!byCountry[country]) byCountry[country] = [];
     byCountry[country].push({
       stageId: t.TOURNAMENT_STAGE_ID || '',
@@ -769,6 +810,13 @@ function renderCol2() {
     // column header strip beneath the tournament name. If not,
     // skip the strip — there's nothing to label.
     const tournamentHasMatch = evs.some(e => e.kalshi && e.kalshi.event_ticker);
+    // Show the SCORE column label only when at least one event in
+    // this tournament is going to render scores in the score column
+    // (Winner-shape outcomes / unmatched / no active market). For
+    // tournaments where every visible event has its score baked
+    // into the matchup line (sub-market views), the score column is
+    // empty for every row and the label would be misleading.
+    const tournamentNeedsScoreCol = evs.some(eventShowsScoreInColumn);
     html += '<div class="sp-c2-tournament">';
     html += '<div class="sp-c2-tournament-head">';
     html += '<span class="sp-c2-league-name">' + escH(leagueDisplayName(t)) + '</span>';
@@ -779,7 +827,7 @@ function renderCol2() {
       html += '<div></div>';  // indicator spacer
       html += '<div></div>';  // time spacer
       html += '<div></div>';  // teams spacer
-      html += '<div class="sp-c2-tcol-score">Score</div>';
+      html += '<div class="sp-c2-tcol-score">' + (tournamentNeedsScoreCol ? 'Score' : '') + '</div>';
       html += '<div class="sp-c2-tcol-kalshi">';
       html += '<span class="sp-c2-tcol-kalshi-title">Kalshi</span>';
       html += '<span class="lh-prob">PROB</span>';
@@ -1017,15 +1065,26 @@ function renderEventRow(ev, market, isMarketRow) {
     const hs = ev.HOME_SCORE_CURRENT;
     const as = ev.AWAY_SCORE_CURRENT;
     const haveScores = (hs != null) || (as != null);
-    let matchup;
+    const homeName = ev.HOME_NAME || '';
+    const awayName = ev.AWAY_NAME || '';
+    // Plain-text matchup for the title= tooltip (no markup).
+    const matchupTitle = haveScores
+      ? homeName + ' ' + (hs != null ? hs : 0) + ' - ' + (as != null ? as : 0) + ' ' + awayName
+      : homeName + ' vs ' + awayName;
+    let matchupHtml;
     if (haveScores) {
-      matchup = (ev.HOME_NAME || '') + ' ' + (hs != null ? hs : 0) +
-                ' - ' + (as != null ? as : 0) + ' ' + (ev.AWAY_NAME || '');
+      // Wrap the inline score numbers in a span so they render in
+      // the same bold tabular style as the vertical score column —
+      // visually consistent across both layouts.
+      matchupHtml = escH(homeName) +
+        ' <span class="sp-c2-matchup-score">' + escH(hs != null ? hs : 0) + '</span>' +
+        ' - <span class="sp-c2-matchup-score">' + escH(as != null ? as : 0) + '</span> ' +
+        escH(awayName);
     } else {
-      matchup = (ev.HOME_NAME || '') + ' vs ' + (ev.AWAY_NAME || '');
+      matchupHtml = escH(homeName) + ' vs ' + escH(awayName);
     }
-    html += '<span class="sp-c2-matchup" title="' + escH(matchup) +
-            '">' + escH(matchup) + '</span>';
+    html += '<span class="sp-c2-matchup" title="' + escH(matchupTitle) +
+            '">' + matchupHtml + '</span>';
   }
   if (matched && outcomes.length) {
     // Show outcome labels (home / away / tie for Winner; spread
@@ -1148,6 +1207,22 @@ function collectOutcomesForRender(ev, marketOverride) {
     return activeMarket.outcomes;
   }
   return [];
+}
+
+function eventShowsScoreInColumn(ev) {
+  // True if THIS event will render its scores in the standalone
+  // score column (vs inline in the matchup header). Used to
+  // decide whether the tournament's column header strip should
+  // show 'Score' or leave that label blank. Mirror of the
+  // showMatchup branch in renderEventRow — keep them in sync.
+  const matched = !!(ev.kalshi && ev.kalshi.event_ticker);
+  if (!matched) return true;
+  const outcomes = collectOutcomesForRender(ev);
+  if (!outcomes.length) return true;
+  // Winner-shape outcomes → score column carries home/away. Sub-
+  // market outcomes (BTTS / Totals / Spreads) → score is in the
+  // matchup line, column is empty.
+  return isWinnerShapedOutcomes(outcomes, ev.HOME_NAME, ev.AWAY_NAME);
 }
 
 function isWinnerShapedOutcomes(outcomes, homeName, awayName) {
