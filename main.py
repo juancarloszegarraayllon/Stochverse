@@ -7085,96 +7085,133 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
       - The Outrights collector skips h2h titles by design (they're
         matches, not season futures).
 
-    Returns a list of synthetic tournament dicts grouped by the
-    Kalshi series_ticker → league mapping (KXUCL → 'Champions
-    League', KXCONMEBOLLIB → 'Copa Libertadores', etc.). NAME_PART_1
-    is set to the inferred FL region (Europe / South America /
-    World / etc.) so the frontend bucketCountry() routes them under
-    the right continent.
+    Each matchup becomes ONE event row carrying ALL its markets
+    (Winner + Spreads + Totals + BTTS + First Half Winner + etc.),
+    grouped by (series_ticker, matchup name). So Bayern vs PSG
+    appears as a single event with the full per-event tab strip,
+    not just the headline Winner.
+
+    Aggregate score (two-leg knockout ties) is passed through from
+    the headline cache record's `aggregate_home`/`aggregate_away`
+    fields when present — same source the regular index uses, so
+    PSG vs Bayern ROUND OF 16 LEG 2 will show 'AGG 4-5 · LEG 2/2'
+    on the matchup line just like it does for FL-paired games.
+
+    Bucketed by series_ticker → league → region (KXUCL → Champions
+    League → Europe, KXCONMEBOLLIB → Copa Libertadores → South
+    America, etc.) so the frontend bucketCountry() routes them
+    under the right continent in COL 1.
     """
     from flashlive_feed import match_game
     if not sport_name:
         return []
     get_data()
     records = _cache.get("data_all") or _cache.get("data") or []
-    # Group: league_name → list of event dicts
-    by_league: dict = {}
-    seen_tickers: set = set()
+    # Pass 1: group by (series_ticker, bare matchup name) so
+    # headline + sub-market records for the same X vs Y match end
+    # up together. Bare matchup = title with any ':<market_type>'
+    # suffix stripped.
+    matchups: dict = {}
     for r in records:
         if (r.get("_sport") or "") != sport_name:
             continue
         title = r.get("title") or ""
         if not title:
             continue
-        # Headline only — sub-markets pair with their parent game
-        if _market_type_from_title(title):
+        bare = title.split(":", 1)[0].strip() if ":" in title else title.strip()
+        if not _is_head_to_head_title(bare):
             continue
-        # Must look like an h2h match (NOT an outright/futures)
-        if not _is_head_to_head_title(title):
+        series = (r.get("series_ticker") or "").upper()
+        key = (series, bare.lower())
+        matchups.setdefault(key, {"bare": bare, "records": []})
+        matchups[key]["records"].append(r)
+    # Pass 2: for each matchup, drop if any of its tickers is
+    # already FL-paired (matched_kalshi_tickers) OR if the bare
+    # matchup pairs with FL via match_game + corroboration. Build
+    # a synthetic event row carrying ALL the matchup's markets.
+    by_league: dict = {}
+    for (series, _), bundle in matchups.items():
+        bare_title = bundle["bare"]
+        recs = bundle["records"]
+        # Already FL-paired? Skip — those are in the regular index.
+        if any((r.get("event_ticker") or "") in matched_kalshi_tickers for r in recs):
             continue
-        # Skip if this ticker is already in the matched index (FL
-        # paired it). matched_kalshi_tickers is the running set
-        # populated by the regular index walk in /api/sports/.../feed.
-        ticker = r.get("event_ticker") or ""
-        if not ticker or ticker in seen_tickers:
-            continue
-        if ticker in matched_kalshi_tickers:
-            continue
-        # Re-run match_game + corroboration to confirm no FL pair.
-        # (The matched_kalshi_tickers check above is enough in
-        # practice; this is belt-and-suspenders against the rare
-        # case where /v1/events/list filtered the matched event
-        # but the cache still has it.)
         try:
-            mg = match_game(title, sport_name)
+            mg = match_game(bare_title, sport_name)
         except Exception:
             mg = None
-        if mg and _kalshi_title_corroborates_fl_game(title, mg):
+        if mg and _kalshi_title_corroborates_fl_game(bare_title, mg):
             continue
-        # Look up the league via the series_ticker. Soccer has the
-        # detailed SOCCER_COMP map; other sports fall through to
-        # the prefix as a poor-man's league name (still better than
-        # nothing — gives the user a grouping signal).
-        series = (r.get("series_ticker") or "").upper()
+        # Build market list — one entry per Kalshi record. Headline
+        # (no market_type) sorts first, then sub-markets alphabetical
+        # so the per-event tab strip is stable across renders.
+        markets: list = []
+        primary = None
+        for r in recs:
+            outcomes = _extract_all_outcomes(r)
+            if not outcomes:
+                continue
+            mt = _market_type_from_title(r.get("title") or "")
+            ticker = r.get("event_ticker") or ""
+            markets.append({
+                "event_ticker": ticker,
+                "title": r.get("title") or "",
+                "series_ticker": r.get("series_ticker") or "",
+                "market_type": mt,
+                "outcomes": outcomes,
+            })
+            if not mt and primary is None:
+                primary = r
+        if not markets:
+            continue
+        markets.sort(key=lambda m: (m["market_type"] != "", m["market_type"].lower()))
+        if primary is None:
+            primary = recs[0]
+        # League → region for COL 1 bucketing
         league = ""
         if sport_name == "Soccer" and series in SOCCER_COMP:
             league = SOCCER_COMP[series]
         if not league:
-            # Strip the trailing market-suffix (GAME/SPREAD/TOTAL/
-            # BTTS/1H) from the series ticker to get the bare comp
-            # code, which is at least stable per-tournament.
             base = series
             for suf in ("GAME", "SPREAD", "TOTAL", "BTTS", "1H", "WGAME", "W"):
                 if base.endswith(suf):
                     base = base[:-len(suf)]
                     break
             league = base.replace("KX", "").title() if base else "Other"
-        outcomes = _extract_all_outcomes(r)
-        if not outcomes:
-            continue
-        seen_tickers.add(ticker)
-        markets = [{
-            "event_ticker": ticker,
-            "title": title,
-            "series_ticker": r.get("series_ticker", ""),
-            "market_type": "",
-            "outcomes": outcomes,
-        }]
-        # Try to derive HOME/AWAY names from the title for the
-        # teams cell + matchup line. Title is shaped 'X vs Y' so
-        # split on the h2h regex hit.
-        m = _HEAD_TO_HEAD_TITLE_RE.search(title)
+        # Home/away from the bare title for the matchup line
+        m = _HEAD_TO_HEAD_TITLE_RE.search(bare_title)
         home_name = ""
         away_name = ""
         if m:
-            home_name = title[:m.start()].strip()
-            away_name = title[m.end():].strip()
-            # Strip any trailing colon-suffix from away (already
-            # filtered above but defensive).
-            if ":" in away_name:
-                away_name = away_name.split(":", 1)[0].strip()
+            home_name = bare_title[:m.start()].strip()
+            away_name = bare_title[m.end():].strip()
+        primary_ticker = primary.get("event_ticker") or markets[0]["event_ticker"]
+        # Aggregate / leg label — passed straight through from the
+        # cache. Populated by _enrich_soccer_aggregate upstream
+        # for soccer two-leg ties; null for non-cup events.
+        live = primary.get("_live_state") or {}
+        agg_label = live.get("aggregate_label") if isinstance(live, dict) else None
+        agg_h = primary.get("aggregate_home")
+        agg_a = primary.get("aggregate_away")
+        # Soccer cup ties — even without an FL pair, ask SofaScore
+        # directly for aggregate info. Knockout-tie info doesn't
+        # depend on FL having today's fixture, so a Bayern vs PSG
+        # leg-2 market gets 'AGG 4-5 LEG 2/2' on /sports the same
+        # way it does on the homepage card.
+        if sport_name == "Soccer" and (agg_h is None or agg_a is None):
+            try:
+                from sofascore_feed import match_game as sofa_match
+                sg = sofa_match(bare_title, "Soccer")
+                if sg and sg.get("is_two_leg"):
+                    if agg_h is None: agg_h = sg.get("aggregate_home")
+                    if agg_a is None: agg_a = sg.get("aggregate_away")
+                    if not agg_label and sg.get("leg_number") and sg.get("round_name"):
+                        agg_label = (sg.get("round_name", "") + " · LEG " +
+                                     str(sg.get("leg_number")))
+            except Exception:
+                pass
         ev = {
-            "EVENT_ID": "kalshi-h2h-" + ticker,
+            "EVENT_ID": "kalshi-h2h-" + primary_ticker,
             "START_TIME": None,
             "HOME_NAME": home_name,
             "AWAY_NAME": away_name,
@@ -7183,15 +7220,15 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
             "STAGE_TYPE": "SCHEDULED",
             "_kalshi_h2h_only": True,
             "kalshi": {
-                "event_ticker": ticker,
-                "title": title,
-                "series_ticker": r.get("series_ticker", ""),
-                "count": 1,
+                "event_ticker": primary_ticker,
+                "title": bare_title,
+                "series_ticker": primary.get("series_ticker") or "",
+                "count": len(markets),
                 "markets": markets,
                 "primary_prices": None,
-                "aggregate_home": None,
-                "aggregate_away": None,
-                "aggregate_label": None,
+                "aggregate_home": agg_h,
+                "aggregate_away": agg_a,
+                "aggregate_label": agg_label,
             },
         }
         by_league.setdefault(league, []).append(ev)
