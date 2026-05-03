@@ -763,9 +763,12 @@ function renderEventRow(ev, market, isMarketRow) {
   html += '<span class="sp-c2-team">' + escH(ev.HOME_NAME || '') + '</span>';
   html += '<span class="sp-c2-team">' + escH(ev.AWAY_NAME || '') + '</span>';
   // In Market view, append the market type below the team names
-  // so users can scan which market each row represents.
-  if (isMarketRow && market && market.market_type) {
-    html += '<span class="sp-c2-market-type">' + escH(market.market_type) + '</span>';
+  // so users can scan which market each row represents. Headline
+  // markets (no colon suffix in title) get labelled 'Winner' so
+  // every row in Market view has an explicit label.
+  if (isMarketRow && market) {
+    const mtypeLabel = market.market_type || 'Winner';
+    html += '<span class="sp-c2-market-type">' + escH(mtypeLabel) + '</span>';
   }
   html += '</div>';
   html += '<div class="sp-c2-scores">';

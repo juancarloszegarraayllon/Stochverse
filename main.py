@@ -6910,34 +6910,56 @@ def _build_kalshi_index_for_sport(sport_name: str) -> dict:
 
 def _kalshi_title_corroborates_fl_game(kalshi_title: str, fl_game: dict) -> bool:
     """Defensive double-check on a match_game() result. Returns
-    True iff both fl_game.home_name and fl_game.away_name have
-    at least one token ≥4 chars that appears (case-insensitively)
-    in kalshi_title. Catches the 'phrase substring overlap'
-    false positives where match_game returns a game whose actual
-    team names don't appear in the Kalshi title.
+    True iff the FL game's home_name AND away_name BOTH have all
+    their non-trivial (>=3-char) tokens present as whole words
+    in the Kalshi title (case-insensitive).
+
+    Earlier version used substring matching with a >=4-char
+    threshold — but generic sport vocabulary like 'basketball'
+    is a >=4-char token AND appears as substring in any Kalshi
+    title containing 'basketball'. So 'Brussels Basketball'
+    would pass (basketball in title) and 'LWD Basket' would
+    pass (basket in 'basketball'), even when the title is
+    'Pro Basketball #1 Overall Pick' — clearly a futures, not
+    a Brussels vs LWD game.
+
+    Whole-word matching with ALL-tokens-required is much stricter:
+      - 'Brussels Basketball' requires 'brussels' AND 'basketball'
+      - 'Pro Basketball #1 Overall Pick' has 'basketball' but
+        not 'brussels' → reject
+      - 'Bayern Munich' requires 'bayern' AND 'munich'
+      - 'Bayern Munich vs PSG' has both → accept
+      - 'Real Madrid vs Bayern Munich' has bayern + munich
+        but Kalshi title for OUR game (Bayern vs PSG) would
+        also need 'psg' → still rejects when only bayern matches
     """
     if not kalshi_title or not fl_game:
         return False
-    home = (fl_game.get("home_name") or "").lower()
-    away = (fl_game.get("away_name") or "").lower()
-    title_lc = kalshi_title.lower()
+    home = fl_game.get("home_name") or ""
+    away = fl_game.get("away_name") or ""
     if not home or not away:
         return False
+    import re
+    title_lc = kalshi_title.lower()
 
-    def has_token_hit(team_name: str) -> bool:
-        # Split on whitespace and punctuation, look for any
-        # ≥4-char token in the title. 4 chars is the threshold
-        # below which English/Spanish team-name fragments get
-        # noisy ('san', 'mt', 'fc', 'sc' etc. all match too
-        # broadly).
-        import re
-        tokens = re.split(r"[^a-z0-9]+", team_name)
+    def all_tokens_match(team_name: str) -> bool:
+        # Tokenize team name on non-alphanumeric. Keep tokens
+        # >=3 chars (drops 'fc', 'sc', '1', etc. which are noise
+        # — and either way they're rarely distinguishing).
+        tokens = [t for t in re.split(r"[^a-z0-9]+", team_name.lower())
+                  if len(t) >= 3]
+        if not tokens:
+            # Very short team name with no distinguishing tokens
+            # (e.g., 'FC' alone). Rare; reject conservatively.
+            return False
         for tok in tokens:
-            if len(tok) >= 4 and tok in title_lc:
-                return True
-        return False
+            # Whole-word match — \b boundaries prevent 'basket'
+            # from matching inside 'basketball'.
+            if not re.search(r'\b' + re.escape(tok) + r'\b', title_lc):
+                return False
+        return True
 
-    return has_token_hit(home) and has_token_hit(away)
+    return all_tokens_match(home) and all_tokens_match(away)
 
 
 def _market_type_from_title(title: str) -> str:
