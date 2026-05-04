@@ -1120,14 +1120,47 @@ function renderCol2() {
 }
 
 
+// Series-ticker suffixes that get a card-tab in Game view.
+// Mirrors the homepage's _SIBLING_SUFFIXES whitelist (main.py
+// line 848) so /sports and the homepage card agree on which
+// markets are 'card-class' vs which only appear in the
+// all-markets-flat view (Markets toggle here on /sports).
+//
+// What this filters OUT — NBA/NHL/MLB-heavy player-prop markets
+// that would otherwise pad the strip with 8-10 entries per game:
+//   ASSISTS, PLAYERGOAL, POINTS, REBOUNDS, STEALS, BLOCKS,
+//   STRIKEOUTS, FIRSTGOAL, OVERTIME, etc. They still show as
+//   their own row when the user toggles into Markets view —
+//   nothing's lost, it just stops cluttering the card.
+const _CARD_TAB_SERIES_SUFFIXES = [
+  'GAME', 'MATCH',                          // primary (Winner)
+  'SPREAD', 'TOTAL', 'BTTS', 'TEAMTOTAL',
+  '1H', '1HWINNER', '1HSPREAD', '1HTOTAL',
+  '2HWINNER',
+  'RFI', 'F5', 'F5SPREAD', 'F5TOTAL',
+  'SETWINNER', 'MAP', 'TOTALMAPS', 'ADVANCE',
+];
+
+function _isCardTabMarket(seriesTicker) {
+  const s = (seriesTicker || '').toUpperCase();
+  for (const suf of _CARD_TAB_SERIES_SUFFIXES) {
+    if (s.endsWith(suf)) return true;
+  }
+  return false;
+}
+
 function eventMarketTypes(ev) {
-  // List of market types available for this event, ordered with
-  // headline Winner ('') first, then alphabetical. Used to render
-  // the per-event tab strip — only types this event actually has,
-  // not the union across all events.
+  // Card-tab market types for this event, ordered with headline
+  // Winner ('') first, then alphabetical. Filtered to the
+  // homepage's card-class whitelist so player-prop markets
+  // don't pollute the tab strip — those still show in Markets
+  // view (each market = its own row).
   if (!ev.kalshi || !ev.kalshi.markets) return [];
   const set = new Set();
-  for (const m of ev.kalshi.markets) set.add(m.market_type || '');
+  for (const m of ev.kalshi.markets) {
+    if (!_isCardTabMarket(m.series_ticker)) continue;
+    set.add(m.market_type || '');
+  }
   const arr = Array.from(set);
   arr.sort((a, b) => {
     if (a === b) return 0;
