@@ -101,6 +101,198 @@ Splitters between columns drag-resize, with widths persisted to
 - WS subscription now finds tickers on either `.sp-c2-price-row` OR
   `.sp-c2-mkt-row`, so sub-market outcomes also receive live updates.
 
+### Phase 7 — Day 2 (versions 0.7.10 → 0.7.40)
+
+Big themes today: getting layout parity with the homepage card,
+broadening the data sources surfaced, and fixing a long chain of
+bugs in the aggregate / series enrichment that culminated in
+discovering the cache record never actually carries `_live_state`.
+
+**Layout parity (per-event cards):**
+- Outcome labels moved out of the marketcell into the teams cell.
+  Marketcell now carries chip rows only, aligned 1:1 with the
+  outcome labels on the left.
+- Per-tournament column header strip ("Score / Kalshi (PROB / YES /
+  NO)") replaces the global sticky header. Sits below the league
+  name, hidden when no event in the tournament has a Kalshi pair.
+- Matchup header line (`Bayern 0 - 2 PSG`) appears in the teams
+  cell when outcomes don't already include team names (Spreads /
+  Totals / BTTS / etc.). Score column stays empty for those rows
+  to avoid duplication. Detection is shape-based:
+  `isWinnerShapedOutcomes` checks if every outcome label EQUALS
+  home/away/tie — covers Winner, First Half Winner, Set Winner,
+  etc., without a per-market-type whitelist.
+- Per-event tab strip (Winner / Spreads / Totals / etc.) replaces
+  the global market-type tab. State per event ID in
+  `_eventActiveMarketType`. Each tab strip is filtered to the
+  homepage's `_SIBLING_SUFFIXES` whitelist (card-class markets
+  only; player props go to the Markets-view rows). Cap of 5 visible
+  tabs with a "+ N More" / "Less" toggle when an event carries
+  more than that.
+- K + +N indicator badges removed (redundant with the Kalshi column
+  header and per-event tabs). Grid trimmed from 5 cols to 4.
+
+**Tennis scoring:**
+- Tennis sport gets a wider score column (`--sp-score-w: 120px`).
+- Per-row breakdown: sets-won, server-dot (●), one box per
+  completed set + the in-progress set, current point. Matches the
+  homepage tennis-row format exactly. Set history grows naturally
+  via flex layout — 1 box during set 1, up to 5 in a 5-setter.
+
+**Live clocks:**
+- Soccer: `1H 32:15` / `2H 45+3:27` / `ET 95:08` / `HT`. Computed
+  from `STAGE_START_TIME` + period offsets. Counts UP.
+- Hockey: `P{period} M:SS`. Counts down.
+- Basketball / American Football: `Q{period} M:SS`. Counts down.
+- 500ms tick (matches homepage), 15-second drift cap so a stale
+  capture can't run the clock to zero.
+- Period offsets ported verbatim from homepage's
+  `computeSoccerMinute` (`SOCCER_PERIOD_OFFSETS`).
+- ESPN `display_clock` + `captured_at_ms` enriched into ev._live_state
+  on the backend for non-soccer (in-memory match_game, no HTTP).
+
+**Day picker / calendar:**
+- Sofascore-style horizontal trio: `‹ Today ›`. Center label opens
+  a calendar modal (month grid, navigation arrows, TODAY button).
+  Esc / × / backdrop click close.
+- Range: ±60 days. FL's events-list only accepts ±7, so beyond
+  that we skip the FL call entirely and serve Kalshi-only data
+  (Outrights + unpaired h2h). Lets users find World Cup / UCL Final
+  / NBA Finals etc. months ahead — Kalshi opens markets long
+  before FL ships fixtures.
+- Date picks auto-flip the state filter: past → 'finished',
+  today → 'live', future → 'upcoming'. Skipped if user explicitly
+  picked 'all'.
+- Pill counts (`X events / Y on Kalshi`) are state-filter-aware
+  but ignore the `onlyMatched` toggle (since that toggle IS the
+  Kalshi pill — its number shouldn't change when clicked).
+
+**Continent buckets in COL 1:**
+- New `bucketCountry()` helper. Falls through:
+  `COUNTRY_NAME` → `NAME_PART_1` → NAME prefix before `:` →
+  keyword regex on full NAME (`UEFA`/`UCL`/`Europa` → Europe;
+  `CONMEBOL`/`Libertadores` → South America; `CONCACAF` → North &
+  Central America; `AFC`/`AFCON` → Asia; `CAF` → Africa;
+  `FIFA`/`World Cup` → World) → `International`. Title-cased.
+- Outright tournaments are special-cased to the top of the country
+  list (instead of mid-alphabet at "O").
+
+**Outrights / unpaired Kalshi pipelines:**
+- `_collect_outrights_for_sport()`: surfaces tournament/season
+  futures (Champions League Winner, World Cup Winner, MVP, Heisman
+  Trophy, etc.) as a synthetic "Outrights" tournament group.
+  Filters by:
+  - title doesn't match the universal head-to-head regex
+    (`_HEAD_TO_HEAD_TITLE_RE` — covers `vs / v. / v / @ / at`
+    across all sports).
+  - ≥`_OUTRIGHT_MIN_OUTCOMES` outcomes (3) — real outrights have
+    many candidates.
+  - Expiration filter: hidden once `_exp_dt` is in the past
+    relative to the picked date.
+- `_collect_unpaired_h2h_for_sport()`: surfaces Kalshi h2h markets
+  Kalshi has open but FL doesn't have today (e.g. tomorrow's UCL
+  match). Two-pass:
+  - Pass 1: bucket records by (`_series_base`, sorted matchup
+    name) so all sub-markets for the same fixture group together
+    regardless of team-order ordering.
+  - Pass 2: filter date (ticker date must equal target date),
+    drop FL-paired matchups, build event row carrying ALL the
+    matchup's markets in `markets[]`.
+  - `_cup_priority` sort runs first so cup matches (UCL, UEL,
+    Libertadores, FA Cup, etc.) survive the `MAX_UNPAIRED=500`
+    cap before regular leagues.
+- League-name → region map (`_LEAGUE_TO_REGION`) routes synthetic
+  tournaments under the correct continent bucket in COL 1.
+
+**Aggregate / series enrichment — the chase:**
+
+This was the longest debug of the day. The arc:
+1. Soccer aggregate (`AGG 4-5 LEG 2/2`) wasn't showing on /sports
+   while the homepage card showed it for the same game.
+2. Tried reading `primary.aggregate_home` — always None.
+3. "Fixed" by reading `primary._live_state.aggregate_home` (where
+   the homepage's `renderSeriesPill` reads from). Still None.
+4. Added the `/api/_debug/event_record?q=<substring>` endpoint to
+   inspect the cache directly. Output revealed: `_live_state_keys: []`
+   on EVERY cache record. `_live_state` isn't even a top-level key.
+
+**Real cause:** the homepage's `/api/events` handler enriches
+`_live_state` PER REQUEST via `match_game` + `_enrich_soccer_aggregate`
+(main.py:2407-2429). The cache itself never stores it. /sports was
+reading a field that doesn't exist.
+
+**Real fix:** new `_enrich_record_live_state(title, sport)` helper
+that mirrors the /api/events enrichment chain. Called per matched
+event in /sports. Returns a synthetic `_live_state` with
+`aggregate_home/away`, `series_home_wins/away_wins`, `display_clock`,
+`period`, etc. In-memory match_game, no HTTP cost; SofaScore is
+5-min cached for soccer.
+
+Also extended for the unpaired h2h pipeline. For both paths, the
+title passed to enrichment is the **headline** record's title
+(`primary.title`, e.g. `'Bayern Munich vs PSG'` from KXUCLGAME),
+not the bundle's `bare_title` (which picks up the first cache
+record's title, often a sub-market like `'PSG at Bayern Munich:
+Totals'` that SofaScore doesn't index by).
+
+**Universal across sports:**
+- Soccer (cup ties): SofaScore via `_enrich_soccer_aggregate` →
+  `aggregate_home/away`, `leg_number`, `round_name`. AGG pill.
+- NBA / NHL / MLB / NFL playoffs: ESPN match_game →
+  `series_home_wins/away_wins`, `series_summary`. SERIES pill.
+- Renders adapt: `renderAggOrSeries(ev)` picks aggregate (if
+  populated) → SERIES (if populated) → nothing.
+- Pill is a green-on-green pill matching homepage's `.agg-pill`,
+  not muted grey text.
+
+**Team crests / national flags:**
+- FL's events-list response already ships `HOME_IMAGES` /
+  `AWAY_IMAGES` arrays of CDN URLs — same source the homepage's
+  H2H pane uses. National-team fixtures get country flags, club
+  fixtures get crests, FL handles the distinction.
+- Renders inline next to team names: in matchup headers, in
+  Winner-shape outcome labels (matched against HOME_NAME /
+  AWAY_NAME), and in the unmatched fallback team rows.
+- 14×14 lazy-loaded `<img>`. No backend change — passthrough only.
+- Game events only — outright tournaments and unpaired Kalshi h2h
+  don't carry `HOME_IMAGES` (no FL pair), so they render text-only.
+
+**Title parsing for NHL/NBA-shape Kalshi titles:**
+- Kalshi has two title shapes:
+  - Soccer: `Bayern vs PSG: Spreads` (matchup BEFORE colon)
+  - NHL/NBA: `NHL Game: Tampa Bay vs Montreal Canadiens` (matchup
+    AFTER colon, league prefix BEFORE)
+- `_market_type_from_title` now disambiguates: if the suffix after
+  the last colon matches the head-to-head regex, it's the matchup,
+  not a sub-market. Returns `''` for headline.
+- New `_bare_matchup_from_title` walks colon-split parts and
+  returns the first one that matches h2h shape.
+- Smoke-tested 6 cases across both shapes.
+
+**Playoff-series duplicate fix (last fix of the day):**
+- `_build_kalshi_index_for_sport` was over-attaching: a single
+  Cleveland-Toronto FL fixture got paired with `KXNBAGAME-
+  26MAY01CLETOR`, `26MAY03CLETOR`, `26MAY05CLETOR`, etc. (every
+  game in the playoff series — `match_game` only checks team
+  names). Markets view rendered the same matchup 3-5×.
+- Added a date sanity check: drop records whose ticker date
+  doesn't match the FL event's start time (UTC, ±1 day fuzz for
+  timezone drift between Kalshi/ET and FL/UTC).
+
+**Outright "expiration" filter:**
+- Outrights stay visible across the calendar window UNTIL their
+  Kalshi market expires. Source field is `_exp_dt` on the cache
+  record (resolved `expected_expiration_time`). So 'World Cup
+  Winner 2026' shows from now through the tournament's settlement
+  day, then drops. Avoids hiding World Cup Winner just because
+  user picked a date outside today.
+
+**Sentry / observability:**
+- Wrapped initial WebSocket hello send to suppress
+  WebSocketDisconnect noise from clients that disconnect during
+  handshake. Was flooding Sentry; now silently cleans up and
+  returns.
+
 ## Important conventions / gotchas
 
 ### Cache field names — the `_yb / _ya / _nb / _na` rule
@@ -144,34 +336,38 @@ few sports for false positives before shipping.
 
 ## Pending work / wishlist
 
+Done in Phase 7 (today): live clocks (1), country flags + team
+crests via FL HOME_IMAGES (2). Outrights / unpaired pipeline,
+calendar picker, day-shift filtering, NBA/NHL series enrichment,
+aggregate fix all landed. Pending list trimmed accordingly:
+
 In rough priority order:
 
-1. **Live clocks for live games** — currently shows half/period only.
-   Per-event ESPN-routed clock for the 3 sports above; FL clock for
-   the rest. Refresh on a 5-10s cadence (NOT WS — too chatty).
-2. **Country flag emojis** in COL 1 country headers and COL 2
-   tournament rows.
-3. **Mobile single-column treatment** — currently the 3-column grid
-   blows out on phone widths. Needs a media query to stack vertically
-   with a tab switcher between columns.
-4. **Inline COL 3 stats panel** — currently a placeholder. Should
-   render the same lineups / standings / H2H / form panels the
-   homepage event-card uses, but inlined as a third pane.
+1. **Inline COL 3 stats panel** — still a placeholder. Should render
+   the same lineups / standings / H2H / form panels the homepage
+   event-card uses, but inlined as a third pane. Highest user-visible
+   gap left in /sports.
+2. **Mobile single-column treatment** — the 3-column grid blows out
+   on phone widths. Needs a media query to stack vertically with a
+   tab switcher between columns.
+3. **Kalshi-only sport rendering** — Lacrosse / Chess / Squash /
+   WSOP / SailGP need a Kalshi-only card variant (no FL stats panel)
+   served from `/api/sports/kalshi-only-feed?sport=…`. Endpoint
+   exists; frontend rendering is stub.
+4. **Cross-platform price comparison** — once Polymarket scoping
+   lands, render a second chip row per outcome with the Polymarket
+   side-by-side. Architecture already supports stacking rows in
+   `.sp-c2-marketcell`.
 5. **CSS for `.sp-c2-mkt-row` and `.sp-c2-mkt-label`** — the
    sub-market layout works but the label could use ellipsis
    truncation and a slightly larger font. Currently relies on
    inherited styles; should be made explicit.
-6. **Kalshi-only sport rendering** — Lacrosse / Chess / Squash /
-   WSOP / SailGP need a Kalshi-only card variant (no FL stats panel)
-   served from `/api/sports/kalshi-only-feed?sport=…`. Endpoint
-   exists; frontend rendering is stub.
-7. **Cross-platform price comparison** — once Polymarket scoping
-   lands, render a second chip row per outcome with the Polymarket
-   side-by-side. Architecture already supports stacking rows in
-   `.sp-c2-marketcell`.
-8. **Kalshi audit** — parallel to the FL audit. Probe what Kalshi
+6. **Kalshi audit** — parallel to the FL audit. Probe what Kalshi
    API surfaces we use vs what's available, similar to
    `fl_probe/coverage.py`. Output: `KALSHI_API_COVERAGE.md`.
+7. **Pre-launch Sentry hygiene** — see Phase 7 notes; bump to Team
+   plan if usage exceeds free 5k errors/mo, add `beforeSend` hook
+   to drop transient I/O exceptions, source maps, release tagging.
 
 ## Key files
 

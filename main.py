@@ -7510,6 +7510,28 @@ def _build_kalshi_index_for_sport(sport_name: str) -> dict:
         if not _kalshi_title_corroborates_fl_game(title, mg):
             rejected += 1
             continue
+        # Date sanity — match_game only checks team names, so for
+        # playoff series (NBA/NHL/MLB) every game in the series
+        # matches the same FL fixture by team. Without a date
+        # check, the matched index over-attaches: a single
+        # Cleveland-Toronto FL event gets paired with KXNBAGAME-
+        # 26MAY01CLETOR, ...26MAY03CLETOR, ...26MAY05CLETOR
+        # (Games 1, 3, 5 of the series), and Markets view shows
+        # the same matchup row 3-5x with WINNER labels. Drop
+        # records whose ticker date doesn't fall on the same UTC
+        # day as the FL event (with ±1 day fuzz for timezone
+        # drift between Kalshi/ET and FL/UTC).
+        ticker_date = parse_game_date_from_ticker(r.get("event_ticker") or "")
+        fl_start_ms = mg.get("scheduled_kickoff_ms", 0) or 0
+        if ticker_date and fl_start_ms:
+            from datetime import datetime as _dt, timezone as _tz
+            try:
+                fl_date = _dt.fromtimestamp(fl_start_ms / 1000, tz=_tz.utc).date()
+                if abs((ticker_date - fl_date).days) > 1:
+                    rejected += 1
+                    continue
+            except Exception:
+                pass
         idx.setdefault(fl_id, []).append(r)
     if rejected:
         logging.getLogger("stochverse").info(
