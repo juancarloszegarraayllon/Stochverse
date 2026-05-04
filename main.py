@@ -1332,6 +1332,15 @@ CACHE_STALE_TTL = 1800     # 30 min — hard expiry, beyond this we block
 _rebuild_lock = threading.Lock()
 _rebuilding = {"active": False}
 
+# Persistent hints learned from observed FL ↔ Kalshi pairings.
+# Keyed by (sport_name, series_base) → {"name": str, "country": str,
+# "stage_id": str, "ts": float}. Used by sports_feed() to route
+# Kalshi-only events into the right FL competition bucket — even
+# when today's request has zero current pairings for that series
+# (yesterday's pairing seeds today's routing). Lives for the
+# process lifetime; rebuilds from observation on every request.
+_SERIES_TOURNAMENT_HINTS: dict = {}
+
 # FlashLive capability map cache. Populated by /api/debug_fl_capabilities.
 # A full scan can spend ~150-300 RapidAPI calls so we hold the result
 # for a day. Pass ?refresh=1 to force a re-scan.
@@ -9007,6 +9016,123 @@ async def sports_feed(sport_id: int, timezone: int = 0,
         _collect_unpaired_h2h_for_sport(kalshi_sport, matched_kalshi_tickers, target_date)
         if kalshi_sport else []
     )
+
+    # ── Series-routing pass ──────────────────────────────────────
+    # Architectural fix for the "two parallel league buckets" issue
+    # (e.g. FL 'Copa Sudamericana - Group Stage' + synthetic 'Copa
+    # Sudamericana' both showing in COL 1 because Kalshi-only events
+    # for the competition got bucketed under SOCCER_COMP's name
+    # instead of FL's name).
+    #
+    # Approach is data-driven, not hand-curated:
+    #   1. From observed pairings in this request (out_tournaments
+    #      with kalshi blocks), record series_ticker → FL tournament
+    #      mapping. Store both full ticker (KXCONMEBOLLIBGAME) and
+    #      base (KXCONMEBOLLIB) so sub-market suffixes find a home.
+    #   2. Promote each mapping to the persistent hint store keyed
+    #      by (sport, series_base). So tomorrow's request, even with
+    #      zero pairings, can still route by yesterday's hint.
+    #   3. For each event in the unpaired buckets, look up its
+    #      series in the in-request map first, then the persistent
+    #      hint store. If a match is found, splice the event into
+    #      that FL tournament (or rename a bucket to FL's name when
+    #      using the persistent hint without an in-request peer).
+    #   4. Remaining truly-Kalshi-only events keep their synthetic
+    #      bucket (correct — there's no FL home to merge into).
+    if kalshi_sport:
+        SUFFIX_STRIP = ("GAME", "MATCH", "SPREAD", "TOTAL", "BTTS",
+                        "1H", "ADVANCE", "TCORNERS", "CORNERS",
+                        "HALFTIME", "OUTRIGHT", "1Q", "2Q", "3Q", "4Q")
+
+        def _series_keys(s: str) -> set:
+            s = (s or "").upper()
+            if not s:
+                return set()
+            keys = {s}
+            for suf in SUFFIX_STRIP:
+                if s.endswith(suf) and len(s) > len(suf):
+                    keys.add(s[:-len(suf)])
+                    break
+            return keys
+
+        # Step 1: in-request series → tournament map
+        series_to_tournament: dict = {}
+        for t_out in out_tournaments:
+            for ev in t_out.get("events") or []:
+                k = ev.get("kalshi") or {}
+                seen_keys = set()
+                for s in (k.get("series_ticker"), *(
+                        m.get("series_ticker")
+                        for m in k.get("markets") or [])):
+                    seen_keys |= _series_keys(s or "")
+                for key in seen_keys:
+                    series_to_tournament.setdefault(key, t_out)
+
+        # Step 2: promote to persistent hints. Keep the most-recent
+        # (timestamp wins on collision so renamed competitions
+        # eventually overwrite the stale name).
+        import time as _t
+        _now = _t.time()
+        for key, t_out in series_to_tournament.items():
+            _SERIES_TOURNAMENT_HINTS[(kalshi_sport, key)] = {
+                "name":     t_out.get("NAME") or "",
+                "country":  t_out.get("COUNTRY_NAME") or "",
+                "stage_id": t_out.get("TOURNAMENT_STAGE_ID") or "",
+                "ts":       _now,
+            }
+
+        # Step 3 — route unpaired events. Two outcomes per event:
+        #   (a) in-request peer exists: append into that FL bucket
+        #   (b) persistent hint exists: rename the synthetic bucket
+        #       to FL's name on first hit (subsequent events from
+        #       the same synthetic bucket inherit the rename)
+        #   (c) neither: keep synthetic bucket as-is
+        routed_buckets = []
+        for ut in unpaired_h2h_tournaments:
+            still_kalshi_only = []
+            renamed_to = None
+            for ev in ut.get("events") or []:
+                k = ev.get("kalshi") or {}
+                seen_keys = set()
+                for s in (k.get("series_ticker"), *(
+                        m.get("series_ticker")
+                        for m in k.get("markets") or [])):
+                    seen_keys |= _series_keys(s or "")
+                target = None
+                hint = None
+                for key in seen_keys:
+                    if key in series_to_tournament:
+                        target = series_to_tournament[key]
+                        break
+                if target is None:
+                    for key in seen_keys:
+                        h = _SERIES_TOURNAMENT_HINTS.get((kalshi_sport, key))
+                        if h:
+                            hint = h
+                            break
+                if target is not None:
+                    target.setdefault("events", []).append(ev)
+                elif hint is not None and renamed_to is None:
+                    # Rename the synthetic bucket on first hint hit;
+                    # remaining events in the bucket fall into the
+                    # 'still_kalshi_only' branch and get the renamed
+                    # bucket once we set it below.
+                    renamed_to = hint
+                    still_kalshi_only.append(ev)
+                else:
+                    still_kalshi_only.append(ev)
+            if still_kalshi_only:
+                if renamed_to:
+                    ut["NAME"] = renamed_to["name"] or ut.get("NAME")
+                    ut["NAME_PART_2"] = (renamed_to["name"].split(":")[-1].strip()
+                                         if ":" in (renamed_to["name"] or "")
+                                         else (renamed_to["name"] or ut.get("NAME_PART_2")))
+                    if renamed_to["country"]:
+                        ut["COUNTRY_NAME"] = renamed_to["country"]
+                        ut["NAME_PART_1"] = renamed_to["country"]
+                ut["events"] = still_kalshi_only
+                routed_buckets.append(ut)
+        unpaired_h2h_tournaments = routed_buckets
     for t in unpaired_h2h_tournaments:
         for ev in t["events"]:
             tk = (ev.get("kalshi") or {}).get("event_ticker")
