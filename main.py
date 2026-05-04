@@ -8307,6 +8307,272 @@ async def debug_series_tickers(sport: str = "", limit: int = 5000):
     }
 
 
+@app.get("/api/_debug/outcome_shapes")
+async def debug_outcome_shapes(sport: str = "", limit: int = 5000):
+    """Catalog outcome shapes per (series_base, market_type) — the
+    data /sports v2 needs to render outcomes correctly without
+    guessing. Today's renderer assumes home/away/tie when the title
+    looks like h2h, which silently drops outcomes that don't fit
+    that mould (e.g. Pic 1 missing-away-team — the away outcome
+    label was 'Taian' while FL's away_name was 'Taian Tiankuang',
+    so the price never bound to away → no row).
+
+    For each (series_base, market_type) bucket, surfaces:
+      - distribution of outcome counts (how many outcomes per record)
+      - label classification: team_like / tie / yes_no / spread_like
+        / total_like / advance / other
+      - sample raw labels per class
+      - whether yes/no/prob fields are populated
+
+    Output per bucket lets v2 build a deterministic per-shape
+    renderer instead of guessing from title structure.
+
+      /api/_debug/outcome_shapes?sport=Soccer
+    """
+    if limit > 10000:
+        limit = 10000
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    if sport:
+        records = [r for r in records if (r.get("_sport") or "") == sport]
+    sample = records[:limit]
+
+    KNOWN_SUFFIXES = (
+        "TCORNERS", "CORNERS", "ADVANCE", "OUTRIGHT", "HALFTIME",
+        "SPREAD", "TOTAL", "BTTS", "MATCH", "GAME", "1H", "1Q",
+        "2Q", "3Q", "4Q",
+    )
+
+    def _series_base(s: str) -> tuple:
+        s = (s or "").upper()
+        if not s:
+            return ("", "")
+        for suf in KNOWN_SUFFIXES:
+            if s.endswith(suf) and len(s) > len(suf):
+                return (s[:-len(suf)], suf)
+        return (s, "")
+
+    _TIE_WORDS = {"tie", "draw", "no winner", "no result"}
+    _YES_NO = {"yes", "no"}
+
+    def _classify(label: str) -> str:
+        lc = (label or "").strip().lower()
+        if not lc:
+            return "empty"
+        if lc in _YES_NO:
+            return "yes_no"
+        if lc in _TIE_WORDS:
+            return "tie"
+        if re.search(r"\b(over|under|o/u)\b\s*\d", lc):
+            return "total_like"
+        if re.search(r"\bwins?\s+by\b", lc):
+            return "spread_like"
+        if "advance" in lc or "advances" in lc:
+            return "advance"
+        if re.search(r"\bwins?\b", lc):
+            return "winner_phrase"  # 'Bayern wins', 'Arsenal wins'
+        # Team-like: alphabetic + spaces + dots, no digits
+        if re.match(r"^[A-Za-z][A-Za-z\.\-\s]+$", label) and not re.search(r"\d", label):
+            return "team_like"
+        return "other"
+
+    buckets: dict = {}
+    for r in sample:
+        series = (r.get("series_ticker") or "").upper()
+        base, suf = _series_base(series)
+        title = r.get("title") or ""
+        market_type = _market_type_from_title(title)
+        outs = r.get("outcomes") or r.get("_outcomes") or []
+        n = len(outs)
+        key = (base, suf, market_type)
+        info = buckets.setdefault(key, {
+            "base":          base,
+            "suffix":        suf,
+            "market_type":   market_type,
+            "record_count":  0,
+            "outcome_counts": {},  # n → records seen
+            "label_classes": {},   # class → count
+            "label_samples": {},   # class → [labels]
+            "title_samples": [],
+            "fields_present": {"prob": 0, "yes": 0, "no": 0, "ticker": 0},
+            "outcome_field_total": 0,
+        })
+        info["record_count"] += 1
+        info["outcome_counts"][n] = info["outcome_counts"].get(n, 0) + 1
+        if len(info["title_samples"]) < 3:
+            info["title_samples"].append(title[:90])
+        for o in outs:
+            cls = _classify(o.get("label") or "")
+            info["label_classes"][cls] = info["label_classes"].get(cls, 0) + 1
+            if cls not in info["label_samples"]:
+                info["label_samples"][cls] = []
+            if len(info["label_samples"][cls]) < 4:
+                lbl = (o.get("label") or "").strip()[:40]
+                if lbl and lbl not in info["label_samples"][cls]:
+                    info["label_samples"][cls].append(lbl)
+            info["outcome_field_total"] += 1
+            if o.get("yes_bid") is not None or o.get("_yb") is not None:
+                info["fields_present"]["prob"] += 1
+            if o.get("yes_ask") is not None or o.get("_ya") is not None:
+                info["fields_present"]["yes"] += 1
+            if o.get("no_ask") is not None or o.get("_na") is not None:
+                info["fields_present"]["no"] += 1
+            if o.get("ticker"):
+                info["fields_present"]["ticker"] += 1
+
+    out = []
+    for key, info in buckets.items():
+        # Most common outcome count
+        oc = info["outcome_counts"]
+        most_common_n = max(oc.items(), key=lambda x: x[1])[0] if oc else 0
+        out.append({
+            "series_base":      info["base"],
+            "suffix":           info["suffix"],
+            "market_type":      info["market_type"],
+            "record_count":     info["record_count"],
+            "most_common_outcome_count": most_common_n,
+            "outcome_count_distribution": dict(sorted(oc.items())),
+            "label_classes":    info["label_classes"],
+            "label_samples":    info["label_samples"],
+            "title_samples":    info["title_samples"],
+            "field_coverage_pct": {
+                k: round(100.0 * v / max(1, info["outcome_field_total"]), 1)
+                for k, v in info["fields_present"].items()
+            },
+        })
+    out.sort(key=lambda x: -x["record_count"])
+    return {
+        "sample_size":  len(sample),
+        "sport_filter": sport or "all",
+        "bucket_count": len(out),
+        "buckets":      out,
+    }
+
+
+@app.get("/api/_debug/ticker_grammar")
+async def debug_ticker_grammar(sport: str = "", limit: int = 5000):
+    """Catalog Kalshi event_ticker grammar per series_base. Used by
+    /sports v2 to derive a deterministic fixture identity from the
+    ticker without parsing titles or matching team names.
+
+    Tries a handful of canonical grammar patterns:
+      G1  {series}-{YYMMDD}{TEAMS}    KXUCLGAME-26MAY05ARSATM
+      G2  {series}-{YYMMDD}{HASH}     KXNFLGAME-26JAN05-DETPHI
+      G3  {series}-{YYYY}             KXNCAACHAMP-2026
+      G4  {series}-{NN}               KXTEAMSINUCL-26
+      G5  {series}-{HANDLE}           KXJOINRONALDO-PSG
+      Gx  {anything else}              ← surfaced as 'unparsed'
+
+    Output per series_base:
+      total tickers, parse counts per pattern, unparsed examples,
+      decoded date / team-abbr structure when known.
+
+      /api/_debug/ticker_grammar?sport=Soccer
+    """
+    if limit > 10000:
+        limit = 10000
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    if sport:
+        records = [r for r in records if (r.get("_sport") or "") == sport]
+    sample = records[:limit]
+
+    KNOWN_SUFFIXES = (
+        "TCORNERS", "CORNERS", "ADVANCE", "OUTRIGHT", "HALFTIME",
+        "SPREAD", "TOTAL", "BTTS", "MATCH", "GAME", "1H", "1Q",
+        "2Q", "3Q", "4Q",
+    )
+
+    def _series_base(s: str) -> str:
+        s = (s or "").upper()
+        if not s:
+            return ""
+        for suf in KNOWN_SUFFIXES:
+            if s.endswith(suf) and len(s) > len(suf):
+                return s[:-len(suf)]
+        return s
+
+    G_PATTERNS = [
+        ("G1_date_teams",
+         re.compile(r"^(\d{2}[A-Z]{3}\d{2})([A-Z]+)$")),
+        ("G2_date_dash_teams",
+         re.compile(r"^(\d{2}[A-Z]{3}\d{2})-([A-Z]+)$")),
+        ("G3_year",
+         re.compile(r"^(\d{4})$")),
+        ("G4_short_int",
+         re.compile(r"^(\d{1,3})$")),
+        ("G5_handle",
+         re.compile(r"^([A-Z][A-Z0-9]+)$")),
+        ("G6_handle_dash",
+         re.compile(r"^(\d+-[A-Z]+|[A-Z]+-[A-Z]+)$")),
+    ]
+
+    by_base: dict = {}
+    for r in sample:
+        full_ticker = (r.get("event_ticker") or "").upper()
+        series = (r.get("series_ticker") or "").upper()
+        if not full_ticker or not series:
+            continue
+        base = _series_base(series)
+        info = by_base.setdefault(base, {
+            "base":          base,
+            "total":         0,
+            "patterns":      {},  # pattern_name → count
+            "examples":      {},  # pattern_name → [examples]
+            "unparsed":      [],
+            "team_abbr_lengths": {},  # length → count (for G1 team blocks)
+        })
+        info["total"] += 1
+        # Strip series prefix + dash
+        suffix_part = full_ticker
+        if full_ticker.startswith(series + "-"):
+            suffix_part = full_ticker[len(series) + 1:]
+        elif full_ticker.startswith(series):
+            suffix_part = full_ticker[len(series):]
+            if suffix_part.startswith("-"):
+                suffix_part = suffix_part[1:]
+        matched_pattern = None
+        match_groups = None
+        for name, pat in G_PATTERNS:
+            m = pat.match(suffix_part)
+            if m:
+                matched_pattern = name
+                match_groups = m.groups()
+                break
+        if matched_pattern:
+            info["patterns"][matched_pattern] = info["patterns"].get(
+                matched_pattern, 0) + 1
+            ex_list = info["examples"].setdefault(matched_pattern, [])
+            if len(ex_list) < 3:
+                ex_list.append({
+                    "ticker":  full_ticker,
+                    "suffix":  suffix_part,
+                    "groups":  list(match_groups),
+                })
+            # For date+teams: count team-block lengths to surface
+            # 6-char (3+3 abbr) vs others
+            if matched_pattern in ("G1_date_teams", "G2_date_dash_teams"):
+                tlen = len(match_groups[1])
+                info["team_abbr_lengths"][tlen] = info["team_abbr_lengths"].get(
+                    tlen, 0) + 1
+        else:
+            if len(info["unparsed"]) < 5:
+                info["unparsed"].append({
+                    "ticker": full_ticker, "suffix": suffix_part,
+                })
+
+    out = []
+    for base, info in by_base.items():
+        out.append(info)
+    out.sort(key=lambda x: -x["total"])
+    return {
+        "sample_size":  len(sample),
+        "sport_filter": sport or "all",
+        "base_count":   len(out),
+        "bases":        out,
+    }
+
+
 @app.get("/api/_debug/enrich_trace")
 async def debug_enrich_trace(title: str = "", sport: str = "Soccer"):
     """Trace every step of the live-state enrichment chain for a
