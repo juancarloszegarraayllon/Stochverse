@@ -246,7 +246,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums}
 .sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);margin-top:2px;text-transform:uppercase}
 .sp-c2-time-state.live{color:var(--red);font-weight:700}
-.sp-c2-teams{font-size:13px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
+.sp-c2-teams{font-size:13px;line-height:1.4;display:flex;flex-direction:column;gap:2px;overflow:hidden}
 .sp-c2-team{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* Team crest / national-flag icon next to a team name. Source
    is FL's HOME_IMAGES / AWAY_IMAGES (already in the events-list
@@ -272,26 +272,27 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    Villa 0 - 2 Tottenham' reads the same as the vertical 0/2
    pair would. */
 .sp-c2-matchup-score{font-size:13px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;padding:0 2px}
-.sp-c2-scores{font-size:13px;font-weight:700;text-align:center;font-variant-numeric:tabular-nums;display:flex;flex-direction:column;gap:2px}
+.sp-c2-scores{font-size:13px;line-height:1.4;font-weight:700;text-align:center;font-variant-numeric:tabular-nums;display:flex;flex-direction:column;gap:2px}
 /* Aggregate / series-score pill — matches the homepage card's
    .agg-pill: green-on-green-bg pill, bold uppercase, sized so
    it reads cleanly under the leg score. Shows 'AGG 4-5 LEG 2/2'
    for soccer two-leg ties, 'SERIES 3-3' for NBA/NHL/MLB/NFL
    playoff series. */
-/* Per-event mini-header inside the marketcell — sits directly
-   above the chip rows so PROB / YES / NO labels line up with
-   their column values. KALSHI title spans columns 2-3 (over
-   YES + NO), centered above. Per-event so it's positioned
-   right with the prices for THIS event card, not as a separate
-   tournament-level strip. */
-.sp-c2-mc-header{display:grid;grid-template-columns:32px 1fr 1fr;grid-template-rows:auto auto;gap:0 4px;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);padding-bottom:2px;border-bottom:1px solid var(--border);margin-bottom:2px}
-.sp-c2-mch-title{grid-column:2 / 4;grid-row:1;text-align:center;color:var(--text)}
-.sp-c2-mch-prob{grid-column:1;grid-row:2;text-align:right}
-.sp-c2-mch-yes{grid-column:2;grid-row:2;text-align:center;color:var(--green)}
-.sp-c2-mch-no{grid-column:3;grid-row:2;text-align:center;color:var(--red)}
-/* SCORE label inside the score column, above the home/away
-   numbers. Matches the chip-header styling for visual parity. */
-.sp-c2-sch{font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);text-align:center;padding-bottom:2px;border-bottom:1px solid var(--border);margin-bottom:2px}
+/* Per-event header row — single horizontal strip above the
+   event-row grid. Uses the SAME 4-column widths so SCORE / KALSHI
+   / PROB / YES / NO labels line up with the values (scores +
+   chips) directly below. KALSHI title spans cols 2-3 of its sub-
+   grid, PROB / YES / NO sit on the second row beneath it (matching
+   the homepage card's price-table caption hierarchy). All labels
+   share the same outer flex baseline so SCORE aligns with the
+   PROB / YES / NO row, not the KALSHI row above. */
+.sp-c2-event-headers{display:grid;grid-template-columns:64px 1fr var(--sp-score-w) 180px;gap:8px;padding:0 14px 4px;font-size:8px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;align-items:end;border-bottom:1px solid var(--border)}
+.sp-c2-eh-score{text-align:center}
+.sp-c2-eh-kalshi{display:grid;grid-template-columns:32px 1fr 1fr;grid-template-rows:auto auto;gap:0 4px}
+.sp-c2-eh-kalshi-title{grid-column:2 / 4;grid-row:1;text-align:center;color:var(--text);padding-bottom:1px}
+.sp-c2-eh-prob{grid-column:1;grid-row:2;text-align:right;color:var(--text-muted)}
+.sp-c2-eh-yes{grid-column:2;grid-row:2;text-align:center;color:var(--green)}
+.sp-c2-eh-no{grid-column:3;grid-row:2;text-align:center;color:var(--red)}
 /* Aggregate / playoff-series pill — its own row above the event
    grid, left-aligned. Pill styling (green-on-green-bg) matches
    the homepage's .agg-pill so /sports and homepage cards have
@@ -1303,6 +1304,25 @@ function renderEventRow(ev, market, isMarketRow) {
   if (_aggRowHtml) {
     html += '<div class="sp-c2-event-aggrow">' + _aggRowHtml + '</div>';
   }
+  // Per-event header row — uses the SAME 4-column grid as the
+  // event-row below, so SCORE label aligns with the score column,
+  // KALSHI / PROB / YES / NO align with the chip columns. All
+  // labels share one row → they line up horizontally. Rendered
+  // only when this event has matched chips (otherwise the labels
+  // would point at empty columns).
+  if (matched && outcomes.length) {
+    html += '<div class="sp-c2-event-headers">';
+    html += '<div></div>';  // time column spacer
+    html += '<div></div>';  // teams column spacer
+    html += '<div class="sp-c2-eh-score">SCORE</div>';
+    html += '<div class="sp-c2-eh-kalshi">';
+    html += '<span class="sp-c2-eh-kalshi-title">KALSHI</span>';
+    html += '<span class="sp-c2-eh-prob">PROB</span>';
+    html += '<span class="sp-c2-eh-yes">YES</span>';
+    html += '<span class="sp-c2-eh-no">NO</span>';
+    html += '</div>';
+    html += '</div>';
+  }
   // Main row — time / teams / scores / marketcell.
   html += '<div class="sp-c2-event-row">';
   // Left indicator column — was the Kalshi K + count badge.
@@ -1436,7 +1456,6 @@ function renderEventRow(ev, market, isMarketRow) {
     html += '<div class="sp-c2-scores"></div>';
   } else {
     html += '<div class="sp-c2-scores">';
-    if (matched) html += '<div class="sp-c2-sch">SCORE</div>';
     html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
     html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
     html += '</div>';
@@ -1444,18 +1463,13 @@ function renderEventRow(ev, market, isMarketRow) {
   // Right market cell — chip rows only (PROB / YES / NO), one per
   // outcome. Labels live in the teams cell to the left so each
   // chip row reads horizontally with its corresponding label.
-  // Outcome → chip row is 1:1 in display order. Per-event header
-  // strip ('KALSHI / PROB YES NO') sits at the top of the
-  // marketcell so the labels are directly above the chip values
-  // — one set per event card, like a small price-table caption.
+  // Outcome → chip row is 1:1 in display order. SCORE / KALSHI /
+  // PROB / YES / NO labels are rendered in a unified header row
+  // ABOVE the event-row grid so they all align horizontally
+  // (same y) — not per-cell which made SCORE float higher than
+  // PROB/YES/NO.
   html += '<div class="sp-c2-marketcell">';
   if (matched && outcomes.length) {
-    html += '<div class="sp-c2-mc-header">';
-    html += '<span class="sp-c2-mch-title">KALSHI</span>';
-    html += '<span class="sp-c2-mch-prob">PROB</span>';
-    html += '<span class="sp-c2-mch-yes">YES</span>';
-    html += '<span class="sp-c2-mch-no">NO</span>';
-    html += '</div>';
     if (showMatchup) html += '<div class="sp-c2-chip-spacer"></div>';
     for (const o of outcomes) html += renderChipRow(o);
   } else {
