@@ -169,6 +169,25 @@ The renderer's per-shape rules. **Locked from observed data** — no guessing.
 | `SPREAD` (UFL) | 11 | `<team> wins by over N points` |
 | Per-team season wins (KXNFLWINS, market_type=`<team> Total Wins`) | 17 | `N+ wins` |
 
+### Tennis
+
+| Suffix | market_type | Outcomes | Labels |
+|---|---|---|---|
+| `MATCH` | — | 2 | player full names (NO TIE — tennis can't tie) |
+| `SETWINNER` (KXATPSETWINNER, KXWTASETWINNER) | `Set 1 Winner` / `Set 2 Winner` | 2 | player full names |
+| `GRANDSLAM` (per-player, KXGRANDSLAM) | `Grand Slam wins in 2026` | 3 | `1+`, `2+`, `3+`, `All 4 Grand Slam wins` |
+| Outright tour winners (KXFOMEN, KXFOWOMEN, KXATPGRANDSLAM, KXWTAGRANDSLAM) | — | 14–25 | player full names |
+
+**Tennis sub-tiers** (all use the same `MATCH` shape, different bases for tour level):
+- `KXATP` — men's tour (12 records)
+- `KXATPCHALLENGER` — men's challenger tier (19 records)
+- `KXWTA` — women's tour (34 records)
+- `KXWTACHALLENGER` — women's challenger (18 records)
+- `KXITF` — men's ITF lower tier (60 records)
+- `KXITFW` — women's ITF lower tier (133 records — biggest tennis bucket)
+
+**Title-shape quirk**: tennis uses **surname-only** in `MATCH` titles (`"Hooper vs Ponchet"`) but **full names** in `SETWINNER` titles (`"Taylor Townsend vs Victoria Jimenez Kasintseva: Set 1 Winner"`). Same player pair, two different title shapes depending on suffix. **The renderer should always read player labels from `outcomes[].label`** (which always has the full name), not from titles.
+
 ### Universal: outrights / futures (no suffix)
 
 Outcome count is variable (1 to 70+), labels are sport-specific:
@@ -260,6 +279,37 @@ Used by virtually every outright / season-long / future market across all sports
 Examples: `KXNBASERIES-26LALOKCR2`, `KXNHLSERIESSCORE-26MTLBUFR2`
 
 `R{N}` is the playoff round number. No date — the market spans the full series.
+
+### G_SET — set-winner sub-markets (Tennis)
+
+```
+{base}-{YYMMDD}{HOME_ABBR}{AWAY_ABBR}-{N}
+```
+
+`N` is the set number (1 or 2). Used by `KXATPSETWINNER`, `KXWTASETWINNER`.
+
+Examples: `KXATPSETWINNER-26MAY05HIJBAS-1`, `KXWTASETWINNER-26MAY05TOWJIM-2`.
+
+The base ticker (without `-{N}`) matches the corresponding `MATCH` ticker, so a set-winner record can be deterministically associated with its parent match.
+
+### G_DATE_ONLY — date-keyed outright (Tennis)
+
+```
+{base}-{YYMMDD}
+```
+
+Used for "ranked / state on date X" type futures. Examples: `KXATP1RANK-26DEC31`, `KXATP1RANK-26JUN30`.
+
+### Tennis player abbreviations
+
+Tennis uses **first 3 chars of surname** as the player abbreviation, concatenated home+away → 6 chars total. Examples:
+- `HIJBAS` → Hijikata + Basilashvili
+- `TOWJIM` → Townsend + Jimenez Kasintseva
+- `MILPAV` → Milovanova + Pavlova
+
+**Edge case**: compound surnames can produce 7-char blocks. `KXATPCHALLENGERMATCH-26MAY05DIABER` → Diaz Acosta (4-char `DIA`) + Bernet (`BER`). Rare (1 in our sample).
+
+**Edge case 2**: rematch / same-day-second-bracket. `KXITFWMATCH-26MAY04CHOCHO2` — same `CHOCHO` abbrs with trailing `2`. Rare (~0.75% of ITFW matches). Renderer should keep the `2` as part of fixture identity to avoid collisions.
 
 ### Sport-specific outright ticker variations
 
