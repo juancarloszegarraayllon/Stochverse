@@ -8044,6 +8044,70 @@ def _parse_title_teams(title: str) -> tuple:
     return ("", "")
 
 
+@app.get("/api/_debug/cache_schema")
+async def debug_cache_schema(sport: str = "", limit: int = 200,
+                              include_examples: int = 1):
+    """Field-frequency dump for Kalshi cache records — what fields
+    exist, how often they're populated, and sample values per type.
+
+    Output drives kalshi_probe/probe_cache_schema.py and feeds the
+    KALSHI_API_COVERAGE.md cache-record-schema section. Without
+    this we keep guessing field locations (the _live_state-on-cache
+    discovery from yesterday is the canonical example of why the
+    audit matters).
+
+      /api/_debug/cache_schema?sport=Soccer&limit=200
+
+    Returns:
+      sample_size:      number of records inspected
+      sport_filter:     which sport (or 'all')
+      fields:           [{ key, type, present_count, present_pct,
+                           sample_values (up to 3) }, ...]
+                        sorted by descending presence so common
+                        fields surface first.
+    """
+    if limit > 1000:
+        limit = 1000
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    if sport:
+        records = [r for r in records if (r.get("_sport") or "") == sport]
+    sample = records[:limit]
+    field_stats: dict = {}
+    for r in sample:
+        for k, v in r.items():
+            stat = field_stats.setdefault(k, {
+                "count": 0, "type_counts": {}, "samples": [],
+            })
+            stat["count"] += 1
+            tname = type(v).__name__
+            stat["type_counts"][tname] = stat["type_counts"].get(tname, 0) + 1
+            if include_examples and len(stat["samples"]) < 3:
+                # Avoid dumping huge values into the response
+                if isinstance(v, (str, int, float, bool, type(None))):
+                    sval = v
+                elif isinstance(v, (list, dict)):
+                    sval = ("<" + tname + " len=" + str(len(v)) + ">")
+                else:
+                    sval = "<" + tname + ">"
+                stat["samples"].append(sval)
+    out_fields = []
+    for key, stat in field_stats.items():
+        out_fields.append({
+            "key": key,
+            "types": stat["type_counts"],
+            "present_count": stat["count"],
+            "present_pct": round(100.0 * stat["count"] / max(1, len(sample)), 1),
+            "samples": stat["samples"] if include_examples else None,
+        })
+    out_fields.sort(key=lambda x: (-x["present_count"], x["key"]))
+    return {
+        "sample_size": len(sample),
+        "sport_filter": sport or "all",
+        "fields": out_fields,
+    }
+
+
 @app.get("/api/_debug/enrich_trace")
 async def debug_enrich_trace(title: str = "", sport: str = "Soccer"):
     """Trace every step of the live-state enrichment chain for a
