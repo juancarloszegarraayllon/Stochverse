@@ -7287,8 +7287,10 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         # navigation in a session hits cache.
         live = primary.get("_live_state") or {}
         agg_label = live.get("aggregate_label") if isinstance(live, dict) else None
-        agg_h = primary.get("aggregate_home")
-        agg_a = primary.get("aggregate_away")
+        # See matched-event branch below — aggregate is on _live_state,
+        # not the top-level record. Same fix here.
+        agg_h = live.get("aggregate_home") if isinstance(live, dict) else None
+        agg_a = live.get("aggregate_away") if isinstance(live, dict) else None
         if (sport_name == "Soccer" and (agg_h is None or agg_a is None)
                 and agg_lookups_done < AGG_LOOKUP_CAP
                 and any(series.startswith(p) for p in cup_prefixes_for_agg)):
@@ -7313,9 +7315,13 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         # leaves them None for regular-season games, which is the
         # exact gating we want — playoffs render 'SERIES X-Y',
         # regular-season renders nothing.
-        series_h_wins = primary.get("series_home_wins")
-        series_a_wins = primary.get("series_away_wins")
-        series_summary = primary.get("series_summary") or ""
+        # Series fields, like aggregate, live INSIDE _live_state on
+        # the cache record (rc['_live_state']['series_home_wins']),
+        # not on the top level. Reading from primary.* returned None
+        # for FL-paired playoff games, leaving SERIES X-Y blank.
+        series_h_wins = live.get("series_home_wins") if isinstance(live, dict) else None
+        series_a_wins = live.get("series_away_wins") if isinstance(live, dict) else None
+        series_summary = (live.get("series_summary") if isinstance(live, dict) else "") or ""
         if (series_h_wins is None or series_a_wins is None) and sport_name in (
                 "Basketball", "Hockey", "Baseball", "American Football"):
             try:
@@ -8054,8 +8060,16 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                 # the unpaired path uses — both paths share the
                 # budget so total /sports SofaScore lookups stay
                 # bounded per request.
-                _agg_h = primary.get("aggregate_home")
-                _agg_a = primary.get("aggregate_away")
+                # Aggregate fields are populated INSIDE _live_state
+                # by the cache builder (rc['_live_state'] at main.py
+                # line 2516), not on the top-level cache record. The
+                # earlier read of primary.get('aggregate_home') was
+                # always None — that's why /sports never showed AGG
+                # X-Y while the homepage card did. Read from
+                # _live_state instead, same source the homepage's
+                # renderSeriesPill uses.
+                _agg_h = live.get("aggregate_home")
+                _agg_a = live.get("aggregate_away")
                 _agg_label = (live.get("aggregate_label")
                               if isinstance(live, dict) else None)
                 _series = (primary.get("series_ticker") or "").upper()
@@ -8094,9 +8108,9 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                     # Populated by FL/ESPN match enrichment when
                     # the game is part of a playoff series; null
                     # for round-robin league games.
-                    "series_home_wins": primary.get("series_home_wins"),
-                    "series_away_wins": primary.get("series_away_wins"),
-                    "series_summary":   primary.get("series_summary"),
+                    "series_home_wins": live.get("series_home_wins"),
+                    "series_away_wins": live.get("series_away_wins"),
+                    "series_summary":   live.get("series_summary"),
                 }
             else:
                 ev_out["kalshi"] = None
