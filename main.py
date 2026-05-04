@@ -7124,6 +7124,30 @@ def _enrich_record_live_state(title: str, sport: str, rc: dict = None) -> dict:
             g = _enrich_soccer_aggregate(g, title)
         except Exception:
             pass
+    # When g exists but aggregate is still missing (FL ships
+    # is_playoff/series_summary but not aggregate_home/away —
+    # only the bracket cache has the actual leg-1 score), fall
+    # through to the bracket cache to fill in. Without this,
+    # Arsenal vs Atletico (FL g returned, but with no aggregate
+    # fields populated) loses to FL's nulls instead of getting
+    # the bracket's '1-1 / Leg 2' data.
+    if g and sport == "Soccer" and rc and (
+            g.get("aggregate_home") is None or g.get("aggregate_away") is None):
+        try:
+            _bagg = _bracket_aggregate_for_event(rc)
+        except Exception:
+            _bagg = None
+        if _bagg:
+            if _bagg.get("aggregate_home") is not None:
+                g["aggregate_home"] = _bagg.get("aggregate_home")
+            if _bagg.get("aggregate_away") is not None:
+                g["aggregate_away"] = _bagg.get("aggregate_away")
+            if _bagg.get("is_two_leg"):
+                g["is_two_leg"] = True
+            if _bagg.get("leg_number") and not g.get("leg_number"):
+                g["leg_number"] = _bagg.get("leg_number")
+            if _bagg.get("round_name") and not g.get("round_name"):
+                g["round_name"] = _bagg.get("round_name")
     if g:
         return {
             "state":            g.get("state", ""),
@@ -7257,18 +7281,28 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
                 break
         return b
 
-    def _matchup_key(bare: str) -> str:
+    def _matchup_key(bare: str, ticker_date=None) -> str:
         # Sort the two teams so 'PSG vs Bayern Munich' and
-        # 'Bayern Munich vs PSG' produce the same key. The same
-        # tie shows up under both orderings depending on how the
-        # market was titled — without sorting they'd render as
-        # two separate event rows for the same fixture.
+        # 'Bayern Munich vs PSG' produce the same key. Also
+        # 'Atletico at Arsenal' and 'Arsenal vs Atletico' — the
+        # same tie shows up under multiple orderings depending on
+        # which sub-market record we're looking at. Without
+        # sorting they'd render as separate event rows for the
+        # same fixture.
+        # Ticker date is included so the same teams playing on
+        # different days end up in different buckets (a fresh
+        # NBA playoff series leg is a different event than
+        # yesterday's leg even though the team pair is identical).
         m = _HEAD_TO_HEAD_TITLE_RE.search(bare)
         if not m:
-            return bare.lower().strip()
-        a = bare[:m.start()].strip().lower()
-        b = bare[m.end():].strip().lower()
-        return " vs ".join(sorted([a, b]))
+            base = bare.lower().strip()
+        else:
+            a = bare[:m.start()].strip().lower()
+            b = bare[m.end():].strip().lower()
+            base = " vs ".join(sorted([a, b]))
+        if ticker_date is not None:
+            return ticker_date.isoformat() + ":" + base
+        return base
 
     # Pass 1: group records by (series_base, sorted matchup) so all
     # Winner / Spreads / Totals / BTTS / 1H Winner records for the
@@ -7293,12 +7327,20 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         # date inline (KXUCLGAME-26MAY06BMUPSG → 2026-05-06).
         # Records without a parseable date pass through (props /
         # season-long markets shouldn't be filtered out by day).
+        ticker_date = parse_game_date_from_ticker(r.get("event_ticker") or "")
         if target_date is not None:
-            ticker_date = parse_game_date_from_ticker(r.get("event_ticker") or "")
             if ticker_date is not None and ticker_date != target_date:
                 continue
-        series_base = _series_base(r.get("series_ticker") or "")
-        key = (series_base, _matchup_key(bare))
+        # Matchup key uses the sorted team names + ticker date.
+        # Previously also included _series_base — but that broke
+        # for sub-markets whose suffix isn't in our strip list
+        # (KXUCLTCORNERS / KXUCLCORNERS / KXUCLADVANCE all stayed
+        # whole, splitting into separate buckets and causing
+        # duplicate Arsenal-Atletico rows on /sports). Sorted name
+        # + date is enough for the same fixture's records to group;
+        # cross-competition collisions (same teams playing in two
+        # comps on the same day) are an edge case we accept.
+        key = _matchup_key(bare, ticker_date)
         matchups.setdefault(key, {"bare": bare, "records": []})
         matchups[key]["records"].append(r)
     # Pass 2: for each matchup, drop if any of its tickers is
@@ -7316,15 +7358,20 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         # international fixtures sort before regular leagues so
         # they're not the ones dropped by the cap. Within each
         # priority class we sort by matchup key for stability.
-        (sb, mk), _ = item
+        # Key is now a string (was a tuple); cup detection walks
+        # the records' series_tickers since series_base isn't in
+        # the key anymore.
+        key, bundle = item
         cup_prefixes = ("KXUCL", "KXUEL", "KXUECL", "KXCONMEBOL",
                         "KXCONCACAF", "KXFACUP", "KXDFBPOKAL",
                         "KXCOPADELREY", "KXCOPPAITALIA", "KXKNVBCUP",
                         "KXMLSCUP", "KXWC", "KXMENWORLDCUP")
-        for prefix in cup_prefixes:
-            if sb.startswith(prefix):
-                return (0, mk)
-        return (1, mk)
+        for r in bundle["records"]:
+            s = (r.get("series_ticker") or "").upper()
+            for prefix in cup_prefixes:
+                if s.startswith(prefix):
+                    return (0, key)
+        return (1, key)
 
     sorted_matchups = sorted(matchups.items(), key=_cup_priority)
     # Aggregate enrichment — capped per request so we don't blow
@@ -7342,7 +7389,19 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
     agg_lookups_done = 0
     by_league: dict = {}
     total_events = 0
-    for (series, _), bundle in sorted_matchups:
+    for _key, bundle in sorted_matchups:
+        # Series prefix used by the SofaScore-fallback gate below.
+        # Walk the bundle's records to find any cup-tie series.
+        series = ""
+        for _r in bundle["records"]:
+            _s = (_r.get("series_ticker") or "").upper()
+            if any(_s.startswith(p) for p in
+                   ("KXUCL", "KXUEL", "KXUECL", "KXCONMEBOL",
+                    "KXCONCACAF", "KXFACUP", "KXDFBPOKAL",
+                    "KXCOPADELREY", "KXCOPPAITALIA", "KXKNVBCUP",
+                    "KXMLSCUP", "KXWC", "KXMENWORLDCUP")):
+                series = _s
+                break
         if total_events >= MAX_UNPAIRED:
             break
         bare_title = bundle["bare"]
