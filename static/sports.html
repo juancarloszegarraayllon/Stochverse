@@ -278,6 +278,17 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    it reads cleanly under the leg score. Shows 'AGG 4-5 LEG 2/2'
    for soccer two-leg ties, 'SERIES 3-3' for NBA/NHL/MLB/NFL
    playoff series. */
+/* Per-tournament column header strip — sits below the tournament
+   name, labels the score column and the chip columns
+   (PROB / YES / NO under a 'KALSHI' bracket). Mirrors the event-
+   row grid widths so labels line up with the values below. */
+.sp-c2-tournament-cols{display:grid;grid-template-columns:64px 1fr var(--sp-score-w) 180px;gap:8px;padding:4px 14px 6px;background:transparent;border-bottom:1px solid var(--border);font-size:8px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+.sp-c2-tcol-score{text-align:center;align-self:end}
+.sp-c2-tcol-kalshi{display:grid;grid-template-columns:32px 1fr 1fr;grid-template-rows:auto auto;gap:0 4px}
+.sp-c2-tcol-kalshi-title{grid-column:2 / 4;grid-row:1;text-align:center;color:var(--text);padding-bottom:1px}
+.sp-c2-tcol-kalshi .lh-prob{grid-column:1;grid-row:2;text-align:right;color:var(--text-muted)}
+.sp-c2-tcol-kalshi .lh-yes{grid-column:2;grid-row:2;text-align:center;color:var(--green)}
+.sp-c2-tcol-kalshi .lh-no{grid-column:3;grid-row:2;text-align:center;color:var(--red)}
 /* Aggregate / playoff-series pill — its own row above the event
    grid, left-aligned. Pill styling (green-on-green-bg) matches
    the homepage's .agg-pill so /sports and homepage cards have
@@ -1011,6 +1022,25 @@ function renderCol2() {
     html += '<span class="sp-c2-league-name">' + escH(leagueDisplayName(t)) + '</span>';
     if (t.COUNTRY_NAME) html += '<span class="sp-c2-country">' + escH(t.COUNTRY_NAME) + '</span>';
     html += '</div>';
+    // Column-header strip — sits below the tournament name and
+    // labels the score / probability / yes / no columns of the
+    // chip area below. Per-tournament (renders once per
+    // tournament block) and only when the tournament has at
+    // least one Kalshi-matched event (otherwise the labels would
+    // point at empty columns).
+    if (tournamentHasMatch) {
+      html += '<div class="sp-c2-tournament-cols">';
+      html += '<div></div>';  // time spacer
+      html += '<div></div>';  // teams spacer
+      html += '<div class="sp-c2-tcol-score">SCORE</div>';
+      html += '<div class="sp-c2-tcol-kalshi">';
+      html += '<span class="sp-c2-tcol-kalshi-title">KALSHI</span>';
+      html += '<span class="lh-prob">PROB</span>';
+      html += '<span class="lh-yes">YES</span>';
+      html += '<span class="lh-no">NO</span>';
+      html += '</div>';
+      html += '</div>';
+    }
     html += '<div class="sp-c2-events">';
     for (const ev of evs) {
       // In Market view, each Kalshi ticker becomes its own row;

@@ -7449,13 +7449,24 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
             league = SOCCER_COMP[primary_series]
         if not league:
             league = (series.replace("KX", "").title() if series else "Other")
-        # Home/away from the bare title for the matchup line
+        # Home/away from the bare title for the matchup line.
+        # Separator semantics matter for orientation:
+        #   'X vs Y'  / 'X v Y' / 'X versus Y' → home=X, away=Y
+        #   'X at Y'  / 'X @ Y'                → home=Y, away=X
+        # (Visiting team comes first in 'at'/'@' notation, so the
+        # left side is the away team. Without flipping we'd assign
+        # the wrong team as home → wrong leader on the AGG pill.)
         m = _HEAD_TO_HEAD_TITLE_RE.search(bare_title)
         home_name = ""
         away_name = ""
         if m:
-            home_name = bare_title[:m.start()].strip()
-            away_name = bare_title[m.end():].strip()
+            _sep = m.group(0).strip().lower()
+            _left = bare_title[:m.start()].strip()
+            _right = bare_title[m.end():].strip()
+            if _sep in ("at", "@"):
+                home_name, away_name = _right, _left
+            else:
+                home_name, away_name = _left, _right
         primary_ticker = primary.get("event_ticker") or markets[0]["event_ticker"]
         # Aggregate — pass through whatever's on the cache record
         # first (free), then for cup-tie matchups missing aggregate
