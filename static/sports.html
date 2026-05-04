@@ -1325,6 +1325,19 @@ function renderEventRow(ev, market, isMarketRow) {
   if (_aggRowHtml) {
     html += '<div class="sp-c2-event-aggrow">' + _aggRowHtml + '</div>';
   }
+  // Compute outcomes BEFORE the header row reads `outcomes.length`
+  // — `const` declarations have a temporal dead zone, so reading
+  // the binding before its initializer throws ReferenceError and
+  // takes down the whole render. Was the cause of the
+  // 'Failed to load events.' regression.
+  const rowMarketOverride = isMarketRow ? market : null;
+  const allOutcomes = matched ? collectOutcomesForRender(ev, rowMarketOverride) : [];
+  const MAX_VISIBLE = 4;
+  const expanded = _expandedEvents.has(ev.EVENT_ID);
+  const outcomes = (allOutcomes.length > MAX_VISIBLE && !expanded)
+    ? allOutcomes.slice(0, MAX_VISIBLE)
+    : allOutcomes;
+  const hasMore = allOutcomes.length > MAX_VISIBLE;
   // Per-event header row — uses the SAME 4-column grid as the
   // event-row below, so SCORE label aligns with the score column,
   // KALSHI / PROB / YES / NO align with the chip columns. All
@@ -1365,20 +1378,8 @@ function renderEventRow(ev, market, isMarketRow) {
             liveAttr + '>' + escH(stLbl) + '</span>';
   }
   html += '</div>';
-  // Build the visible outcome list (capped at MAX_VISIBLE unless
-  // the user toggled "+ N more" on this event). The same list
-  // drives both the teams cell (labels) and the marketcell
-  // (chips) so they stay in lockstep. In Market view we pass the
-  // per-row market so SPREADS / TOTALS / etc. show their own
-  // outcomes — not always the headline Winner's home/away/tie.
-  const rowMarketOverride = isMarketRow ? market : null;
-  const allOutcomes = matched ? collectOutcomesForRender(ev, rowMarketOverride) : [];
-  const MAX_VISIBLE = 4;
-  const expanded = _expandedEvents.has(ev.EVENT_ID);
-  const outcomes = (allOutcomes.length > MAX_VISIBLE && !expanded)
-    ? allOutcomes.slice(0, MAX_VISIBLE)
-    : allOutcomes;
-  const hasMore = allOutcomes.length > MAX_VISIBLE;
+  // outcomes / allOutcomes / hasMore are computed above (before the
+  // header row reads outcomes.length). Re-using those bindings here.
   html += '<div class="sp-c2-teams">';
   // Matchup header — shows 'Home <score> - <score> Away' above
   // the outcome labels when the outcomes don't already include
