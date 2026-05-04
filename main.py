@@ -8082,6 +8082,53 @@ def _parse_title_teams(title: str) -> tuple:
     return ("", "")
 
 
+@app.get("/api/_debug/sports_inventory")
+async def debug_sports_inventory():
+    """Sport-level inventory: every distinct _sport value in the
+    Kalshi cache + record count + a few sample series_tickers.
+
+    Purpose: tell the audit which sports have live data right now
+    so we don't waste cycles probing sports Kalshi nominally lists
+    but has no current markets for. Drives the per-sport extension
+    of KALSHI_AUDIT.md.
+
+      /api/_debug/sports_inventory
+    """
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    by_sport: dict = {}
+    for r in records:
+        s = r.get("_sport") or ""
+        info = by_sport.setdefault(s, {
+            "record_count":      0,
+            "distinct_series":   set(),
+            "sample_titles":     [],
+        })
+        info["record_count"] += 1
+        ser = (r.get("series_ticker") or "").upper()
+        if ser:
+            info["distinct_series"].add(ser)
+        if len(info["sample_titles"]) < 3:
+            t = r.get("title") or ""
+            if t:
+                info["sample_titles"].append(t[:80])
+    out = []
+    for sport, info in by_sport.items():
+        out.append({
+            "sport":            sport or "(unclassified)",
+            "record_count":     info["record_count"],
+            "series_count":     len(info["distinct_series"]),
+            "sample_series":    sorted(info["distinct_series"])[:10],
+            "sample_titles":    info["sample_titles"],
+        })
+    out.sort(key=lambda x: -x["record_count"])
+    return {
+        "total_records": len(records),
+        "sport_count":   len(by_sport),
+        "sports":        out,
+    }
+
+
 @app.get("/api/_debug/cache_schema")
 async def debug_cache_schema(sport: str = "", limit: int = 200,
                               include_examples: int = 1):
