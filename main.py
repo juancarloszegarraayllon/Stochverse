@@ -7086,6 +7086,55 @@ def _league_to_region(league_name: str) -> str:
     return ""
 
 
+def _enrich_record_live_state(title: str, sport: str) -> dict:
+    """On-demand match_game + _enrich_soccer_aggregate, returning
+    a synthetic _live_state dict shaped like the one /api/events
+    builds (main.py:3259). The cache record itself doesn't carry
+    _live_state — /api/events computes it per-request — so /sports
+    has to do the same enrichment to get aggregate / series /
+    display_clock fields. In-memory match_game lookup, no HTTP.
+
+    Returns {} on no match, so callers can do
+    `live = _enrich_record_live_state(title, sport)` and treat
+    the empty case as 'no live data available'.
+    """
+    if not title or not sport:
+        return {}
+    g = None
+    try:
+        if sport in _ESPN_CLOCK_SPORTS:
+            from espn_feed import match_game as _espn_match
+            g = _espn_match(title, sport)
+        if g is None:
+            from flashlive_feed import match_game as _flash_match
+            g = _flash_match(title, sport)
+    except Exception:
+        g = None
+    if g and sport == "Soccer":
+        try:
+            g = _enrich_soccer_aggregate(g, title)
+        except Exception:
+            pass
+    if not g:
+        return {}
+    return {
+        "state":            g.get("state", ""),
+        "display_clock":    g.get("display_clock", ""),
+        "period":           g.get("period", 0),
+        "stage_start_ms":   g.get("stage_start_ms", 0),
+        "captured_at_ms":   g.get("captured_at_ms", 0),
+        "clock_running":    g.get("clock_running", True),
+        "is_two_leg":       bool(g.get("is_two_leg")),
+        "aggregate_home":   g.get("aggregate_home"),
+        "aggregate_away":   g.get("aggregate_away"),
+        "leg_number":       g.get("leg_number"),
+        "round_name":       g.get("round_name", ""),
+        "series_home_wins": g.get("series_home_wins"),
+        "series_away_wins": g.get("series_away_wins"),
+        "series_summary":   g.get("series_summary", ""),
+    }
+
+
 def _collect_unpaired_h2h_for_sport(sport_name: str,
                                      matched_kalshi_tickers: set,
                                      target_date=None) -> list:
@@ -7285,12 +7334,22 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         # matches that don't have aggregates anyway. SofaScore
         # caches results for 5 min on its side, so repeated
         # navigation in a session hits cache.
+        # Cache record's _live_state is populated by /api/events at
+        # render time, NOT during cache build — so for /sports we
+        # have to run the same on-demand enrichment per record to
+        # get aggregate / series / display_clock fields. In-memory
+        # match_game, no HTTP.
         live = primary.get("_live_state") or {}
+        if not live or not isinstance(live, dict) or not live.get("aggregate_home"):
+            enriched = _enrich_record_live_state(bare_title, sport_name)
+            if enriched:
+                live = enriched
         agg_label = live.get("aggregate_label") if isinstance(live, dict) else None
-        # See matched-event branch below — aggregate is on _live_state,
-        # not the top-level record. Same fix here.
         agg_h = live.get("aggregate_home") if isinstance(live, dict) else None
         agg_a = live.get("aggregate_away") if isinstance(live, dict) else None
+        if not agg_label and live.get("leg_number") and live.get("round_name"):
+            agg_label = (live.get("round_name", "") + " · LEG " +
+                         str(live.get("leg_number")))
         if (sport_name == "Soccer" and (agg_h is None or agg_a is None)
                 and agg_lookups_done < AGG_LOOKUP_CAP
                 and any(series.startswith(p) for p in cup_prefixes_for_agg)):
@@ -8104,6 +8163,13 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                 # Live-state may also carry the leg/aggregate label
                 # for richer rendering ('PSG LEADS AGGREGATE').
                 live = primary.get("_live_state") or {}
+                # Cache records don't carry _live_state — /api/events
+                # enriches per-request. /sports has to do the same so
+                # aggregate / series / clock fields actually populate.
+                if not live or not isinstance(live, dict) or not live.get("aggregate_home"):
+                    _enriched = _enrich_record_live_state(primary.get("title", ""), kalshi_sport)
+                    if _enriched:
+                        live = _enriched
                 # Aggregate fallback for matched soccer cup ties.
                 # Cache build's _enrich_soccer_aggregate is best-
                 # effort and sometimes runs before SofaScore has
