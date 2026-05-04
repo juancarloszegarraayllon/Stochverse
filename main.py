@@ -7337,11 +7337,18 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         # Cache record's _live_state is populated by /api/events at
         # render time, NOT during cache build — so for /sports we
         # have to run the same on-demand enrichment per record to
-        # get aggregate / series / display_clock fields. In-memory
-        # match_game, no HTTP.
+        # get aggregate / series / display_clock fields. Use the
+        # PRIMARY (headline KXUCLGAME) record's title rather than
+        # bundle.bare, because bare picks the first cache record's
+        # ordering ('PSG at Bayern Munich: Totals') while the
+        # headline is the canonical 'Bayern Munich vs PSG' that
+        # SofaScore actually indexes by. Try both as fallbacks.
         live = primary.get("_live_state") or {}
+        primary_title = primary.get("title", "") or bare_title
         if not live or not isinstance(live, dict) or not live.get("aggregate_home"):
-            enriched = _enrich_record_live_state(bare_title, sport_name)
+            enriched = _enrich_record_live_state(primary_title, sport_name)
+            if not enriched and primary_title != bare_title:
+                enriched = _enrich_record_live_state(bare_title, sport_name)
             if enriched:
                 live = enriched
         agg_label = live.get("aggregate_label") if isinstance(live, dict) else None
@@ -7355,7 +7362,10 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
                 and any(series.startswith(p) for p in cup_prefixes_for_agg)):
             try:
                 from sofascore_feed import match_game as sofa_match
-                sg = sofa_match(bare_title, "Soccer")
+                # Try headline title first, fallback to bare.
+                sg = sofa_match(primary_title, "Soccer")
+                if not sg and primary_title != bare_title:
+                    sg = sofa_match(bare_title, "Soccer")
                 if sg and sg.get("is_two_leg"):
                     if agg_h is None: agg_h = sg.get("aggregate_home")
                     if agg_a is None: agg_a = sg.get("aggregate_away")

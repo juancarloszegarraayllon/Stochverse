@@ -292,7 +292,12 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    pair would. */
 .sp-c2-matchup-score{font-size:13px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;padding:0 2px}
 .sp-c2-scores{font-size:13px;font-weight:700;text-align:center;font-variant-numeric:tabular-nums;display:flex;flex-direction:column;gap:2px}
-.sp-c2-agg{font-size:9px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.3px;margin-top:2px}
+/* Aggregate / series-score pill — matches the homepage card's
+   .agg-pill: green-on-green-bg pill, bold uppercase, sized so
+   it reads cleanly under the leg score. Shows 'AGG 4-5 LEG 2/2'
+   for soccer two-leg ties, 'SERIES 3-3' for NBA/NHL/MLB/NFL
+   playoff series. */
+.sp-c2-agg{display:inline-block;font-size:9px;color:var(--green);background:var(--green-bg);border:1px solid var(--green-line);border-radius:8px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 6px;margin-top:4px;line-height:1;white-space:nowrap}
 /* Empty chip-row spacer — used when the teams cell shows a
    matchup header (sub-market views). Pushes the first real chip
    row down by one row so each chip aligns with its outcome label
