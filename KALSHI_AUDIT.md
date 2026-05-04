@@ -203,6 +203,26 @@ Esports uses **multi-map series structure** — a "match" is best-of-N maps, eac
 
 **Cache-builder bug to flag**: `KXOWGRRANK` (Overwatch GR Rank) is bucketed into Esports but its outcomes are golf-player names (`Scottie Scheffler`, `Rory McIlroy`, etc.). The classifier confused `OWGR` with `OW` (Overwatch). Non-blocking; clean up in a future pass.
 
+### MMA (UFC)
+
+MMA has the **most granular per-fight sub-market structure** of any sport — five distinct sub-markets attached to each headline fight, all sharing the same fixture identity tuple `(date, fighter_abbrs)`.
+
+| Series base | market_type | Outcome count | Label shape |
+|---|---|---|---|
+| `KXUFCFIGHT` | — | 2 | fighter names, **no draw** in headline. Title: `"<Event>: X vs Y"` |
+| `KXUFCDISTANCE` | `Go the Distance` | 1 | binary YES/NO (`Fight goes the distance`) |
+| `KXUFCROUNDS` | `Round of Finish` | 2–4 | `Fight ends before round N` |
+| `KXUFCVICROUND` | `Round of Victory` | 7–11 | `<Fighter> to win in Round N` × 2 fighters × N rounds + `Decision / Draw / No Contest` |
+| `KXUFCMOV` | `Method of Victory` | 7 | `<Fighter> by KO/TKO/DQ` / `by Submission` / `by Decision` × 2 fighters + `Draw` |
+| `KXUFCMOF` | `Method of Finish` | 4 | `KO/TKO/DQ`, `Submission`, `Decision`, `Draw` (fighter-agnostic) |
+
+**Critical insight**: `KXUFCROUNDS` ("Round of Finish") and `KXUFCVICROUND` ("Round of Victory") look similar but answer different questions. ROUNDS = "when does the fight end?" (round-agnostic); VICROUND = "who wins in which round?" (per-fighter). Renderer must distinguish them by `market_type`, not by series_base alone.
+
+**Outright title-belt holders** (one per UFC weight class):
+`KXUFCBANTAMWEIGHTTITLE`, `KXUFCFEATHERWEIGHTTITLE`, `KXUFCFLYWEIGHTTITLE`, `KXUFCLIGHTWEIGHTTITLE`, `KXUFCLHEAVYWEIGHTTITLE`, `KXUFCHEAVYWEIGHTTITLE`, `KXUFCMIDDLEWEIGHTTITLE`, `KXUFCWELTERWEIGHTTITLE` — 8–11 fighters each. Title: `"UFC <Class> Title Holder on Dec 31, 2026?"`
+
+**Other futures**: `KXMCGREGORFIGHTNEXT` (14 fighters), `KXCARDPRESENCEUFCWH` (5 fighters), `KXUFCWHITEHOUSE` (binary), `KXPERSONUNRETIRE` (binary).
+
 ### Universal: outrights / futures (no suffix)
 
 Outcome count is variable (1 to 70+), labels are sport-specific:
@@ -336,6 +356,21 @@ Tennis uses **first 3 chars of surname** as the player abbreviation, concatenate
 **Edge case**: compound surnames can produce 7-char blocks. `KXATPCHALLENGERMATCH-26MAY05DIABER` → Diaz Acosta (4-char `DIA`) + Bernet (`BER`). Rare (1 in our sample).
 
 **Edge case 2**: rematch / same-day-second-bracket. `KXITFWMATCH-26MAY04CHOCHO2` — same `CHOCHO` abbrs with trailing `2`. Rare (~0.75% of ITFW matches). Renderer should keep the `2` as part of fixture identity to avoid collisions.
+
+### MMA fighter abbreviations — clean G1, all sub-markets share identity
+
+MMA per-fight ticker uses identical `{YYMMDD}{fighter_abbrs}` across **all 6 series** (FIGHT + 5 sub-markets):
+
+```
+KXUFCFIGHT-26MAY16MGOMOR        ← headline
+KXUFCDISTANCE-26MAY16MGOMOR     ← binary "goes the distance"
+KXUFCROUNDS-26MAY16MGOMOR       ← when does the fight end
+KXUFCVICROUND-26MAY16MGOMOR     ← who wins in which round
+KXUFCMOV-26MAY16MGOMOR          ← method of victory (per-fighter)
+KXUFCMOF-26MAY16MGOMOR          ← method of finish (fighter-agnostic)
+```
+
+**Lesson**: identify a fight by `(sport=MMA, date, abbrs)` — all 6 sub-markets attach automatically. Cleanest sub-market structure of any sport so far. Fighter abbr = first 3 chars of surname × 2 = 6-char block.
 
 ### Esports team abbreviations — opaque blocks
 
