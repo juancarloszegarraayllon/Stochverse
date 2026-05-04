@@ -8108,6 +8108,167 @@ async def debug_cache_schema(sport: str = "", limit: int = 200,
     }
 
 
+@app.get("/api/_debug/title_shapes")
+async def debug_title_shapes(sport: str = "", limit: int = 1000):
+    """Catalog Kalshi title patterns per sport — used by
+    kalshi_probe/probe_titles.py to feed the
+    KALSHI_API_COVERAGE.md title-shapes section.
+
+    For each title, normalize the matchup names down to {TEAM}/{P}
+    placeholders so structurally-similar titles collapse into one
+    'shape'. Then group by shape and count. Surfaces the long tail
+    of head-to-head shapes (X vs Y, X at Y, NHL Game: X vs Y, X vs
+    Y: Spreads, etc.) so the parser whitelist stays in sync with
+    what Kalshi actually ships.
+
+      /api/_debug/title_shapes?sport=Soccer&limit=1000
+    """
+    if limit > 5000:
+        limit = 5000
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    if sport:
+        records = [r for r in records if (r.get("_sport") or "") == sport]
+    sample = records[:limit]
+    # Normalization rules — keep separators + suffix punctuation,
+    # collapse team / player names to {TEAM}. Order matters: longer
+    # patterns first so 'NHL Game:' isn't shadowed by ':' alone.
+    # _HEAD_TO_HEAD_TITLE_RE comes from main.py — same regex our
+    # title parser uses, so 'shape' here matches what the runtime
+    # actually sees.
+    sep_pat = _HEAD_TO_HEAD_TITLE_RE
+    shapes: dict = {}
+    for r in sample:
+        title = (r.get("title") or "").strip()
+        if not title:
+            continue
+        # Split on a leading 'NHL Game: ', 'NBA Game: ', etc. prefix
+        # and on a trailing ': Spreads' / ': Totals' suffix so we
+        # surface those as part of the shape rather than letting
+        # them turn the whole thing into a free-text variant.
+        prefix = ""
+        suffix = ""
+        # Pull off everything up to and including the first ': '
+        # IF that prefix doesn't itself look like a matchup. Lets
+        # 'NHL Game: X vs Y' become 'NHL Game: {T} vs {T}' but
+        # leaves 'X vs Y: Spreads' alone for the suffix step.
+        head_m = re.match(r"^([A-Z][A-Za-z0-9 ]{0,20}):\s+", title)
+        if head_m and not sep_pat.search(head_m.group(1)):
+            prefix = head_m.group(1) + ": "
+            title = title[head_m.end():]
+        tail_m = re.search(r":\s+([A-Za-z0-9 /-]{1,30})$", title)
+        if tail_m and sep_pat.search(title[:tail_m.start()]):
+            suffix = ": " + tail_m.group(1).strip()
+            title = title[:tail_m.start()]
+        sm = sep_pat.search(title)
+        if sm:
+            sep = sm.group(0).strip().lower()
+            shape = prefix + "{T} " + sep + " {T}" + suffix
+        else:
+            shape = "(non-h2h) " + (prefix.strip() or "?") + suffix
+        info = shapes.setdefault(shape, {
+            "count": 0, "examples": [], "series_examples": set(),
+        })
+        info["count"] += 1
+        if len(info["examples"]) < 3:
+            info["examples"].append((r.get("title") or "")[:80])
+        s = (r.get("series_ticker") or "").upper()
+        if s and len(info["series_examples"]) < 5:
+            info["series_examples"].add(s)
+    out = []
+    for shape, info in shapes.items():
+        out.append({
+            "shape":            shape,
+            "count":            info["count"],
+            "pct":              round(100.0 * info["count"] /
+                                       max(1, len(sample)), 1),
+            "examples":         info["examples"],
+            "series_examples":  sorted(info["series_examples"]),
+        })
+    out.sort(key=lambda x: -x["count"])
+    return {
+        "sample_size":  len(sample),
+        "sport_filter": sport or "all",
+        "shape_count":  len(out),
+        "shapes":       out,
+    }
+
+
+@app.get("/api/_debug/series_tickers")
+async def debug_series_tickers(sport: str = "", limit: int = 5000):
+    """Catalog Kalshi series_ticker values per sport — used by
+    kalshi_probe/probe_series.py to feed the
+    KALSHI_API_COVERAGE.md series-tickers section.
+
+    For each series_ticker, count records and best-effort split
+    into (base, suffix) where suffix is the market-type marker
+    (GAME / SPREAD / TOTAL / BTTS / 1H / ADVANCE / CORNERS /
+    TCORNERS / HALFTIME / OUTRIGHT / etc.). Suffix groupings let us
+    see, e.g., 'KXUCL has GAME + SPREAD + TOTAL + BTTS variants in
+    Soccer' — the data the title parser + tab strip whitelists need.
+
+      /api/_debug/series_tickers?sport=Soccer
+    """
+    if limit > 10000:
+        limit = 10000
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    if sport:
+        records = [r for r in records if (r.get("_sport") or "") == sport]
+    sample = records[:limit]
+    # Suffixes ordered longest-first so 'TCORNERS' isn't matched as
+    # 'CORNERS'. Anything not matching gets suffix='' and the full
+    # ticker becomes the base.
+    KNOWN_SUFFIXES = (
+        "TCORNERS", "CORNERS", "ADVANCE", "OUTRIGHT", "HALFTIME",
+        "SPREAD", "TOTAL", "BTTS", "MATCH", "GAME", "1H", "1Q",
+        "2Q", "3Q", "4Q",
+    )
+    series_stats: dict = {}
+    for r in sample:
+        s = (r.get("series_ticker") or "").upper()
+        if not s:
+            continue
+        suffix = ""
+        base = s
+        for suf in KNOWN_SUFFIXES:
+            if s.endswith(suf) and len(s) > len(suf):
+                base = s[:-len(suf)]
+                suffix = suf
+                break
+        info = series_stats.setdefault(s, {
+            "count":    0,
+            "base":     base,
+            "suffix":   suffix,
+            "examples": [],
+        })
+        info["count"] += 1
+        if len(info["examples"]) < 2:
+            info["examples"].append((r.get("title") or "")[:80])
+    by_base: dict = {}
+    for s, info in series_stats.items():
+        by_base.setdefault(info["base"], []).append({
+            "series_ticker": s, **info,
+        })
+    out_bases = []
+    for base, items in by_base.items():
+        items.sort(key=lambda x: x["suffix"])
+        out_bases.append({
+            "base":     base,
+            "variants": items,
+            "total":    sum(it["count"] for it in items),
+            "suffixes": sorted({it["suffix"] for it in items}),
+        })
+    out_bases.sort(key=lambda x: -x["total"])
+    return {
+        "sample_size":   len(sample),
+        "sport_filter":  sport or "all",
+        "base_count":    len(out_bases),
+        "ticker_count":  len(series_stats),
+        "bases":         out_bases,
+    }
+
+
 @app.get("/api/_debug/enrich_trace")
 async def debug_enrich_trace(title: str = "", sport: str = "Soccer"):
     """Trace every step of the live-state enrichment chain for a
