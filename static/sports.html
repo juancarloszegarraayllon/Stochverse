@@ -207,7 +207,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    strip in-place when an event has more than 5 card-class
    markets. Visually de-emphasized vs the regular tabs (italic,
    no underline) so it reads as a control, not a market choice. */
-.sp-c2-event-tab.sp-c2-event-tab-more{font-style:italic;color:var(--green);border-bottom:0;padding-left:6px}
+.sp-c2-event-tab.sp-c2-event-tab-more{color:var(--green);border-bottom:0;padding-left:6px}
 .sp-c2-event-tab.sp-c2-event-tab-more:hover{color:var(--text);text-decoration:underline}
 /* Matched (Kalshi market exists) gets a subtle accent. Lite (FL only)
    stays neutral so the eye is drawn to actionable rows. */
@@ -262,8 +262,9 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    4 to display. Click expands / collapses the full list. */
 .sp-c2-loadmore{background:transparent;border:none;color:var(--green);font-size:9px;font-weight:700;padding:2px 0;text-align:left;cursor:pointer;text-transform:uppercase;letter-spacing:.4px}
 .sp-c2-loadmore:hover{text-decoration:underline}
-.sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums}
-.sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);margin-top:2px;text-transform:uppercase}
+.sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums;display:flex;flex-direction:column;align-items:flex-start;gap:2px}
+.sp-c2-time-clock{display:block}
+.sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);text-transform:uppercase}
 .sp-c2-time-state.live{color:var(--red);font-weight:700}
 .sp-c2-teams{font-size:13px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
 .sp-c2-team{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -297,7 +298,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    it reads cleanly under the leg score. Shows 'AGG 4-5 LEG 2/2'
    for soccer two-leg ties, 'SERIES 3-3' for NBA/NHL/MLB/NFL
    playoff series. */
-.sp-c2-agg{display:inline-block;font-size:9px;color:var(--green);background:var(--green-bg);border:1px solid var(--green-line);border-radius:8px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 6px;margin-top:4px;line-height:1;white-space:nowrap}
+.sp-c2-agg{display:inline-block;font-size:8px;color:var(--green);background:var(--green-bg);border:1px solid var(--green-line);border-radius:6px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;padding:1px 5px;line-height:1.2;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 /* Empty chip-row spacer — used when the teams cell shows a
    matchup header (sub-market views). Pushes the first real chip
    row down by one row so each chip aligns with its outcome label
@@ -1317,7 +1318,14 @@ function renderEventRow(ev, market, isMarketRow) {
   // sources land we'll re-introduce a tiny multi-source indicator
   // here; until then the column is gone and the grid is one
   // column slimmer.
-  html += '<div class="sp-c2-time">' + escH(time);
+  // Time cell stacks vertically: aggregate / series pill (if any)
+  // on top → kickoff time → live game clock. So multi-leg context
+  // sits with the time-related info instead of crowding the score
+  // column. Mirrors the homepage card hierarchy.
+  html += '<div class="sp-c2-time">';
+  const _aggHtml = renderAggOrSeries(ev);
+  if (_aggHtml) html += _aggHtml;
+  html += '<span class="sp-c2-time-clock">' + escH(time) + '</span>';
   if (stLbl) {
     const liveAttr = state === 'live'
       ? ' data-event-id="' + escH(ev.EVENT_ID || '') + '"'
@@ -1435,22 +1443,13 @@ function renderEventRow(ev, market, isMarketRow) {
   if (isTennisEv) {
     html += renderTennisScoreCell(ev, showMatchup);
   } else if (showMatchup) {
-    // Score is baked into the matchup header line ('Home X - Y
-    // Away'), so the standalone score column stays empty for
-    // these rows. Aggregate / series label still renders here
-    // when present — the multi-leg or playoff context belongs
-    // next to the score, not the matchup name.
-    html += '<div class="sp-c2-scores">';
-    html += renderAggOrSeries(ev);
-    html += '</div>';
+    // Score is baked into the matchup header line; column stays
+    // empty. Aggregate / series moved to the time column above.
+    html += '<div class="sp-c2-scores"></div>';
   } else {
     html += '<div class="sp-c2-scores">';
     html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
     html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
-    // Aggregate (soccer two-leg ties) or series score (NBA / NHL
-    // / MLB / NFL playoffs best-of-N). Same UX slot, label
-    // adapts to what's present.
-    html += renderAggOrSeries(ev);
     html += '</div>';
   }
   // Right market cell — chip rows only (PROB / YES / NO), one per
@@ -1515,25 +1514,58 @@ function collectOutcomesForRender(ev, marketOverride) {
 }
 
 function renderAggOrSeries(ev) {
-  // Universal multi-leg / playoff-series label, shown next to the
-  // current-game score. Two data shapes share the slot:
-  //   1. Soccer two-leg cup ties → 'AGG X-Y' (sum of goals across
-  //      both legs of the knockout tie).
-  //   2. NBA / NHL / MLB / NFL best-of-N playoffs → 'SERIES X-Y'
-  //      (wins-to-wins in the series).
-  // Only one shape ever applies per event — soccer ties use
-  // aggregate_*, North-American playoff sports use series_*.
-  // Renders nothing for round-robin league games where neither
-  // is populated.
+  // Universal multi-leg / playoff-series pill. Two shapes share
+  // the slot:
+  //   1. Soccer two-leg cup ties:  AGG 1-1 · LEG 2/2
+  //                                AGG ARS 4-3 · LEG 2/2  (when
+  //                                home leads, abbr from kalshi)
+  //   2. NBA / NHL / MLB / NFL playoffs:  SERIES BOS 3-2
+  //                                       SERIES TIED 1-1
+  //                                       GAME 5 · SERIES BOS 3-2
+  // Mirrors homepage's renderSeriesPill format exactly.
+  // Returns nothing for round-robin / regular-season games.
   if (!ev.kalshi || !(ev.kalshi.event_ticker)) return '';
   const k = ev.kalshi;
+  // Soccer two-leg aggregate
   if (k.aggregate_home != null && k.aggregate_away != null) {
-    return '<span class="sp-c2-agg" title="Aggregate score">agg ' +
-           escH(k.aggregate_home) + '-' + escH(k.aggregate_away) + '</span>';
+    const hh = k.aggregate_home;
+    const aa = k.aggregate_away;
+    const homeAbbr = (ev.HOME_NAME || '').slice(0, 3).toUpperCase();
+    const awayAbbr = (ev.AWAY_NAME || '').slice(0, 3).toUpperCase();
+    const parts = [];
+    if (hh > aa && homeAbbr) {
+      parts.push(escH(homeAbbr) + ' ' + escH(hh) + '-' + escH(aa));
+    } else if (aa > hh && awayAbbr) {
+      parts.push(escH(awayAbbr) + ' ' + escH(aa) + '-' + escH(hh));
+    } else {
+      parts.push(escH(hh) + '-' + escH(aa));
+    }
+    if (k.aggregate_label) {
+      parts.push(escH(k.aggregate_label));
+    } else if (k.leg_number) {
+      parts.push('LEG ' + escH(k.leg_number) + '/2');
+    }
+    return '<span class="sp-c2-agg" title="Aggregate across both legs">AGG ' +
+           parts.join(' · ') + '</span>';
   }
+  // North-American playoff series score
   if (k.series_home_wins != null && k.series_away_wins != null) {
-    return '<span class="sp-c2-agg" title="Playoff series score">series ' +
-           escH(k.series_home_wins) + '-' + escH(k.series_away_wins) + '</span>';
+    const hW = k.series_home_wins;
+    const aW = k.series_away_wins;
+    let leader, leadW, trailW;
+    if (hW > aW) {
+      leader = (ev.HOME_NAME || '').slice(0, 3).toUpperCase() || 'HOME';
+      leadW = hW; trailW = aW;
+    } else if (aW > hW) {
+      leader = (ev.AWAY_NAME || '').slice(0, 3).toUpperCase() || 'AWAY';
+      leadW = aW; trailW = hW;
+    } else {
+      leader = 'TIED'; leadW = hW; trailW = aW;
+    }
+    const tag = leader === 'TIED'
+      ? 'SERIES TIED ' + escH(leadW) + '-' + escH(trailW)
+      : 'SERIES ' + escH(leader) + ' ' + escH(leadW) + '-' + escH(trailW);
+    return '<span class="sp-c2-agg" title="Playoff series score">' + tag + '</span>';
   }
   return '';
 }
