@@ -1,0 +1,282 @@
+{
+  "sample_size": 10,
+  "sport_filter": "Chess",
+  "bucket_count": 9,
+  "buckets": [
+    {
+      "series_base": "KXCHESSNORWAY",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 2,
+      "most_common_outcome_count": 6,
+      "outcome_count_distribution": {
+        "6": 2
+      },
+      "label_classes": {
+        "team_like": 12
+      },
+      "label_samples": {
+        "team_like": [
+          "Zhu Jiner",
+          "Ju Wenjun",
+          "Humpy Koneru",
+          "Anna Muzychuk"
+        ]
+      },
+      "title_samples": [
+        "2026 Norway Chess Women Winner",
+        "2026 Men's Norway Chess Winner"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXCHESSWORLDCHAMPION",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 9,
+      "outcome_count_distribution": {
+        "9": 1
+      },
+      "label_classes": {
+        "team_like": 9
+      },
+      "label_samples": {
+        "team_like": [
+          "Gukesh Dommaraju",
+          "Javokhir Sindarov",
+          "Rameshbabu Praggnanandhaa",
+          "Fabiano Caruana"
+        ]
+      },
+      "title_samples": [
+        "2026 FIDE World Chess Championship Winner"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXCHESSOLYMPIAD",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 40,
+      "outcome_count_distribution": {
+        "40": 1
+      },
+      "label_classes": {
+        "team_like": 40
+      },
+      "label_samples": {
+        "team_like": [
+          "India",
+          "United States of America",
+          "Uzbekistan",
+          "China"
+        ]
+      },
+      "title_samples": [
+        "46th FIDE Chess Olympiad Open Tournament Winner"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXCHESSOLYMPIADUSA",
+      "suffix": "",
+      "market_type": "Team USA",
+      "record_count": 1,
+      "most_common_outcome_count": 15,
+      "outcome_count_distribution": {
+        "15": 1
+      },
+      "label_classes": {
+        "team_like": 14,
+        "other": 1
+      },
+      "label_samples": {
+        "team_like": [
+          "John Donaldson",
+          "Hikaru Nakamura",
+          "Levon Aronian",
+          "Ray Robson"
+        ],
+        "other": [
+          "Leinier Domínguez Pérez"
+        ]
+      },
+      "title_samples": [
+        "46th FIDE Chess Olympiad: Team USA"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXCHESSGRANDTOUR",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 18,
+      "outcome_count_distribution": {
+        "18": 1
+      },
+      "label_classes": {
+        "team_like": 18
+      },
+      "label_samples": {
+        "team_like": [
+          "Fabiano Caruana",
+          "Wesley So",
+          "Alireza Firouzja",
+          "Jan-Krzysztof Duda"
+        ]
+      },
+      "title_samples": [
+        "Grand Chess Tour 2026 Finals Winner"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXCHESSFIDERATING",
+      "suffix": "",
+      "market_type": "#3 Rated in June 2026",
+      "record_count": 1,
+      "most_common_outcome_count": 14,
+      "outcome_count_distribution": {
+        "14": 1
+      },
+      "label_classes": {
+        "team_like": 14
+      },
+      "label_samples": {
+        "team_like": [
+          "Magnus Carlsen",
+          "Hikaru Nakamura",
+          "Fabiano Caruana",
+          "Nodirbek Abdusattorov"
+        ]
+      },
+      "title_samples": [
+        "FIDE World Top Chess Players: #3 Rated in June 2026"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXCHESSFIDERATING",
+      "suffix": "",
+      "market_type": "#2 Rated in June 2026",
+      "record_count": 1,
+      "most_common_outcome_count": 14,
+      "outcome_count_distribution": {
+        "14": 1
+      },
+      "label_classes": {
+        "team_like": 14
+      },
+      "label_samples": {
+        "team_like": [
+          "Magnus Carlsen",
+          "Hikaru Nakamura",
+          "Fabiano Caruana",
+          "Nodirbek Abdusattorov"
+        ]
+      },
+      "title_samples": [
+        "FIDE World Top Chess Players: #2 Rated in June 2026"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXCHESSFIDERATING",
+      "suffix": "",
+      "market_type": "#1 Rated in June 2026",
+      "record_count": 1,
+      "most_common_outcome_count": 14,
+      "outcome_count_distribution": {
+        "14": 1
+      },
+      "label_classes": {
+        "team_like": 14
+      },
+      "label_samples": {
+        "team_like": [
+          "Magnus Carlsen",
+          "Hikaru Nakamura",
+          "Fabiano Caruana",
+          "Nodirbek Abdusattorov"
+        ]
+      },
+      "title_samples": [
+        "FIDE World Top Chess Players: #1 Rated in June 2026"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXCHESSPOLAND",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 10,
+      "outcome_count_distribution": {
+        "10": 1
+      },
+      "label_classes": {
+        "team_like": 10
+      },
+      "label_samples": {
+        "team_like": [
+          "Fabiano Caruana",
+          "Wesley So",
+          "Alireza Firouzja",
+          "Jan-Krzysztof Duda"
+        ]
+      },
+      "title_samples": [
+        "Super Rapid & Blitz Poland Winner"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    }
+  ]
+}
