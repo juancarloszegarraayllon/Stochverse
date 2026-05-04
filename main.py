@@ -7804,6 +7804,60 @@ def _parse_title_teams(title: str) -> tuple:
     return ("", "")
 
 
+@app.get("/api/_debug/event_record")
+async def debug_event_record(q: str = ""):
+    """Dump every Kalshi cache record matching the substring `q`
+    (case-insensitive title match), with the full _live_state and
+    every top-level field that /sports cares about. Use to compare
+    what the homepage sees vs what /sports reads:
+
+      /api/_debug/event_record?q=Bayern
+
+    Returns title, event_ticker, series_ticker, the entire
+    _live_state dict (where aggregate_home / series_home_wins /
+    display_clock / etc. actually live), the top-level
+    aggregate_home / series_* (almost always None — known caveat)
+    and a list of every key on the record.
+    """
+    if not q or len(q) < 3:
+        return {"error": "supply ?q=substring (>=3 chars)"}
+    get_data()
+    records = _cache.get("data_all") or _cache.get("data") or []
+    ql = q.lower()
+    out = []
+    for r in records:
+        title = r.get("title") or ""
+        if ql not in title.lower():
+            continue
+        live = r.get("_live_state") or {}
+        out.append({
+            "title": title,
+            "event_ticker": r.get("event_ticker"),
+            "series_ticker": r.get("series_ticker"),
+            "_sport": r.get("_sport"),
+            "top_level_aggregate_home": r.get("aggregate_home"),
+            "top_level_aggregate_away": r.get("aggregate_away"),
+            "top_level_series_home_wins": r.get("series_home_wins"),
+            "_live_state.is_two_leg": live.get("is_two_leg"),
+            "_live_state.aggregate_home": live.get("aggregate_home"),
+            "_live_state.aggregate_away": live.get("aggregate_away"),
+            "_live_state.aggregate_label": live.get("aggregate_label"),
+            "_live_state.leg_number": live.get("leg_number"),
+            "_live_state.round_name": live.get("round_name"),
+            "_live_state.series_home_wins": live.get("series_home_wins"),
+            "_live_state.series_away_wins": live.get("series_away_wins"),
+            "_live_state.series_summary": live.get("series_summary"),
+            "_live_state.display_clock": live.get("display_clock"),
+            "_live_state.period": live.get("period"),
+            "_live_state.state": live.get("state"),
+            "all_top_level_keys": sorted(r.keys()),
+            "_live_state_keys": sorted(live.keys()) if isinstance(live, dict) else None,
+        })
+        if len(out) >= 30:
+            break
+    return {"query": q, "count": len(out), "records": out}
+
+
 @app.get("/api/_debug/sport_buckets/{sport_id}")
 async def debug_sport_buckets(sport_id: int, timezone: int = 0,
                                indent_days: int = 0):

@@ -1173,11 +1173,23 @@ function eventMarketTypes(ev) {
   // homepage's card-class whitelist so player-prop markets
   // don't pollute the tab strip — those still show in Markets
   // view (each market = its own row).
+  //
+  // Special case: the headline Winner (market_type === '') always
+  // counts as a card-class market regardless of its series_ticker
+  // suffix. NHL playoff games sometimes use KXNHLPLAYOFF /
+  // KXSTANLEYCUP / etc. instead of KXNHLGAME for the primary
+  // winner market — same applies for KXWORLDSERIES on MLB and
+  // KXNBAFINALS on NBA. The whitelist only filters sub-markets.
   if (!ev.kalshi || !ev.kalshi.markets) return [];
   const set = new Set();
   for (const m of ev.kalshi.markets) {
+    const mt = m.market_type || '';
+    if (mt === '') {
+      set.add('');
+      continue;
+    }
     if (!_isCardTabMarket(m.series_ticker)) continue;
-    set.add(m.market_type || '');
+    set.add(mt);
   }
   const arr = Array.from(set);
   arr.sort((a, b) => {
