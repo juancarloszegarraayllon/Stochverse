@@ -1,0 +1,244 @@
+{
+  "sample_size": 25,
+  "sport_filter": "Boxing",
+  "base_count": 10,
+  "bases": [
+    {
+      "base": "KXBOXING",
+      "total": 16,
+      "patterns": {
+        "G1_date_teams": 16
+      },
+      "examples": {
+        "G1_date_teams": [
+          {
+            "ticker": "KXBOXING-26SEP19FMAYMPAC",
+            "suffix": "26SEP19FMAYMPAC",
+            "groups": [
+              "26SEP19",
+              "FMAYMPAC"
+            ]
+          },
+          {
+            "ticker": "KXBOXING-26JUL25YSOYFERN",
+            "suffix": "26JUL25YSOYFERN",
+            "groups": [
+              "26JUL25",
+              "YSOYFERN"
+            ]
+          },
+          {
+            "ticker": "KXBOXING-26JUL25RIVERORO",
+            "suffix": "26JUL25RIVERORO",
+            "groups": [
+              "26JUL25",
+              "RIVERORO"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+        "8": 12,
+        "7": 1,
+        "12": 2,
+        "9": 1
+      }
+    },
+    {
+      "base": "KXWBCWELTERWEIGHTTITLE",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXWBCWELTERWEIGHTTITLE-27",
+            "suffix": "27",
+            "groups": [
+              "27"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXWBCFLYWEIGHTTITLE",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXWBCFLYWEIGHTTITLE-27",
+            "suffix": "27",
+            "groups": [
+              "27"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXWBCFEATHERWEIGHTTITLE",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXWBCFEATHERWEIGHTTITLE-27",
+            "suffix": "27",
+            "groups": [
+              "27"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXWBCCRUISERWEIGHTTITLE",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXWBCCRUISERWEIGHTTITLE-27",
+            "suffix": "27",
+            "groups": [
+              "27"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXWBCBANTAMWEIGHTTITLE",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXWBCBANTAMWEIGHTTITLE-27",
+            "suffix": "27",
+            "groups": [
+              "27"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXWBCMIDDLEWEIGHTTITLE",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXWBCMIDDLEWEIGHTTITLE-27",
+            "suffix": "27",
+            "groups": [
+              "27"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXWBCLIGHTWEIGHTTITLE",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXWBCLIGHTWEIGHTTITLE-27",
+            "suffix": "27",
+            "groups": [
+              "27"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXWBCHEAVYWEIGHTTITLE",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXWBCHEAVYWEIGHTTITLE-27",
+            "suffix": "27",
+            "groups": [
+              "27"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXFLOYDTYSONFIGHT",
+      "total": 1,
+      "patterns": {
+
+      },
+      "examples": {
+
+      },
+      "unparsed": [
+        {
+          "ticker": "KXFLOYDTYSONFIGHT-27JAN01",
+          "suffix": "27JAN01"
+        }
+      ],
+      "team_abbr_lengths": {
+
+      }
+    }
+  ]
+}
