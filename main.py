@@ -1341,6 +1341,16 @@ _rebuilding = {"active": False}
 # process lifetime; rebuilds from observation on every request.
 _SERIES_TOURNAMENT_HINTS: dict = {}
 
+# Persistent hints learned from observed FL events. Keyed by
+# (sport_name, normalized_team_name) → {"image_url": str,
+# "shortname": str, "ts": float}. Used by sports_feed() to
+# enrich synthetic Kalshi-only events with team images +
+# shortnames, so they look identical to FL events when grafted
+# into FL tournament buckets. Alias-aware lookup (via
+# flashlive_feed.find_team_aliases) bridges 'atletico' synthetic
+# events to 'atl. madrid' hints.
+_FL_TEAM_HINTS: dict = {}
+
 # FlashLive capability map cache. Populated by /api/debug_fl_capabilities.
 # A full scan can spend ~150-300 RapidAPI calls so we hold the result
 # for a day. Pass ?refresh=1 to force a re-scan.
@@ -8654,6 +8664,31 @@ async def sports_feed(sport_id: int, timezone: int = 0,
         # picks above.
 
     kalshi_sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
+    # Harvest team-data hints from FL response — image URLs +
+    # shortnames keyed by normalized team name. Persists across
+    # requests so synthetic Kalshi-only events can pick up icons
+    # for teams seen on prior days. Read by the routing pass below
+    # via _enrich_synthetic_event_with_fl_hints.
+    if fl_data and kalshi_sport:
+        import time as _t_hint
+        _now_hint = _t_hint.time()
+        for _t in (fl_data.get("DATA") or []):
+            for _ev in (_t.get("EVENTS") or []):
+                for _name_f, _img_f, _sh_f in (
+                    ("HOME_NAME", "HOME_IMAGES", "SHORTNAME_HOME"),
+                    ("AWAY_NAME", "AWAY_IMAGES", "SHORTNAME_AWAY"),
+                ):
+                    _nm = (_ev.get(_name_f) or "").strip().lower()
+                    if not _nm:
+                        continue
+                    _imgs = _ev.get(_img_f) or []
+                    _sh = _ev.get(_sh_f) or ""
+                    if _imgs:
+                        _FL_TEAM_HINTS[(kalshi_sport, _nm)] = {
+                            "image_url": _imgs[0],
+                            "shortname": _sh,
+                            "ts":        _now_hint,
+                        }
     kalshi_idx = _build_kalshi_index_for_sport(kalshi_sport) if kalshi_sport else {}
     # Compute the target date the user actually picked (today + N
     # UTC days). Drives both the unpaired-h2h date filter and the
@@ -9016,6 +9051,60 @@ async def sports_feed(sport_id: int, timezone: int = 0,
         _collect_unpaired_h2h_for_sport(kalshi_sport, matched_kalshi_tickers, target_date)
         if kalshi_sport else []
     )
+
+    # ── Synthetic-event cosmetic enrichment ──────────────────────
+    # Synthetic Kalshi-only events from _collect_unpaired_h2h_for_sport
+    # have START_TIME=None and no team images, so they look bare in
+    # COL 2 next to FL-paired events that have icons + kickoff times.
+    # Inject both before the routing pass so the result is visually
+    # consistent regardless of which bucket the event ends up in.
+    #   - Team images: alias-aware lookup against _FL_TEAM_HINTS, so
+    #     'atletico' resolves to 'atl. madrid' if FL has shipped that
+    #     team on any prior request.
+    #   - START_TIME: derived from the Kalshi ticker date at 18:00
+    #     UTC. International cup fixtures are typically evening-
+    #     local; 18:00 UTC ≈ early evening Europe / midday Americas.
+    #     Marked _kickoff_estimated so the frontend can render with
+    #     a marker if needed (e.g. '~18:00') instead of as exact.
+    if kalshi_sport and unpaired_h2h_tournaments:
+        from flashlive_feed import find_team_aliases as _find_aliases
+        from datetime import datetime as _dt_t, time as _time_t, timezone as _tz_t
+        for _ut in unpaired_h2h_tournaments:
+            for _ev in _ut.get("events") or []:
+                # Team images + shortnames per side
+                for _name_f, _img_f, _sh_f in (
+                    ("HOME_NAME", "HOME_IMAGES", "SHORTNAME_HOME"),
+                    ("AWAY_NAME", "AWAY_IMAGES", "SHORTNAME_AWAY"),
+                ):
+                    if _ev.get(_img_f):
+                        continue
+                    _nm = (_ev.get(_name_f) or "").strip().lower()
+                    if not _nm:
+                        continue
+                    # Try exact match first, then any alias of the team
+                    _hint = _FL_TEAM_HINTS.get((kalshi_sport, _nm))
+                    if not _hint:
+                        for _alias in _find_aliases(_nm):
+                            _hint = _FL_TEAM_HINTS.get((kalshi_sport, _alias))
+                            if _hint:
+                                break
+                    if _hint:
+                        _ev[_img_f] = [_hint["image_url"]]
+                        if not _ev.get(_sh_f) and _hint.get("shortname"):
+                            _ev[_sh_f] = _hint["shortname"]
+                # Kickoff estimate from ticker date
+                if not _ev.get("START_TIME"):
+                    _k = _ev.get("kalshi") or {}
+                    _tk = _k.get("event_ticker") or ""
+                    _td = parse_game_date_from_ticker(_tk)
+                    if _td:
+                        try:
+                            _ev["START_TIME"] = int(_dt_t.combine(
+                                _td, _time_t(18, 0), tzinfo=_tz_t.utc
+                            ).timestamp())
+                            _ev["_kickoff_estimated"] = True
+                        except Exception:
+                            pass
 
     # ── Series-routing pass ──────────────────────────────────────
     # Architectural fix for the "two parallel league buckets" issue

@@ -198,6 +198,139 @@ def _normalize(s: str) -> str:
     return s.strip()
 
 
+# Team-name alias groups. Each set contains all known forms of a
+# single team — full names, shortened names, common nicknames, FL
+# truncation forms. Used by:
+#   1. FL ingest to expand home_phrases / away_phrases so match_game
+#      finds Kalshi titles that use any alias form.
+#   2. main.py's _FL_TEAM_HINTS lookup so synthetic Kalshi-only
+#      events can resolve team data (icons, shortname) by alias.
+#
+# Adding entries: lowercase, no diacritics, no trailing punctuation.
+# Order doesn't matter within a set — lookup is bidirectional.
+# Coverage focus: top-tier soccer (where nicknames diverge most)
+# and a few NBA/NHL nicknames. Other sports' team names match by
+# direct token overlap so don't need entries here.
+TEAM_ALIASES: tuple = (
+    # ── English Premier League ──────────────────────────────
+    frozenset({"manchester united", "man united", "man utd", "red devils"}),
+    frozenset({"manchester city", "man city", "citizens"}),
+    frozenset({"tottenham", "tottenham hotspur", "spurs"}),
+    frozenset({"arsenal", "gunners"}),
+    frozenset({"liverpool", "reds"}),
+    frozenset({"chelsea", "blues"}),
+    frozenset({"west ham", "west ham united", "hammers", "irons"}),
+    frozenset({"newcastle", "newcastle united", "magpies"}),
+    frozenset({"wolves", "wolverhampton", "wolverhampton wanderers"}),
+    frozenset({"leicester", "leicester city", "foxes"}),
+    frozenset({"everton", "toffees"}),
+    frozenset({"aston villa", "villa", "villans"}),
+    # ── La Liga ──────────────────────────────────────────────
+    frozenset({"real madrid", "los blancos", "merengues"}),
+    frozenset({"barcelona", "fc barcelona", "barca", "blaugrana"}),
+    frozenset({"atletico madrid", "atl madrid", "atl. madrid",
+               "atletico", "atleti", "rojiblancos"}),
+    frozenset({"sevilla", "sevilla fc"}),
+    frozenset({"valencia", "valencia cf", "los che"}),
+    frozenset({"real sociedad", "la real"}),
+    # ── Bundesliga ──────────────────────────────────────────
+    frozenset({"bayern munich", "bayern", "fc bayern", "bayern muenchen",
+               "bavarians"}),
+    frozenset({"borussia dortmund", "dortmund", "bvb"}),
+    frozenset({"bayer leverkusen", "leverkusen", "die werkself"}),
+    frozenset({"rb leipzig", "leipzig"}),
+    frozenset({"borussia monchengladbach", "monchengladbach",
+               "gladbach", "die fohlen"}),
+    # ── Serie A ─────────────────────────────────────────────
+    frozenset({"juventus", "juve", "old lady", "bianconeri"}),
+    frozenset({"ac milan", "milan", "rossoneri"}),
+    frozenset({"inter milan", "inter", "internazionale", "nerazzurri"}),
+    frozenset({"napoli", "ssc napoli", "azzurri"}),
+    frozenset({"as roma", "roma", "giallorossi"}),
+    frozenset({"lazio", "ss lazio", "biancocelesti"}),
+    # ── Ligue 1 ─────────────────────────────────────────────
+    frozenset({"paris saint-germain", "paris saint germain",
+               "paris", "psg", "les parisiens"}),
+    frozenset({"olympique marseille", "marseille", "om"}),
+    frozenset({"olympique lyonnais", "lyon", "ol", "olympique lyon"}),
+    frozenset({"st etienne", "saint etienne", "st. etienne",
+               "saint-etienne", "asse", "les verts"}),
+    # ── UEFA / international cup ─────────────────────────────
+    frozenset({"benfica", "sl benfica", "as aguias"}),
+    frozenset({"porto", "fc porto", "dragoes"}),
+    frozenset({"sporting cp", "sporting", "sporting lisbon", "leoes"}),
+    frozenset({"ajax", "afc ajax"}),
+    frozenset({"psv eindhoven", "psv", "boeren"}),
+    frozenset({"feyenoord", "stadionclub"}),
+    frozenset({"galatasaray", "gala", "cim bom"}),
+    frozenset({"fenerbahce", "fener"}),
+    frozenset({"besiktas", "kara kartal"}),
+    frozenset({"celtic", "celtic fc", "bhoys"}),
+    frozenset({"rangers", "rangers fc", "gers"}),
+    # ── South America (Copa Libertadores / Sudamericana) ────
+    frozenset({"boca juniors", "boca", "xeneizes"}),
+    frozenset({"river plate", "river", "millonarios"}),
+    frozenset({"flamengo", "fla", "mengao"}),
+    frozenset({"vasco da gama", "vasco", "gigante da colina"}),
+    frozenset({"corinthians", "timao"}),
+    frozenset({"sao paulo", "tricolor paulista"}),
+    frozenset({"palmeiras", "verdao"}),
+    frozenset({"santos", "peixe"}),
+    frozenset({"atletico mineiro", "mineiro", "galo"}),
+    frozenset({"gremio", "tricolor gaucho"}),
+    frozenset({"internacional", "inter porto alegre", "colorado"}),
+    frozenset({"america cali", "america de cali", "los diablos rojos"}),
+    frozenset({"alianza atletico", "alianza"}),
+    frozenset({"audax italiano", "audax"}),
+    # ── MLS ─────────────────────────────────────────────────
+    frozenset({"inter miami", "inter miami cf"}),
+    frozenset({"la galaxy", "los angeles galaxy", "galaxy"}),
+    frozenset({"lafc", "los angeles fc"}),
+    frozenset({"new york city fc", "nycfc"}),
+    frozenset({"new york red bulls", "nyrb", "red bulls"}),
+)
+
+
+def _team_alias_index() -> dict:
+    """Build a one-shot index: every alias form (normalized) → its
+    full alias group. Used for O(1) nickname-to-group lookup at
+    phrase-build time. Memoized via module-level cache below."""
+    idx: dict = {}
+    for grp in TEAM_ALIASES:
+        normed = frozenset(_normalize(m) for m in grp if _normalize(m))
+        for member in normed:
+            # First-write wins on collision — alias groups should
+            # not overlap by design.
+            idx.setdefault(member, normed)
+    return idx
+
+
+_TEAM_ALIAS_INDEX = _team_alias_index()
+
+
+def find_team_aliases(name: str) -> frozenset:
+    """Look up all known alias forms for a team name. Returns the
+    full alias group (including the input) or just {name_normed}
+    if no group matches.
+
+    Match strategy: exact normalized match first, then whole-word
+    substring (so 'Atl. Madrid Sub-21' still resolves to the
+    senior team's group via the 'atl madrid' substring). Caller
+    decides whether to use the broader set."""
+    n = _normalize(name)
+    if not n:
+        return frozenset()
+    if n in _TEAM_ALIAS_INDEX:
+        return _TEAM_ALIAS_INDEX[n]
+    # Whole-word substring fallback
+    for member, grp in _TEAM_ALIAS_INDEX.items():
+        if re.search(r'\b' + re.escape(member) + r'\b', n):
+            return grp
+        if re.search(r'\b' + re.escape(n) + r'\b', member):
+            return grp
+    return frozenset({n})
+
+
 def _cache_key_normalize(s: str) -> str:
     """Tight name normalizer for cache keys ONLY. Lowercases and
     strips diacritics, but does NOT drop distinguishing suffixes
@@ -571,6 +704,24 @@ def _parse_event(ev):
             home_phrases.append(sh_home)
         if sh_away and len(sh_away) >= 3 and sh_away not in away_phrases:
             away_phrases.append(sh_away)
+        # Nickname / alias expansion — pulls every known form of the
+        # team (Manchester United → Red Devils / Man Utd / Man United;
+        # Atl. Madrid → Atletico / Atleti; PSG → Paris Saint-Germain).
+        # Without this, match_game can't link a Kalshi title that uses
+        # a nickname FL doesn't ship as a phrase. TEAM_ALIASES is
+        # bidirectional — match by any form, expand to all forms.
+        for grp_name, dest in (("home", home_phrases), ("away", away_phrases)):
+            grp = find_team_aliases(home_norm if grp_name == "home" else away_norm)
+            for alias in grp:
+                if alias and alias not in dest:
+                    dest.append(alias)
+                # Also break out individual tokens of the alias so
+                # match_game's substring-in-title check can hit them
+                # when the title uses just the distinguishing word
+                # ('atletico' alone rather than full 'atletico madrid').
+                for tok in alias.split():
+                    if len(tok) >= 3 and tok not in dest:
+                        dest.append(tok)
 
         tournament_id = str(ev.get("_tournament_id") or ev.get("TOURNAMENT_ID") or "")
         tournament_season_id = str(ev.get("_tournament_season_id") or ev.get("TOURNAMENT_SEASON_ID") or "")
