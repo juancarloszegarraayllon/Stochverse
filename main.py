@@ -7895,6 +7895,146 @@ def _parse_title_teams(title: str) -> tuple:
     return ("", "")
 
 
+@app.get("/api/_debug/enrich_trace")
+async def debug_enrich_trace(title: str = "", sport: str = "Soccer"):
+    """Trace every step of the live-state enrichment chain for a
+    given (title, sport) pair so we can see EXACTLY where aggregate
+    / series data is being dropped. Hit:
+
+      /api/_debug/enrich_trace?title=Bayern+Munich+vs+PSG&sport=Soccer
+      /api/_debug/enrich_trace?title=Cleveland+Cavaliers+vs+Toronto+Raptors&sport=Basketball
+
+    Returns a step-by-step breakdown of:
+      step1_espn_match: result of espn_feed.match_game (or null)
+      step2_flash_match: result of flashlive_feed.match_game
+      step3_chosen_g: which g would be used (ESPN preferred for
+                      _ESPN_CLOCK_SPORTS, FL otherwise)
+      step4_sofa_match: result of sofascore_feed.match_game
+      step5_lookup_aggregate_sync: result of the on-demand
+                      SofaScore lookup
+      step6_enriched: what _enrich_soccer_aggregate would produce
+                      after running on step3_chosen_g
+      step7_final_live_state: what _enrich_record_live_state
+                      returns end-to-end
+
+    For each step, key fields are surfaced (aggregate_home/away,
+    is_two_leg, leg_number, series_home_wins/away_wins, state,
+    period, display_clock). Lets us see exactly which feed source
+    has the data and which step in the chain swallowed it.
+    """
+    if not title:
+        return {"error": "supply ?title=...&sport=..."}
+
+    def summarize(g):
+        if not g or not isinstance(g, dict):
+            return None
+        return {
+            "sport":             g.get("sport"),
+            "league":            g.get("league"),
+            "home_name":         g.get("home_name"),
+            "away_name":         g.get("away_name"),
+            "home_abbr":         g.get("home_abbr"),
+            "away_abbr":         g.get("away_abbr"),
+            "state":             g.get("state"),
+            "period":            g.get("period"),
+            "display_clock":     g.get("display_clock"),
+            "stage_start_ms":    g.get("stage_start_ms"),
+            "is_two_leg":        g.get("is_two_leg"),
+            "aggregate_home":    g.get("aggregate_home"),
+            "aggregate_away":    g.get("aggregate_away"),
+            "leg_number":        g.get("leg_number"),
+            "round_name":        g.get("round_name"),
+            "is_playoff":        g.get("is_playoff"),
+            "series_home_wins":  g.get("series_home_wins"),
+            "series_away_wins":  g.get("series_away_wins"),
+            "series_summary":    g.get("series_summary"),
+            "series_game_number": g.get("series_game_number"),
+        }
+
+    out = {"title": title, "sport": sport, "steps": {}}
+
+    # Step 1 — ESPN match
+    g_espn = None
+    try:
+        from espn_feed import match_game as espn_match
+        g_espn = espn_match(title, sport)
+    except Exception as e:
+        out["steps"]["step1_espn_match_error"] = str(e)
+    out["steps"]["step1_espn_match"] = summarize(g_espn)
+
+    # Step 2 — FlashLive match
+    g_fl = None
+    try:
+        from flashlive_feed import match_game as flash_match
+        g_fl = flash_match(title, sport)
+    except Exception as e:
+        out["steps"]["step2_flash_match_error"] = str(e)
+    out["steps"]["step2_flash_match"] = summarize(g_fl)
+
+    # Step 3 — Which g would the chain pick?
+    if sport in _ESPN_CLOCK_SPORTS and g_espn:
+        chosen = "espn"
+        chosen_g = g_espn
+    elif g_fl:
+        chosen = "flashlive"
+        chosen_g = g_fl
+    elif g_espn:
+        chosen = "espn"
+        chosen_g = g_espn
+    else:
+        chosen = "none"
+        chosen_g = None
+    out["steps"]["step3_chosen_g"] = {
+        "source": chosen,
+        "value": summarize(chosen_g),
+    }
+
+    # Step 4 — SofaScore match (independent path used by enrich_aggregate)
+    g_sofa = None
+    try:
+        from sofascore_feed import match_game as sofa_match
+        g_sofa = sofa_match(title, sport)
+    except Exception as e:
+        out["steps"]["step4_sofa_match_error"] = str(e)
+    out["steps"]["step4_sofa_match"] = summarize(g_sofa)
+
+    # Step 5 — SofaScore on-demand lookup_aggregate_sync (used as
+    # final fallback inside _enrich_soccer_aggregate when GAMES
+    # cache doesn't have the fixture)
+    out["steps"]["step5_lookup_aggregate_sync"] = None
+    if sport == "Soccer" and chosen_g:
+        try:
+            from sofascore_feed import lookup_aggregate_sync
+            home_hint = chosen_g.get("home_display") or chosen_g.get("home_name") or ""
+            away_hint = chosen_g.get("away_display") or chosen_g.get("away_name") or ""
+            if home_hint and away_hint:
+                agg = lookup_aggregate_sync(home_hint, away_hint)
+                out["steps"]["step5_lookup_aggregate_sync"] = agg
+        except Exception as e:
+            out["steps"]["step5_lookup_aggregate_sync_error"] = str(e)
+
+    # Step 6 — Result of _enrich_soccer_aggregate on the chosen g
+    enriched = None
+    try:
+        if chosen_g and sport == "Soccer":
+            # Make a copy so we don't mutate
+            import copy
+            g_copy = copy.deepcopy(chosen_g)
+            enriched = _enrich_soccer_aggregate(g_copy, title)
+    except Exception as e:
+        out["steps"]["step6_enriched_error"] = str(e)
+    out["steps"]["step6_enriched"] = summarize(enriched)
+
+    # Step 7 — End-to-end _enrich_record_live_state output
+    try:
+        ls = _enrich_record_live_state(title, sport)
+        out["steps"]["step7_final_live_state"] = ls or {}
+    except Exception as e:
+        out["steps"]["step7_final_live_state_error"] = str(e)
+
+    return out
+
+
 @app.get("/api/_debug/event_record")
 async def debug_event_record(q: str = ""):
     """Dump every Kalshi cache record matching the substring `q`
