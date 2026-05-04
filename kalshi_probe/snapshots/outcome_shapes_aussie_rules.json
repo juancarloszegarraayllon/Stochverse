@@ -1,0 +1,319 @@
+{
+  "sample_size": 25,
+  "sport_filter": "Boxing",
+  "bucket_count": 10,
+  "buckets": [
+    {
+      "series_base": "KXBOXING",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 16,
+      "most_common_outcome_count": 2,
+      "outcome_count_distribution": {
+        "2": 16
+      },
+      "label_classes": {
+        "team_like": 30,
+        "other": 2
+      },
+      "label_samples": {
+        "team_like": [
+          "Floyd Mayweather Jr.",
+          "Manny Pacquiao",
+          "Yo Soy Plex",
+          "Fernanfloo"
+        ],
+        "other": [
+          "Marta Díaz",
+          "Gastón Edul"
+        ]
+      },
+      "title_samples": [
+        "Mayweather vs Pacquiao",
+        "La Velada del Año VI: Yo Soy Plex vs Fernanfloo",
+        "La Velada del Año VI: Rivers vs Roro"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXWBCWELTERWEIGHTTITLE",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 18,
+      "outcome_count_distribution": {
+        "18": 1
+      },
+      "label_classes": {
+        "team_like": 18
+      },
+      "label_samples": {
+        "team_like": [
+          "Ryan Garcia",
+          "Conor Benn",
+          "Souleymane Cissokho",
+          "Raul Curiel"
+        ]
+      },
+      "title_samples": [
+        "WBC Welterweight Title on January 1, 2027"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXWBCFLYWEIGHTTITLE",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 19,
+      "outcome_count_distribution": {
+        "19": 1
+      },
+      "label_classes": {
+        "team_like": 19
+      },
+      "label_samples": {
+        "team_like": [
+          "Ricardo Sandoval",
+          "Galal Yafai",
+          "Brandon Daord",
+          "Anthony Olascuaga"
+        ]
+      },
+      "title_samples": [
+        "WBC Flyweight Title on January 1, 2027"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXWBCFEATHERWEIGHTTITLE",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 17,
+      "outcome_count_distribution": {
+        "17": 1
+      },
+      "label_classes": {
+        "team_like": 17
+      },
+      "label_samples": {
+        "team_like": [
+          "Nathaniel Collins",
+          "Cristobal Lorente",
+          "Nick Ball",
+          "Omar Trinidad"
+        ]
+      },
+      "title_samples": [
+        "WBC Featherweight Title on January 1, 2027"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXWBCCRUISERWEIGHTTITLE",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 18,
+      "outcome_count_distribution": {
+        "18": 1
+      },
+      "label_classes": {
+        "team_like": 18
+      },
+      "label_samples": {
+        "team_like": [
+          "Noel Mikaelian",
+          "Michael Cieslak",
+          "Yamil Alberto Peralta",
+          "Jai Opetaia"
+        ]
+      },
+      "title_samples": [
+        "WBC Cruiserweight Title on January 1, 2027"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXWBCBANTAMWEIGHTTITLE",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 20,
+      "outcome_count_distribution": {
+        "20": 1
+      },
+      "label_classes": {
+        "team_like": 19,
+        "other": 1
+      },
+      "label_samples": {
+        "team_like": [
+          "Takuma Inoue",
+          "Andrew Cain",
+          "David Mwale",
+          "Christian Medina Jimenez"
+        ],
+        "other": [
+          "Emmanuel Rodríguez"
+        ]
+      },
+      "title_samples": [
+        "WBC Bantamweight Title on January 1, 2027"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXWBCMIDDLEWEIGHTTITLE",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 19,
+      "outcome_count_distribution": {
+        "19": 1
+      },
+      "label_classes": {
+        "team_like": 19
+      },
+      "label_samples": {
+        "team_like": [
+          "Carlos Adames",
+          "Jesus Ramos",
+          "Meiirim Nursultanov",
+          "Bilal Jkitou"
+        ]
+      },
+      "title_samples": [
+        "WBC Middleweight Title on January 1, 2027"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXWBCLIGHTWEIGHTTITLE",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 17,
+      "outcome_count_distribution": {
+        "17": 1
+      },
+      "label_classes": {
+        "team_like": 17
+      },
+      "label_samples": {
+        "team_like": [
+          "Jadier Herrera",
+          "William Zepeda",
+          "Lamont Roach",
+          "Dzmitry Asanau"
+        ]
+      },
+      "title_samples": [
+        "WBC Lightweight Title on January 1, 2027"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXWBCHEAVYWEIGHTTITLE",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 17,
+      "outcome_count_distribution": {
+        "17": 1
+      },
+      "label_classes": {
+        "team_like": 16,
+        "other": 1
+      },
+      "label_samples": {
+        "team_like": [
+          "Oleksandr Usyk",
+          "Fabio Wardley",
+          "Agit Kabayel",
+          "Daniel Dubois"
+        ],
+        "other": [
+          "Filip Hrgović"
+        ]
+      },
+      "title_samples": [
+        "WBC Heavyweight Title on January 1, 2027"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXFLOYDTYSONFIGHT",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 1,
+      "outcome_count_distribution": {
+        "1": 1
+      },
+      "label_classes": {
+        "other": 1
+      },
+      "label_samples": {
+        "other": [
+          "Before Jan 1, 2027"
+        ]
+      },
+      "title_samples": [
+        "Will Mike Tyson and Floyd Mayweather fight this year?"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    }
+  ]
+}
