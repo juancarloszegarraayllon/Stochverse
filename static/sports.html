@@ -238,33 +238,13 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 @keyframes sp-flash-down{0%{background-color:rgba(255,51,51,0.55)}100%{background-color:transparent}}
 .sp-c2-yes.sp-flash-up,.sp-c2-no.sp-flash-up,.sp-c2-prob.sp-flash-up{animation:sp-flash-up 0.9s ease-out}
 .sp-c2-yes.sp-flash-down,.sp-c2-no.sp-flash-down,.sp-c2-prob.sp-flash-down{animation:sp-flash-down 0.9s ease-out}
-/* Per-tournament column header strip — sits between the
-   tournament name and its first event row. Matches the .sp-c2-event
-   grid so 'Score' lines up with the score column and 'Kalshi
-   (PROB / YES / NO)' lines up with the chip columns. Renders
-   only when at least one event in the tournament has a Kalshi
-   match — otherwise there'd be nothing to label. */
-.sp-c2-tournament-cols{display:grid;grid-template-columns:64px 1fr var(--sp-score-w) 180px;gap:8px;padding:4px 14px 6px;background:transparent;border-bottom:1px solid var(--border);font-size:8px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
-.sp-c2-tcol-score{text-align:center;align-self:end}
-/* Kalshi cell — single 3-column grid with two rows. The KALSHI
-   title spans cols 2-3 only (above YES + NO, NOT above PROB) so
-   it centers between the two chip columns. PROB / YES / NO labels
-   sit on row 2 directly above their chip columns in the rows
-   below. All labels share the parent's 8px so SCORE / PROB / YES /
-   NO render at the same visual weight. */
-.sp-c2-tcol-kalshi{display:grid;grid-template-columns:32px 1fr 1fr;grid-template-rows:auto auto;gap:0 4px}
-.sp-c2-tcol-kalshi-title{grid-column:2 / 4;grid-row:1;text-align:center;color:var(--text);padding-bottom:1px}
-.sp-c2-tcol-kalshi .lh-prob{grid-column:1;grid-row:2;text-align:right;color:var(--text-muted)}
-.sp-c2-tcol-kalshi .lh-yes{grid-column:2;grid-row:2;text-align:center;color:var(--green)}
-.sp-c2-tcol-kalshi .lh-no{grid-column:3;grid-row:2;text-align:center;color:var(--red)}
 /* Load-more toggle inside the teams cell — green text link
    appearing under the visible outcomes when there are more than
    4 to display. Click expands / collapses the full list. */
 .sp-c2-loadmore{background:transparent;border:none;color:var(--green);font-size:9px;font-weight:700;padding:2px 0;text-align:left;cursor:pointer;text-transform:uppercase;letter-spacing:.4px}
 .sp-c2-loadmore:hover{text-decoration:underline}
-.sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums;display:flex;flex-direction:column;align-items:flex-start;gap:2px}
-.sp-c2-time-clock{display:block}
-.sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);text-transform:uppercase}
+.sp-c2-time{font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums}
+.sp-c2-time-state{display:block;font-size:10px;color:var(--text-muted);margin-top:2px;text-transform:uppercase}
 .sp-c2-time-state.live{color:var(--red);font-weight:700}
 .sp-c2-teams{font-size:13px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
 .sp-c2-team{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -298,7 +278,12 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    it reads cleanly under the leg score. Shows 'AGG 4-5 LEG 2/2'
    for soccer two-leg ties, 'SERIES 3-3' for NBA/NHL/MLB/NFL
    playoff series. */
-.sp-c2-agg{display:inline-block;font-size:8px;color:var(--green);background:var(--green-bg);border:1px solid var(--green-line);border-radius:6px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;padding:1px 5px;line-height:1.2;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+/* Aggregate / playoff-series pill — its own row above the event
+   grid, left-aligned. Pill styling (green-on-green-bg) matches
+   the homepage's .agg-pill so /sports and homepage cards have
+   visual parity. */
+.sp-c2-event-aggrow{padding:0 14px 4px}
+.sp-c2-agg{display:inline-block;font-size:9px;color:var(--green);background:var(--green-bg);border:1px solid var(--green-line);border-radius:8px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;line-height:1.2;white-space:nowrap}
 /* Empty chip-row spacer — used when the teams cell shows a
    matchup header (sub-market views). Pushes the first real chip
    row down by one row so each chip aligns with its outcome label
@@ -1026,19 +1011,6 @@ function renderCol2() {
     html += '<span class="sp-c2-league-name">' + escH(leagueDisplayName(t)) + '</span>';
     if (t.COUNTRY_NAME) html += '<span class="sp-c2-country">' + escH(t.COUNTRY_NAME) + '</span>';
     html += '</div>';
-    if (tournamentHasMatch) {
-      html += '<div class="sp-c2-tournament-cols">';
-      html += '<div></div>';  // time spacer
-      html += '<div></div>';  // teams spacer
-      html += '<div class="sp-c2-tcol-score">' + (tournamentNeedsScoreCol ? 'Score' : '') + '</div>';
-      html += '<div class="sp-c2-tcol-kalshi">';
-      html += '<span class="sp-c2-tcol-kalshi-title">Kalshi</span>';
-      html += '<span class="lh-prob">PROB</span>';
-      html += '<span class="lh-yes">YES</span>';
-      html += '<span class="lh-no">NO</span>';
-      html += '</div>';
-      html += '</div>';
-    }
     html += '<div class="sp-c2-events">';
     for (const ev of evs) {
       // In Market view, each Kalshi ticker becomes its own row;
@@ -1309,7 +1281,15 @@ function renderEventRow(ev, market, isMarketRow) {
       html += '</div>';
     }
   }
-  // Main row — indicator / time / teams / scores / marketcell.
+  // Aggregate / playoff-series pill — its own row between the
+  // tab strip and the event-row grid. Visible only when populated.
+  // Sits left-aligned above the team names so it reads as
+  // contextual metadata for the row beneath.
+  const _aggRowHtml = renderAggOrSeries(ev);
+  if (_aggRowHtml) {
+    html += '<div class="sp-c2-event-aggrow">' + _aggRowHtml + '</div>';
+  }
+  // Main row — time / teams / scores / marketcell.
   html += '<div class="sp-c2-event-row">';
   // Left indicator column — was the Kalshi K + count badge.
   // Removed: 'Kalshi' is already labelled in the column header,
@@ -1318,14 +1298,10 @@ function renderEventRow(ev, market, isMarketRow) {
   // sources land we'll re-introduce a tiny multi-source indicator
   // here; until then the column is gone and the grid is one
   // column slimmer.
-  // Time cell stacks vertically: aggregate / series pill (if any)
-  // on top → kickoff time → live game clock. So multi-leg context
-  // sits with the time-related info instead of crowding the score
-  // column. Mirrors the homepage card hierarchy.
-  html += '<div class="sp-c2-time">';
-  const _aggHtml = renderAggOrSeries(ev);
-  if (_aggHtml) html += _aggHtml;
-  html += '<span class="sp-c2-time-clock">' + escH(time) + '</span>';
+  // Time cell — kickoff time + live state (e.g. 'HT' / '1H 23:14').
+  // Aggregate/series pill moved to its own row above the event-row
+  // grid so it doesn't crowd the narrow time column.
+  html += '<div class="sp-c2-time">' + escH(time);
   if (stLbl) {
     const liveAttr = state === 'live'
       ? ' data-event-id="' + escH(ev.EVENT_ID || '') + '"'
@@ -1538,7 +1514,9 @@ function renderAggOrSeries(ev) {
     } else if (aa > hh && awayAbbr) {
       parts.push(escH(awayAbbr) + ' ' + escH(aa) + '-' + escH(hh));
     } else {
-      parts.push(escH(hh) + '-' + escH(aa));
+      // Tied — explicit 'TIED' prefix so it's visually parallel
+      // with the playoff-series 'SERIES TIED 1-1' format.
+      parts.push('TIED ' + escH(hh) + '-' + escH(aa));
     }
     if (k.aggregate_label) {
       parts.push(escH(k.aggregate_label));
