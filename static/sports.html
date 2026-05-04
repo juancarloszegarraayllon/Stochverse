@@ -278,17 +278,20 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
    it reads cleanly under the leg score. Shows 'AGG 4-5 LEG 2/2'
    for soccer two-leg ties, 'SERIES 3-3' for NBA/NHL/MLB/NFL
    playoff series. */
-/* Per-tournament column header strip — sits below the tournament
-   name, labels the score column and the chip columns
-   (PROB / YES / NO under a 'KALSHI' bracket). Mirrors the event-
-   row grid widths so labels line up with the values below. */
-.sp-c2-tournament-cols{display:grid;grid-template-columns:64px 1fr var(--sp-score-w) 180px;gap:8px;padding:4px 14px 6px;background:transparent;border-bottom:1px solid var(--border);font-size:8px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
-.sp-c2-tcol-score{text-align:center;align-self:end}
-.sp-c2-tcol-kalshi{display:grid;grid-template-columns:32px 1fr 1fr;grid-template-rows:auto auto;gap:0 4px}
-.sp-c2-tcol-kalshi-title{grid-column:2 / 4;grid-row:1;text-align:center;color:var(--text);padding-bottom:1px}
-.sp-c2-tcol-kalshi .lh-prob{grid-column:1;grid-row:2;text-align:right;color:var(--text-muted)}
-.sp-c2-tcol-kalshi .lh-yes{grid-column:2;grid-row:2;text-align:center;color:var(--green)}
-.sp-c2-tcol-kalshi .lh-no{grid-column:3;grid-row:2;text-align:center;color:var(--red)}
+/* Per-event mini-header inside the marketcell — sits directly
+   above the chip rows so PROB / YES / NO labels line up with
+   their column values. KALSHI title spans columns 2-3 (over
+   YES + NO), centered above. Per-event so it's positioned
+   right with the prices for THIS event card, not as a separate
+   tournament-level strip. */
+.sp-c2-mc-header{display:grid;grid-template-columns:32px 1fr 1fr;grid-template-rows:auto auto;gap:0 4px;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);padding-bottom:2px;border-bottom:1px solid var(--border);margin-bottom:2px}
+.sp-c2-mch-title{grid-column:2 / 4;grid-row:1;text-align:center;color:var(--text)}
+.sp-c2-mch-prob{grid-column:1;grid-row:2;text-align:right}
+.sp-c2-mch-yes{grid-column:2;grid-row:2;text-align:center;color:var(--green)}
+.sp-c2-mch-no{grid-column:3;grid-row:2;text-align:center;color:var(--red)}
+/* SCORE label inside the score column, above the home/away
+   numbers. Matches the chip-header styling for visual parity. */
+.sp-c2-sch{font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);text-align:center;padding-bottom:2px;border-bottom:1px solid var(--border);margin-bottom:2px}
 /* Aggregate / playoff-series pill — its own row above the event
    grid, left-aligned. Pill styling (green-on-green-bg) matches
    the homepage's .agg-pill so /sports and homepage cards have
@@ -1022,25 +1025,6 @@ function renderCol2() {
     html += '<span class="sp-c2-league-name">' + escH(leagueDisplayName(t)) + '</span>';
     if (t.COUNTRY_NAME) html += '<span class="sp-c2-country">' + escH(t.COUNTRY_NAME) + '</span>';
     html += '</div>';
-    // Column-header strip — sits below the tournament name and
-    // labels the score / probability / yes / no columns of the
-    // chip area below. Per-tournament (renders once per
-    // tournament block) and only when the tournament has at
-    // least one Kalshi-matched event (otherwise the labels would
-    // point at empty columns).
-    if (tournamentHasMatch) {
-      html += '<div class="sp-c2-tournament-cols">';
-      html += '<div></div>';  // time spacer
-      html += '<div></div>';  // teams spacer
-      html += '<div class="sp-c2-tcol-score">SCORE</div>';
-      html += '<div class="sp-c2-tcol-kalshi">';
-      html += '<span class="sp-c2-tcol-kalshi-title">KALSHI</span>';
-      html += '<span class="lh-prob">PROB</span>';
-      html += '<span class="lh-yes">YES</span>';
-      html += '<span class="lh-no">NO</span>';
-      html += '</div>';
-      html += '</div>';
-    }
     html += '<div class="sp-c2-events">';
     for (const ev of evs) {
       // In Market view, each Kalshi ticker becomes its own row;
@@ -1449,11 +1433,10 @@ function renderEventRow(ev, market, isMarketRow) {
   if (isTennisEv) {
     html += renderTennisScoreCell(ev, showMatchup);
   } else if (showMatchup) {
-    // Score is baked into the matchup header line; column stays
-    // empty. Aggregate / series moved to the time column above.
     html += '<div class="sp-c2-scores"></div>';
   } else {
     html += '<div class="sp-c2-scores">';
+    if (matched) html += '<div class="sp-c2-sch">SCORE</div>';
     html += '<span>' + escH(ev.HOME_SCORE_CURRENT != null ? ev.HOME_SCORE_CURRENT : '') + '</span>';
     html += '<span>' + escH(ev.AWAY_SCORE_CURRENT != null ? ev.AWAY_SCORE_CURRENT : '') + '</span>';
     html += '</div>';
@@ -1461,14 +1444,18 @@ function renderEventRow(ev, market, isMarketRow) {
   // Right market cell — chip rows only (PROB / YES / NO), one per
   // outcome. Labels live in the teams cell to the left so each
   // chip row reads horizontally with its corresponding label.
-  // Outcome → chip row is 1:1 in display order.
+  // Outcome → chip row is 1:1 in display order. Per-event header
+  // strip ('KALSHI / PROB YES NO') sits at the top of the
+  // marketcell so the labels are directly above the chip values
+  // — one set per event card, like a small price-table caption.
   html += '<div class="sp-c2-marketcell">';
   if (matched && outcomes.length) {
-    // When the teams cell has a matchup header on top (sub-market
-    // views like Spreads / BTTS), prepend an empty chip-row spacer
-    // here so each real chip row aligns horizontally with its
-    // outcome label below the matchup header — not with the
-    // matchup line itself.
+    html += '<div class="sp-c2-mc-header">';
+    html += '<span class="sp-c2-mch-title">KALSHI</span>';
+    html += '<span class="sp-c2-mch-prob">PROB</span>';
+    html += '<span class="sp-c2-mch-yes">YES</span>';
+    html += '<span class="sp-c2-mch-no">NO</span>';
+    html += '</div>';
     if (showMatchup) html += '<div class="sp-c2-chip-spacer"></div>';
     for (const o of outcomes) html += renderChipRow(o);
   } else {
