@@ -188,6 +188,21 @@ The renderer's per-shape rules. **Locked from observed data** — no guessing.
 
 **Title-shape quirk**: tennis uses **surname-only** in `MATCH` titles (`"Hooper vs Ponchet"`) but **full names** in `SETWINNER` titles (`"Taylor Townsend vs Victoria Jimenez Kasintseva: Set 1 Winner"`). Same player pair, two different title shapes depending on suffix. **The renderer should always read player labels from `outcomes[].label`** (which always has the full name), not from titles.
 
+### Esports
+
+Esports uses **multi-map series structure** — a "match" is best-of-N maps, each map is its own betable market. Six games covered: League of Legends, CS2, Valorant, Dota 2, Rocket League, Overwatch, Rainbow Six.
+
+| Suffix / market_type | Outcome count | Labels | Title shape |
+|---|---|---|---|
+| `GAME` (KXLOL, KXCS2, KXVALORANT, KXDOTA2) | 2 | team names, **no tie** | `"X vs. Y"` (note period after `vs`) |
+| `MAP` w/ market_type `Map 1` / `Map 2` / `Map 3` (KXLOLMAP, KXCS2MAP, KXVALORANTMAP, KXDOTA2MAP) | 2 | team names | `"X vs. Y: Map N"` |
+| `TOTALMAPS` w/ market_type `Total Maps` (KXLOLTOTALMAPS, KXCS2TOTALMAPS) | 1–2 | `Over N.5 maps` | `"X vs. Y: Total Maps"` |
+| Outright (event champion: KXCS2, KXOVERWATCH, KXR6, KXROCKETLEAGUE) | 6–20 | team names | event-name title (e.g. `"IEM Atlanta Champion"`) |
+
+**Note on title format**: Esports uses `"X vs. Y"` (period after `vs`) where other sports use `"X vs Y"` (no period). The title-prep parser must accept both forms.
+
+**Cache-builder bug to flag**: `KXOWGRRANK` (Overwatch GR Rank) is bucketed into Esports but its outcomes are golf-player names (`Scottie Scheffler`, `Rory McIlroy`, etc.). The classifier confused `OWGR` with `OW` (Overwatch). Non-blocking; clean up in a future pass.
+
 ### Universal: outrights / futures (no suffix)
 
 Outcome count is variable (1 to 70+), labels are sport-specific:
@@ -280,17 +295,28 @@ Examples: `KXNBASERIES-26LALOKCR2`, `KXNHLSERIESSCORE-26MTLBUFR2`
 
 `R{N}` is the playoff round number. No date — the market spans the full series.
 
-### G_SET — set-winner sub-markets (Tennis)
+### G_LEG — sub-fixture sub-markets (set/map/period leg)
+
+Generalized pattern. Two variants depending on whether the parent grammar is G1 or G7:
 
 ```
-{base}-{YYMMDD}{HOME_ABBR}{AWAY_ABBR}-{N}
+G_LEG_DATE        — {base}-{YYMMDD}{ABBRS}-{N}              (Tennis)
+G_LEG_DATE_TIME   — {base}-{YYMMDD}{HHMM}{ABBRS}-{N}        (Esports)
 ```
 
-`N` is the set number (1 or 2). Used by `KXATPSETWINNER`, `KXWTASETWINNER`.
+`N` is the leg number (1, 2, 3, …). The leg can be a tennis set, an esports map, or any future "leg of a series" market.
 
-Examples: `KXATPSETWINNER-26MAY05HIJBAS-1`, `KXWTASETWINNER-26MAY05TOWJIM-2`.
+**Tennis examples** (no time):
+- `KXATPSETWINNER-26MAY05HIJBAS-1` — Set 1
+- `KXWTASETWINNER-26MAY05TOWJIM-2` — Set 2
 
-The base ticker (without `-{N}`) matches the corresponding `MATCH` ticker, so a set-winner record can be deterministically associated with its parent match.
+**Esports examples** (with time):
+- `KXCS2MAP-26MAY051800VSCBSTA-1` — Map 1
+- `KXLOLMAP-26MAY071500ZYBSLY-2` — Map 2
+- `KXVALORANTMAP-26MAY071400VITTL-1`
+- `KXDOTA2MAP-26MAY051400L1GANEM-1`
+
+The base ticker (without `-{N}`) matches the corresponding parent `MATCH` / `GAME` ticker, so a leg can be deterministically associated with its parent match.
 
 ### G_DATE_ONLY — date-keyed outright (Tennis)
 
@@ -310,6 +336,16 @@ Tennis uses **first 3 chars of surname** as the player abbreviation, concatenate
 **Edge case**: compound surnames can produce 7-char blocks. `KXATPCHALLENGERMATCH-26MAY05DIABER` → Diaz Acosta (4-char `DIA`) + Bernet (`BER`). Rare (1 in our sample).
 
 **Edge case 2**: rematch / same-day-second-bracket. `KXITFWMATCH-26MAY04CHOCHO2` — same `CHOCHO` abbrs with trailing `2`. Rare (~0.75% of ITFW matches). Renderer should keep the `2` as part of fixture identity to avoid collisions.
+
+### Esports team abbreviations — opaque blocks
+
+Esports team abbr blocks vary 5–8 chars with **no consistent home/away split**:
+- `VSCBSTA` (Vasco Esports + BESTIA Academy) — could be 3+4 or 4+3
+- `L1GANEM` (L1ga Team + Team Nemesis) — includes a digit
+- `HRTSKOIA` (Heretics + KOI Academy?) — 8 chars
+- `1WINMOUZ` (1win + MOUZ) — leading digit, 4+4
+
+**Lesson for the merge contract**: for fixture identity, **treat the abbr block as opaque**. Don't attempt home/away split. Full date+time+block is the join key. Home/away orientation comes from outcome labels (which carry full team names) at render time, not from parsing the ticker. This rule generalizes across all sports — `OKCLAL` and `LALOKC` would normally need sorting to match, but if FL's tickers and Kalshi's tickers use the same author, equality on the raw block works directly.
 
 ### Sport-specific outright ticker variations
 
