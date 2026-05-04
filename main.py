@@ -7779,6 +7779,25 @@ def _kalshi_title_corroborates_fl_game(kalshi_title: str, fl_game: dict) -> bool
             for tok in toks_short:
                 if re.search(r'\b' + re.escape(tok) + r'\b', title_lc):
                     return True
+        # Prefix-match fallback (v5) — a >=3-char FL token may be a
+        # prefix of a >=5-char Kalshi title word, or vice versa.
+        # Handles FL truncations Kalshi spells out:
+        #   FL 'Atl. Madrid' → 'atl' prefixes Kalshi's 'Atletico'
+        #   FL 'Bayern' / Kalshi 'Bayer' → 'bayern' has 'bayer' prefix
+        #   FL 'St. Etienne' → 'etienne' prefixes Kalshi's 'Etiennes'
+        # Without this, Arsenal vs Atl. Madrid in UCL playoffs gets
+        # rejected even though match_game pairs them correctly,
+        # which causes /sports to render the same fixture twice
+        # (once FL-paired sans markets, once synthesized by the
+        # unpaired-h2h collector with markets).
+        # _build_kalshi_index_for_sport already filters by sport,
+        # so soccer-side 'atl' can't corroborate against an NBA
+        # Atlanta title — they live in different sport buckets.
+        title_words = re.findall(r"[a-z]+", title_lc)
+        for tok in (t for t in toks_all if len(t) >= 3):
+            for w in title_words:
+                if len(w) >= 5 and (w.startswith(tok) or tok.startswith(w)):
+                    return True
         return False
 
     return (has_distinguishing_token(home, fl_game.get("home_abbr"))
