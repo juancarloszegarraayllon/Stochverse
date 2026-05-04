@@ -7086,7 +7086,7 @@ def _league_to_region(league_name: str) -> str:
     return ""
 
 
-def _enrich_record_live_state(title: str, sport: str) -> dict:
+def _enrich_record_live_state(title: str, sport: str, rc: dict = None) -> dict:
     """On-demand match_game + _enrich_soccer_aggregate, returning
     a synthetic _live_state dict shaped like the one /api/events
     builds (main.py:3259). The cache record itself doesn't carry
@@ -7094,9 +7094,18 @@ def _enrich_record_live_state(title: str, sport: str) -> dict:
     has to do the same enrichment to get aggregate / series /
     display_clock fields. In-memory match_game lookup, no HTTP.
 
+    When `rc` (the cache record) is supplied, also tries the
+    bracket-cache path that /api/events falls through to when
+    match_game returns None — see main.py:2663. This is what
+    lights up aggregate badges for FUTURE-fixture knockout legs
+    that FL hasn't loaded into events-list yet (Bayern vs PSG on
+    May 4 when the game is May 6 — match_game can't find it
+    because GAMES has only the today/recent window, but the
+    tournament-bracket cache has it).
+
     Returns {} on no match, so callers can do
-    `live = _enrich_record_live_state(title, sport)` and treat
-    the empty case as 'no live data available'.
+    `live = _enrich_record_live_state(...)` and treat the empty
+    case as 'no live data available'.
     """
     if not title or not sport:
         return {}
@@ -7115,24 +7124,88 @@ def _enrich_record_live_state(title: str, sport: str) -> dict:
             g = _enrich_soccer_aggregate(g, title)
         except Exception:
             pass
-    if not g:
-        return {}
-    return {
-        "state":            g.get("state", ""),
-        "display_clock":    g.get("display_clock", ""),
-        "period":           g.get("period", 0),
-        "stage_start_ms":   g.get("stage_start_ms", 0),
-        "captured_at_ms":   g.get("captured_at_ms", 0),
-        "clock_running":    g.get("clock_running", True),
-        "is_two_leg":       bool(g.get("is_two_leg")),
-        "aggregate_home":   g.get("aggregate_home"),
-        "aggregate_away":   g.get("aggregate_away"),
-        "leg_number":       g.get("leg_number"),
-        "round_name":       g.get("round_name", ""),
-        "series_home_wins": g.get("series_home_wins"),
-        "series_away_wins": g.get("series_away_wins"),
-        "series_summary":   g.get("series_summary", ""),
-    }
+    if g:
+        return {
+            "state":            g.get("state", ""),
+            "display_clock":    g.get("display_clock", ""),
+            "period":           g.get("period", 0),
+            "stage_start_ms":   g.get("stage_start_ms", 0),
+            "captured_at_ms":   g.get("captured_at_ms", 0),
+            "clock_running":    g.get("clock_running", True),
+            "is_two_leg":       bool(g.get("is_two_leg")),
+            "aggregate_home":   g.get("aggregate_home"),
+            "aggregate_away":   g.get("aggregate_away"),
+            "leg_number":       g.get("leg_number"),
+            "round_name":       g.get("round_name", ""),
+            "series_home_wins": g.get("series_home_wins"),
+            "series_away_wins": g.get("series_away_wins"),
+            "series_summary":   g.get("series_summary", ""),
+        }
+    # Fallback path 1: bracket cache for soccer cup ties
+    # (mirrors /api/events line 2663). Hits the tournament-
+    # bracket cache populated by _tournament_bracket_warm_loop —
+    # has aggregate data for future-fixture knockout legs FL
+    # hasn't loaded yet. Requires the cache record so we have
+    # series_ticker + title in the right shape.
+    if sport == "Soccer" and rc:
+        try:
+            agg = _bracket_aggregate_for_event(rc)
+        except Exception:
+            agg = None
+        if agg:
+            return {
+                "is_two_leg":     bool(agg.get("is_two_leg")),
+                "aggregate_home": agg.get("aggregate_home"),
+                "aggregate_away": agg.get("aggregate_away"),
+                "leg_number":     agg.get("leg_number"),
+                "round_name":     agg.get("round_name", ""),
+                # Other fields stay empty — bracket cache only
+                # carries aggregate, no live clock / period etc.
+                "state":            "",
+                "display_clock":    "",
+                "period":           0,
+                "stage_start_ms":   0,
+                "captured_at_ms":   0,
+                "clock_running":    False,
+                "series_home_wins": None,
+                "series_away_wins": None,
+                "series_summary":   "",
+            }
+    # Fallback path 2: NBA/NHL/MLB playoff series cache. /api/events
+    # builds _basketball_series_by_ticker once per request and
+    # reads it for every record (main.py:2369, 2609). For /sports
+    # we recompute it on demand for the requested sport. Cheap —
+    # iterates cache records, regex-matches ticker patterns.
+    if sport in ("Basketball", "Hockey", "Baseball", "Football") and rc:
+        try:
+            ticker = rc.get("event_ticker") or ""
+            if ticker:
+                get_data()
+                _records = _cache.get("data_all") or _cache.get("data") or []
+                _bs_dict = _derive_basketball_series_state(_records)
+                _bs = _bs_dict.get(ticker)
+                if _bs:
+                    return {
+                        "is_two_leg":       False,
+                        "aggregate_home":   None,
+                        "aggregate_away":   None,
+                        "leg_number":       None,
+                        "round_name":       "",
+                        "state":            "",
+                        "display_clock":    "",
+                        "period":           0,
+                        "stage_start_ms":   0,
+                        "captured_at_ms":   0,
+                        "clock_running":    False,
+                        "is_playoff":       bool(_bs.get("is_playoff")),
+                        "series_home_wins": _bs.get("series_home_wins"),
+                        "series_away_wins": _bs.get("series_away_wins"),
+                        "series_summary":   _bs.get("series_summary", ""),
+                        "series_game_number": _bs.get("series_game_number"),
+                    }
+        except Exception:
+            pass
+    return {}
 
 
 def _collect_unpaired_h2h_for_sport(sport_name: str,
@@ -7346,9 +7419,9 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         live = primary.get("_live_state") or {}
         primary_title = primary.get("title", "") or bare_title
         if not live or not isinstance(live, dict) or not live.get("aggregate_home"):
-            enriched = _enrich_record_live_state(primary_title, sport_name)
+            enriched = _enrich_record_live_state(primary_title, sport_name, primary)
             if not enriched and primary_title != bare_title:
-                enriched = _enrich_record_live_state(bare_title, sport_name)
+                enriched = _enrich_record_live_state(bare_title, sport_name, primary)
             if enriched:
                 live = enriched
         agg_label = live.get("aggregate_label") if isinstance(live, dict) else None
@@ -8025,9 +8098,36 @@ async def debug_enrich_trace(title: str = "", sport: str = "Soccer"):
         out["steps"]["step6_enriched_error"] = str(e)
     out["steps"]["step6_enriched"] = summarize(enriched)
 
+    # Step 6b — Bracket cache lookup (fallback path /api/events
+    # uses when match_game returns None — main.py line 2663).
+    # We synthesize a minimal record from the title + a series_ticker
+    # the caller can supply via ?series=KXUCLGAME if known.
+    out["steps"]["step6b_bracket_aggregate"] = None
+    try:
+        # Try to find a real cache record by title to use as input
+        get_data()
+        _recs = _cache.get("data_all") or _cache.get("data") or []
+        _ql = title.lower()
+        _matched_rc = None
+        for _r in _recs:
+            _rt = (_r.get("title") or "").lower()
+            if _ql in _rt or _rt in _ql:
+                _matched_rc = _r
+                break
+        if _matched_rc:
+            out["steps"]["step6b_matched_cache_record"] = {
+                "event_ticker": _matched_rc.get("event_ticker"),
+                "series_ticker": _matched_rc.get("series_ticker"),
+                "title": _matched_rc.get("title"),
+            }
+            agg = _bracket_aggregate_for_event(_matched_rc)
+            out["steps"]["step6b_bracket_aggregate"] = agg
+    except Exception as e:
+        out["steps"]["step6b_bracket_aggregate_error"] = str(e)
+
     # Step 7 — End-to-end _enrich_record_live_state output
     try:
-        ls = _enrich_record_live_state(title, sport)
+        ls = _enrich_record_live_state(title, sport, _matched_rc if '_matched_rc' in dir() else None)
         out["steps"]["step7_final_live_state"] = ls or {}
     except Exception as e:
         out["steps"]["step7_final_live_state_error"] = str(e)
@@ -8339,7 +8439,7 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                 # enriches per-request. /sports has to do the same so
                 # aggregate / series / clock fields actually populate.
                 if not live or not isinstance(live, dict) or not live.get("aggregate_home"):
-                    _enriched = _enrich_record_live_state(primary.get("title", ""), kalshi_sport)
+                    _enriched = _enrich_record_live_state(primary.get("title", ""), kalshi_sport, primary)
                     if _enriched:
                         live = _enriched
                 # Aggregate fallback for matched soccer cup ties.
