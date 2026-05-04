@@ -223,6 +223,39 @@ MMA has the **most granular per-fight sub-market structure** of any sport — fi
 
 **Other futures**: `KXMCGREGORFIGHTNEXT` (14 fighters), `KXCARDPRESENCEUFCWH` (5 fighters), `KXUFCWHITEHOUSE` (binary), `KXPERSONUNRETIRE` (binary).
 
+### Golf
+
+Golf is **tournament-based** — fundamentally different from team sports. **No per-fixture h2h ticker exists**; each tournament is its own scoping unit, with up to 12 sub-markets attaching to the same `(tournament_handle, year)` identity.
+
+**Per-tournament markets** (each present for every active tournament — PGA Championship, Truist Championship, ONEflight Myrtle Beach Classic in our sample):
+
+| Series base | market_type | Outcomes | Notes |
+|---|---|---|---|
+| `KXPGATOUR` | — | 74–131 | Tournament Winner (full field) |
+| `KXPGAR1LEAD` / `KXPGAR2LEAD` / `KXPGAR3LEAD` | — | 66–117 | End-of-round leader |
+| `KXPGATOP5` / `KXPGATOP10` / `KXPGATOP20` | `Top N Finishers` | 66–117 | Multi-pick |
+| `KXPGAR1TOP5` / `KXPGAR1TOP10` | `Round 1 Top N Finishers` | 66–117 | After round 1 |
+| `KXPGAMAKECUT` | `To Make the Cut` | 66–117 | Binary YES per golfer |
+| `KXPGAHOLEINONE` | `Hole-in-One` | 3 | `1+ / 2+ / 3+ holes-in-one` thresholds |
+| `KXPGAPLAYOFF` | `Playoff` | 1 | Binary YES |
+
+**Tour variants** (parallel structure on smaller fields):
+- `KXLIVTOUR` / `KXLIVR1LEAD` / `KXLIVTOP5` / `KXLIVTOP10` — LIV Golf, ~57 golfers
+- `KXLIVOCCUR` — binary YES (will tournament happen)
+- `KXDPWORLDTOUR` / `KXDPWORLDTOURR1LEAD` / `KXDPWORLDTOURMAKECUT` — DP World Tour, ~149–160 golfers (Europe)
+- `KXLPGATOUR` — LPGA, ~119 women golfers
+
+**Multi-tournament season-long futures:**
+- `KXPGAMAJORWIN` (52 golfers — winner of any 2026 major)
+- `KXPGAMAJORTOP10` (11 — top-10 in all 4 majors)
+- `KXGOLFMAJOR` / `KXGOLFMAJORS` (per-player thresholds: `1+ / 2+ / 3+ / 4 majors`)
+- `KXRYDERCUPCAPTAIN` (US + Europe captain)
+- `KXPGARYDER` / `KXPGASOLHEIM` (3 outcomes: US / Europe / Tie)
+
+**Per-player binary futures:** `KXPGACURRY`, `KXPGATIGER`, `KXSCOTTIESLAM`, `KXBRYSONCOURSERECORDS`.
+
+**Cross-sport:** `KXGOLFTENNISMAJORS` (3 outcomes: golf player / tennis player / Tie).
+
 ### Universal: outrights / futures (no suffix)
 
 Outcome count is variable (1 to 70+), labels are sport-specific:
@@ -356,6 +389,24 @@ Tennis uses **first 3 chars of surname** as the player abbreviation, concatenate
 **Edge case**: compound surnames can produce 7-char blocks. `KXATPCHALLENGERMATCH-26MAY05DIABER` → Diaz Acosta (4-char `DIA`) + Bernet (`BER`). Rare (1 in our sample).
 
 **Edge case 2**: rematch / same-day-second-bracket. `KXITFWMATCH-26MAY04CHOCHO2` — same `CHOCHO` abbrs with trailing `2`. Rare (~0.75% of ITFW matches). Renderer should keep the `2` as part of fixture identity to avoid collisions.
+
+### G_TOURNAMENT_HANDLE — Golf tournament-scoped sub-markets
+
+```
+{base}-{TOURNAMENT_CODE}{YY}
+```
+
+Tournament code is a 3–7 char alphabetic event identifier; year is 2-digit. Used by all per-tournament Golf markets.
+
+Examples:
+- `KXPGATOUR-PGC26` → PGA Championship 2026
+- `KXPGATOUR-TRC26` → Truist Championship 2026
+- `KXPGATOUR-ONMBC26` → ONEflight Myrtle Beach Classic 2026
+- `KXLIVTOUR-LIGV26` → LIV Golf Virginia 2026
+- `KXDPWORLDTOUR-ESDCC26` → Estrella Damm Catalunya Championship 2026
+- `KXLPGATOUR-MIZAO26` → Mizuho Americas Open 2026
+
+**Lesson**: identify a Golf tournament by `(sport=Golf, base, handle)`. All 12 sub-markets attach automatically — same insight as MMA's per-fight identity, but scoped to a tournament instead of a fixture.
 
 ### MMA fighter abbreviations — clean G1, all sub-markets share identity
 
