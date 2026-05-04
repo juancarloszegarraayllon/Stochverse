@@ -203,6 +203,12 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-event-tab{background:transparent;border:0;color:var(--text-muted);font-weight:700;font-size:9px;padding:2px 0;cursor:pointer;font-family:inherit;letter-spacing:.4px;text-transform:uppercase;border-bottom:2px solid transparent;flex-shrink:0;transition:color .12s ease,border-color .12s ease}
 .sp-c2-event-tab:hover{color:var(--text)}
 .sp-c2-event-tab.active{color:var(--green);border-bottom-color:var(--green)}
+/* 'More Markets' / 'Less' toggle — expands the per-event tab
+   strip in-place when an event has more than 5 card-class
+   markets. Visually de-emphasized vs the regular tabs (italic,
+   no underline) so it reads as a control, not a market choice. */
+.sp-c2-event-tab.sp-c2-event-tab-more{font-style:italic;color:var(--green);border-bottom:0;padding-left:6px}
+.sp-c2-event-tab.sp-c2-event-tab-more:hover{color:var(--text);text-decoration:underline}
 /* Matched (Kalshi market exists) gets a subtle accent. Lite (FL only)
    stays neutral so the eye is drawn to actionable rows. */
 .sp-c2-event.sp-c2-matched .sp-c2-team{color:var(--text)}
@@ -766,6 +772,7 @@ let _calendarMonth = null;       // Date pinned to first of the month being brow
 const _eventActiveMarketType = new Map();
 const _collapsedCountries = new Set();  // Set of country names
 const _expandedEvents = new Set();      // Event IDs with full outcome list shown (Load more toggled)
+const _expandedTabs = new Set();        // Event IDs with full tab strip shown (More Markets toggled)
 
 // View mode persists across reloads — same pattern as the
 // column splitter widths.
@@ -1110,6 +1117,17 @@ function renderCol2() {
   col2.querySelectorAll('.sp-c2-event-tab').forEach(el => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
+      // 'More Markets' / 'Less' toggle — flips the per-event tab
+      // expansion state and re-renders. Doesn't change the active
+      // market.
+      if (el.classList.contains('sp-c2-event-tab-more')) {
+        const evId = el.dataset.eventId;
+        if (!evId) return;
+        if (_expandedTabs.has(evId)) _expandedTabs.delete(evId);
+        else _expandedTabs.add(evId);
+        renderCol2();
+        return;
+      }
       const wrap = el.closest('.sp-c2-event');
       if (!wrap) return;
       const evId = wrap.dataset.eventId;
@@ -1230,12 +1248,45 @@ function renderEventRow(ev, market, isMarketRow) {
     const types = eventMarketTypes(ev);
     if (types.length > 1) {
       const evActive = _eventActiveMarketType.get(ev.EVENT_ID) || '';
+      // Cap at 5 visible tabs. When > 5, show first 4 + a 'More
+      // Markets' toggle button. Click expands the strip in-place
+      // to show all tabs (state held in _expandedTabs per event
+      // ID). Active market always stays visible — if the user
+      // picked a tab that's beyond the first 4, we move it into
+      // the visible slot so they don't lose their place.
+      const TAB_CAP = 5;
+      const expandedHere = _expandedTabs.has(ev.EVENT_ID);
+      let visible = types;
+      let needsMore = false;
+      if (types.length > TAB_CAP && !expandedHere) {
+        visible = types.slice(0, TAB_CAP - 1);
+        // Make sure the active tab is in the visible set; if not,
+        // swap it into the last visible slot.
+        if (evActive && !visible.includes(evActive) && types.includes(evActive)) {
+          visible = visible.slice(0, TAB_CAP - 2);
+          visible.push(evActive);
+        }
+        needsMore = true;
+      }
       html += '<div class="sp-c2-event-tabs">';
-      for (const t of types) {
+      for (const t of visible) {
         const lbl = t === '' ? 'Winner' : t;
         const cls = 'sp-c2-event-tab' + (t === evActive ? ' active' : '');
         html += '<button class="' + cls + '" data-mtype="' + escH(t) +
                 '" type="button">' + escH(lbl) + '</button>';
+      }
+      if (needsMore) {
+        const moreCount = types.length - visible.length;
+        html += '<button class="sp-c2-event-tab sp-c2-event-tab-more" ' +
+                'data-event-id="' + escH(ev.EVENT_ID || '') + '" type="button" ' +
+                'title="Show all markets in the tab strip">+ ' +
+                moreCount + ' More</button>';
+      } else if (expandedHere && types.length > TAB_CAP) {
+        // Already expanded — show a "Less" toggle so the user
+        // can collapse back to the compact strip.
+        html += '<button class="sp-c2-event-tab sp-c2-event-tab-more" ' +
+                'data-event-id="' + escH(ev.EVENT_ID || '') + '" type="button" ' +
+                'data-collapse="1">Less</button>';
       }
       html += '</div>';
     }
