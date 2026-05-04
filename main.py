@@ -7489,11 +7489,17 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
         live = primary.get("_live_state") or {}
         primary_title = primary.get("title", "") or bare_title
         if not live or not isinstance(live, dict) or not live.get("aggregate_home"):
-            enriched = _enrich_record_live_state(primary_title, sport_name, primary)
-            if not enriched and primary_title != bare_title:
-                enriched = _enrich_record_live_state(bare_title, sport_name, primary)
-            if enriched:
-                live = enriched
+            try:
+                enriched = _enrich_record_live_state(primary_title, sport_name, primary)
+                if not enriched and primary_title != bare_title:
+                    enriched = _enrich_record_live_state(bare_title, sport_name, primary)
+                if enriched:
+                    live = enriched
+            except Exception:
+                # A bad enrichment for one matchup shouldn't blow up
+                # the whole /sports response. Silently fall through
+                # with the original (empty) live dict.
+                pass
         agg_label = live.get("aggregate_label") if isinstance(live, dict) else None
         agg_h = live.get("aggregate_home") if isinstance(live, dict) else None
         agg_a = live.get("aggregate_away") if isinstance(live, dict) else None
@@ -8197,7 +8203,8 @@ async def debug_enrich_trace(title: str = "", sport: str = "Soccer"):
 
     # Step 7 — End-to-end _enrich_record_live_state output
     try:
-        ls = _enrich_record_live_state(title, sport, _matched_rc if '_matched_rc' in dir() else None)
+        _mrc = locals().get('_matched_rc')
+        ls = _enrich_record_live_state(title, sport, _mrc)
         out["steps"]["step7_final_live_state"] = ls or {}
     except Exception as e:
         out["steps"]["step7_final_live_state_error"] = str(e)
@@ -8509,9 +8516,13 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                 # enriches per-request. /sports has to do the same so
                 # aggregate / series / clock fields actually populate.
                 if not live or not isinstance(live, dict) or not live.get("aggregate_home"):
-                    _enriched = _enrich_record_live_state(primary.get("title", ""), kalshi_sport, primary)
-                    if _enriched:
-                        live = _enriched
+                    try:
+                        _enriched = _enrich_record_live_state(primary.get("title", ""), kalshi_sport, primary)
+                        if _enriched:
+                            live = _enriched
+                    except Exception:
+                        # Don't let one bad event kill the response
+                        pass
                 # Aggregate fallback for matched soccer cup ties.
                 # Cache build's _enrich_soccer_aggregate is best-
                 # effort and sometimes runs before SofaScore has
