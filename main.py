@@ -8842,12 +8842,167 @@ async def sports_feed(sport_id: int, timezone: int = 0,
                 "events": events_out,
             })
 
+    # Second-pass attach — universal fallback. For any FL event the
+    # main loop left without a kalshi block, scan the cache for an
+    # unmatched h2h Kalshi record whose teams overlap with the FL
+    # fixture's HOME_NAME/AWAY_NAME and whose ticker date matches.
+    # Runs irrespective of why the main loop failed (match_game miss,
+    # corroboration reject, date-drift on wrong leg, alias mismatch),
+    # so we don't keep needing one targeted fix per regression. Same
+    # sport → idx is already _sport-filtered upstream, so this can't
+    # cross-pollinate between sports. Multiple records (Winner +
+    # Spreads + Totals + ...) sharing the same fixture are grouped
+    # into a single attachment, mirroring the main loop's shape.
+    if kalshi_sport and out_tournaments:
+        _records_all = _cache.get("data_all") or _cache.get("data") or []
+        # Pre-filter: same sport, h2h-shape title, not already matched.
+        _h2h_candidates = []
+        for r in _records_all:
+            if (r.get("_sport") or "") != kalshi_sport:
+                continue
+            tk = r.get("event_ticker") or ""
+            if not tk or tk in matched_kalshi_tickers:
+                continue
+            title = r.get("title") or ""
+            bare = _bare_matchup_from_title(title)
+            if not _is_head_to_head_title(bare):
+                continue
+            m = _HEAD_TO_HEAD_TITLE_RE.search(bare)
+            if not m:
+                continue
+            ka = bare[:m.start()].strip().lower()
+            kb = bare[m.end():].strip().lower()
+            if not ka or not kb:
+                continue
+            t_date = parse_game_date_from_ticker(tk)
+            _h2h_candidates.append({
+                "rec": r, "ka": ka, "kb": kb, "t_date": t_date, "bare": bare,
+            })
+
+        def _team_overlap(fl_team: str, k_team: str) -> bool:
+            """True iff any ≥3-char distinguishing token from fl_team
+            is equal-to / prefix-of / suffix-of a ≥3-char token in
+            k_team (longer side must be ≥5 chars for prefix). Mirror
+            of the corroboration check but bidirectional and agnostic
+            to which side has the truncation."""
+            fl_toks = [t for t in re.split(r"[^a-z0-9]+",
+                                           (fl_team or "").lower()) if t]
+            k_toks  = [t for t in re.split(r"[^a-z0-9]+",
+                                           (k_team or "").lower()) if t]
+            for ft in fl_toks:
+                if len(ft) < 3 or ft in _SPORT_VOCAB_TOKENS:
+                    continue
+                for kt in k_toks:
+                    if len(kt) < 3:
+                        continue
+                    if ft == kt:
+                        return True
+                    if len(kt) >= 5 and kt.startswith(ft):
+                        return True
+                    if len(ft) >= 5 and ft.startswith(kt):
+                        return True
+            return False
+
+        from datetime import datetime as _dt2, timezone as _tz2
+        for tournament_out in out_tournaments:
+            for ev_out in tournament_out["events"]:
+                if ev_out.get("kalshi"):
+                    continue
+                fl_home = ev_out.get("HOME_NAME") or ""
+                fl_away = ev_out.get("AWAY_NAME") or ""
+                if not fl_home or not fl_away:
+                    continue
+                # Include FL's short codes (SHORTNAME_HOME = 'PSG' /
+                # 'BMU' / 'ARS' …) so when Kalshi titles use the
+                # abbreviation and FL ships the spelled-out name,
+                # the overlap still resolves.
+                fl_home_search = fl_home + " " + (ev_out.get("SHORTNAME_HOME") or "")
+                fl_away_search = fl_away + " " + (ev_out.get("SHORTNAME_AWAY") or "")
+                fl_start_ms = ev_out.get("START_TIME") or 0
+                fl_date = None
+                if fl_start_ms:
+                    try:
+                        fl_date = _dt2.fromtimestamp(
+                            fl_start_ms, tz=_tz2.utc).date()
+                    except Exception:
+                        fl_date = None
+                # Find all candidates whose teams overlap with this
+                # FL fixture (try both orientations) AND whose ticker
+                # date is within ±1 day of FL date (or ticker has no
+                # parseable date — props / season-long markets).
+                hits = []
+                for cand in _h2h_candidates:
+                    matched = (
+                        (_team_overlap(fl_home_search, cand["ka"]) and
+                         _team_overlap(fl_away_search, cand["kb"])) or
+                        (_team_overlap(fl_home_search, cand["kb"]) and
+                         _team_overlap(fl_away_search, cand["ka"]))
+                    )
+                    if not matched:
+                        continue
+                    if fl_date and cand["t_date"]:
+                        if abs((cand["t_date"] - fl_date).days) > 1:
+                            continue
+                    hits.append(cand)
+                if not hits:
+                    continue
+                # Group hits by their bare-matchup so the same fixture's
+                # markets bundle together. Pick a primary (no market_type
+                # = headline Winner) for the kalshi block's top-level
+                # ticker. Mirror of the main loop's shape so the frontend
+                # treats these identically.
+                hit_records = [h["rec"] for h in hits]
+                primary = None
+                for r in hit_records:
+                    if not _market_type_from_title(r.get("title", "")):
+                        primary = r
+                        break
+                if not primary:
+                    primary = hit_records[0]
+                _markets = []
+                for r in hit_records:
+                    tk = r.get("event_ticker") or ""
+                    if tk:
+                        matched_kalshi_tickers.add(tk)
+                    _markets.append({
+                        "event_ticker":  tk,
+                        "title":         r.get("title", ""),
+                        "series_ticker": r.get("series_ticker", ""),
+                        "market_type":   _market_type_from_title(r.get("title", "")),
+                        "outcomes":      _extract_all_outcomes(r),
+                    })
+                _primary_prices = _extract_winner_prices(
+                    primary, fl_home, fl_away)
+                # Live-state enrichment for this freshly-attached pair —
+                # same path the main loop uses. Wrapped defensively so
+                # a single bad enrichment doesn't kill the response.
+                _live2 = {}
+                try:
+                    _live2 = _enrich_record_live_state(
+                        primary.get("title", ""), kalshi_sport, primary) or {}
+                except Exception:
+                    _live2 = {}
+                ev_out["kalshi"] = {
+                    "event_ticker":  primary.get("event_ticker", ""),
+                    "title":         primary.get("title", ""),
+                    "series_ticker": primary.get("series_ticker", ""),
+                    "count":         len(_markets),
+                    "markets":       _markets,
+                    "primary_prices": _primary_prices,
+                    "aggregate_home":  _live2.get("aggregate_home"),
+                    "aggregate_away":  _live2.get("aggregate_away"),
+                    "aggregate_label": _live2.get("aggregate_label"),
+                    "series_home_wins": _live2.get("series_home_wins"),
+                    "series_away_wins": _live2.get("series_away_wins"),
+                    "series_summary":   _live2.get("series_summary"),
+                }
+
     # Kalshi h2h markets without an FL pair (e.g. UCL men's match
     # tomorrow — Kalshi opens the market days ahead, FL hasn't
     # surfaced the fixture yet). Bucketed by inferred league →
     # region so they appear under Europe / South America / etc.
-    # alongside FL fixtures. Run AFTER the regular index walk so
-    # we know which tickers FL paired.
+    # alongside FL fixtures. Run AFTER the regular index walk and
+    # the second-pass attach so we know which tickers FL paired.
     unpaired_h2h_tournaments = (
         _collect_unpaired_h2h_for_sport(kalshi_sport, matched_kalshi_tickers, target_date)
         if kalshi_sport else []
