@@ -809,3 +809,265 @@ class TestOutcomeSideClassification:
         assert _classify_outcome_side(
             "", registry_seeded_ucl, fx,
         ) is None
+
+
+# ── Phase C2c: per_leg market-layer (tennis sets, esports maps) ──
+
+class TestPerLegMarketLayer:
+    """Phase C2c — per_leg Kalshi tickers (e.g. KXATPSETWINNER for
+    tennis sets, KXLOLMAP for League of Legends maps) resolve to
+    their PARENT fixture (the match) plus a parameterized sub-market
+    for the specific leg.
+
+    Parent fixture aliasing via source='kalshi'; the parameterized
+    Set Winner / Map Winner Market aliases via 'kalshi_market'.
+    """
+
+    @pytest.fixture
+    def registry_tennis_match(self):
+        """One tennis match between Hijikata (HIJ) and Basavareddy
+        (BAS) on 2026-05-05."""
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_atp",
+                    "NAME": "ATP Test Tournament",
+                    "EVENTS": [
+                        {
+                            "EVENT_ID":       "fl_hijbas",
+                            "HOME_NAME":      "Hijikata",
+                            "AWAY_NAME":      "Basavareddy",
+                            "SHORTNAME_HOME": "HIJ",
+                            "SHORTNAME_AWAY": "BAS",
+                            "START_TIME":     _ts(2026, 5, 5, 18, 0),
+                        },
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Tennis")
+        return r
+
+    @pytest.fixture
+    def registry_esports_match(self):
+        """One LoL series ZYB vs SLY on 2026-05-07."""
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_lol",
+                    "NAME": "LoL Test Tournament",
+                    "EVENTS": [
+                        {
+                            "EVENT_ID":       "fl_zybsly",
+                            "HOME_NAME":      "Zybertech",
+                            "AWAY_NAME":      "Sly Wolves",
+                            "SHORTNAME_HOME": "ZYB",
+                            "SHORTNAME_AWAY": "SLY",
+                            "START_TIME":     _ts(2026, 5, 7, 15, 0),
+                        },
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Esports")
+        return r
+
+    def test_tennis_set_pairs_to_parent_fixture(
+        self, registry_tennis_match,
+    ):
+        """KXATPSETWINNER-26MAY05HIJBAS-1 — set 1 of the HIJ-BAS
+        match. Parent fixture must be paired and a Set Winner
+        market with leg_n=1 must be registered."""
+        rec = {
+            "event_ticker":  "KXATPSETWINNER-26MAY05HIJBAS-1",
+            "series_ticker": "KXATPSETWINNER",
+            "outcomes": [
+                {"label": "Hijikata",     "ticker": "T-HIJ-S1"},
+                {"label": "Basavareddy",  "ticker": "T-BAS-S1"},
+            ],
+        }
+        fx = seed_kalshi_record(registry_tennis_match, rec, "Tennis")
+        assert fx is not None
+        # Parent fixture aliased via source='kalshi'
+        a = registry_tennis_match.resolve_alias(
+            "kalshi", "KXATPSETWINNER-26MAY05HIJBAS-1",
+        )
+        assert a is not None
+        assert a.canonical_id.startswith("fixture:")
+        # MarketType = Set Winner, parameterized
+        mt = registry_tennis_match.resolve_market_type(
+            "market_type:tennis:set-winner",
+        )
+        assert mt is not None
+        assert mt.parameterized is True
+        # Market with leg_n=1 created
+        mkt_alias = registry_tennis_match.resolve_alias(
+            "kalshi_market", "KXATPSETWINNER-26MAY05HIJBAS-1",
+        )
+        assert mkt_alias is not None
+        market = registry_tennis_match.resolve_market(
+            mkt_alias.canonical_id,
+        )
+        assert market is not None
+        assert ("leg_n", 1) in market.params
+        # Two outcomes (home/away — sets have no tie)
+        assert registry_tennis_match.stats()["outcomes"] == 2
+
+    def test_set_2_creates_distinct_market(
+        self, registry_tennis_match,
+    ):
+        """Set 1 and Set 2 of the same match → distinct canonical
+        Markets (different leg_n params)."""
+        rec1 = {
+            "event_ticker":  "KXATPSETWINNER-26MAY05HIJBAS-1",
+            "series_ticker": "KXATPSETWINNER",
+            "outcomes": [
+                {"label": "Hijikata",    "ticker": "T-HIJ-S1"},
+                {"label": "Basavareddy", "ticker": "T-BAS-S1"},
+            ],
+        }
+        rec2 = {
+            "event_ticker":  "KXATPSETWINNER-26MAY05HIJBAS-2",
+            "series_ticker": "KXATPSETWINNER",
+            "outcomes": [
+                {"label": "Hijikata",    "ticker": "T-HIJ-S2"},
+                {"label": "Basavareddy", "ticker": "T-BAS-S2"},
+            ],
+        }
+        seed_kalshi_record(registry_tennis_match, rec1, "Tennis")
+        seed_kalshi_record(registry_tennis_match, rec2, "Tennis")
+        # Both markets exist, distinct IDs
+        assert registry_tennis_match.stats()["markets"] == 2
+        m1 = registry_tennis_match.resolve_alias(
+            "kalshi_market", "KXATPSETWINNER-26MAY05HIJBAS-1",
+        ).canonical_id
+        m2 = registry_tennis_match.resolve_alias(
+            "kalshi_market", "KXATPSETWINNER-26MAY05HIJBAS-2",
+        ).canonical_id
+        assert m1 != m2
+
+    def test_esports_map_pairs_to_parent_fixture(
+        self, registry_esports_match,
+    ):
+        """KXLOLMAP-26MAY071500ZYBSLY-1 — map 1 of the ZYB-SLY
+        series. Parent fixture paired, Map Winner market with
+        leg_n=1 registered."""
+        rec = {
+            "event_ticker":  "KXLOLMAP-26MAY071500ZYBSLY-1",
+            "series_ticker": "KXLOLMAP",
+            "outcomes": [
+                {"label": "Zybertech",   "ticker": "T-ZYB-M1"},
+                {"label": "Sly Wolves",  "ticker": "T-SLY-M1"},
+            ],
+        }
+        fx = seed_kalshi_record(registry_esports_match, rec, "Esports")
+        assert fx is not None
+        # MarketType = Map Winner
+        mt = registry_esports_match.resolve_market_type(
+            "market_type:esports:map-winner",
+        )
+        assert mt is not None
+        assert mt.parameterized is True
+        # Market with leg_n=1
+        mkt_alias = registry_esports_match.resolve_alias(
+            "kalshi_market", "KXLOLMAP-26MAY071500ZYBSLY-1",
+        )
+        assert mkt_alias is not None
+        market = registry_esports_match.resolve_market(
+            mkt_alias.canonical_id,
+        )
+        assert ("leg_n", 1) in market.params
+
+    def test_unmapped_sport_skips_market_layer(self):
+        """Sports without a per_leg market-type entry in
+        _PER_LEG_MARKET_TYPES (e.g. Soccer — no per-set sub-markets)
+        leave the per_leg ticker unpaired. Defensive: they typically
+        wouldn't ship per_leg shaped tickers anyway."""
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_x",
+                    "NAME": "Test League",
+                    "EVENTS": [
+                        {
+                            "EVENT_ID":       "fl_x",
+                            "HOME_NAME":      "Foo",
+                            "AWAY_NAME":      "Bar",
+                            "SHORTNAME_HOME": "FOO",
+                            "SHORTNAME_AWAY": "BAR",
+                            "START_TIME":     _ts(2026, 5, 5),
+                        },
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Soccer")
+        rec = {
+            "event_ticker":  "KXMADESETWINNER-26MAY05FOOBAR-1",
+            "series_ticker": "KXMADESETWINNER",
+        }
+        # Soccer + per_leg → no MarketType configured. Parent fixture
+        # gets aliased but no market layer surfaced.
+        fx = seed_kalshi_record(r, rec, "Soccer")
+        assert fx is not None
+        assert r.resolve_alias(
+            "kalshi", "KXMADESETWINNER-26MAY05FOOBAR-1",
+        ) is not None
+        assert r.resolve_alias(
+            "kalshi_market", "KXMADESETWINNER-26MAY05FOOBAR-1",
+        ) is None
+        assert r.stats()["markets"] == 0
+
+    def test_per_leg_no_parent_fixture_returns_none(self):
+        """If FL doesn't have the parent match registered, the
+        per_leg ticker can't pair — returns None and writes nothing."""
+        r = IdentityRegistry()
+        rec = {
+            "event_ticker":  "KXATPSETWINNER-26MAY05HIJBAS-1",
+            "series_ticker": "KXATPSETWINNER",
+        }
+        fx = seed_kalshi_record(r, rec, "Tennis")
+        assert fx is None
+        assert r.resolve_alias(
+            "kalshi", "KXATPSETWINNER-26MAY05HIJBAS-1",
+        ) is None
+
+    def test_idempotent_per_leg(self, registry_tennis_match):
+        rec = {
+            "event_ticker":  "KXATPSETWINNER-26MAY05HIJBAS-1",
+            "series_ticker": "KXATPSETWINNER",
+            "outcomes": [
+                {"label": "Hijikata",    "ticker": "T-HIJ-S1"},
+                {"label": "Basavareddy", "ticker": "T-BAS-S1"},
+            ],
+        }
+        seed_kalshi_record(registry_tennis_match, rec, "Tennis")
+        before = registry_tennis_match.stats()
+        seed_kalshi_record(registry_tennis_match, rec, "Tennis")
+        after = registry_tennis_match.stats()
+        assert before == after
+
+    def test_batch_seeder_per_leg_stats(self, registry_tennis_match):
+        records = [
+            {"event_ticker":  "KXATPSETWINNER-26MAY05HIJBAS-1",
+             "series_ticker": "KXATPSETWINNER",
+             "outcomes": [
+                 {"label": "Hijikata",    "ticker": "T-HIJ-S1"},
+                 {"label": "Basavareddy", "ticker": "T-BAS-S1"},
+             ]},
+            {"event_ticker":  "KXATPSETWINNER-26MAY05HIJBAS-2",
+             "series_ticker": "KXATPSETWINNER",
+             "outcomes": [
+                 {"label": "Hijikata",    "ticker": "T-HIJ-S2"},
+                 {"label": "Basavareddy", "ticker": "T-BAS-S2"},
+             ]},
+        ]
+        stats = seed_kalshi_records(
+            registry_tennis_match, records, "Tennis",
+        )
+        assert stats["paired_per_leg"] == 2
+        assert stats["paired_strict"]  == 0
+        assert stats["unpaired"]       == 0
