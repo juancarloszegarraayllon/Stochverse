@@ -579,3 +579,33 @@ def test_v3_route_dispatches_via_v_param():
             assert called["v3"] is True
             assert called["v2"] is False
             assert result["source"] == "flashlive+kalshi+v3"
+
+
+def test_default_route_dispatches_to_v3():
+    """Phase C2c-c2 stage-2 promotion — unflagged
+    /api/sports/{sport_id}/feed should now route through v3 by
+    default (registry-based pairing). v2 and v1 remain accessible
+    via explicit ?v=2 / ?v=1 query params for the safety-window /
+    rollback paths.
+    """
+    import main
+    called = {"v2": False, "v3": False}
+
+    async def fake_v2(*args, **kwargs):
+        called["v2"] = True
+        return {"source": "flashlive+kalshi+v2"}
+
+    async def fake_v3(*args, **kwargs):
+        called["v3"] = True
+        return {"source": "flashlive+kalshi+v3"}
+
+    with patch.object(main, "sports_feed_v2", side_effect=fake_v2):
+        with patch.object(main, "sports_feed_v3", side_effect=fake_v3):
+            # No `v` argument → uses route default. After C2c-c2
+            # stage-2, that's v=3.
+            result = asyncio.run(main.sports_feed(
+                sport_id=1, timezone=0, indent_days=0,
+            ))
+            assert called["v3"] is True
+            assert called["v2"] is False
+            assert result["source"] == "flashlive+kalshi+v3"
