@@ -1,0 +1,104 @@
+{
+  "sample_size": 5,
+  "sport_filter": "Lacrosse",
+  "base_count": 4,
+  "bases": [
+    {
+      "base": "KXNCAAMLAX",
+      "total": 2,
+      "patterns": {
+        "G1_date_teams": 2
+      },
+      "examples": {
+        "G1_date_teams": [
+          {
+            "ticker": "KXNCAAMLAXGAME-26MAY06ROBJAC",
+            "suffix": "26MAY06ROBJAC",
+            "groups": [
+              "26MAY06",
+              "ROBJAC"
+            ]
+          },
+          {
+            "ticker": "KXNCAAMLAXGAME-26MAY06MARSTO",
+            "suffix": "26MAY06MARSTO",
+            "groups": [
+              "26MAY06",
+              "MARSTO"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+        "6": 2
+      }
+    },
+    {
+      "base": "KXLAXTEWAARATON",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXLAXTEWAARATON-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXNCAALAXFINAL",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXNCAALAXFINAL-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXNCAAMLAXF4",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXNCAAMLAXF4-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    }
+  ]
+}
