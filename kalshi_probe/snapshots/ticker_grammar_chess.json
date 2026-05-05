@@ -1,188 +1,86 @@
 {
-  "sample_size": 23,
-  "sport_filter": "Cricket",
-  "base_count": 6,
+  "sample_size": 10,
+  "sport_filter": "Chess",
+  "base_count": 7,
   "bases": [
     {
-      "base": "KXIPL",
-      "total": 9,
+      "base": "KXCHESSFIDERATING",
+      "total": 3,
       "patterns": {
-        "G4_short_int": 1,
-        "G1_date_teams": 8
+
+      },
+      "examples": {
+
+      },
+      "unparsed": [
+        {
+          "ticker": "KXCHESSFIDERATING-26JUNR3",
+          "suffix": "26JUNR3"
+        },
+        {
+          "ticker": "KXCHESSFIDERATING-26JUNR2",
+          "suffix": "26JUNR2"
+        },
+        {
+          "ticker": "KXCHESSFIDERATING-26JUNR1",
+          "suffix": "26JUNR1"
+        }
+      ],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXCHESSNORWAY",
+      "total": 2,
+      "patterns": {
+        "G4_short_int": 1
       },
       "examples": {
         "G4_short_int": [
           {
-            "ticker": "KXIPL-26",
+            "ticker": "KXCHESSNORWAY-26",
             "suffix": "26",
             "groups": [
               "26"
             ]
           }
-        ],
-        "G1_date_teams": [
-          {
-            "ticker": "KXIPLGAME-26MAY11DCPBKS",
-            "suffix": "26MAY11DCPBKS",
-            "groups": [
-              "26MAY11",
-              "DCPBKS"
-            ]
-          },
-          {
-            "ticker": "KXIPLGAME-26MAY10MIRCB",
-            "suffix": "26MAY10MIRCB",
-            "groups": [
-              "26MAY10",
-              "MIRCB"
-            ]
-          },
-          {
-            "ticker": "KXIPLGAME-26MAY10LSGCSK",
-            "suffix": "26MAY10LSGCSK",
-            "groups": [
-              "26MAY10",
-              "LSGCSK"
-            ]
-          }
         ]
       },
-      "unparsed": [],
+      "unparsed": [
+        {
+          "ticker": "KXCHESSNORWAY-26WOMEN",
+          "suffix": "26WOMEN"
+        }
+      ],
       "team_abbr_lengths": {
-        "6": 3,
-        "5": 3,
-        "4": 1,
-        "7": 1
+
       }
     },
     {
-      "base": "KXIPLTEAM",
-      "total": 4,
+      "base": "KXCHESSWORLDCHAMPION",
+      "total": 1,
       "patterns": {
-        "G1_date_teams": 4
+        "G5_handle": 1
       },
       "examples": {
-        "G1_date_teams": [
+        "G5_handle": [
           {
-            "ticker": "KXIPLTEAMTOTAL-26MAY09GTRR",
-            "suffix": "26MAY09GTRR",
+            "ticker": "KXCHESSWORLDCHAMPION-CHESS26",
+            "suffix": "CHESS26",
             "groups": [
-              "26MAY09",
-              "GTRR"
-            ]
-          },
-          {
-            "ticker": "KXIPLTEAMTOTAL-26MAY07RCBLSG",
-            "suffix": "26MAY07RCBLSG",
-            "groups": [
-              "26MAY07",
-              "RCBLSG"
-            ]
-          },
-          {
-            "ticker": "KXIPLTEAMTOTAL-26MAY06PBKSSRH",
-            "suffix": "26MAY06PBKSSRH",
-            "groups": [
-              "26MAY06",
-              "PBKSSRH"
+              "CHESS26"
             ]
           }
         ]
       },
       "unparsed": [],
       "team_abbr_lengths": {
-        "4": 1,
-        "6": 1,
-        "7": 1,
-        "5": 1
+
       }
     },
     {
-      "base": "KXIPLSIX",
-      "total": 4,
-      "patterns": {
-        "G1_date_teams": 4
-      },
-      "examples": {
-        "G1_date_teams": [
-          {
-            "ticker": "KXIPLSIX-26MAY09GTRR",
-            "suffix": "26MAY09GTRR",
-            "groups": [
-              "26MAY09",
-              "GTRR"
-            ]
-          },
-          {
-            "ticker": "KXIPLSIX-26MAY07RCBLSG",
-            "suffix": "26MAY07RCBLSG",
-            "groups": [
-              "26MAY07",
-              "RCBLSG"
-            ]
-          },
-          {
-            "ticker": "KXIPLSIX-26MAY06PBKSSRH",
-            "suffix": "26MAY06PBKSSRH",
-            "groups": [
-              "26MAY06",
-              "PBKSSRH"
-            ]
-          }
-        ]
-      },
-      "unparsed": [],
-      "team_abbr_lengths": {
-        "4": 1,
-        "6": 1,
-        "7": 1,
-        "5": 1
-      }
-    },
-    {
-      "base": "KXIPLFOUR",
-      "total": 4,
-      "patterns": {
-        "G1_date_teams": 4
-      },
-      "examples": {
-        "G1_date_teams": [
-          {
-            "ticker": "KXIPLFOUR-26MAY09GTRR",
-            "suffix": "26MAY09GTRR",
-            "groups": [
-              "26MAY09",
-              "GTRR"
-            ]
-          },
-          {
-            "ticker": "KXIPLFOUR-26MAY07RCBLSG",
-            "suffix": "26MAY07RCBLSG",
-            "groups": [
-              "26MAY07",
-              "RCBLSG"
-            ]
-          },
-          {
-            "ticker": "KXIPLFOUR-26MAY06PBKSSRH",
-            "suffix": "26MAY06PBKSSRH",
-            "groups": [
-              "26MAY06",
-              "PBKSSRH"
-            ]
-          }
-        ]
-      },
-      "unparsed": [],
-      "team_abbr_lengths": {
-        "4": 1,
-        "6": 1,
-        "7": 1,
-        "5": 1
-      }
-    },
-    {
-      "base": "KXIPLPLAYOFF",
+      "base": "KXCHESSOLYMPIAD",
       "total": 1,
       "patterns": {
         "G4_short_int": 1
@@ -190,7 +88,7 @@
       "examples": {
         "G4_short_int": [
           {
-            "ticker": "KXIPLPLAYOFF-26",
+            "ticker": "KXCHESSOLYMPIAD-26",
             "suffix": "26",
             "groups": [
               "26"
@@ -204,26 +102,69 @@
       }
     },
     {
-      "base": "KXT20",
+      "base": "KXCHESSOLYMPIADUSA",
       "total": 1,
       "patterns": {
-        "G1_date_teams": 1
+        "G4_short_int": 1
       },
       "examples": {
-        "G1_date_teams": [
+        "G4_short_int": [
           {
-            "ticker": "KXT20MATCH-26MAY04IDNMAL",
-            "suffix": "26MAY04IDNMAL",
+            "ticker": "KXCHESSOLYMPIADUSA-26",
+            "suffix": "26",
             "groups": [
-              "26MAY04",
-              "IDNMAL"
+              "26"
             ]
           }
         ]
       },
       "unparsed": [],
       "team_abbr_lengths": {
-        "6": 1
+
+      }
+    },
+    {
+      "base": "KXCHESSGRANDTOUR",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXCHESSGRANDTOUR-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXCHESSPOLAND",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXCHESSPOLAND-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
       }
     }
   ]
