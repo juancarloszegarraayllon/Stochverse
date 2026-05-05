@@ -8082,6 +8082,167 @@ def _parse_title_teams(title: str) -> tuple:
     return ("", "")
 
 
+@app.get("/api/_debug/sports_join_diff")
+async def debug_sports_join_diff(sport_id: int, indent_days: int = 0,
+                                  timezone: int = 0):
+    """Compare v1 pairing behavior vs v2 (kalshi_join.py) for a given
+    (sport_id, indent_days). Used to gate /sports v2 promotion.
+
+    v2 = kalshi_identity.parse_ticker + kalshi_join.join_with_fl
+    v1 = the existing _build_kalshi_index_for_sport + corroboration
+         + second-pass attach pipeline (read by counting pairings
+         in the existing /api/sports/{}/feed response).
+
+    Output:
+      {
+        sport, sport_id, indent_days,
+        v1: { paired_fl_events, paired_kalshi_records, unpaired_kalshi },
+        v2: { paired_fl_events, paired_kalshi_records, unpaired_kalshi,
+              unpaired_buckets },
+        diff: {
+          pairing_rate_v1_pct, pairing_rate_v2_pct,
+          v2_only_pairings: [...],   # FL events v2 paired that v1 missed
+          v1_only_pairings: [...],   # FL events v1 paired that v2 missed
+          identical_pairings: int,
+        }
+      }
+
+    Per SPORTS_V2_PLAN.md §5 promotion criteria, v2 should never
+    regress (pairing_rate_v2 >= pairing_rate_v1). v2_only is the
+    expected source of improvements; v1_only flags potential issues.
+    """
+    from flashlive_feed import _fl_get
+    from kalshi_join import build_kalshi_index, join_with_fl, find_unpaired_buckets
+
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+
+    # Resolve sport name
+    sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
+    if not sport:
+        return {"error": f"no Kalshi sport mapping for FL sport_id={sport_id}"}
+
+    # Fetch FL events list (same as the live /api/sports/{}/feed handler does)
+    fl_data = None
+    if -7 <= indent_days <= 7:
+        try:
+            fl_data = await _fl_get("/v1/events/list", {
+                "sport_id": sport_id, "timezone": timezone,
+                "indent_days": indent_days,
+            })
+        except Exception:
+            fl_data = None
+
+    fl_events: list = []
+    fl_event_ids_with_kalshi = set()  # populated below from v1 path
+    for t in ((fl_data or {}).get("DATA") or []):
+        for ev in (t.get("EVENTS") or []):
+            if isinstance(ev, dict):
+                fl_events.append(ev)
+
+    # v1 pairing — use the existing _build_kalshi_index_for_sport
+    v1_pairings = []
+    v1_paired_records = 0
+    v1_paired_event_ids = set()
+    try:
+        v1_idx = _build_kalshi_index_for_sport(sport)
+        for ev in fl_events:
+            fl_id = ev.get("EVENT_ID") or ""
+            v1_recs = v1_idx.get(fl_id) or []
+            if v1_recs:
+                v1_paired_records += len(v1_recs)
+                v1_paired_event_ids.add(fl_id)
+                v1_pairings.append({
+                    "fl_event_id": fl_id,
+                    "fl_short": [ev.get("SHORTNAME_HOME") or "",
+                                 ev.get("SHORTNAME_AWAY") or ""],
+                    "kalshi_count": len(v1_recs),
+                    "tickers": [r.get("event_ticker", "") for r in v1_recs],
+                })
+    except Exception as e:
+        return {"error": f"v1 pairing crashed: {e!r}"}
+
+    # v2 pairing — kalshi_join.py
+    get_data()
+    cache_records = _cache.get("data_all") or _cache.get("data") or []
+    v2_idx = build_kalshi_index(cache_records, sport)
+    v2_pairings, v2_unpaired = join_with_fl(fl_events, v2_idx, sport)
+    v2_buckets = find_unpaired_buckets(v2_unpaired, sport)
+
+    v2_paired_records = sum(len(p.kalshi_records) for p in v2_pairings)
+    v2_paired_event_ids = set()
+    v2_pairings_serialized = []
+    for p in v2_pairings:
+        fl_id = p.fl_event.get("EVENT_ID") or ""
+        v2_paired_event_ids.add(fl_id)
+        v2_pairings_serialized.append({
+            "fl_event_id": fl_id,
+            "fl_short": [p.fl_event.get("SHORTNAME_HOME") or "",
+                         p.fl_event.get("SHORTNAME_AWAY") or ""],
+            "date": p.fl_identity.date.isoformat() if p.fl_identity.date else None,
+            "time": p.fl_identity.time,
+            "kalshi_count": len(p.kalshi_records),
+            "tickers": [r.get("event_ticker", "") for r in p.kalshi_records],
+        })
+
+    # Diff
+    v2_only = v2_paired_event_ids - v1_paired_event_ids
+    v1_only = v1_paired_event_ids - v2_paired_event_ids
+    identical = v2_paired_event_ids & v1_paired_event_ids
+
+    fl_total = len(fl_events) or 1  # avoid /0
+    return {
+        "sport": sport,
+        "sport_id": sport_id,
+        "indent_days": indent_days,
+        "fl_total_events": len(fl_events),
+        "v1": {
+            "paired_fl_events": len(v1_paired_event_ids),
+            "paired_kalshi_records": v1_paired_records,
+            "pairings_sample": v1_pairings[:30],
+        },
+        "v2": {
+            "paired_fl_events": len(v2_paired_event_ids),
+            "paired_kalshi_records": v2_paired_records,
+            "unpaired_kalshi_records": len(v2_unpaired),
+            "unpaired_buckets": len(v2_buckets),
+            "pairings_sample": v2_pairings_serialized[:30],
+            "unpaired_buckets_sample": [
+                {"key": [str(x) if x is not None else None for x in key],
+                 "kalshi_count": len(recs),
+                 "sample_title": (recs[0].get("title") or "") if recs else "",
+                 "sample_tickers": [r.get("event_ticker", "") for r in recs[:5]]}
+                for key, recs in list(v2_buckets.items())[:30]
+            ],
+        },
+        "diff": {
+            "pairing_rate_v1_pct": round(100 * len(v1_paired_event_ids) / fl_total, 1),
+            "pairing_rate_v2_pct": round(100 * len(v2_paired_event_ids) / fl_total, 1),
+            "v2_only_pairings": [
+                {"fl_event_id": eid,
+                 "fl_short": next(
+                     ([ev.get("SHORTNAME_HOME") or "",
+                       ev.get("SHORTNAME_AWAY") or ""]
+                      for ev in fl_events if ev.get("EVENT_ID") == eid),
+                     ["?", "?"])}
+                for eid in list(v2_only)[:30]
+            ],
+            "v1_only_pairings": [
+                {"fl_event_id": eid,
+                 "fl_short": next(
+                     ([ev.get("SHORTNAME_HOME") or "",
+                       ev.get("SHORTNAME_AWAY") or ""]
+                      for ev in fl_events if ev.get("EVENT_ID") == eid),
+                     ["?", "?"])}
+                for eid in list(v1_only)[:30]
+            ],
+            "identical_pairings_count": len(identical),
+            "v2_only_count": len(v2_only),
+            "v1_only_count": len(v1_only),
+        },
+    }
+
+
 @app.get("/api/_debug/sports_inventory")
 async def debug_sports_inventory():
     """Sport-level inventory: every distinct _sport value in the
