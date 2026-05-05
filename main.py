@@ -9632,16 +9632,191 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
     }
 
 
+# ── /sports v3 — registry-based pairing (Phase C2c-c2) ────────────
+
+async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
+    """Registry-based feed handler. Replaces v2's kalshi_join chain
+    with pair_via_registry, which seeds an ephemeral IdentityRegistry
+    from FL+Kalshi inputs and reads back pairings via the canonical
+    alias index. Strict-date matching via Phase C2d's local_date —
+    no fuzz_days, no false positives across multi-game series.
+
+    Same response shape as v2 so the frontend doesn't change.
+    Source field is `'flashlive+kalshi+v3'` so consumers can tell
+    which path produced the response.
+
+    Architecture:
+      * Outrights, FL fetch, target_date, persistent hints, route_
+        unpaired, tournament shape — all reused unchanged from v2.
+      * The join step is the only difference: pair_via_registry
+        returns {fl_event_id: [kalshi_ticker]}, we look up the
+        original Kalshi cache records by ticker, then hand them to
+        _v2_build_kalshi_block (the same outcome/price extraction
+        v2 uses).
+    """
+    from flashlive_feed import _fl_get
+    from kalshi_join import find_unpaired_buckets
+    from registry_pairing import pair_via_registry
+
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    if not -12 <= timezone <= 12:
+        return {"error": "timezone must be between -12 and 12"}
+    if not -60 <= indent_days <= 60:
+        return {"error": "indent_days must be between -60 and 60"}
+
+    sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
+    from datetime import date as _date, timedelta as _td
+    target_date = (_date.today() + _td(days=indent_days)
+                   if indent_days != 0 else _date.today())
+
+    # Outrights — reuse v1's collector (same as v2)
+    outright_tournaments = (_collect_outrights_for_sport(sport, target_date)
+                            if sport else [])
+
+    # Fetch FL events list (only when within FL's ±7 day window)
+    fl_data = None
+    if -7 <= indent_days <= 7:
+        try:
+            fl_data = await _fl_get("/v1/events/list", {
+                "sport_id": sport_id, "timezone": timezone,
+                "indent_days": indent_days,
+            })
+        except Exception:
+            fl_data = None
+    fl_data = fl_data or {"DATA": []}
+
+    # Flatten FL events with their tournament context (same as v2).
+    fl_events_with_tournament: list = []
+    for t in (fl_data.get("DATA") or []):
+        for ev in (t.get("EVENTS") or []):
+            if isinstance(ev, dict):
+                fl_events_with_tournament.append((t, ev))
+
+    # Registry-based pairing.
+    get_data()
+    cache_records = _cache.get("data_all") or _cache.get("data") or []
+    sport_kalshi = [r for r in cache_records
+                      if (r.get("_sport") or "") == sport] if sport else []
+    pairings_dict: dict = {}
+    if sport:
+        pairings_dict = pair_via_registry(sport, fl_data, sport_kalshi)
+
+    # ticker → original Kalshi cache record (for downstream block build)
+    record_by_ticker = {(r.get("event_ticker") or ""): r
+                          for r in sport_kalshi}
+    matched_kalshi_tickers: set = set()
+
+    # Build out_tournaments preserving FL structure, attaching kalshi
+    # blocks for paired events.
+    seen_tournaments: dict = {}
+    tournament_order: list = []
+    for t, ev in fl_events_with_tournament:
+        t_key = t.get("TOURNAMENT_STAGE_ID") or t.get("NAME") or "?"
+        if t_key not in seen_tournaments:
+            seen_tournaments[t_key] = {
+                "TOURNAMENT_STAGE_ID": t.get("TOURNAMENT_STAGE_ID"),
+                "NAME":                t.get("NAME"),
+                "NAME_PART_1":         t.get("NAME_PART_1"),
+                "NAME_PART_2":         t.get("NAME_PART_2"),
+                "COUNTRY_NAME":        t.get("COUNTRY_NAME"),
+                "events":              [],
+            }
+            tournament_order.append(t_key)
+        ev_out = dict(ev)
+        fl_event_id = ev.get("EVENT_ID") or ""
+        ticker_list = pairings_dict.get(fl_event_id, []) or []
+        kalshi_records = [record_by_ticker[tk]
+                            for tk in ticker_list
+                            if tk in record_by_ticker]
+        if kalshi_records:
+            ev_out["kalshi"] = _v2_build_kalshi_block(
+                kalshi_records, sport,
+                ev.get("HOME_NAME") or "",
+                ev.get("AWAY_NAME") or "",
+            )
+            for tk in ticker_list:
+                if tk:
+                    matched_kalshi_tickers.add(tk)
+        else:
+            ev_out["kalshi"] = None
+        seen_tournaments[t_key]["events"].append(ev_out)
+    out_tournaments = [seen_tournaments[k] for k in tournament_order]
+
+    # Update persistent series routing hints (same logic as v2)
+    if sport:
+        from kalshi_identity import strip_known_suffix
+        import time as _t_hint
+        _now_hint = _t_hint.time()
+        for t_out in out_tournaments:
+            for ev in t_out.get("events") or []:
+                k = ev.get("kalshi") or {}
+                series = (k.get("series_ticker") or "").upper()
+                base, _ = strip_known_suffix(series)
+                if not base:
+                    continue
+                _SERIES_TOURNAMENT_HINTS[(sport, base)] = {
+                    "name":     t_out.get("NAME") or "",
+                    "country":  t_out.get("COUNTRY_NAME") or "",
+                    "stage_id": t_out.get("TOURNAMENT_STAGE_ID") or "",
+                    "ts":       _now_hint,
+                }
+
+    # Surface unpaired Kalshi as synthetic events (same path as v2,
+    # just sourced from the registry-computed unpaired set).
+    unpaired_tournaments: list = []
+    if sport and sport_kalshi:
+        paired_tickers: set = set()
+        for tlist in pairings_dict.values():
+            for tk in (tlist or []):
+                if tk:
+                    paired_tickers.add(tk)
+        unpaired_records = [r for r in sport_kalshi
+                              if (r.get("event_ticker") or "")
+                              not in paired_tickers]
+        if unpaired_records:
+            buckets = find_unpaired_buckets(unpaired_records, sport)
+            unpaired_tournaments, _routed = _v2_route_unpaired(
+                buckets, sport, out_tournaments, target_date,
+            )
+            for items in buckets.values():
+                for r in items:
+                    tk = r.get("event_ticker") or ""
+                    if tk:
+                        matched_kalshi_tickers.add(tk)
+
+    # Outrights count toward matched_kalshi_count (same as v2)
+    for t in outright_tournaments:
+        for ev in t.get("events") or []:
+            tk = (ev.get("kalshi") or {}).get("event_ticker")
+            if tk:
+                matched_kalshi_tickers.add(tk)
+
+    return {
+        "fl_sport_id":          sport_id,
+        "kalshi_sport":         sport,
+        "tournaments":          outright_tournaments
+                                + unpaired_tournaments
+                                + out_tournaments,
+        "matched_kalshi_count": len(matched_kalshi_tickers),
+        "source":               "flashlive+kalshi+v3",
+    }
+
+
 @app.get("/api/sports/{sport_id}/feed")
 async def sports_feed(sport_id: int, timezone: int = 0,
                        indent_days: int = 0, v: int = 1):
     """Sport-page feed — FL events for the sport_id merged with
     matched Kalshi market data. Drives /sports/:sport_id COL 2.
 
-    Feature flag: `?v=2` routes to the new identity-based handler
-    built on kalshi_identity / outcome_shapes / kalshi_join /
-    live_source_selector. v1 (the implementation below) is the
-    default until phase 6 promotes v2.
+    Feature flags:
+      `?v=2` — identity-based handler built on kalshi_identity /
+        outcome_shapes / kalshi_join / live_source_selector.
+      `?v=3` — registry-based handler (sports_feed_v3) that routes
+        through the canonical IdentityRegistry + pair_via_registry
+        with timezone-aware local_date matching (Phase C2c-c2 + C2d).
+      v1 (the implementation below) remains the default until
+      promotion criteria are met for either v2 or v3.
 
     Response (same shape for both v1 and v2):
       {
@@ -9667,6 +9842,8 @@ async def sports_feed(sport_id: int, timezone: int = 0,
     """
     if v == 2:
         return await sports_feed_v2(sport_id, timezone, indent_days)
+    if v == 3:
+        return await sports_feed_v3(sport_id, timezone, indent_days)
     # ── v1 (existing implementation, unchanged below) ───────────
     from flashlive_feed import _fl_get
     if not 1 <= sport_id <= 42:

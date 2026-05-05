@@ -478,3 +478,104 @@ def test_v2_pick_primary_soccer_kxuclgame_still_wins():
     ]
     primary = main._v2_pick_primary(records)
     assert primary["series_ticker"] == "KXUCLGAME"
+
+
+# ── /sports v3 — registry-based handler (Phase C2c-c2) ────────────
+
+def test_v3_response_shape(fake_cache_records, fake_fl_data):
+    """sports_feed_v3 returns the same v1/v2-compatible response
+    shape with `source: 'flashlive+kalshi+v3'`."""
+    import main
+
+    async def fake_fl_get(path, params=None):
+        return fake_fl_data
+
+    main._cache["data_all"] = fake_cache_records
+
+    with patch("flashlive_feed._fl_get", side_effect=fake_fl_get):
+        with patch.object(main, "get_data", lambda: None):
+            result = asyncio.run(main.sports_feed_v3(
+                sport_id=1, timezone=0, indent_days=0,
+            ))
+
+    assert result["fl_sport_id"]   == 1
+    assert result["kalshi_sport"]  == "Soccer"
+    assert result["source"]        == "flashlive+kalshi+v3"
+    assert "tournaments"           in result
+    assert "matched_kalshi_count"  in result
+
+
+def test_v3_paired_event_has_kalshi_block(
+    fake_cache_records, fake_fl_data,
+):
+    """Arsenal-Atletico FL event paired via registry → Kalshi block
+    populated with all 3 records (Game / Total / Spread). Same end-
+    to-end behavior as v2 for the canonical-pair case."""
+    import main
+
+    async def fake_fl_get(path, params=None):
+        return fake_fl_data
+
+    main._cache["data_all"] = fake_cache_records
+
+    with patch("flashlive_feed._fl_get", side_effect=fake_fl_get):
+        with patch.object(main, "get_data", lambda: None):
+            result = asyncio.run(main.sports_feed_v3(
+                sport_id=1, timezone=0, indent_days=0,
+            ))
+
+    fl_tournaments = [t for t in result["tournaments"]
+                       if t.get("TOURNAMENT_STAGE_ID") == "tour_ucl_playoffs"]
+    assert len(fl_tournaments) == 1
+    t = fl_tournaments[0]
+    assert len(t["events"]) == 1
+    ev = t["events"][0]
+    assert ev["EVENT_ID"] == "fl_arsatm"
+    k = ev["kalshi"]
+    assert k is not None
+    assert k["count"] == 3
+    for m in k["markets"]:
+        assert "26MAY05ARSATM" in m["event_ticker"]
+
+
+def test_v3_invalid_sport_id_returns_error():
+    import main
+    result = asyncio.run(main.sports_feed_v3(
+        sport_id=99, timezone=0, indent_days=0,
+    ))
+    assert "error" in result
+
+
+def test_v3_invalid_timezone_returns_error():
+    import main
+    result = asyncio.run(main.sports_feed_v3(
+        sport_id=1, timezone=99, indent_days=0,
+    ))
+    assert "error" in result
+
+
+def test_v3_route_dispatches_via_v_param():
+    """`?v=3` query param on /api/sports/{sport_id}/feed should
+    invoke sports_feed_v3, not v2 or v1. Quick sanity check on
+    the route-level dispatcher."""
+    import main
+    # Mock both v2 and v3 to record which got called.
+    called = {"v2": False, "v3": False}
+
+    async def fake_v2(*args, **kwargs):
+        called["v2"] = True
+        return {"source": "flashlive+kalshi+v2"}
+
+    async def fake_v3(*args, **kwargs):
+        called["v3"] = True
+        return {"source": "flashlive+kalshi+v3"}
+
+    with patch.object(main, "sports_feed_v2", side_effect=fake_v2):
+        with patch.object(main, "sports_feed_v3", side_effect=fake_v3):
+            # v=3 routes to v3
+            result = asyncio.run(main.sports_feed(
+                sport_id=1, timezone=0, indent_days=0, v=3,
+            ))
+            assert called["v3"] is True
+            assert called["v2"] is False
+            assert result["source"] == "flashlive+kalshi+v3"

@@ -708,8 +708,12 @@ async function loadSportNav() {
       .replace(/\b\w/g, c => c.toUpperCase());
     const count = counts[sid];
     const cls = 'sp-nav-item' + (sid === active ? ' active' : '');
-    const _navV2 = new URLSearchParams(window.location.search).get('v2') === '1' ? '?v2=1' : '';
-    html += '<a class="' + cls + '" href="/sports/' + sid + _navV2 + '">';
+    // Carry whichever feature flag the user landed with (v3 wins
+    // over v2 if both are somehow present — matches the fetch path).
+    const _navQs = new URLSearchParams(window.location.search);
+    const _navFlag = _navQs.get('v3') === '1' ? '?v3=1'
+                    : (_navQs.get('v2') === '1' ? '?v2=1' : '');
+    html += '<a class="' + cls + '" href="/sports/' + sid + _navFlag + '">';
     html += '<span class="sp-nav-name">' + escH(name) + '</span>';
     if (count != null && count > 0) {
       html += '<span class="sp-nav-count">' + escH(count) + '</span>';
@@ -807,10 +811,15 @@ async function loadEvents() {
     //   events: [{...FL fields..., kalshi: {event_ticker} | null}]}]}.
     // Each event carries a .kalshi field — rich (matched market) vs
     // lite (FL-only, no markets yet).
-    // Feature flag: ?v2=1 in the page URL routes to the v2 feed
-    // handler (identity-based join). Default = v1.
-    const _useV2 = new URLSearchParams(window.location.search).get('v2') === '1';
-    const _vQs = _useV2 ? '&v=2' : '';
+    // Feature flags (URL query, mutually-exclusive — v3 wins if both):
+    //   ?v3=1 → registry-based handler (Phase C2c-c2). Strict-date
+    //           matching with timezone-aware local_date. Most correct.
+    //   ?v2=1 → identity-based handler (kalshi_join). Pre-registry.
+    //   default → v1 (legacy fuzzy-match handler).
+    const _qs = new URLSearchParams(window.location.search);
+    const _useV3 = _qs.get('v3') === '1';
+    const _useV2 = !_useV3 && _qs.get('v2') === '1';
+    const _vQs = _useV3 ? '&v=3' : (_useV2 ? '&v=2' : '');
     const r = await fetch('/api/sports/' + sid + '/feed?indent_days=' + _indentDays + _vQs);
     _httpStatus = r.status;
     const text = await r.text();
