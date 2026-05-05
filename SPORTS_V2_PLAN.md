@@ -309,7 +309,24 @@ Single running list of every issue surfaced from live `/sports?v2=1` testing. On
 | 2026-05-05 | Basketball | KXNBAGAME-26MAY05LALOKC (LAL@OKC) FL row had no Kalshi block attached | FL/Kalshi NBA shortname divergence — added per-sport `_FL_ABBR_ALIASES` map in `kalshi_identity.py` (LAK↔LAL, OKL↔OKC, etc.) | `bdfe68b` |
 | 2026-05-05 | All | When FL has a fixture but Kalshi pairing fails, the Kalshi market vanished into a sibling 'Other: <ticker>' tournament instead of surfacing inside the FL tournament | Added `_V2_SAFETY_NET_LEAGUE_PATTERNS` map + `_v2_safety_net_target()` fallback in `_v2_route_unpaired` — fuzzy-matches series_base to FL tournament NAME substring as a tertiary routing fallback (after deterministic in-request match and persistent hint) | _next commit_ |
 | 2026-05-05 | UX | Outright/season-future tournaments were rendered at the TOP of side nav AND cards column, blocking the user from seeing live games | Reordered: outrights now `push` to bottom of side nav, cards column stable-sorts so outrights render last | `fed6818` |
-| 2026-05-05 | Basketball | DET-CLE WINNER tab rendered empty even though KXNBAGAME-26MAY05CLEDET was paired and the data was sitting in the markets array | `_v2_pick_primary` chose `KXNBASERIES` (no market_type, came first in records) over `KXNBAGAME` (the actual 2-way Winner). `_extract_winner_prices` then ran on series-level outcomes with no home/away prices. Primary now prefers GAME/MATCH-suffixed series_ticker before falling through to the any-empty-market_type heuristic | _next commit_ |
+| 2026-05-05 | Basketball | DET-CLE WINNER tab rendered empty even though KXNBAGAME-26MAY05CLEDET was paired and the data was sitting in the markets array | `_v2_pick_primary` chose `KXNBASERIES` (no market_type, came first in records) over `KXNBAGAME` (the actual 2-way Winner). `_extract_winner_prices` then ran on series-level outcomes with no home/away prices. Primary now prefers GAME/MATCH-suffixed series_ticker before falling through to the any-empty-market_type heuristic | `bd6255d` |
+
+### Phase 5+ — canonical entity registry (parallel track)
+
+In response to the realization that adding Polymarket and OddsAPI on top of Kalshi+FL (+ ESPN/SportsDB/SofaScore for live state) would push us into N×N pairwise integration territory, we're building a canonical entity registry as the source-agnostic identity layer underneath the v2 join.
+
+**Sub-phases:**
+
+- **A — `identity_registry.py` foundation**: in-memory registry, canonical IDs (`team:<sport>:<slug>`, `fixture:<sport>:<date>:<home>-vs-<away>`, parameterized markets, outcome layer, alias index with method-precedence). Idempotent registration + version bumping. **No source mappers, no production wiring.** Status: _shipped_.
+- **B — FL seed**: walk FL events list, populate teams/fixtures/competitions in the registry. FL is canonical for fixture metadata per the precedence policy. Read-only against production data; doesn't touch v2 yet.
+- **C — Kalshi migration**: `kalshi_join` resolves through the registry. The 3-tier matching (strict → alias → guarded fuzzy) becomes the seeding logic for `kalshi_team_alias` / `kalshi_fixture_alias`, run at first sighting. Request-time pairing collapses to O(1) lookup.
+- **D — generalize**: ESPN / SofaScore / SportsDB live-state dispatchers also resolve via the registry. Polymarket and OddsAPI plug in as new source mappers when they land, no changes to existing ones.
+
+**Source precedence policy (per field):** FL authoritative for fixture metadata (start time, scores, teams). Each market source authoritative for its own market metadata + prices. No source overrides another source's prices — every source's prices attach to the same canonical Outcome under that source's namespace.
+
+**Versioning:** Fixture has `version` + `updated_at_utc`; mappers bump version when a real change is observed (rescheduling, postponement, cancellation). Downstream caches key off `(fixture_id, version)`.
+
+**Auditability:** every alias row stores `(source, external_id, canonical_id, method, confidence, observed_at_utc)`. "Why did we pair these?" answers via a registry lookup, not by reading code.
 
 ### Phase 6 — promote v2 to default (1 hour)
 
