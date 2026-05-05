@@ -241,10 +241,11 @@ Smaller, more readable, less surface area for bugs.
 
 Strict ordering; each phase ships independently and is verified before the next.
 
-### Phase 1 — `kalshi_identity.py` + tests (estimated half day)
+### Phase 1 — `kalshi_identity.py` + tests + pytest setup (estimated half day)
 
+- Add `pytest` to requirements (one line; no CI dep yet — runs locally and in any future CI)
 - Build Identity dataclass + parse_ticker() + compute_fl_identity() + match()
-- Unit-test against every snapshot in `kalshi_probe/snapshots/` — every observed ticker must parse to a non-`None` Identity
+- pytest tests against every snapshot in `kalshi_probe/snapshots/` — every observed ticker must parse to a non-`None` Identity
 - Spot-check: take 10 known FL fixtures from prod cache, verify `match(parse_ticker(K), compute_fl_identity(FL))` returns True
 - **No changes to /sports yet** — module sits alongside, unused
 
@@ -274,15 +275,26 @@ Strict ordering; each phase ships independently and is verified before the next.
 - Replace `_enrich_record_live_state()` body with one call
 - Run the diff endpoint again — should be identical or better (more aggregates resolved, fewer null clocks)
 
-### Phase 5 — `sports_feed_v2()` behind feature flag (estimated 1 day)
+### Phase 5 — `sports_feed_v2()` behind feature flag (estimated 1 day + flagged window)
 
 - Implement the new handler at `/api/sports/{id}/feed?v=2`
 - v1 keeps working at the default URL
 - Frontend reads `?v2=1` query param to opt in
 - Comprehensive manual QA: walk through 10 sports × 3 dates, compare side-by-side
-- Run prod traffic for ≥3 days against v2 in feature-flag mode
 
-**Done criterion**: zero regressions in 3-day flagged window.
+**Promotion exit criteria — ALL must hold before phase 6:**
+
+1. **Time window**: minimum 3 days flagged in production. Extend to **7 days for any sport with a weekly rhythm** (NFL — Sunday-heavy; NCAA Football — Saturday-heavy; UFC — typically Saturday card) so we don't miss the busy day.
+2. **Zero P1 bugs**: nothing duplicate-fixture, nothing missing-outcome, nothing wrong-source-attached, nothing 500-on-load.
+3. **Parity metrics**: for the same `(sport_id, indent_days)` pair, v2 vs v1 must have:
+   - Same or higher pairing rate (paired fixtures / total fixtures) — never regress
+   - Same or fewer null-clock events (live games with no clock displayed)
+   - Same or fewer null-aggregate events (cup ties with no aggregate displayed)
+   - Same or fewer null-outcome events (markets with empty outcomes[])
+   - At most 0.5% Identity-parse failure rate across all production tickers (logged with the unparseable ticker for follow-up)
+4. **No quiet stretch**: if any criterion is missed at the window expiry, **explicitly extend by 24 hours and document why** rather than letting it drift. After two extensions, escalate to "redesign needed" rather than ship-with-known-issues.
+
+**Done criterion**: ALL exit criteria above met for the full window length.
 
 ### Phase 6 — promote v2 to default (1 hour)
 
