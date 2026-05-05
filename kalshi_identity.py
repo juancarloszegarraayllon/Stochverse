@@ -92,6 +92,69 @@ class Identity:
     raw_suffix: str = ""                        # post-series-prefix remainder
 
 
+# ── Outright-only series prefixes ────────────────────────────────
+# Series whose ticker SHAPE is G1 (date + alphabetic block) but
+# whose semantics are outrights / player-or-manager futures, not
+# h2h fixtures. Listed here so parse_ticker classifies them as
+# kind="outright" instead of mis-classifying as per_fixture.
+# Sourced from KALSHI_AUDIT.md §5 sport-specific outright variations.
+_OUTRIGHT_SERIES_PREFIXES = (
+    # Player movement futures (suffix block = player surname handle)
+    "KXJOIN",            # KXJOINCLUB-26OCT02RODRYGO, KXJOINLEAGUE-26OCT02MSALAH
+    "KXNEXTTEAM",        # KXNEXTTEAMNFL-27JALLEN, KXNEXTTEAMNBA-26LJAM
+    "KXNEXTMANAGER",     # KXNEXTMANAGEREPL-26CFC
+    # Manager / coach futures
+    "KXMANAGERSOUT",     # KXMANAGERSOUT-26AUG01EPL
+    "KXCOACHOUT",        # KXCOACHOUTNBADATE-27SKER
+    "KXCOACHONDATE",     # KXCOACHONDATE-NE26
+    # Trade / transfer / retirement
+    "KXMLBTRADE", "KXNFLTRADE", "KXSOCCERTRANSFER",
+    "KXF1RETIRE", "KXARODGRETIRE", "KXKELCERETIRE",
+    "KXLBJRETIRE", "KXPERSONUNRETIRE",
+    # Per-player binary "will X happen"
+    "KXSOCCERPLAY", "KXPLAYWC", "KXPGACURRY", "KXPGATIGER",
+    "KXSCOTTIESLAM", "KXLAMINEYAMAL", "KXBRYSONCOURSERECORDS",
+    "KXFURYJOSHUA", "KXFLOYDTYSONFIGHT", "KXMCGREGORFIGHTNEXT",
+    "KXCALCFO", "KXSORONDO",
+    # Award / honor (per-player handle)
+    "KXGRANDSLAMJ", "KXGRANDSLAM",
+    "KXNYKCOACH",
+    # Cards / events / appearances
+    "KXCARDPRESENCE", "KXSPORTSOWNERLBJ", "KXNBAATTEND",
+    "KXSHAI20PTREC", "KXNBA2KCOVER", "KXNDJOINCONF",
+    "KXDONATEMRBEAST", "KXCOVEREA", "KXPGAMAJORWIN",
+    # Stadium / location / team-existence futures
+    "KX1STHOMEGAME", "KXRELOCATION", "KXNBASEATTLE",
+    "KXSONICS", "KXCITYNBA", "KXNBATEAM",
+    # World Cup / Olympics specials
+    "KXFIFAUSPULL", "KXWCIRAN", "KXWCLOCATION",
+    "KXWCMESSIRONALDO", "KXWCROUND", "KXWCSQUAD", "KXWCGROUP",
+    # Per-player futures with custom prefixes
+    "KXSTARTINGQB", "KXNBARETURN",
+    "KXNBADRAFT", "KXNFLDRAFT",
+    "KXNBAPLAYOFF",       # playoff-related outright counts
+    # Misc / cross-sport novelty
+    "KXEUROVISIONISRAELBAN", "KXPIZZASCORE",
+    "KXCOLLEGEGAMEDAYGUEST", "KXWSOPENTRANTS",
+    "KXQUADRUPLEDOUBLE", "KXARSENALCUPS",
+    "KXPAVIAPRESEASON", "KXMLSJOIN",
+    "KXRANKLISTFF", "KXOWGRRANK", "KXCHESSFIDERATING",
+    "KXLIVOCCUR",         # "Will LIV Golf tournament happen in X"
+)
+
+
+def _is_outright_series(series_base: str) -> bool:
+    """True if series_base matches a known outright-only prefix.
+
+    Short-circuits per_fixture classification for tickers whose
+    shape is G1/G7 but whose semantics are outrights.
+    """
+    s = (series_base or "").upper()
+    if not s:
+        return False
+    return any(s.startswith(p) for p in _OUTRIGHT_SERIES_PREFIXES)
+
+
 # ── Series-base extraction ───────────────────────────────────────
 
 def strip_known_suffix(series_ticker: str) -> tuple[str, str]:
@@ -214,6 +277,74 @@ def parse_ticker(event_ticker: str, series_ticker: str, sport: str) -> Identity:
 
     series_base, _ = strip_known_suffix(series_ticker or "")
     suffix = _strip_series_prefix(event_ticker, series_ticker or "")
+
+    # ── Outright series short-circuit ────────────────────────────
+    # Some series have ticker shapes that LOOK like G1/G7 (date +
+    # alphabetic block) but are outrights — player handles, manager
+    # codes, novelty futures. Skip per_fixture classification entirely
+    # for these and route directly to outright with date and handle
+    # preserved. Without this, KXJOINCLUB-26OCT02RODRYGO would
+    # mis-classify as a per_fixture with abbr_block="RODRYGO" and
+    # show up as an unpaired Soccer fixture in /sports.
+    if _is_outright_series(series_base):
+        # Try to extract date + handle from the suffix; fall back to
+        # plain handle / year codes.
+        if (m := PATTERN_DATE_TEAMS.match(suffix)):
+            yy, mmm, dd, handle = m.groups()
+            d = _parse_date(yy, mmm, dd)
+            if d is not None:
+                return Identity(
+                    kind="outright", sport=sport, series_base=series_base,
+                    date=d, handle=handle, raw_suffix=suffix,
+                )
+        if (m := PATTERN_DATE_TIME.match(suffix)):
+            yy, mmm, dd, hhmm, handle = m.groups()
+            d = _parse_date(yy, mmm, dd)
+            if d is not None:
+                return Identity(
+                    kind="outright", sport=sport, series_base=series_base,
+                    date=d, time=hhmm, handle=handle, raw_suffix=suffix,
+                )
+        if (m := PATTERN_DATE_ONLY.match(suffix)):
+            yy, mmm, dd = m.groups()
+            d = _parse_date(yy, mmm, dd)
+            if d is not None:
+                return Identity(
+                    kind="outright", sport=sport, series_base=series_base,
+                    date=d, raw_suffix=suffix,
+                )
+        if (m := PATTERN_YEAR_4.match(suffix)):
+            return Identity(
+                kind="outright", sport=sport, series_base=series_base,
+                year=int(m.group(1)), raw_suffix=suffix,
+            )
+        if (m := PATTERN_YEAR_2.match(suffix)):
+            return Identity(
+                kind="outright", sport=sport, series_base=series_base,
+                year=int(m.group(1)), raw_suffix=suffix,
+            )
+        if (m := PATTERN_YEAR_HANDLE.match(suffix)):
+            return Identity(
+                kind="outright", sport=sport, series_base=series_base,
+                year=int(m.group(1)), handle=m.group(2),
+                raw_suffix=suffix,
+            )
+        if (m := PATTERN_HANDLE_YEAR.match(suffix)):
+            return Identity(
+                kind="outright", sport=sport, series_base=series_base,
+                handle=m.group(1), year=int(m.group(2)),
+                raw_suffix=suffix,
+            )
+        if (m := PATTERN_HANDLE.match(suffix)):
+            return Identity(
+                kind="outright", sport=sport, series_base=series_base,
+                handle=m.group(1), raw_suffix=suffix,
+            )
+        # Last-resort: outright with raw_suffix preserved
+        return Identity(
+            kind="outright", sport=sport, series_base=series_base,
+            raw_suffix=suffix,
+        )
 
     # Most-specific patterns first.
 

@@ -308,6 +308,84 @@ class TestUnparsed:
         assert i.kind in ("outright", "unparsed", "tournament")
 
 
+class TestOutrightSeriesPrefixes:
+    """Player / manager / novelty futures whose ticker shape LOOKS
+    like G1 (date + abbr) but which must NOT be classified as
+    per_fixture — they don't pair with FL events.
+    """
+
+    def test_join_club_player_future(self):
+        """KXJOINCLUB-26OCT02RODRYGO should be outright, not per_fixture.
+
+        Pre-fix: classified as per_fixture with abbr_block=RODRYGO
+        and surfaced as an unpaired Soccer fixture in /sports.
+        Post-fix: classified as outright with handle=RODRYGO.
+        """
+        i = parse_ticker(
+            "KXJOINCLUB-26OCT02RODRYGO", "KXJOINCLUB", "Soccer",
+        )
+        assert i.kind == "outright"
+        assert i.handle == "RODRYGO"
+        assert i.date == date(2026, 10, 2)
+
+    def test_join_league(self):
+        i = parse_ticker(
+            "KXJOINLEAGUE-26OCT02MSALAH", "KXJOINLEAGUE", "Soccer",
+        )
+        assert i.kind == "outright"
+
+    def test_managers_out_with_league_code(self):
+        """KXMANAGERSOUT-26AUG01EPL — date + 'EPL' looks like teams
+        but is really a league code on a manager-futures market."""
+        i = parse_ticker(
+            "KXMANAGERSOUT-26AUG01EPL", "KXMANAGERSOUT", "Soccer",
+        )
+        assert i.kind == "outright"
+
+    def test_next_team_player(self):
+        i = parse_ticker(
+            "KXNEXTTEAMNFL-27JALLEN", "KXNEXTTEAMNFL", "Football",
+        )
+        assert i.kind == "outright"
+
+    def test_player_will_play_binary(self):
+        i = parse_ticker(
+            "KXSOCCERPLAYMESSI-26", "KXSOCCERPLAYMESSI", "Soccer",
+        )
+        assert i.kind == "outright"
+        assert i.year == 26
+
+    def test_nba_draft_pick(self):
+        i = parse_ticker(
+            "KXNBADRAFTPICK-26-3", "KXNBADRAFTPICK", "Basketball",
+        )
+        assert i.kind == "outright"
+
+    def test_outright_doesnt_appear_in_per_fixture_join(self):
+        """Sanity: outright records, when parsed and grouped, must
+        not produce a per_fixture identity."""
+        i = parse_ticker(
+            "KXJOINCLUB-26OCT02RODRYGO", "KXJOINCLUB", "Soccer",
+        )
+        assert i.kind != "per_fixture"
+        assert i.kind != "per_leg"
+
+    def test_normal_h2h_still_per_fixture(self):
+        """Regression: don't accidentally mark normal h2h as outright."""
+        i = parse_ticker(
+            "KXEPLGAME-26MAY19CFCTOT", "KXEPLGAME", "Soccer",
+        )
+        assert i.kind == "per_fixture"
+
+    def test_owgrrank_overwatch_outright(self):
+        """Esports OWGR rank ticker that LOOKS like G_DATE_ONLY
+        but is actually an outright."""
+        i = parse_ticker(
+            "KXOWGRRANK-26JUNT20", "KXOWGRRANK", "Esports",
+        )
+        assert i.kind == "outright"
+
+
 # ── Full snapshot sweep — every observed ticker must parse ──────
 
 class TestSnapshotsParse:
