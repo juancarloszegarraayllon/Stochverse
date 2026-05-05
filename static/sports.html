@@ -876,6 +876,28 @@ function passesStateFilter(ev) {
   return true;
 }
 
+function passesDateFilter(ev) {
+  // Date filter — compares the event's USER-LOCAL date to
+  // (today + _indentDays) in the user's browser timezone. Without
+  // this, the backend's UTC-based bucket leaks late-evening US
+  // games into the next day's view (a 9 PM PT game = next-day UTC,
+  // shows up under "Tomorrow" even though it's tonight in the
+  // user's tz). Outrights and FL events without START_TIME are
+  // always allowed through (they're date-independent).
+  const ts = ev.START_TIME || ev.START_UTIME;
+  if (!ts) return true;
+  const evDate = new Date(ts * 1000);
+  const target = new Date();
+  target.setDate(target.getDate() + _indentDays);
+  return evDate.getFullYear() === target.getFullYear() &&
+         evDate.getMonth() === target.getMonth() &&
+         evDate.getDate() === target.getDate();
+}
+
+function passesAllFilters(ev) {
+  return passesStateFilter(ev) && passesDateFilter(ev);
+}
+
 function renderCol1() {
   const col1 = document.getElementById('sp-c1-list');
   if (!_eventsCache || !_eventsCache.length) {
@@ -889,7 +911,7 @@ function renderCol1() {
   const byCountry = {};
   let totalEvents = 0;
   for (const t of _eventsCache) {
-    const evs = (t.events || t.EVENTS || []).filter(passesStateFilter);
+    const evs = (t.events || t.EVENTS || []).filter(passesAllFilters);
     if (!evs.length) continue;
     const country = bucketCountry(t);
     const leagueName = leagueDisplayName(t);
@@ -1007,7 +1029,7 @@ function renderCol2() {
   let filteredKalshiCount = 0;
   for (const t of _eventsCache) {
     for (const ev of (t.events || [])) {
-      if (_activeStateFilter !== 'all' && eventState(ev) !== _activeStateFilter) continue;
+      if (!passesAllFilters(ev)) continue;
       totalEvents += 1;
       if (ev.kalshi && ev.kalshi.event_ticker) filteredKalshiCount += 1;
     }
@@ -1050,7 +1072,7 @@ function renderCol2() {
   for (const t of sortedTournaments) {
     const stageId = t.TOURNAMENT_STAGE_ID || '';
     if (_activeLeagueFilter && _activeLeagueFilter !== stageId) continue;
-    const evs = (t.events || t.EVENTS || []).filter(passesStateFilter);
+    const evs = (t.events || t.EVENTS || []).filter(passesAllFilters);
     if (!evs.length) continue;
     any = true;
     // Does this tournament have any matched (Kalshi-backed)
@@ -1249,6 +1271,16 @@ function pickMarketForGameRow(ev) {
   // visible so the user can see which game it is).
   if (!ev.kalshi || !ev.kalshi.markets) return null;
   const t = _eventActiveMarketType.get(ev.EVENT_ID) || '';
+  // For the headline (t === ''), prefer the market whose
+  // event_ticker matches the kalshi block's chosen primary
+  // (backend's _v2_pick_primary picks the GAME/MATCH-suffixed
+  // ticker, so this lands on KXNBAGAME instead of arbitrary
+  // empty-market_type rows like KXNBAMENTION).
+  if (t === '' && ev.kalshi.event_ticker) {
+    for (const m of ev.kalshi.markets) {
+      if (m.event_ticker === ev.kalshi.event_ticker) return m;
+    }
+  }
   for (const m of ev.kalshi.markets) {
     if ((m.market_type || '') === t) return m;
   }
