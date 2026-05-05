@@ -395,3 +395,86 @@ def test_v2_safety_net_target_helper():
     assert main._v2_safety_net_target("KXMADEUP", out) is None
     # Empty series → no match
     assert main._v2_safety_net_target("", out) is None
+
+
+# ── _v2_pick_primary preference for GAME/MATCH suffix ────────────
+
+def test_v2_pick_primary_prefers_game_suffix_over_series():
+    """Phase 5 punch list 2026-05-05 — empty WINNER tab on NBA
+    fixtures because KXNBASERIES tickers (no market_type) were
+    being chosen as primary over KXNBAGAME (the actual 2-way
+    Winner). _extract_winner_prices then ran on series-level
+    outcomes that have no home/away prices and the WINNER tab
+    rendered empty. Primary should prefer GAME/MATCH suffix.
+    """
+    import main
+    records = [
+        # KXNBASERIES comes first — no market_type, no GAME suffix.
+        {
+            "event_ticker":  "KXNBASERIES-26CLEDETR2",
+            "series_ticker": "KXNBASERIES",
+            "title":         "Cleveland Cavaliers vs Detroit Pistons playoffs series",
+            "outcomes": [
+                {"label": "Cavaliers win 4-0", "_yb": 10},
+                {"label": "Cavaliers win 4-1", "_yb": 30},
+            ],
+        },
+        # KXNBAGAME — the actual 2-way headline Winner. Should be
+        # picked even though it's not first in the list.
+        {
+            "event_ticker":  "KXNBAGAME-26MAY05CLEDET",
+            "series_ticker": "KXNBAGAME",
+            "title":         "Cleveland Cavaliers vs Detroit Pistons",
+            "outcomes": [
+                {"label": "Cleveland Cavaliers", "_yb": 60},
+                {"label": "Detroit Pistons",     "_yb": 40},
+            ],
+        },
+    ]
+    primary = main._v2_pick_primary(records)
+    assert primary["series_ticker"] == "KXNBAGAME", (
+        f"Expected KXNBAGAME (suffix=GAME) to win over KXNBASERIES "
+        f"(no suffix). Got {primary['series_ticker']!r}"
+    )
+
+
+def test_v2_pick_primary_falls_back_when_no_game_suffix():
+    """When NO record has a GAME/MATCH suffix (e.g., outright-only
+    pairing or a sport whose game ticker doesn't follow that convention),
+    fall through to the legacy any-empty-market_type heuristic.
+    """
+    import main
+    records = [
+        {
+            "event_ticker":  "KXFOO-26-XYZ",
+            "series_ticker": "KXFOO",
+            "title":         "Foo vs Bar",
+            "outcomes":      [],
+        },
+    ]
+    primary = main._v2_pick_primary(records)
+    assert primary["series_ticker"] == "KXFOO"
+
+
+def test_v2_pick_primary_soccer_kxuclgame_still_wins():
+    """Soccer canonical headline (KXUCLGAME, GAME-suffixed) keeps
+    being picked over sub-market tickers — sanity check we didn't
+    regress the working case.
+    """
+    import main
+    records = [
+        {
+            "event_ticker":  "KXUCLTOTAL-26MAY05ARSATM",
+            "series_ticker": "KXUCLTOTAL",
+            "title":         "Atletico at Arsenal: Totals",
+            "outcomes":      [],
+        },
+        {
+            "event_ticker":  "KXUCLGAME-26MAY05ARSATM",
+            "series_ticker": "KXUCLGAME",
+            "title":         "Atletico at Arsenal",
+            "outcomes":      [],
+        },
+    ]
+    primary = main._v2_pick_primary(records)
+    assert primary["series_ticker"] == "KXUCLGAME"
