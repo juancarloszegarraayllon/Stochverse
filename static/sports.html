@@ -1422,15 +1422,12 @@ function renderEventRow(ev, market, isMarketRow) {
       : homeName + ' vs ' + awayName;
     let matchupHtml;
     if (haveScores) {
-      // Wrap the inline score numbers in a span so they render in
-      // the same bold tabular style as the vertical score column —
-      // visually consistent across both layouts.
-      matchupHtml = homeIconHtml + escH(homeName) +
+      matchupHtml = escH(homeName) +
         ' <span class="sp-c2-matchup-score">' + escH(hs != null ? hs : 0) + '</span>' +
         ' - <span class="sp-c2-matchup-score">' + escH(as != null ? as : 0) + '</span> ' +
-        escH(awayName) + awayIconHtml;
+        escH(awayName);
     } else {
-      matchupHtml = homeIconHtml + escH(homeName) + ' vs ' + escH(awayName) + awayIconHtml;
+      matchupHtml = escH(homeName) + ' vs ' + escH(awayName);
     }
     html += '<span class="sp-c2-matchup" title="' + escH(matchupTitle) +
             '">' + matchupHtml + '</span>';
