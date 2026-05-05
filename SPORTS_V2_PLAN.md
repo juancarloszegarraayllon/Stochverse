@@ -296,6 +296,19 @@ Strict ordering; each phase ships independently and is verified before the next.
 
 **Done criterion**: ALL exit criteria above met for the full window length.
 
+#### Phase 5 punch list — gaps surfaced during the verification window
+
+Single running list of every issue surfaced from live `/sports?v2=1` testing. One line per issue, fixed in small batches. Promotion to Phase 6 blocks until the list goes a full 7 days without new entries on weekly-rhythm sports (NFL/NCAAF/UFC).
+
+| Date | Sport | Ticker / surface | Root cause | Fix commit |
+|---|---|---|---|---|
+| 2026-05-05 | All | KXJOINCLUB-26OCT02RODRYGO and ~265 other player/manager futures | G1-shape ticker mis-classified as per_fixture | `833e95d` |
+| 2026-05-05 | Basketball | KXWNBADELAY ("Will at least 1 game be played in the WNBA season?") | Outright series prefix missing from `_OUTRIGHT_SERIES_PREFIXES` | `6ebbc92` |
+| 2026-05-05 | All | Sub-market views duplicating team crests on matchup line + outcome rows | UI: redundant icon placement | `46a43e1`, `6ebbc92`, `f84514a` |
+| 2026-05-05 | All | Sport-nav side links dropped `?v2=1` query param on click | UI: query-string forwarding | `6ebbc92` |
+| 2026-05-05 | Basketball | KXNBAGAME-26MAY05LALOKC (LAL@OKC) FL row had no Kalshi block attached | Suspected FL/Kalshi NBA shortname divergence — needs per-sport abbr alias map | _open_ |
+| 2026-05-05 | All | When FL has a fixture but Kalshi pairing fails, the Kalshi market vanishes from `/sports` even though it exists in the cache | No safety-net surfacing of unpaired-but-same-date Kalshi fixtures next to their likely FL counterpart | _open_ |
+
 ### Phase 6 — promote v2 to default (1 hour)
 
 - Swap the default handler
