@@ -708,7 +708,8 @@ async function loadSportNav() {
       .replace(/\b\w/g, c => c.toUpperCase());
     const count = counts[sid];
     const cls = 'sp-nav-item' + (sid === active ? ' active' : '');
-    html += '<a class="' + cls + '" href="/sports/' + sid + '">';
+    const _navV2 = new URLSearchParams(window.location.search).get('v2') === '1' ? '?v2=1' : '';
+    html += '<a class="' + cls + '" href="/sports/' + sid + _navV2 + '">';
     html += '<span class="sp-nav-name">' + escH(name) + '</span>';
     if (count != null && count > 0) {
       html += '<span class="sp-nav-count">' + escH(count) + '</span>';
@@ -1422,30 +1423,31 @@ function renderEventRow(ev, market, isMarketRow) {
       : homeName + ' vs ' + awayName;
     let matchupHtml;
     if (haveScores) {
-      matchupHtml = escH(homeName) +
+      matchupHtml = homeIconHtml + escH(homeName) +
         ' <span class="sp-c2-matchup-score">' + escH(hs != null ? hs : 0) + '</span>' +
         ' - <span class="sp-c2-matchup-score">' + escH(as != null ? as : 0) + '</span> ' +
-        escH(awayName);
+        escH(awayName) + awayIconHtml;
     } else {
-      matchupHtml = escH(homeName) + ' vs ' + escH(awayName);
+      matchupHtml = homeIconHtml + escH(homeName) + ' vs ' + escH(awayName) + awayIconHtml;
     }
     html += '<span class="sp-c2-matchup" title="' + escH(matchupTitle) +
             '">' + matchupHtml + '</span>';
   }
   if (matched && outcomes.length) {
-    // Show outcome labels (home / away / tie for Winner; spread
-    // variants for Spreads; etc.). Match outcome label against
-    // HOME_NAME / AWAY_NAME to attach the right team icon —
-    // 'Tie' / sub-market labels get no icon. Score column to the
-    // right stays anchored to the home/away pair regardless of
-    // how many outcome rows we render here.
+    // When the matchup header is visible above (sub-market views),
+    // teams are already identified up top with their crests, so the
+    // per-outcome row drops the team icon to avoid duplication.
+    // Winner-shape views (showMatchup=false) keep the icon since
+    // the outcome row IS the only place teams are rendered.
     const homeLc = (ev.HOME_NAME || '').toLowerCase();
     const awayLc = (ev.AWAY_NAME || '').toLowerCase();
     for (const o of outcomes) {
       const lblLc = (o.label || '').toLowerCase();
       let icon = '';
-      if (lblLc === homeLc) icon = homeIconHtml;
-      else if (lblLc === awayLc) icon = awayIconHtml;
+      if (!showMatchup) {
+        if (lblLc === homeLc) icon = homeIconHtml;
+        else if (lblLc === awayLc) icon = awayIconHtml;
+      }
       html += '<span class="sp-c2-team" title="' + escH(o.label || '') +
               '">' + icon + escH(o.label || '') + '</span>';
     }

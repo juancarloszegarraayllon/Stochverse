@@ -140,6 +140,13 @@ _OUTRIGHT_SERIES_PREFIXES = (
     "KXPAVIAPRESEASON", "KXMLSJOIN",
     "KXRANKLISTFF", "KXOWGRRANK", "KXCHESSFIDERATING",
     "KXLIVOCCUR",         # "Will LIV Golf tournament happen in X"
+    # Season-level "will X happen" futures (no per-fixture pairing)
+    "KXWNBADELAY",        # "Will at least 1 game be played in WNBA season?"
+    "KXWNBAGAMESPLAYED",  # WNBA games-played count futures
+    "KXWNBADRAFT",        # KXWNBADRAFT1, KXWNBADRAFTTOP3 — draft outrights
+    "KXMARMAD",           # March Madness bracket outrights
+    "KXNCAAMBNEXTCOACH",  # NCAA basketball coaching changes
+    "KXSTEPHDEAL",        # Steph Curry contract futures
 )
 
 
