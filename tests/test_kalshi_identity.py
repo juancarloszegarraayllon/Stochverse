@@ -615,3 +615,61 @@ class TestMatch:
             "START_TIME": _ts(2026, 5, 5, 15, 0),
         }, "Soccer")
         assert not match(k, fl)
+
+
+# ── FL → Kalshi abbreviation alias map ───────────────────────────
+
+class TestFLAbbrAliases:
+    """Phase 5 punch list 2026-05-05 — NBA fixtures dropped from
+    /sports v2 because FL's NBA shortnames don't always equal
+    Kalshi's. Alias map normalizes FL's vocabulary into Kalshi's
+    so the deterministic identity match still pairs.
+    """
+
+    def test_nba_lakers_thunder_via_alias(self):
+        """KXNBAGAME-26MAY05LALOKC must pair with FL fixture
+        even when FL ships SHORTNAME=LAK (not LAL) and OKL (not OKC).
+        """
+        k = parse_ticker(
+            "KXNBAGAME-26MAY05LALOKC", "KXNBAGAME", "Basketball",
+        )
+        fl = compute_fl_identity({
+            "SHORTNAME_HOME": "OKL",  # FL form
+            "SHORTNAME_AWAY": "LAK",  # FL form
+            "START_TIME": _ts(2026, 5, 5, 20, 30),
+        }, "Basketball")
+        assert match(k, fl), (
+            f"k.abbr_block={k.abbr_block!r} not in "
+            f"fl.fl_orientations={fl.fl_orientations!r}"
+        )
+
+    def test_nba_canonical_form_still_matches(self):
+        """Sanity: FL fixtures already using Kalshi's canonical
+        abbreviation pair without alias help.
+        """
+        k = parse_ticker(
+            "KXNBAGAME-26MAY05LALOKC", "KXNBAGAME", "Basketball",
+        )
+        fl = compute_fl_identity({
+            "SHORTNAME_HOME": "OKC",  # canonical
+            "SHORTNAME_AWAY": "LAL",  # canonical
+            "START_TIME": _ts(2026, 5, 5, 20, 30),
+        }, "Basketball")
+        assert match(k, fl)
+
+    def test_alias_doesnt_leak_into_other_sports(self):
+        """Soccer SHORTNAME_HOME=LAK must not be normalized to LAL —
+        the alias map is keyed by sport, so non-Basketball entries
+        stay untouched.
+        """
+        k = parse_ticker(
+            "KXMLSGAME-26MAY05LALOKC", "KXMLSGAME", "Soccer",
+        )
+        fl = compute_fl_identity({
+            "SHORTNAME_HOME": "OKL",
+            "SHORTNAME_AWAY": "LAK",
+            "START_TIME": _ts(2026, 5, 5, 20, 30),
+        }, "Soccer")
+        # No Soccer alias entries → orientations only contain
+        # OKL+LAK / LAK+OKL, not the LAL/OKC-normalized form.
+        assert not match(k, fl)

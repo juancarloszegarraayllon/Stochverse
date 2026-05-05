@@ -140,6 +140,13 @@ _OUTRIGHT_SERIES_PREFIXES = (
     "KXPAVIAPRESEASON", "KXMLSJOIN",
     "KXRANKLISTFF", "KXOWGRRANK", "KXCHESSFIDERATING",
     "KXLIVOCCUR",         # "Will LIV Golf tournament happen in X"
+    # Season-level "will X happen" futures (no per-fixture pairing)
+    "KXWNBADELAY",        # "Will at least 1 game be played in WNBA season?"
+    "KXWNBAGAMESPLAYED",  # WNBA games-played count futures
+    "KXWNBADRAFT",        # KXWNBADRAFT1, KXWNBADRAFTTOP3 — draft outrights
+    "KXMARMAD",           # March Madness bracket outrights
+    "KXNCAAMBNEXTCOACH",  # NCAA basketball coaching changes
+    "KXSTEPHDEAL",        # Steph Curry contract futures
 )
 
 
@@ -469,6 +476,58 @@ def parse_ticker(event_ticker: str, series_ticker: str, sport: str) -> Identity:
 
 # ── Public: compute_fl_identity ──────────────────────────────────
 
+# ── FL → Kalshi abbreviation alias map ───────────────────────────
+# FL and Kalshi don't always agree on team shortnames. NBA is the
+# worst offender (FL's "OKL"/"LAK" vs Kalshi's "OKC"/"LAL"). Per
+# Phase 5 punch list 2026-05-05.
+#
+# Normalization is APPLIED at FL → Identity time. Both the original
+# FL abbr AND the normalized form get added to fl_orientations so
+# the identity match accepts either side. Kalshi tickers stay the
+# canonical reference; aliases only translate FL's vocabulary in.
+#
+# Add new entries as gaps surface via /api/_debug/sports_join_diff.
+_FL_ABBR_ALIASES: dict[str, dict[str, str]] = {
+    "Basketball": {
+        # NBA — Kalshi uses canonical 3-letter, FL sometimes diverges
+        "LAK": "LAL",      # Lakers
+        "LA":  "LAL",
+        "OKL": "OKC",      # Thunder
+        "GSW": "GS",       # Warriors (Kalshi sometimes uses GS)
+        "GS":  "GSW",      # reverse — also try GSW form
+        "NOP": "NO",       # Pelicans
+        "NO":  "NOP",
+        "NYK": "NY",       # Knicks
+        "NY":  "NYK",
+        "PHO": "PHX",      # Suns
+        "PHX": "PHO",
+        "SAS": "SA",       # Spurs
+        "SA":  "SAS",
+        "WAS": "WSH",      # Wizards
+        "WSH": "WAS",
+        "UTA": "UTH",      # Jazz
+        "UTH": "UTA",
+        "BKN": "BRK",      # Nets
+        "BRK": "BKN",
+    },
+    # Other sports get populated as gaps surface.
+}
+
+
+def _normalize_fl_abbr(sport: str, abbr: str) -> set[str]:
+    """Return all known forms of `abbr` for `sport`, including the original.
+
+    Used by compute_fl_identity to expand fl_orientations beyond the
+    raw FL shortname so Kalshi's abbr_block matches under either
+    convention. Returns at minimum `{abbr}` if no aliases are known.
+    """
+    forms = {abbr}
+    aliases = _FL_ABBR_ALIASES.get(sport, {})
+    if abbr in aliases:
+        forms.add(aliases[abbr])
+    return forms
+
+
 def compute_fl_identity(fl_event: dict, sport: str) -> Optional[Identity]:
     """Build an Identity for an FL events-list event.
 
@@ -477,7 +536,10 @@ def compute_fl_identity(fl_event: dict, sport: str) -> Optional[Identity]:
 
     The identity stores BOTH abbr orientations in `fl_orientations`
     because Kalshi's abbr_block can be home+away OR away+home depending
-    on the title shape (vs vs at). `match()` checks membership.
+    on the title shape (vs vs at). Each side is also expanded through
+    `_normalize_fl_abbr` so per-sport alias maps catch FL/Kalshi
+    shortname divergence (NBA: FL "OKL" → Kalshi "OKC", etc.).
+    `match()` checks membership.
     """
     home = (fl_event.get("SHORTNAME_HOME") or "").upper().strip()
     away = (fl_event.get("SHORTNAME_AWAY") or "").upper().strip()
@@ -491,8 +553,18 @@ def compute_fl_identity(fl_event: dict, sport: str) -> Optional[Identity]:
     except (TypeError, ValueError, OSError):
         return None
 
-    # Both orientations of the abbr concatenation. Used by match().
-    orientations = frozenset({home + away, away + home})
+    # Cross-product of all known forms × both orientations.
+    home_forms = _normalize_fl_abbr(sport, home)
+    away_forms = _normalize_fl_abbr(sport, away)
+    orientations = frozenset(
+        h + a
+        for h in home_forms
+        for a in away_forms
+    ) | frozenset(
+        a + h
+        for h in home_forms
+        for a in away_forms
+    )
 
     return Identity(
         kind="per_fixture",
