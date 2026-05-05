@@ -1,6 +1,69 @@
 {
-  "sample_size": 0,
-  "sport_filter": "Other 20Sports",
-  "base_count": 0,
-  "bases": []
+  "sample_size": 5,
+  "sport_filter": "Darts",
+  "bucket_count": 2,
+  "buckets": [
+    {
+      "series_base": "KXDARTS",
+      "suffix": "MATCH",
+      "market_type": "",
+      "record_count": 4,
+      "most_common_outcome_count": 2,
+      "outcome_count_distribution": {
+        "2": 4
+      },
+      "label_classes": {
+        "team_like": 8
+      },
+      "label_samples": {
+        "team_like": [
+          "Gian van Veen",
+          "Stephen Bunting",
+          "Josh Rock",
+          "Luke Humphries"
+        ]
+      },
+      "title_samples": [
+        "Gian van Veen vs Stephen Bunting",
+        "Josh Rock vs Luke Humphries",
+        "Luke Littler vs Michael van Gerwen"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXPREMDARTS",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 8,
+      "outcome_count_distribution": {
+        "8": 1
+      },
+      "label_classes": {
+        "team_like": 8
+      },
+      "label_samples": {
+        "team_like": [
+          "Luke Littler",
+          "Luke Humphries",
+          "Michael van Gerwen",
+          "Gian van Veen"
+        ]
+      },
+      "title_samples": [
+        "Premier League Darts Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    }
+  ]
 }
