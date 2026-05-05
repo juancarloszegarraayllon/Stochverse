@@ -566,6 +566,29 @@ class IdentityRegistry:
                        external_id: str) -> Optional[Alias]:
         return self._aliases.get((source, external_id))
 
+    def count_aliases_for(self, canonical_id: str,
+                           source: Optional[str] = None) -> int:
+        """How many aliases point at this canonical entity?
+
+        Used by Phase C2's guarded-fuzzy tier to determine whether a
+        canonical fixture is "unpaired" relative to a given source
+        (e.g. has Kalshi already linked any of its tickers to this
+        FL fixture?).
+
+        With `source=None`, counts aliases across every source.
+        With `source='kalshi'`, counts only Kalshi-origin aliases.
+
+        O(N_aliases) today — iterates the alias index. If the alias
+        set grows large, swap in a reverse index keyed by
+        canonical_id without changing the public API.
+        """
+        if source is None:
+            return sum(1 for a in self._aliases.values()
+                       if a.canonical_id == canonical_id)
+        return sum(1 for a in self._aliases.values()
+                   if a.canonical_id == canonical_id
+                   and a.source == source)
+
     def resolve_through_alias(self, source: str, external_id: str):
         """Convenience: resolve external (source, external_id) all
         the way to the canonical entity. Returns None if no alias,

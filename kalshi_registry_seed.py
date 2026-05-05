@@ -1,4 +1,4 @@
-"""Kalshi → IdentityRegistry seeder — Phase C.
+"""Kalshi → IdentityRegistry seeder — Phase C + C2.
 
 Resolves Kalshi cache records through the canonical registry and
 writes their fixture-level mappings into the alias index.
@@ -13,12 +13,22 @@ Three-tier match strategy at seed time:
        LAK↔LAL, OKL↔OKC, etc. — same map that Phase 5 punch-list
        seeded for the LAL@OKC pairing fix). Retry the equality
        check against the expanded form.
-    3. Guarded fuzzy — DEFERRED to Phase C2. Out of scope here.
-       When (1) and (2) miss, we record the Kalshi record as
-       unpaired and move on. Phase C2 will add the date+competition
-       guarded fuzzy fallback (only fires when exactly one unpaired
-       FL fixture and one Kalshi record remain in a (date, comp)
-       bucket).
+    3. Guarded fuzzy (Phase C2) — final fallback when (1) and (2)
+       both miss. Fires ONLY when:
+           a. the FL fixture and the Kalshi record are for the
+              same sport and exact same date (no time-fuzz),
+           b. the FL fixture has no other Kalshi alias yet,
+           c. the bucket — all unpaired FL fixtures for (sport,
+              date) intersected with all unpaired Kalshi records
+              for (sport, date) — contains exactly ONE FL
+              fixture and ONE Kalshi record.
+
+       The 1+1-on-each-side guard is what prevents v1's
+       wrong-fixture pairings: if there are two unpaired Atletico
+       games and two unpaired Atletico-shaped Kalshi records on
+       the same day, we don't gamble — leave them unpaired and
+       let an alias-map entry resolve them next deploy.
+       Confidence: 0.7 (substantially below strict/alias_table).
 
 On a successful match, two aliases get written:
     source='kalshi', external_id=event_ticker  → fixture canonical id
@@ -170,7 +180,9 @@ def seed_kalshi_record(registry: IdentityRegistry,
             )
             return fx
 
-    # Tier 3 (guarded fuzzy) — Phase C2.
+    # Tier 3 (guarded fuzzy) — only available via the batch seeder
+    # since it requires bucket-level visibility (count of unpaired
+    # FL fixtures + unpaired Kalshi records on the same date).
     return None
 
 
@@ -179,26 +191,49 @@ def seed_kalshi_record(registry: IdentityRegistry,
 def seed_kalshi_records(registry: IdentityRegistry,
                           records: list, sport: str) -> dict:
     """Walk Kalshi cache records for a sport, attempt to seed each
-    via seed_kalshi_record. Returns a stats dict for observability:
+    through the three-tier ladder (strict → alias_table → guarded
+    fuzzy). Returns a stats dict for observability:
 
         {
-            'total':         int,  # records in
-            'paired_strict': int,  # tier-1 hits
-            'paired_alias':  int,  # tier-2 hits
-            'unpaired':      int,  # missed every tier (excl. outright)
-            'outright':      int,  # parsed as outright
-            'unparseable':   int,  # parse_ticker returned None or
-                                   # kind not in (per_fixture, outright)
+            'total':              int,  # records in
+            'paired_strict':      int,  # tier-1 hits
+            'paired_alias':       int,  # tier-2 hits
+            'paired_guarded':     int,  # tier-3 hits (Phase C2)
+            'unpaired':           int,  # missed every tier
+            'outright':           int,  # parsed as outright
+            'unparseable':        int,  # parse_ticker None or wrong kind
         }
+
+    Implementation: two passes.
+      Pass 1 — for each record, run tier 1 + tier 2. Records that
+               miss both are buffered for pass 2 along with their
+               parsed identity.
+      Pass 2 — group buffered records by (sport, fixture_date).
+               For each bucket, find the unpaired FL fixtures (those
+               with zero kalshi aliases) for that (sport, date). If
+               the bucket has EXACTLY one unpaired FL fixture and
+               EXACTLY one buffered Kalshi record, pair them with
+               method='guarded_fuzzy', confidence=0.7. Anything
+               else: leave unpaired.
+
+    The 1+1 guard is the safety. If the bucket has two unpaired FL
+    fixtures or two unparied Kalshi records on the same date, we
+    refuse to guess — the caller should add an alias-map entry to
+    disambiguate next deploy.
     """
     stats = {
-        "total":         0,
-        "paired_strict": 0,
-        "paired_alias":  0,
-        "unpaired":      0,
-        "outright":      0,
-        "unparseable":   0,
+        "total":          0,
+        "paired_strict":  0,
+        "paired_alias":   0,
+        "paired_guarded": 0,
+        "unpaired":       0,
+        "outright":       0,
+        "unparseable":    0,
     }
+    # Pass-2 buffer: (ticker, identity) per still-unpaired record
+    buffered: list = []
+
+    # ── Pass 1: strict + alias_table ───────────────────────────
     for rec in records:
         if not isinstance(rec, dict):
             continue
@@ -216,18 +251,15 @@ def seed_kalshi_records(registry: IdentityRegistry,
             stats["outright"] += 1
             continue
         if identity.kind != "per_fixture":
-            # per_leg etc. — counted as unparseable for now, will
-            # become a real bucket in Phase C2.
             stats["unparseable"] += 1
             continue
 
-        # Re-do the candidate walk but now we also need to know
-        # which tier hit (so we can stat correctly).
         fixture_date = identity.date
         abbr_block = identity.abbr_block
         if not fixture_date or not abbr_block:
             stats["unpaired"] += 1
             continue
+
         candidates = registry.lookup_fixtures_by_date(sport, fixture_date)
         hit = None
         hit_method = None
@@ -242,18 +274,48 @@ def seed_kalshi_records(registry: IdentityRegistry,
                 ):
                     hit, hit_method = fx, "alias_table"
                     break
-        if hit is None:
-            stats["unpaired"] += 1
+
+        if hit is not None:
+            registry.register_alias(
+                source="kalshi", external_id=ticker,
+                canonical_id=hit.id, method=hit_method,
+                confidence=1.0 if hit_method == "strict" else 0.95,
+            )
+            if hit_method == "strict":
+                stats["paired_strict"] += 1
+            else:
+                stats["paired_alias"] += 1
             continue
-        # Register alias
-        registry.register_alias(
-            source="kalshi", external_id=ticker,
-            canonical_id=hit.id, method=hit_method,
-            confidence=1.0 if hit_method == "strict" else 0.95,
-        )
-        if hit_method == "strict":
-            stats["paired_strict"] += 1
+
+        # Buffer for tier-3 attempt
+        buffered.append((ticker, identity))
+
+    # ── Pass 2: guarded fuzzy ──────────────────────────────────
+    # Group buffered records by (sport, fixture_date).
+    by_date: dict = {}
+    for ticker, identity in buffered:
+        key = (sport, identity.date)
+        by_date.setdefault(key, []).append((ticker, identity))
+
+    for (sp, dt), bucket_records in by_date.items():
+        # Find unpaired FL fixtures for this (sport, date).
+        all_fixtures = registry.lookup_fixtures_by_date(sp, dt)
+        unpaired_fixtures = [
+            fx for fx in all_fixtures
+            if registry.count_aliases_for(fx.id, source="kalshi") == 0
+        ]
+        # 1+1 guard
+        if len(unpaired_fixtures) == 1 and len(bucket_records) == 1:
+            fx = unpaired_fixtures[0]
+            ticker, _ = bucket_records[0]
+            registry.register_alias(
+                source="kalshi", external_id=ticker,
+                canonical_id=fx.id, method="guarded_fuzzy",
+                confidence=0.7,
+            )
+            stats["paired_guarded"] += 1
         else:
-            stats["paired_alias"] += 1
+            # Bucket too ambiguous — leave every record unpaired.
+            stats["unpaired"] += len(bucket_records)
 
     return stats
