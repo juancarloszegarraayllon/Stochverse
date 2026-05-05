@@ -9805,18 +9805,23 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
 
 @app.get("/api/sports/{sport_id}/feed")
 async def sports_feed(sport_id: int, timezone: int = 0,
-                       indent_days: int = 0, v: int = 1):
+                       indent_days: int = 0, v: int = 3):
     """Sport-page feed — FL events for the sport_id merged with
     matched Kalshi market data. Drives /sports/:sport_id COL 2.
 
-    Feature flags:
-      `?v=2` — identity-based handler built on kalshi_identity /
-        outcome_shapes / kalshi_join / live_source_selector.
-      `?v=3` — registry-based handler (sports_feed_v3) that routes
-        through the canonical IdentityRegistry + pair_via_registry
-        with timezone-aware local_date matching (Phase C2c-c2 + C2d).
-      v1 (the implementation below) remains the default until
-      promotion criteria are met for either v2 or v3.
+    Feature flags (Phase C2c-c2 promotion — v3 is now the default):
+      `?v=3` — DEFAULT. Registry-based handler (sports_feed_v3)
+        routing through the canonical IdentityRegistry +
+        pair_via_registry with timezone-aware local_date matching
+        (Phases A/B/C/C2a/C2b/C2c-a/C2d/C2e). Strict-date matching,
+        deterministic pairing, no fuzz_days false positives.
+      `?v=2` — identity-based legacy handler built on
+        kalshi_identity / outcome_shapes / kalshi_join /
+        live_source_selector. Kept as a safety-window fallback for
+        ~1 week post-promotion.
+      `?v=1` — the original v1 fuzzy-match handler (the
+        implementation below). Kept accessible for emergency
+        rollback / debugging only.
 
     Response (same shape for both v1 and v2):
       {
