@@ -1,0 +1,133 @@
+{
+  "sample_size": 5,
+  "sport_filter": "Lacrosse",
+  "bucket_count": 4,
+  "buckets": [
+    {
+      "series_base": "KXNCAAMLAX",
+      "suffix": "GAME",
+      "market_type": "",
+      "record_count": 2,
+      "most_common_outcome_count": 2,
+      "outcome_count_distribution": {
+        "2": 2
+      },
+      "label_classes": {
+        "team_like": 4
+      },
+      "label_samples": {
+        "team_like": [
+          "Robert Morris",
+          "Jacksonville",
+          "Marist",
+          "Stony Brook"
+        ]
+      },
+      "title_samples": [
+        "Robert Morris vs Jacksonville",
+        "Marist vs Stony Brook"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXLAXTEWAARATON",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 26,
+      "outcome_count_distribution": {
+        "26": 1
+      },
+      "label_classes": {
+        "team_like": 24,
+        "other": 2
+      },
+      "label_samples": {
+        "team_like": [
+          "Joey Spallina",
+          "Ryan Goldstein",
+          "Owen Duffy",
+          "Eric Spanos"
+        ],
+        "other": [
+          "Aidan O'Neil",
+          "Tie/Co-Winners"
+        ]
+      },
+      "title_samples": [
+        "Tewaaraton Award Winner"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNCAALAXFINAL",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 52,
+      "outcome_count_distribution": {
+        "52": 1
+      },
+      "label_classes": {
+        "team_like": 52
+      },
+      "label_samples": {
+        "team_like": [
+          "Maryland",
+          "Princeton",
+          "Syracuse",
+          "Cornell"
+        ]
+      },
+      "title_samples": [
+        "Division I Men's College Lacrosse Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNCAAMLAXF4",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 28,
+      "outcome_count_distribution": {
+        "28": 1
+      },
+      "label_classes": {
+        "team_like": 28
+      },
+      "label_samples": {
+        "team_like": [
+          "Notre Dame",
+          "Duke",
+          "Princeton",
+          "Syracuse"
+        ]
+      },
+      "title_samples": [
+        "College Lacrosse Semifinals Qualifiers"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    }
+  ]
+}
