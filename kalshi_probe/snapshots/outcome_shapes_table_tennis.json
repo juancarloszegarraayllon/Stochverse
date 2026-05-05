@@ -1,59 +1,97 @@
 {
   "sample_size": 4,
   "sport_filter": "Table Tennis",
-  "base_count": 2,
-  "bases": [
+  "bucket_count": 3,
+  "buckets": [
     {
-      "base": "KXITTFMEN",
-      "total": 3,
-      "patterns": {
-        "G4_short_int": 1
+      "series_base": "KXITTFMEN",
+      "suffix": "MATCH",
+      "market_type": "",
+      "record_count": 2,
+      "most_common_outcome_count": 2,
+      "outcome_count_distribution": {
+        "2": 2
       },
-      "examples": {
-        "G4_short_int": [
-          {
-            "ticker": "KXITTFMEN-26",
-            "suffix": "26",
-            "groups": [
-              "26"
-            ]
-          }
+      "label_classes": {
+        "team_like": 4
+      },
+      "label_samples": {
+        "team_like": [
+          "France",
+          "Greece",
+          "Hungary",
+          "Uzbekistan"
         ]
       },
-      "unparsed": [
-        {
-          "ticker": "KXITTFMENMATCH-26APR290730FRAGRE",
-          "suffix": "26APR290730FRAGRE"
-        },
-        {
-          "ticker": "KXITTFMENMATCH-26APR281430HUNUZB",
-          "suffix": "26APR281430HUNUZB"
-        }
+      "title_samples": [
+        "France vs Greece",
+        "Hungary vs Uzbekistan"
       ],
-      "team_abbr_lengths": {
-
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
       }
     },
     {
-      "base": "KXITTFWOMEN",
-      "total": 1,
-      "patterns": {
-        "G4_short_int": 1
+      "series_base": "KXITTFMEN",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 8,
+      "outcome_count_distribution": {
+        "8": 1
       },
-      "examples": {
-        "G4_short_int": [
-          {
-            "ticker": "KXITTFWOMEN-26",
-            "suffix": "26",
-            "groups": [
-              "26"
-            ]
-          }
+      "label_classes": {
+        "team_like": 8
+      },
+      "label_samples": {
+        "team_like": [
+          "China",
+          "Japan",
+          "France",
+          "Sweden"
         ]
       },
-      "unparsed": [],
-      "team_abbr_lengths": {
-
+      "title_samples": [
+        "ITTF World Team Table Tennis Men's Championship Finals"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXITTFWOMEN",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 8,
+      "outcome_count_distribution": {
+        "8": 1
+      },
+      "label_classes": {
+        "team_like": 8
+      },
+      "label_samples": {
+        "team_like": [
+          "China",
+          "Japan",
+          "Republic of Korea",
+          "Germany"
+        ]
+      },
+      "title_samples": [
+        "ITTF World Team Table Tennis Women's Championship Finals"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
       }
     }
   ]
