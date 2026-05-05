@@ -395,3 +395,186 @@ class TestBatchSeeder:
         assert stats["paired_strict"] == 1
         assert stats["outright"]      == 1
         assert stats["unpaired"]      == 1
+
+
+# ── Tier 3: guarded fuzzy (Phase C2) ─────────────────────────────
+
+class TestGuardedFuzzyTier:
+    """Phase C2 — final fallback when strict + alias_table both miss.
+
+    Fires ONLY when the (sport, date) bucket has exactly one unpaired
+    FL fixture and one unpaired Kalshi record. Anything more
+    ambiguous → leave unpaired (caller should add an alias-map
+    entry instead of letting v2 guess).
+    """
+
+    def _seed_one_fl_fixture(self, sport: str,
+                              shortname_home: str,
+                              shortname_away: str,
+                              fl_event_id: str = "fl_x"):
+        """Helper: build a registry with one FL fixture for
+        2026-05-05 between the given shortnames."""
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_test",
+                    "NAME": "Test League",
+                    "EVENTS": [
+                        {
+                            "EVENT_ID":       fl_event_id,
+                            "HOME_NAME":      f"Team {shortname_home}",
+                            "AWAY_NAME":      f"Team {shortname_away}",
+                            "SHORTNAME_HOME": shortname_home,
+                            "SHORTNAME_AWAY": shortname_away,
+                            "START_TIME":     _ts(2026, 5, 5, 19, 0),
+                        },
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, sport)
+        return r
+
+    def test_guarded_fuzzy_pairs_when_one_plus_one(self):
+        """Single unpaired FL fixture + single unpaired Kalshi record
+        on the same date → guarded fuzzy fires, paired with
+        confidence 0.7."""
+        # FL fixture between FOO and BAR (no Kalshi alias entries).
+        r = self._seed_one_fl_fixture("Soccer", "FOO", "BAR")
+        # Kalshi record with a totally different abbr_block (XXXYYY)
+        # — strict and alias_table both miss; only guarded fuzzy
+        # can pair them.
+        records = [
+            {"event_ticker":  "KXUCLGAME-26MAY05XXXYYY",
+             "series_ticker": "KXUCLGAME"},
+        ]
+        stats = seed_kalshi_records(r, records, "Soccer")
+        assert stats["paired_guarded"] == 1
+        assert stats["paired_strict"]  == 0
+        assert stats["paired_alias"]   == 0
+        assert stats["unpaired"]       == 0
+        # Alias was written with the right method/confidence
+        a = r.resolve_alias("kalshi", "KXUCLGAME-26MAY05XXXYYY")
+        assert a is not None
+        assert a.method == "guarded_fuzzy"
+        assert a.confidence == 0.7
+
+    def test_does_not_fire_when_multiple_fl_fixtures(self):
+        """Two unpaired FL fixtures on the same date → bucket is
+        ambiguous → guarded fuzzy refuses to guess.
+        """
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_test",
+                    "NAME": "Test League",
+                    "EVENTS": [
+                        {"EVENT_ID": "fl_a",
+                         "HOME_NAME": "Foo", "AWAY_NAME": "Bar",
+                         "SHORTNAME_HOME": "FOO", "SHORTNAME_AWAY": "BAR",
+                         "START_TIME": _ts(2026, 5, 5, 19, 0)},
+                        {"EVENT_ID": "fl_b",
+                         "HOME_NAME": "Baz", "AWAY_NAME": "Qux",
+                         "SHORTNAME_HOME": "BAZ", "SHORTNAME_AWAY": "QUX",
+                         "START_TIME": _ts(2026, 5, 5, 21, 0)},
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Soccer")
+        records = [
+            {"event_ticker":  "KXUCLGAME-26MAY05ZZZWWW",
+             "series_ticker": "KXUCLGAME"},
+        ]
+        stats = seed_kalshi_records(r, records, "Soccer")
+        assert stats["paired_guarded"] == 0
+        assert stats["unpaired"]       == 1
+
+    def test_does_not_fire_when_multiple_kalshi_records(self):
+        """One unpaired FL fixture + two unpaired Kalshi records
+        on the same date → ambiguous → no pairing."""
+        r = self._seed_one_fl_fixture("Soccer", "FOO", "BAR")
+        records = [
+            {"event_ticker":  "KXUCLGAME-26MAY05XXXYYY",
+             "series_ticker": "KXUCLGAME"},
+            {"event_ticker":  "KXUCLGAME-26MAY05ZZZWWW",
+             "series_ticker": "KXUCLGAME"},
+        ]
+        stats = seed_kalshi_records(r, records, "Soccer")
+        assert stats["paired_guarded"] == 0
+        assert stats["unpaired"]       == 2
+
+    def test_does_not_fire_when_dates_differ(self):
+        """Same sport, but Kalshi record is for a different date
+        than the only unpaired FL fixture → buckets don't intersect
+        → no pairing."""
+        r = self._seed_one_fl_fixture("Soccer", "FOO", "BAR")
+        records = [
+            {"event_ticker":  "KXUCLGAME-26MAY12XXXYYY",
+             "series_ticker": "KXUCLGAME"},  # May 12, FL is May 5
+        ]
+        stats = seed_kalshi_records(r, records, "Soccer")
+        assert stats["paired_guarded"] == 0
+        assert stats["unpaired"]       == 1
+
+    def test_already_paired_fl_fixture_not_eligible(self):
+        """If the only FL fixture for the date already has a Kalshi
+        alias (from tier 1 or 2), a NEW unpaired record can't piggy-
+        back via guarded fuzzy — guard requires ZERO existing aliases.
+        """
+        r = self._seed_one_fl_fixture("Soccer", "FOO", "BAR")
+        # First record pairs strict (FOO+BAR matches FOOBAR)
+        records = [
+            {"event_ticker":  "KXUCLGAME-26MAY05FOOBAR",
+             "series_ticker": "KXUCLGAME"},
+            # Second record (different abbr) shouldn't piggy-back
+            # via guarded fuzzy — the FL fixture is already paired.
+            {"event_ticker":  "KXUCLGAME-26MAY05ZZZWWW",
+             "series_ticker": "KXUCLGAME"},
+        ]
+        stats = seed_kalshi_records(r, records, "Soccer")
+        assert stats["paired_strict"]  == 1
+        assert stats["paired_guarded"] == 0
+        assert stats["unpaired"]       == 1
+
+    def test_strict_takes_precedence_over_guarded(self):
+        """When tier 1 matches in pass 1, the record never enters the
+        pass-2 buffer — guarded fuzzy never gets a chance."""
+        r = self._seed_one_fl_fixture("Soccer", "FOO", "BAR")
+        records = [
+            {"event_ticker":  "KXUCLGAME-26MAY05FOOBAR",
+             "series_ticker": "KXUCLGAME"},
+        ]
+        stats = seed_kalshi_records(r, records, "Soccer")
+        assert stats["paired_strict"]  == 1
+        assert stats["paired_guarded"] == 0
+        # Alias method must be 'strict', not 'guarded_fuzzy'
+        a = r.resolve_alias("kalshi", "KXUCLGAME-26MAY05FOOBAR")
+        assert a.method == "strict"
+
+    def test_idempotent_with_guarded(self):
+        """Re-running the batch shouldn't double-count or overwrite
+        the guarded_fuzzy alias."""
+        r = self._seed_one_fl_fixture("Soccer", "FOO", "BAR")
+        records = [
+            {"event_ticker":  "KXUCLGAME-26MAY05XXXYYY",
+             "series_ticker": "KXUCLGAME"},
+        ]
+        a = seed_kalshi_records(r, records, "Soccer")
+        assert a["paired_guarded"] == 1
+        # Second run: the FL fixture now has a kalshi alias from run 1,
+        # so the guard correctly rejects re-pairing. The same record
+        # is also already aliased via resolve_alias's idempotence
+        # — but the seeder counts it as 'unpaired' because the FL
+        # fixture is no longer in the unpaired_fixtures list.
+        # That's the correct behavior: tier 3 doesn't try to "refresh"
+        # an existing pairing.
+        b = seed_kalshi_records(r, records, "Soccer")
+        # Alias still points to same fixture, still guarded_fuzzy
+        a2 = r.resolve_alias("kalshi", "KXUCLGAME-26MAY05XXXYYY")
+        assert a2.method == "guarded_fuzzy"
+        assert b["paired_guarded"] == 0  # didn't re-fire
+        # Total registry alias count unchanged
+        assert r.stats()["aliases"] == 3   # 1 fl fixture + 1 fl tournament + 1 kalshi
