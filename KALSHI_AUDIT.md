@@ -350,6 +350,230 @@ Key fields: `collection_ticker`, `series_ticker`, `associated_events` (list of `
 
 ---
 
+## 1.6. WebSocket protocol (extracted from `kalshi-websockets.json`)
+
+### Connection
+
+```
+wss://api.elections.kalshi.com/trade-api/ws/v2
+```
+
+Single connection; all communication happens over it. **API-key authentication** required during the WebSocket handshake.
+
+### Heartbeat protocol
+
+Kalshi sends WebSocket Ping frames (opcode 0x9) every **10 seconds** with body `"heartbeat"`. **Clients must respond with Pong frames (0xA)** or the connection drops. Clients may also send Ping; Kalshi will respond with Pong.
+
+### Subscribe / unsubscribe envelope (client → server)
+
+```json
+{
+  "id": 1,
+  "cmd": "subscribe",
+  "params": {
+    "channels": ["ticker", "trade"],
+    "market_tickers": ["KXUCLGAME-26MAY05ARSATM", "..."],
+    "send_initial_snapshot": true
+  }
+}
+```
+
+| Param | Notes |
+|---|---|
+| `channels` | Array of channel names (see below) |
+| `market_ticker` / `market_tickers` | Single or list. Most channels accept this. |
+| `market_id` / `market_ids` | UUIDs (alternative to ticker). Mutually exclusive with ticker variant. |
+| `send_initial_snapshot` | If true, receive a starting snapshot on subscribe |
+| `skip_ticker_ack` | OK responses omit the ticker list (saves bandwidth) |
+| `shard_factor` / `shard_key` | For sharding the `communications` channel only (1–100) |
+
+**Update subscription** (add/remove markets without resubscribing):
+```json
+{ "id": 2, "cmd": "update_subscription",
+  "params": { "sid": 7, "action": "add_markets",
+              "market_tickers": ["..."] } }
+```
+`action` must be `add_markets` or `delete_markets`.
+
+**Unsubscribe**: `{ "id": 3, "cmd": "unsubscribe", "params": { "sids": [7, 8] } }`
+
+**List active subscriptions**: `{ "id": 4, "cmd": "list_subscriptions" }`
+
+### Server → client envelope
+
+Every server message has the shape:
+```json
+{ "type": "<channel>", "sid": 7, "seq": 12345, "msg": { /* payload */ } }
+```
+
+- `sid` = subscription identifier (assigned on subscribe success)
+- `seq` = sequential counter; **gap detection is the client's responsibility for snapshot/delta channels**
+- `msg` = channel-specific payload (schemas below)
+
+### Server-side error codes (22 total)
+
+| Code | Name | When |
+|---|---|---|
+| 1 | Unable to process message | General processing error |
+| 2 | Params required | Missing params object in command |
+| 3 | Channels required | Missing channels array in subscribe |
+| 4 | Subscription IDs required | Missing sids in unsubscribe |
+| 5 | Unknown command | Invalid command name |
+| 6 | Already subscribed | Duplicate subscription attempt |
+| 7 | Unknown subscription ID | Subscription ID not found |
+| 8 | Unknown channel name | Invalid channel in subscribe |
+| 9 | Authentication required | Channel requires authenticated connection |
+| 10 | Channel error | Channel-specific error |
+| 11 | Invalid parameter | Malformed parameter value |
+| 12 | Exactly one sid required | For update_subscription |
+| 13 | Unsupported action | Invalid action for update_subscription |
+| 14 | Market ticker required | Missing market spec |
+| 15 | Action required | Missing action in update_subscription |
+| 16 | Market not found | Invalid market_ticker or market_id |
+| 17 | Internal error | Server-side processing error |
+| 18 | Command timeout | Server timed out |
+| 19–22 | Sharding errors | shard_factor / shard_key validation |
+
+### Channel: `ticker` — primary live-price feed
+
+**Auth**: not required (beyond the authenticated connection).
+**Use case**: live YES/NO chip prices on cards, current market stats.
+
+**Payload (`msg`)**:
+| Field | Type | Description |
+|---|---|---|
+| `market_ticker` | string | Unique market identifier — the join key |
+| `market_id` | string | Market UUID |
+| `price_dollars` | string | Last traded price |
+| `yes_bid_dollars` | string | Best YES bid |
+| `yes_ask_dollars` | string | Best YES ask |
+| `yes_bid_size_fp` | string | Contracts at best YES bid |
+| `yes_ask_size_fp` | string | Contracts at best YES ask |
+| `last_trade_size_fp` | string | Contracts in last trade |
+| `volume_fp` | string | Total contracts traded (lifetime) |
+| `open_interest_fp` | string | Open interest |
+| `dollar_volume` | integer | Total $ traded |
+| `dollar_open_interest` | integer | Total $ in open positions |
+| `ts_ms` | integer | Unix milliseconds (use this) |
+| `ts` | integer | **Deprecated** — Unix seconds |
+| `time` | string | **Deprecated** — RFC3339 |
+
+### Channel: `orderbook_delta` — incremental order book
+
+**Auth**: required.
+**Requires** `market_ticker` / `market_tickers` (not optional).
+**Use case**: build + maintain a live order book.
+
+**Snapshot first** (`type: orderbook_snapshot`), then deltas (`type: orderbook_delta`):
+
+```json
+// Snapshot payload
+{ "market_ticker": "...", "market_id": "...",
+  "yes_dollars_fp": [["0.1500", "100.00"], ...],   // [price_dollars, count_fp]
+  "no_dollars_fp":  [["0.8400", "50.00"],  ...] }
+
+// Delta payload
+{ "market_ticker": "...", "market_id": "...",
+  "price_dollars": "0.1500",
+  "delta_fp": "+10.00",        // signed delta to apply
+  "side": "yes",               // "yes" or "no"
+  "client_order_id": "...",    // optional — present only on YOUR caused changes
+  "ts_ms": 1715000000000 }
+```
+
+`seq` field on the envelope must be checked for gap detection — if you get `seq=N+2` after `seq=N`, you missed `N+1` and need to resubscribe.
+
+### Channel: `trade` — public trades
+
+**Auth**: not required.
+**Optional** market filter (omit to receive all).
+**Use case**: live trades tape, volume analysis.
+
+**Payload (`msg`)**:
+| Field | Type | Description |
+|---|---|---|
+| `trade_id` | string | UUID |
+| `market_ticker` | string | |
+| `yes_price_dollars` | string | |
+| `no_price_dollars` | string | |
+| `count_fp` | string | Contracts in this trade |
+| `taker_side` | string | `yes` or `no` |
+| `ts_ms` | integer | |
+| `ts` | integer | **Deprecated** — Unix seconds |
+
+### Channel: `market_lifecycle_v2` — state changes
+
+**Auth**: not required (beyond connection).
+**No market filter** (receives all). **Use case**: react to settlement / determination / pause / market creation.
+
+Two message types:
+
+**`market_lifecycle_v2`** — market state change:
+| Field | Type | When |
+|---|---|---|
+| `event_type` | string | `created` / `determined` / `settled` / `close_date_updated` / `paused` / `unpaused` / `price_level_structure_updated` / `limit_updated` / etc. |
+| `market_ticker` | string | always |
+| `open_ts` / `close_ts` | integer | on `created` / `close_date_updated` |
+| `result` | string | on `determined` (`yes` / `no` / `scalar` / `void`) |
+| `determination_ts` | integer | on `determined` |
+| `settlement_value` | string | on `determined` |
+| `settled_ts` | integer | on `settled` |
+| `is_deactivated` | boolean | on pause/unpause |
+| `price_level_structure` | string | on `created` / `price_level_structure_updated` |
+| `additional_metadata` | object | only on `created` (carries title, rules_primary, strike fields, etc.) |
+
+**`event_lifecycle`** — emitted when a new event is created:
+| Field | Description |
+|---|---|
+| `event_ticker` / `series_ticker` / `title` / `subtitle` | self-explanatory |
+| `collateral_return_type` | `MECNET`, `DIRECNET`, or empty |
+| `strike_date` / `strike_period` | optional |
+
+### Channel: `fill` — your fills (auth required)
+
+Used when you have orders on the exchange. Not used today on /sports v2 but listed for completeness.
+
+**Payload (`msg`)**:
+- `trade_id`, `order_id`, `market_ticker`, `is_taker`, `side` (yes/no), `yes_price_dollars`, `count_fp`, `fee_cost`, `action` (buy/sell), `ts_ms`, `client_order_id`, `post_position_fp`, `purchased_side`, `subaccount`
+
+### Channel: `user_orders` — your order updates (auth required)
+
+**Payload**: same fields as REST `Order` schema, with `created_ts_ms` / `last_updated_ts_ms` / `expiration_ts_ms` (ms variants of legacy time fields).
+
+### Channel: `market_positions` — your portfolio (auth required)
+
+**Payload**: `market_ticker`, `position_fp`, `position_cost_dollars`, `realized_pnl_dollars`, `fees_paid_dollars`, `position_fee_cost_dollars`, `volume_fp`, `subaccount`. All monetary values are FixedPointDollars strings.
+
+### Channel: `multivariate_market_lifecycle`
+
+Same shape as `market_lifecycle_v2` but for MVE markets. Emits `multivariate_market_lifecycle` and `event_lifecycle` types.
+
+### Channel: `multivariate` (DEPRECATED)
+
+Pre-RFQ multivariate lookup channel. Don't use for new integrations.
+
+### Channel: `communications` — RFQ/quote feed (auth required)
+
+For institutional traders working with Request-for-Quote workflows. Five message types: `rfq_created`, `rfq_deleted`, `quote_created`, `quote_accepted`, `quote_executed`. Uses `client_order_id` to correlate quote_executed → fill events.
+
+### Channel: `order_group_updates` — order group lifecycle (auth required)
+
+Order groups are atomic order-bundle constructs. Emits on creation, trigger, reset, deletion, limit update. Single message type.
+
+### Channels we use today (recap)
+
+From `kalshi_ws.py`:
+| Channel | Mode | Purpose |
+|---|---|---|
+| `ticker` | always-on | Live YES/NO prices on every card |
+| `orderbook_delta` | on-demand (ref-counted) | Order book panel when modal opens |
+| `trade` | on-demand (ref-counted) | Live trades feed when modal opens |
+
+**Channels we should add for /sports v2:**
+- `market_lifecycle_v2` — react to `settled` / `determined` events to update card state in real time (FT badge, settlement price); auto-remove markets on `closed` if useful.
+
+---
+
 ## 2. Series tickers per sport
 
 Source: `probe_series.py` → `/api/_debug/series_tickers`.
