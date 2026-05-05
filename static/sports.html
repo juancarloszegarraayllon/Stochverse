@@ -1501,8 +1501,14 @@ function renderEventRow(ev, market, isMarketRow) {
       const lblLc = (o.label || '').toLowerCase();
       let icon = '';
       if (!showMatchup) {
-        if (lblLc === homeLc || (homeLc && lblLc.includes(homeLc))) icon = homeIconHtml;
-        else if (lblLc === awayLc || (awayLc && lblLc.includes(awayLc))) icon = awayIconHtml;
+        const matchesTeam = function(team) {
+          if (!team || !lblLc) return false;
+          if (lblLc === team) return true;
+          if (lblLc.length < 3) return false;
+          return lblLc.includes(team) || team.includes(lblLc);
+        };
+        if (matchesTeam(homeLc)) icon = homeIconHtml;
+        else if (matchesTeam(awayLc)) icon = awayIconHtml;
       }
       html += '<span class="sp-c2-team" title="' + escH(o.label || '') +
               '">' + icon + escH(o.label || '') + '</span>';
@@ -1842,24 +1848,49 @@ function eventShowsScoreInColumn(ev) {
 }
 
 function isWinnerShapedOutcomes(outcomes, homeName, awayName) {
-  // True when every outcome label IS one of: home team name, away
-  // team name, or a tie/draw word. Used to skip the matchup header
-  // (which would just duplicate the team names already showing as
-  // outcome labels). Covers Winner, First Half Winner, Half-time
-  // Winner, Set Winner, etc. — any market shaped like 'home /
-  // away / tie' regardless of its market_type label. Doesn't trip
-  // on Spreads ('Freiburg wins by over 2.5') because the label
-  // doesn't EQUAL 'Freiburg' — it just contains it.
+  // True when every outcome label maps to home, away, or a tie
+  // word. Used to skip the matchup header (which would just
+  // duplicate the team names already showing as outcome labels).
+  // Covers Winner, First Half Winner, Half-time Winner, Set
+  // Winner, etc. — any market shaped like 'home / away / tie'.
+  //
+  // Match is bidirectional substring (>=3 chars) so Kalshi short
+  // labels like 'San Antonio' map to FL HOME_NAME 'San Antonio
+  // Spurs', and 'Atl. Madrid' to 'Atletico Madrid'. Spreads still
+  // fail because 'Freiburg wins by over 2.5' contains 'Freiburg'
+  // but also contains tokens like 'wins by' which won't match the
+  // other side, and we require non-tie labels to map to DIFFERENT
+  // teams so a single team-name substring can't satisfy both
+  // outcomes of a 2-outcome market.
   if (!outcomes || outcomes.length < 2 || outcomes.length > 3) return false;
   const tieWords = new Set(['tie', 'draw', 'no winner', 'no result']);
   const home = (homeName || '').trim().toLowerCase();
   const away = (awayName || '').trim().toLowerCase();
   if (!home || !away) return false;
+  function matches(lbl, team) {
+    if (!lbl || !team) return false;
+    if (lbl === team) return true;
+    if (lbl.length < 3) return false;
+    return team.indexOf(lbl) !== -1 || lbl.indexOf(team) !== -1;
+  }
+  let homeSeen = false;
+  let awaySeen = false;
   for (const o of outcomes) {
     const lbl = (o.label || '').trim().toLowerCase();
-    if (lbl !== home && lbl !== away && !tieWords.has(lbl)) return false;
+    if (tieWords.has(lbl)) continue;
+    const isHome = matches(lbl, home);
+    const isAway = matches(lbl, away);
+    if (isHome && !isAway && !homeSeen) { homeSeen = true; continue; }
+    if (isAway && !isHome && !awaySeen) { awaySeen = true; continue; }
+    if (isHome && isAway) {
+      // Ambiguous (e.g. home='LA Lakers', away='LA Clippers',
+      // label='LA'). Assign to whichever side hasn't been seen.
+      if (!homeSeen) { homeSeen = true; continue; }
+      if (!awaySeen) { awaySeen = true; continue; }
+    }
+    return false;
   }
-  return true;
+  return homeSeen && awaySeen;
 }
 
 function renderTennisScoreCell(ev, hasMatchupHeader) {
