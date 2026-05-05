@@ -306,8 +306,9 @@ Single running list of every issue surfaced from live `/sports?v2=1` testing. On
 | 2026-05-05 | Basketball | KXWNBADELAY ("Will at least 1 game be played in the WNBA season?") | Outright series prefix missing from `_OUTRIGHT_SERIES_PREFIXES` | `6ebbc92` |
 | 2026-05-05 | All | Sub-market views duplicating team crests on matchup line + outcome rows | UI: redundant icon placement | `46a43e1`, `6ebbc92`, `f84514a` |
 | 2026-05-05 | All | Sport-nav side links dropped `?v2=1` query param on click | UI: query-string forwarding | `6ebbc92` |
-| 2026-05-05 | Basketball | KXNBAGAME-26MAY05LALOKC (LAL@OKC) FL row had no Kalshi block attached | Suspected FL/Kalshi NBA shortname divergence — needs per-sport abbr alias map | _open_ |
-| 2026-05-05 | All | When FL has a fixture but Kalshi pairing fails, the Kalshi market vanishes from `/sports` even though it exists in the cache | No safety-net surfacing of unpaired-but-same-date Kalshi fixtures next to their likely FL counterpart | _open_ |
+| 2026-05-05 | Basketball | KXNBAGAME-26MAY05LALOKC (LAL@OKC) FL row had no Kalshi block attached | FL/Kalshi NBA shortname divergence — added per-sport `_FL_ABBR_ALIASES` map in `kalshi_identity.py` (LAK↔LAL, OKL↔OKC, etc.) | `bdfe68b` |
+| 2026-05-05 | All | When FL has a fixture but Kalshi pairing fails, the Kalshi market vanished into a sibling 'Other: <ticker>' tournament instead of surfacing inside the FL tournament | Added `_V2_SAFETY_NET_LEAGUE_PATTERNS` map + `_v2_safety_net_target()` fallback in `_v2_route_unpaired` — fuzzy-matches series_base to FL tournament NAME substring as a tertiary routing fallback (after deterministic in-request match and persistent hint) | _next commit_ |
+| 2026-05-05 | UX | Outright/season-future tournaments were rendered at the TOP of side nav AND cards column, blocking the user from seeing live games | Reordered: outrights now `push` to bottom of side nav, cards column stable-sorts so outrights render last | `fed6818` |
 
 ### Phase 6 — promote v2 to default (1 hour)
 
