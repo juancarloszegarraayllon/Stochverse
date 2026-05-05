@@ -9093,7 +9093,33 @@ async def debug_sport_buckets(sport_id: int, timezone: int = 0,
 
 def _v2_pick_primary(records: list) -> dict:
     """From a pairing's kalshi_records, pick the headline (no market_type)
-    record. Falls back to records[0] if no headline exists."""
+    record. Falls back to records[0] if no headline exists.
+
+    Preference order (Phase 5 punch list 2026-05-05 — empty WINNER
+    tab on NBA cards):
+      1. Records whose series_ticker ends in GAME or MATCH AND have
+         empty market_type — the canonical headline-fixture markers.
+      2. Any record with empty market_type.
+      3. records[0] as a last resort.
+
+    The two-pass order matters because NBA fixtures pair both
+    KXNBAGAME (the actual 2-way Winner) AND KXNBASERIES* (the
+    playoff-series-level tickers) — both can have empty market_type,
+    but only KXNBAGAME's outcomes are 2-way home/away that
+    _extract_winner_prices knows how to read. Without preferring
+    GAME/MATCH the WINNER tab can render empty even though the data
+    is sitting right there in the markets array.
+    """
+    from kalshi_identity import strip_known_suffix
+    # Pass 1: prefer GAME/MATCH-suffixed series with empty market_type
+    for r in records:
+        if _market_type_from_title(r.get("title") or ""):
+            continue
+        series = (r.get("series_ticker") or "").upper()
+        _, suffix = strip_known_suffix(series)
+        if suffix in ("GAME", "MATCH"):
+            return r
+    # Pass 2: any record with empty market_type
     for r in records:
         if not _market_type_from_title(r.get("title") or ""):
             return r
