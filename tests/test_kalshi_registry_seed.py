@@ -576,5 +576,236 @@ class TestGuardedFuzzyTier:
         a2 = r.resolve_alias("kalshi", "KXUCLGAME-26MAY05XXXYYY")
         assert a2.method == "guarded_fuzzy"
         assert b["paired_guarded"] == 0  # didn't re-fire
-        # Total registry alias count unchanged
-        assert r.stats()["aliases"] == 3   # 1 fl fixture + 1 fl tournament + 1 kalshi
+        # Total registry alias count unchanged. Phase C2b now also
+        # writes a 'kalshi_market' alias for the Winner market layer
+        # (record has GAME suffix), so:
+        #   1 fl fixture + 1 fl tournament + 1 kalshi (fixture)
+        #   + 1 kalshi_market = 4
+        # No kalshi_outcome aliases because the test record carries
+        # no outcomes.
+        assert r.stats()["aliases"] == 4
+
+
+# ── Phase C2b: market-layer seeding ──────────────────────────────
+
+class TestMarketLayerSeeding:
+    """Phase C2b — when a Kalshi Winner record (series_ticker ends
+    in GAME or MATCH) pairs to a fixture, the seeder also registers
+    the canonical Market and Outcomes for it. This is what enables
+    cross-source price aggregation later: Polymarket / OddsAPI
+    Winner records for the same fixture will resolve to the SAME
+    canonical Market and Outcomes.
+    """
+
+    def test_winner_market_layer_seeded(self, registry_seeded_ucl):
+        rec = {
+            "event_ticker":  "KXUCLGAME-26MAY05ARSATM",
+            "series_ticker": "KXUCLGAME",
+            "outcomes": [
+                {"label": "Arsenal",     "_yb": 47, "ticker": "T1-ARS"},
+                {"label": "Atl. Madrid", "_yb": 28, "ticker": "T1-ATM"},
+                {"label": "Tie",         "_yb": 26, "ticker": "T1-TIE"},
+            ],
+        }
+        fx = seed_kalshi_record(registry_seeded_ucl, rec, "Soccer")
+        assert fx is not None
+        # MarketType registered
+        mt = registry_seeded_ucl.resolve_market_type(
+            "market_type:soccer:winner",
+        )
+        assert mt is not None
+        assert mt.parameterized is False
+        # Market registered for this fixture
+        expected_market_id = (
+            "market:soccer:2026-05-05:arsenal-vs-atl-madrid:winner"
+        )
+        market = registry_seeded_ucl.resolve_market(expected_market_id)
+        assert market is not None
+        assert market.fixture_id == fx.id
+
+    def test_market_alias_namespaced(self, registry_seeded_ucl):
+        """Fixture-level alias and market-level alias share the same
+        event_ticker but live under different sources so they don't
+        collide in the alias index."""
+        rec = {
+            "event_ticker":  "KXUCLGAME-26MAY05ARSATM",
+            "series_ticker": "KXUCLGAME",
+            "outcomes":      [],
+        }
+        seed_kalshi_record(registry_seeded_ucl, rec, "Soccer")
+        # source='kalshi' → fixture
+        fix_alias = registry_seeded_ucl.resolve_alias(
+            "kalshi", "KXUCLGAME-26MAY05ARSATM",
+        )
+        assert fix_alias is not None
+        assert fix_alias.canonical_id.startswith("fixture:")
+        # source='kalshi_market' → market
+        mkt_alias = registry_seeded_ucl.resolve_alias(
+            "kalshi_market", "KXUCLGAME-26MAY05ARSATM",
+        )
+        assert mkt_alias is not None
+        assert mkt_alias.canonical_id.startswith("market:")
+
+    def test_outcomes_seeded_with_correct_sides(
+        self, registry_seeded_ucl,
+    ):
+        rec = {
+            "event_ticker":  "KXUCLGAME-26MAY05ARSATM",
+            "series_ticker": "KXUCLGAME",
+            "outcomes": [
+                {"label": "Arsenal",     "ticker": "T1-ARS"},
+                {"label": "Atl. Madrid", "ticker": "T1-ATM"},
+                {"label": "Tie",         "ticker": "T1-TIE"},
+            ],
+        }
+        seed_kalshi_record(registry_seeded_ucl, rec, "Soccer")
+        # Three outcomes registered with sides home/away/tie
+        market_id = (
+            "market:soccer:2026-05-05:arsenal-vs-atl-madrid:winner"
+        )
+        home_o = registry_seeded_ucl.resolve_outcome(
+            f"outcome:{market_id}:home",
+        )
+        away_o = registry_seeded_ucl.resolve_outcome(
+            f"outcome:{market_id}:away",
+        )
+        tie_o = registry_seeded_ucl.resolve_outcome(
+            f"outcome:{market_id}:tie",
+        )
+        assert home_o is not None
+        assert away_o is not None
+        assert tie_o is not None
+        assert home_o.canonical_label == "Arsenal"
+        assert away_o.canonical_label == "Atl. Madrid"
+        assert tie_o.canonical_label  == "Tie"
+
+    def test_outcome_aliases_under_kalshi_outcome_source(
+        self, registry_seeded_ucl,
+    ):
+        """Each Kalshi per-outcome ticker ('T1-ARS' etc.) registered
+        as a kalshi_outcome alias pointing at the canonical Outcome."""
+        rec = {
+            "event_ticker":  "KXUCLGAME-26MAY05ARSATM",
+            "series_ticker": "KXUCLGAME",
+            "outcomes": [
+                {"label": "Arsenal",     "ticker": "T1-ARS"},
+                {"label": "Atl. Madrid", "ticker": "T1-ATM"},
+            ],
+        }
+        seed_kalshi_record(registry_seeded_ucl, rec, "Soccer")
+        a_ars = registry_seeded_ucl.resolve_alias(
+            "kalshi_outcome", "T1-ARS",
+        )
+        assert a_ars is not None
+        assert a_ars.canonical_id.endswith(":home")
+        a_atm = registry_seeded_ucl.resolve_alias(
+            "kalshi_outcome", "T1-ATM",
+        )
+        assert a_atm is not None
+        assert a_atm.canonical_id.endswith(":away")
+
+    def test_sub_market_skipped(self, registry_seeded_ucl):
+        """Spread / Total / etc. (parameterized, deferred to C2c)
+        should still pair the fixture but NOT seed a Market layer.
+        """
+        rec = {
+            "event_ticker":  "KXUCLSPREAD-26MAY05ARSATM",
+            "series_ticker": "KXUCLSPREAD",
+            "outcomes":      [],
+        }
+        fx = seed_kalshi_record(registry_seeded_ucl, rec, "Soccer")
+        assert fx is not None
+        # Fixture alias was written
+        assert registry_seeded_ucl.resolve_alias(
+            "kalshi", "KXUCLSPREAD-26MAY05ARSATM",
+        ) is not None
+        # But NO market layer
+        assert registry_seeded_ucl.resolve_alias(
+            "kalshi_market", "KXUCLSPREAD-26MAY05ARSATM",
+        ) is None
+        assert registry_seeded_ucl.stats()["markets"] == 0
+
+    def test_idempotent_market_seeding(self, registry_seeded_ucl):
+        """Re-running the same Kalshi record doesn't duplicate the
+        Market or Outcomes."""
+        rec = {
+            "event_ticker":  "KXUCLGAME-26MAY05ARSATM",
+            "series_ticker": "KXUCLGAME",
+            "outcomes": [
+                {"label": "Arsenal",     "ticker": "T1-ARS"},
+                {"label": "Atl. Madrid", "ticker": "T1-ATM"},
+                {"label": "Tie",         "ticker": "T1-TIE"},
+            ],
+        }
+        seed_kalshi_record(registry_seeded_ucl, rec, "Soccer")
+        before = registry_seeded_ucl.stats()
+        seed_kalshi_record(registry_seeded_ucl, rec, "Soccer")
+        after = registry_seeded_ucl.stats()
+        assert before == after
+        assert after["markets"]  == 1
+        assert after["outcomes"] == 3
+
+    def test_unrecognized_outcome_label_skipped(
+        self, registry_seeded_ucl,
+    ):
+        """A label that doesn't overlap with home/away tokens and
+        isn't a tie word gets skipped silently — doesn't blow up
+        the seed."""
+        rec = {
+            "event_ticker":  "KXUCLGAME-26MAY05ARSATM",
+            "series_ticker": "KXUCLGAME",
+            "outcomes": [
+                {"label": "Arsenal",     "ticker": "T1-ARS"},
+                {"label": "Mystery Box", "ticker": "T1-MYS"},
+                {"label": "Tie",         "ticker": "T1-TIE"},
+            ],
+        }
+        seed_kalshi_record(registry_seeded_ucl, rec, "Soccer")
+        # 2 outcomes registered (Arsenal home, Tie tie); Mystery Box
+        # silently skipped
+        assert registry_seeded_ucl.stats()["outcomes"] == 2
+
+
+class TestOutcomeSideClassification:
+
+    def test_tie_words(self, registry_seeded_ucl):
+        from kalshi_registry_seed import _classify_outcome_side
+        fx = registry_seeded_ucl.resolve_through_alias("fl", "fl_arsatm")
+        assert _classify_outcome_side(
+            "Tie", registry_seeded_ucl, fx,
+        ) == "tie"
+        assert _classify_outcome_side(
+            "Draw", registry_seeded_ucl, fx,
+        ) == "tie"
+        assert _classify_outcome_side(
+            "no winner", registry_seeded_ucl, fx,
+        ) == "tie"
+
+    def test_home_match_via_canonical_name(self, registry_seeded_ucl):
+        from kalshi_registry_seed import _classify_outcome_side
+        fx = registry_seeded_ucl.resolve_through_alias("fl", "fl_arsatm")
+        assert _classify_outcome_side(
+            "Arsenal FC wins", registry_seeded_ucl, fx,
+        ) == "home"
+
+    def test_away_match_via_partial(self, registry_seeded_ucl):
+        from kalshi_registry_seed import _classify_outcome_side
+        fx = registry_seeded_ucl.resolve_through_alias("fl", "fl_arsatm")
+        # "Madrid" is in 'Atl. Madrid' canonical name's tokens
+        assert _classify_outcome_side(
+            "Madrid wins", registry_seeded_ucl, fx,
+        ) == "away"
+
+    def test_zero_overlap_returns_none(self, registry_seeded_ucl):
+        from kalshi_registry_seed import _classify_outcome_side
+        fx = registry_seeded_ucl.resolve_through_alias("fl", "fl_arsatm")
+        assert _classify_outcome_side(
+            "Liverpool wins", registry_seeded_ucl, fx,
+        ) is None
+
+    def test_empty_label_returns_none(self, registry_seeded_ucl):
+        from kalshi_registry_seed import _classify_outcome_side
+        fx = registry_seeded_ucl.resolve_through_alias("fl", "fl_arsatm")
+        assert _classify_outcome_side(
+            "", registry_seeded_ucl, fx,
+        ) is None
