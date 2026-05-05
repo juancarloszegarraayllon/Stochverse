@@ -1247,6 +1247,236 @@ favor of the contract above:
 
 ---
 
+## 9. Cross-source field mapping (FL / ESPN / SportsDB / SofaScore)
+
+For /sports v2 we need to know which data source supplies which field
+and **who's canonical** when sources overlap. This section is an audit
+of OUR code (`flashlive_feed.py`, `espn_feed.py`, `sportsdb_feed.py`,
+`sofascore_feed.py`) — not Kalshi.
+
+### Sport coverage per source
+
+| Source | Sports | Polling | Auth |
+|---|---|---|---|
+| **FlashLive** (FL) | Soccer, Tennis, Basketball, Hockey, Football (American), Baseball, Rugby (Union+League), Cricket, Darts, Boxing, Aussie Rules, Golf, Table Tennis, MMA, Motorsport, Esports — **17 sports** (all of Kalshi's tagged sports except Chess, Lacrosse, Other Sports) | every `POLL_INTERVAL` seconds, async background task | ✅ RapidAPI key (`FLASHLIVE_API_KEY`) |
+| **ESPN** | Basketball (NBA / WNBA / NCAAM / NCAAW), Football (NFL / NCAAF / UFL), Baseball (MLB / NCAAB), Hockey (NHL / NCAA Hockey), Soccer (~30 leagues — EPL, La Liga, Serie A, Bundesliga, Ligue 1, MLS, etc.) | parallel per-league fetch every poll | ❌ unauth public scoreboard |
+| **SportsDB** | Soccer, Basketball, Football, Baseball, Hockey — **5 sports** | serial polling (10 req/min rate limit), 30s cycle | free tier API key `"3"` |
+| **SofaScore** | Soccer, Basketball, Football, Baseball, Hockey, Cricket, Tennis, Rugby — **8 sports** | per-sport live + scheduled-events endpoints | ❌ unauth (unofficial public API) |
+
+### Canonical source priority (per sport)
+
+When multiple sources have data for the same fixture, the canonical-source priority used in `main.py` today:
+
+| Sport | Live clock / period | Final score | Playoff series | Two-leg aggregate |
+|---|---|---|---|---|
+| Basketball | **ESPN** (preferred — `_ESPN_CLOCK_SPORTS` set) | ESPN → FL → SportsDB → SofaScore | ESPN | n/a |
+| Football | **ESPN** | ESPN → FL → SportsDB → SofaScore | ESPN | n/a |
+| Hockey | **ESPN** | ESPN → FL → SportsDB → SofaScore | ESPN | n/a |
+| Soccer | **FL** (FL ships `STAGE_START_TIME` and stoppage info ESPN omits) | FL → ESPN → SportsDB → SofaScore | n/a | **SofaScore** (only source with cup-tie aggregates) → bracket-cache fallback |
+| Tennis | FL | FL | n/a | n/a |
+| Baseball | FL → ESPN | ESPN → FL | n/a | n/a |
+| MLS / specific leagues ESPN doesn't cover (J1/J2, K League, Polish Ekstraklasa, Chinese Super League) | SportsDB → SofaScore | same | n/a | SofaScore |
+| Cricket / Darts / Aussie Rules / Boxing / MMA / Motorsport / Rugby / Golf / Esports | FL only | FL only | n/a | n/a |
+| Chess / Lacrosse / Other Sports | none — Kalshi-only sports | n/a | n/a | n/a |
+
+The fallback chain is encoded in `main.py:_enrich_record_live_state` (the function /sports v2 will replace).
+
+### Game-dict shape — what each source returns
+
+All four sources expose a `match_game(title, sport)` function that returns `None` or a dict. The dict shapes converge but each source provides a different field subset:
+
+#### FlashLive returns the richest shape (29 fields)
+
+```
+{ "event_id", "sport", "league", "country",
+  "tournament_id", "tournament_season_id", "tournament_stage_id",
+  "home_name", "away_name", "home_abbr", "away_abbr",
+  "home_score", "away_score",
+  "home_phrases", "away_phrases",        # used by match_game's title-search
+  "state",                               # "in", "post", "pre"
+  "display_clock", "short_detail", "period",
+  "is_halftime", "clock_running",
+  "stage_start_ms",                      # tick anchor for 500ms client tick
+  "scheduled_kickoff_ms",                # for date matching
+  "captured_at_ms",
+  "_raw_keys", "_raw_preview",           # debugging
+  "info_notice"                          # added-time announcement
+}
+```
+
+#### ESPN returns playoff-series + two-leg aggregate fields FL doesn't have (24 fields)
+
+```
+{ "sport", "league",
+  "home_phrases", "away_phrases",
+  "home_display", "away_display",
+  "home_abbr", "away_abbr",
+  "home_score", "away_score",
+  "state", "display_clock", "period",
+  "short_detail", "detail", "description",
+  "scheduled_kickoff_ms",
+  # Playoff series — these are ESPN-only:
+  "is_playoff", "series_type", "series_title",
+  "series_summary", "series_home_wins", "series_away_wins",
+  "series_game_number",
+  # Two-leg aggregate (soccer cups) — also from ESPN, redundantly:
+  "is_two_leg", "aggregate_home", "aggregate_away", "leg_number"
+}
+```
+
+#### SportsDB — minimal shape (16 fields)
+
+```
+{ "sport", "league",
+  "home_display", "away_display",
+  "home_phrases", "away_phrases",
+  "home_abbr", "away_abbr",                # synthesized from first 3 chars of name
+  "home_score", "away_score",
+  "state", "display_clock": "",            # SportsDB never gives clock
+  "period": 0,                             # never gives period
+  "short_detail", "detail", "description",
+  "clock_running": False                   # never running per source
+}
+```
+
+Use SportsDB for: **score + state only**, when ESPN doesn't cover the league. No live clock; no aggregate; no series.
+
+#### SofaScore — same shape as SportsDB plus aggregate via `lookup_aggregate_sync`
+
+```
+{ "sport", "league",
+  "scheduled_kickoff_ms",
+  "_sofa_event_id",                        # for the per-event aggregate lookup
+  "home_display", "away_display",
+  "home_phrases", "away_phrases",
+  "home_abbr", "away_abbr",
+  "home_score", "away_score",
+  "state", "display_clock": "", "period": 0,
+  "short_detail", "detail", "description",
+  "clock_running": False
+}
+```
+
+`lookup_aggregate_sync(event_id)` → returns `{is_two_leg, aggregate_home, aggregate_away, leg_number, round_name}` — **only source that reliably has soccer-cup aggregates** (UCL knockouts, Libertadores, FA Cup, etc.). Used as a fallback when ESPN doesn't ship aggregate data for the leg in question.
+
+### Field-by-field source matrix
+
+For every field /sports v2 might display, where it comes from. ✅ = primary source, ☑ = secondary/fallback, ❌ = not provided.
+
+| Field | Kalshi | FL | ESPN | SportsDB | SofaScore |
+|---|---|---|---|---|---|
+| Live YES/NO prices, volume, OI | ✅ | — | — | — | — |
+| Market title / outcome labels | ✅ | — | — | — | — |
+| Settlement value / result | ✅ | — | — | — | — |
+| Order book / live trades | ✅ | — | — | — | — |
+| Market lifecycle events | ✅ (WS) | — | — | — | — |
+| Home / away team name | ☑ (in title) | ✅ (`HOME_NAME`) | ☑ (`home_display`) | ☑ | ☑ |
+| Team abbreviation (3-letter code) | ✅ (in ticker) | ✅ (`SHORTNAME_HOME`) | ✅ (`home_abbr`) | ✗ (synthesized) | ✗ (synthesized) |
+| Team logo / icon URL | — | ✅ (`HOME_IMAGES`) | ❌ | ❌ | ❌ |
+| Live score | — | ✅ | ✅ | ☑ | ☑ |
+| Live clock (e.g. "1H 23:14") | — | ✅ (Soccer) | ✅ (NBA / NHL / NFL) | ❌ | ❌ |
+| Period / quarter / inning | — | ✅ | ✅ | ❌ | ❌ |
+| Halftime indicator | — | ✅ | ☑ | ❌ | ❌ |
+| Stoppage / added time | — | ✅ (`info_notice`) | ❌ | ❌ | ❌ |
+| Scheduled kickoff (`START_TIME`) | — | ✅ | ✅ | ❌ | ✅ |
+| Tournament / league name | — | ✅ (rich) | ✅ | ☑ | ☑ |
+| Tournament stage ID | — | ✅ | — | — | — |
+| Two-leg cup aggregate (UCL R16 leg-1+leg-2 score) | ❌ | ❌ | ✅ partial | ❌ | ✅ canonical |
+| Playoff series score (NBA "3-2") | ❌ | ☑ partial | ✅ canonical | ❌ | ❌ |
+| Series game number (NBA "Game 4") | ❌ | ☑ partial | ✅ | ❌ | ❌ |
+| H2H history | — | ✅ (`/v1/events/h2h`) | ❌ | ❌ | ❌ |
+| Lineups / predicted lineups | — | ✅ | ❌ | ❌ | ❌ |
+| Standings / top scorers | — | ✅ | ❌ | ❌ | ❌ |
+| Bracket / draw | — | ✅ | partial (cache) | ❌ | ❌ |
+| News articles | — | ✅ | ❌ | ❌ | ❌ |
+| Player stats | — | ✅ | partial | ❌ | ❌ |
+
+### How sources combine for a single Kalshi event today
+
+**Soccer fixture, paired to FL:**
+```
+Card title              ← Kalshi (with FL HOME_NAME / AWAY_NAME applied)
+Team logos              ← FL HOME_IMAGES / AWAY_IMAGES
+Score / clock / period  ← FL (canonical for soccer)
+Live state badge        ← FL (HT, FT, "1H 23:14", etc.)
+Aggregate (UCL R16)     ← FL match_game (often null) → SofaScore lookup_aggregate_sync (canonical fallback) → bracket-cache fallback
+Prices                  ← Kalshi WS ticker channel
+Outcomes                ← Kalshi cache record outcomes[]
+```
+
+**NBA playoff game, paired to FL:**
+```
+Card title              ← Kalshi
+Team logos              ← FL HOME_IMAGES
+Score                   ← ESPN (preferred) → FL fallback
+Live clock              ← ESPN (canonical for NBA — _ESPN_CLOCK_SPORTS)
+Period (Q3)             ← ESPN
+Series score (3-2)      ← ESPN series_home_wins / series_away_wins
+Game number (Game 4)    ← ESPN series_game_number
+Prices                  ← Kalshi WS
+```
+
+**MLB game, paired to FL:**
+```
+Score / clock / period  ← ESPN → FL fallback (for leagues ESPN doesn't cover, SportsDB / SofaScore)
+Inning state            ← ESPN
+Doubleheader handling   ← Kalshi ticker has time → joins to FL by SHORTNAME + date+time match
+```
+
+**Kalshi-only sport (Chess, Lacrosse, Other Sports, Esports outrights):**
+```
+All data                ← Kalshi only (no FL pairing). Render outright with N outcomes.
+Player headshots        ← not currently sourced — add to "deferred" list if /sports v2 wants them
+```
+
+### Known gaps in current cross-source code (refer when building v2)
+
+1. **No SportsDB league mapping to Kalshi series** — SportsDB returns games but we don't map their `strLeague` to Kalshi series tickers. Means SportsDB-only games can't pair with Kalshi markets even when both have the fixture.
+
+2. **SofaScore aggregate lookup is on-demand** (`lookup_aggregate_sync`), not pre-fetched. Adds latency (~200ms per cup-tie record) but is gated to known cup prefixes. Acceptable; pre-warming wouldn't change much.
+
+3. **ESPN's `is_two_leg` / `aggregate_home` fields are unreliable for non-UCL competitions** — works for Champions League, sketchy for Europa League / Conference League / domestic cups. SofaScore fills the gap.
+
+4. **No Lacrosse / Chess / Boxing / Aussie Rules in ESPN coverage** — those rely on FL exclusively. If FL drops a sport, those events lose live state entirely. Mitigation: fall back to SofaScore where available (Cricket, Tennis, Rugby coverage exists).
+
+5. **Player info / roster data is FL-only** — H2H, lineups, top scorers, news — all exclusively FlashLive. Adding richer card content depends on FL stability.
+
+### Recommendation for /sports v2 source-selection logic
+
+Replace the current ad-hoc fallback chain with a deterministic source-selector:
+
+```python
+def select_source(sport: str, fl_id: str, ticker_date: date) -> tuple[Game, list[str]]:
+    """Returns (best_game_dict, sources_consulted)."""
+    candidates = []
+
+    # 1. ESPN if sport is in _ESPN_CLOCK_SPORTS — best clock + series data
+    if sport in _ESPN_CLOCK_SPORTS:
+        if g := espn_match(...): candidates.append(("ESPN", g))
+
+    # 2. FlashLive — broadest sport coverage, richest fields
+    if g := fl_match(...): candidates.append(("FL", g))
+
+    # 3. SportsDB / SofaScore — fallback for leagues ESPN+FL miss
+    if not candidates:
+        if g := sportsdb_match(...): candidates.append(("SportsDB", g))
+        if g := sofascore_match(...): candidates.append(("SofaScore", g))
+
+    # 4. Soccer aggregate enrichment — overlay SofaScore on top
+    if sport == "Soccer":
+        if best := candidates[0][1]:
+            if not best.get("aggregate_home"):
+                if agg := sofa_lookup_aggregate(best.get("_sofa_event_id")):
+                    best.update(agg)
+
+    return (candidates[0][1] if candidates else None,
+            [s for s, _ in candidates])
+```
+
+This replaces ~150 lines of nested fallback in `_enrich_record_live_state` with one clean function.
+
+---
+
 ## Regenerating this document
 
 Each section corresponds to a probe; rerunning the probe gives the
@@ -1264,3 +1494,17 @@ endpoint:
 When Kalshi adds a new series or sport, the probes flag it (any
 bucket appearing in the output that's not in this doc is a new
 shape that needs deciding before /sports renders it).
+
+## Deferred work — to revisit before launching the relevant features
+
+These pieces aren't needed for /sports v2 but should be done before
+the corresponding feature ships. Listed here so they don't get
+forgotten.
+
+| What | When to do it | Effort |
+|---|---|---|
+| **Unclassified-records audit** (3,377 records, `_sport=""`): politics, weather, climate, awards, novelty markets like KXELONMARS / KXNEWPOPE / KXWARMING / KXGOVPARTY*. Covers ~1,960 distinct series tickers we haven't catalogued. | Before adding non-sports markets to any user-facing page. | Same probe scripts work — just hit the endpoints with no sport filter, OR add a `_sport_empty=1` flag. ~1 hour to extend probes + ~1 hour to synthesize. |
+| **Cache builder classifier audit** (the OWGRRANK → Esports misclassification surfaced one bug; there may be more) | Before relying on `_sport` for anything user-facing beyond /sports | ~30 min code reading + spot-check on prod cache |
+| **Edge-case ticker patterns** (M05UNI Mainz 05, CHOCHO2 rematch, KXLIVOCCUR `26LIGLA` reversed-handle, KXCHESSFIDERATING `26JUNR3` date+rank) | Before /sports v2 ships if we hit them in QA; otherwise as encountered | ~10 min each |
+| **Multivariate event collections** (KXTEAMSINUCL "Champions League Final Matchup" — pair-style outcomes that span multiple events) | When supporting combo betting | OpenAPI schema is in §1.5; rendering rules need their own probe |
+
