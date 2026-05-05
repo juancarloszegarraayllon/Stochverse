@@ -318,7 +318,7 @@ In response to the realization that adding Polymarket and OddsAPI on top of Kals
 **Sub-phases:**
 
 - **A — `identity_registry.py` foundation**: in-memory registry, canonical IDs (`team:<sport>:<slug>`, `fixture:<sport>:<date>:<home>-vs-<away>`, parameterized markets, outcome layer, alias index with method-precedence). Idempotent registration + version bumping. **No source mappers, no production wiring.** Status: _shipped_.
-- **B — FL seed**: walk FL events list, populate teams/fixtures/competitions in the registry. FL is canonical for fixture metadata per the precedence policy. Read-only against production data; doesn't touch v2 yet.
+- **B — FL seed (`fl_registry_seed.py`)**: walk FL events list → populate teams/competitions/fixtures via the registry. FL is canonical for fixture metadata per the precedence policy. Team slug derived from `HOME_NAME` (long form), `SHORTNAME_HOME` stored as an alias on the team — so canonical IDs survive FL abbr-convention changes (`LAK→LAL` etc.) without renaming. FL `EVENT_ID` and `TOURNAMENT_STAGE_ID` registered as `source='fl'` aliases for `resolve_through_alias`-style lookups. Idempotent (re-runs leave registry unchanged); reschedules bump fixture version. **Read-only against prod data; doesn't touch v2 yet.** Status: _shipped_.
 - **C — Kalshi migration**: `kalshi_join` resolves through the registry. The 3-tier matching (strict → alias → guarded fuzzy) becomes the seeding logic for `kalshi_team_alias` / `kalshi_fixture_alias`, run at first sighting. Request-time pairing collapses to O(1) lookup.
 - **D — generalize**: ESPN / SofaScore / SportsDB live-state dispatchers also resolve via the registry. Polymarket and OddsAPI plug in as new source mappers when they land, no changes to existing ones.
 
