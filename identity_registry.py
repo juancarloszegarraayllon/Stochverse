@@ -566,6 +566,28 @@ class IdentityRegistry:
                        external_id: str) -> Optional[Alias]:
         return self._aliases.get((source, external_id))
 
+    def find_aliases_to(self, canonical_id: str,
+                         source: Optional[str] = None) -> list:
+        """Return every Alias whose `canonical_id` equals the given
+        target, optionally filtered by source.
+
+        Used by the request-time pairing path (Phase C2c-c +) to
+        recover all external IDs (Kalshi tickers, Polymarket
+        condition IDs, OddsAPI event IDs, etc.) that resolve to a
+        given canonical Fixture / Market / Outcome — the inverse
+        of resolve_alias.
+
+        O(N_aliases) iteration today. If aliases grow large, swap
+        in a reverse index keyed by canonical_id without changing
+        the public API.
+        """
+        if source is None:
+            return [a for a in self._aliases.values()
+                    if a.canonical_id == canonical_id]
+        return [a for a in self._aliases.values()
+                if a.canonical_id == canonical_id
+                and a.source == source]
+
     def count_aliases_for(self, canonical_id: str,
                            source: Optional[str] = None) -> int:
         """How many aliases point at this canonical entity?

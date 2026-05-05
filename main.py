@@ -8243,6 +8243,134 @@ async def debug_sports_join_diff(sport_id: int, indent_days: int = 0,
     }
 
 
+@app.get("/api/_debug/registry_diff")
+async def debug_registry_diff(sport_id: int, indent_days: int = 0,
+                                timezone: int = 0):
+    """Compare v2 pairings (kalshi_join.join_with_fl) vs registry-
+    based pairings (registry_pairing.pair_via_registry) for a given
+    (sport_id, indent_days). Used to gate Phase C2c-c request-time
+    wiring of the registry path.
+
+    Output shape mirrors `sports_join_diff` so the verification
+    workflow is consistent:
+      {
+        sport, sport_id, indent_days,
+        v2:        { paired_fl_events, paired_kalshi_records, ... },
+        registry:  { paired_fl_events, paired_kalshi_records, ... },
+        diff: {
+          identical_count, v2_only_pairings, registry_only_pairings,
+          mixed_pairings,
+        }
+      }
+
+    Goal: registry pairings should match or exceed v2 on every FL
+    fixture before we promote the registry path. Mixed_pairings is
+    where the work happens — those rows show divergent ticker sets
+    that need triage before promotion.
+    """
+    from flashlive_feed import _fl_get
+    from kalshi_join import build_kalshi_index, join_with_fl
+    from registry_pairing import pair_via_registry, diff_pairings
+
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
+    if not sport:
+        return {"error":
+                f"no Kalshi sport mapping for FL sport_id={sport_id}"}
+
+    # Fetch FL events (same path as the v1/v2 diff endpoint)
+    fl_data = None
+    if -7 <= indent_days <= 7:
+        try:
+            fl_data = await _fl_get("/v1/events/list", {
+                "sport_id": sport_id, "timezone": timezone,
+                "indent_days": indent_days,
+            })
+        except Exception:
+            fl_data = None
+    fl_data = fl_data or {"DATA": []}
+
+    fl_events: list = []
+    for t in (fl_data.get("DATA") or []):
+        for ev in (t.get("EVENTS") or []):
+            if isinstance(ev, dict):
+                fl_events.append(ev)
+    fl_total = len(fl_events) or 1  # /0 guard
+
+    # v2 pairings (existing kalshi_join path)
+    get_data()
+    cache_records = _cache.get("data_all") or _cache.get("data") or []
+    v2_idx = build_kalshi_index(cache_records, sport)
+    v2_pairings_obj, v2_unpaired = join_with_fl(fl_events, v2_idx, sport)
+    v2_pairings: dict = {}
+    for p in v2_pairings_obj:
+        fl_id = p.fl_event.get("EVENT_ID") or ""
+        if not fl_id:
+            continue
+        v2_pairings[fl_id] = [r.get("event_ticker", "")
+                                for r in p.kalshi_records]
+    # Include FL events with no v2 pairing as empty lists so the
+    # diff sees them on both sides.
+    for ev in fl_events:
+        fl_id = ev.get("EVENT_ID") or ""
+        if fl_id and fl_id not in v2_pairings:
+            v2_pairings[fl_id] = []
+
+    # Registry pairings — restrict cache_records to this sport so
+    # the registry doesn't waste cycles trying to seed cross-sport
+    # tickers (kalshi_join already filtered by sport via build_kalshi_index).
+    sport_kalshi_records = [r for r in cache_records
+                              if (r.get("_sport") or "") == sport]
+    registry_pairings = pair_via_registry(
+        sport, fl_data, sport_kalshi_records,
+    )
+
+    # Diff
+    diff = diff_pairings(v2_pairings, registry_pairings)
+
+    # Counts for at-a-glance comparison
+    v2_paired_events = sum(1 for v in v2_pairings.values() if v)
+    v2_paired_recs   = sum(len(v) for v in v2_pairings.values())
+    rg_paired_events = sum(1 for v in registry_pairings.values() if v)
+    rg_paired_recs   = sum(len(v) for v in registry_pairings.values())
+
+    return {
+        "sport":       sport,
+        "sport_id":    sport_id,
+        "indent_days": indent_days,
+        "fl_total_events": len(fl_events),
+        "v2": {
+            "paired_fl_events":      v2_paired_events,
+            "paired_kalshi_records": v2_paired_recs,
+            "pairing_rate_pct":
+                round(100 * v2_paired_events / fl_total, 1),
+        },
+        "registry": {
+            "paired_fl_events":      rg_paired_events,
+            "paired_kalshi_records": rg_paired_recs,
+            "pairing_rate_pct":
+                round(100 * rg_paired_events / fl_total, 1),
+        },
+        "diff": {
+            "identical_count": diff["identical_count"],
+            # Cap each section at 30 rows to keep responses readable
+            "v2_only_pairings":
+                diff["v2_only_pairings"][:30],
+            "registry_only_pairings":
+                diff["registry_only_pairings"][:30],
+            "mixed_pairings":
+                diff["mixed_pairings"][:30],
+            "v2_only_count":
+                len(diff["v2_only_pairings"]),
+            "registry_only_count":
+                len(diff["registry_only_pairings"]),
+            "mixed_count":
+                len(diff["mixed_pairings"]),
+        },
+    }
+
+
 @app.get("/api/_debug/sports_inventory")
 async def debug_sports_inventory():
     """Sport-level inventory: every distinct _sport value in the
