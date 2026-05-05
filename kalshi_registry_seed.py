@@ -57,11 +57,170 @@ Phase C explicitly does NOT:
 from __future__ import annotations
 from typing import Optional
 
-from identity_registry import IdentityRegistry, Fixture
+from identity_registry import IdentityRegistry, Fixture, Market
 from kalshi_identity import (
     parse_ticker,
     normalize_fl_abbr,
+    strip_known_suffix,
 )
+
+
+# ── Tie-word detection ───────────────────────────────────────────
+
+_TIE_WORDS = frozenset({"tie", "draw", "no winner", "no result"})
+
+
+# ── Market-type detection ────────────────────────────────────────
+
+def _is_winner_market(series_ticker: str) -> bool:
+    """True if `series_ticker` ends in a known headline-fixture
+    suffix (GAME, MATCH) — i.e., this Kalshi record IS the 2-way/3-way
+    Winner market for the fixture, not a sub-market like Spread or
+    Total.
+
+    Same heuristic used by main._v2_pick_primary (Phase 5 punch-list
+    fix for the empty WINNER-tab bug). Centralizing it here lets the
+    market-layer seeder identify which records to canonicalize.
+    """
+    series = (series_ticker or "").upper()
+    _, suffix = strip_known_suffix(series)
+    return suffix in ("GAME", "MATCH")
+
+
+# ── Outcome side classification ──────────────────────────────────
+
+def _classify_outcome_side(label: str,
+                            registry: IdentityRegistry,
+                            fixture: Fixture) -> Optional[str]:
+    """Map a Kalshi outcome label to a canonical side.
+
+    Returns 'home' / 'away' / 'tie', or None if the label can't be
+    confidently classified.
+
+    Strategy: token-overlap against the home and away teams' canonical
+    names AND aliases. The team with the most token overlap wins the
+    label. Tie words ('tie', 'draw', etc.) short-circuit to 'tie'.
+    A label that overlaps zero tokens with both teams returns None.
+    """
+    if not label:
+        return None
+    label_lc = label.strip().lower()
+    if label_lc in _TIE_WORDS:
+        return "tie"
+
+    home = registry.resolve_team(fixture.home_team_id)
+    away = registry.resolve_team(fixture.away_team_id)
+    if home is None or away is None:
+        return None
+
+    def _tokens(s: str) -> set:
+        # Same min-length=3 token rule as main._extract_winner_prices —
+        # so 'NY' / 'LA' (which collide with common English words)
+        # don't count as evidence by themselves.
+        return {t for t in
+                "".join(c if c.isalnum() else " "
+                        for c in s.lower()).split()
+                if len(t) >= 3}
+
+    home_tokens = _tokens(home.canonical_name)
+    away_tokens = _tokens(away.canonical_name)
+    for a in home.aliases:
+        home_tokens |= _tokens(a)
+    for a in away.aliases:
+        away_tokens |= _tokens(a)
+
+    label_tokens = _tokens(label_lc)
+    home_overlap = len(home_tokens & label_tokens)
+    away_overlap = len(away_tokens & label_tokens)
+    if home_overlap == 0 and away_overlap == 0:
+        return None
+    if home_overlap > away_overlap:
+        return "home"
+    if away_overlap > home_overlap:
+        return "away"
+    # Tie in overlap — refuse to guess.
+    return None
+
+
+# ── Market-layer seeding (Phase C2b — Winner markets only) ───────
+
+def _seed_winner_market_layer(registry: IdentityRegistry,
+                               fixture: Fixture,
+                               kalshi_record: dict,
+                               sport: str) -> Optional[Market]:
+    """Register MarketType / Market / Outcomes for a Kalshi Winner
+    record and write Kalshi aliases on each.
+
+    Phase C2b scope: ONLY Winner markets (series_ticker ends in
+    GAME or MATCH). Parameterized sub-markets (Spread, Total,
+    Over/Under, etc.) are deferred to Phase C2c — they need title
+    parsing to extract thresholds, which is parser-heavy work that
+    deserves its own pass.
+
+    Aliases written under namespaced sources so the fixture-level
+    alias (source='kalshi') doesn't collide with the market-level
+    alias for the same event_ticker:
+        source='kalshi_market',  external_id=event_ticker
+                              → market.id  (strict, 1.0)
+        source='kalshi_outcome', external_id=<per-outcome ticker>
+                              → outcome.id (strict, 1.0)
+
+    Returns the Market on success, None if the record isn't a Winner
+    or any required field is missing.
+    """
+    series = (kalshi_record.get("series_ticker") or "").upper().strip()
+    ticker = (kalshi_record.get("event_ticker") or "").upper().strip()
+    if not series or not ticker:
+        return None
+    if not _is_winner_market(series):
+        return None
+
+    # Idempotent registrations.
+    mt = registry.register_market_type(
+        sport=sport, canonical_name="Winner", slug="winner",
+        parameterized=False,
+    )
+    market = registry.register_market(
+        fixture_id=fixture.id, market_type_id=mt.id,
+    )
+    registry.register_alias(
+        source="kalshi_market", external_id=ticker,
+        canonical_id=market.id, method="strict", confidence=1.0,
+    )
+
+    # Outcome layer
+    outcomes = (kalshi_record.get("outcomes")
+                or kalshi_record.get("_outcomes")
+                or [])
+    for o in outcomes:
+        if not isinstance(o, dict):
+            continue
+        label = (o.get("label") or "").strip()
+        if not label:
+            continue
+        side = _classify_outcome_side(label, registry, fixture)
+        if side is None:
+            # Unrecognized outcome — skip silently. This catches
+            # malformed Kalshi data without blowing up the whole
+            # batch seed.
+            continue
+        outcome = registry.register_outcome(
+            market_id=market.id, side=side,
+            canonical_label=label,
+        )
+        # Kalshi ships a per-outcome ticker (`ticker` field) that
+        # the frontend WebSocket subscribes to. Register it as a
+        # `kalshi_outcome` alias so post-Phase-D downstream consumers
+        # can resolve outcome.id → live tick stream.
+        outcome_ticker = (o.get("ticker") or "").strip()
+        if outcome_ticker:
+            registry.register_alias(
+                source="kalshi_outcome",
+                external_id=outcome_ticker,
+                canonical_id=outcome.id, method="strict",
+                confidence=1.0,
+            )
+    return market
 
 
 # ── Orientation builders ─────────────────────────────────────────
@@ -168,6 +327,7 @@ def seed_kalshi_record(registry: IdentityRegistry,
                 canonical_id=fx.id, method="strict",
                 confidence=1.0,
             )
+            _seed_winner_market_layer(registry, fx, kalshi_record, sport)
             return fx
 
     # Tier 2: alias-table expansion.
@@ -178,6 +338,7 @@ def seed_kalshi_record(registry: IdentityRegistry,
                 canonical_id=fx.id, method="alias_table",
                 confidence=0.95,
             )
+            _seed_winner_market_layer(registry, fx, kalshi_record, sport)
             return fx
 
     # Tier 3 (guarded fuzzy) — only available via the batch seeder
@@ -281,6 +442,7 @@ def seed_kalshi_records(registry: IdentityRegistry,
                 canonical_id=hit.id, method=hit_method,
                 confidence=1.0 if hit_method == "strict" else 0.95,
             )
+            _seed_winner_market_layer(registry, hit, rec, sport)
             if hit_method == "strict":
                 stats["paired_strict"] += 1
             else:
@@ -288,14 +450,14 @@ def seed_kalshi_records(registry: IdentityRegistry,
             continue
 
         # Buffer for tier-3 attempt
-        buffered.append((ticker, identity))
+        buffered.append((ticker, identity, rec))
 
     # ── Pass 2: guarded fuzzy ──────────────────────────────────
     # Group buffered records by (sport, fixture_date).
     by_date: dict = {}
-    for ticker, identity in buffered:
+    for ticker, identity, raw in buffered:
         key = (sport, identity.date)
-        by_date.setdefault(key, []).append((ticker, identity))
+        by_date.setdefault(key, []).append((ticker, identity, raw))
 
     for (sp, dt), bucket_records in by_date.items():
         # Find unpaired FL fixtures for this (sport, date).
@@ -307,12 +469,13 @@ def seed_kalshi_records(registry: IdentityRegistry,
         # 1+1 guard
         if len(unpaired_fixtures) == 1 and len(bucket_records) == 1:
             fx = unpaired_fixtures[0]
-            ticker, _ = bucket_records[0]
+            ticker, _, raw = bucket_records[0]
             registry.register_alias(
                 source="kalshi", external_id=ticker,
                 canonical_id=fx.id, method="guarded_fuzzy",
                 confidence=0.7,
             )
+            _seed_winner_market_layer(registry, fx, raw, sport)
             stats["paired_guarded"] += 1
         else:
             # Bucket too ambiguous — leave every record unpaired.
