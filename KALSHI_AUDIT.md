@@ -71,6 +71,285 @@ display_clock fields must run the same enrichment chain.
 
 ---
 
+## 1.5. Complete schema dictionary (extracted from `kalshi-openapi.json`)
+
+Every field on every Kalshi data object, with type, enum values, and description. This is the **canonical source of truth** for what Kalshi sends and what we can display.
+
+### Event
+
+The top-level container — what Stochverse calls a "fixture" or "tournament unit". Each Event groups one or more Markets.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `event_ticker` | string | ✓ | Unique identifier for this event. |
+| `series_ticker` | string | ✓ | Unique identifier for the series this event belongs to. |
+| `sub_title` | string | ✓ | Shortened descriptive title. |
+| `title` | string | ✓ | Full title of the event. |
+| `collateral_return_type` | string | ✓ | How collateral is returned at settlement (`binary` for standard yes/no). |
+| `mutually_exclusive` | boolean | ✓ | If true, only one market in this event can resolve YES. If false, multiple markets can resolve YES. |
+| `category` | string | | **Deprecated** — use series-level category instead. |
+| `strike_date` | string | | Specific date this event is based on (mutually exclusive with `strike_period`). |
+| `strike_period` | string | | Time period this event covers (`week`, `month`, etc.; mutually exclusive with `strike_date`). |
+| `markets` | array<Market> | | Array of markets. Only populated when `with_nested_markets=true`. |
+| `available_on_brokers` | boolean | ✓ | Whether this event is available on brokers. |
+| `product_metadata` | object | ✓ | Additional metadata. |
+| `last_updated_ts` | string | | Timestamp of last metadata update. |
+
+### Market
+
+The actual betable contract. One Event can have many Markets (e.g. UCLGAME has Spreads market, Totals market, etc. each as a separate Market).
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `ticker` | string | ✓ | Market ticker (the join key for /sports v2 — this is what's in our cache as `event_ticker`). |
+| `event_ticker` | string | ✓ | Parent event ticker. |
+| `market_type` | enum | ✓ | `binary` or `scalar`. |
+| `title` | string | | Market title. |
+| `subtitle` | string | | Market subtitle. |
+| `yes_sub_title` | string | ✓ | Shortened title for the YES side. |
+| `no_sub_title` | string | ✓ | Shortened title for the NO side. |
+| `created_time` | string | ✓ | Creation timestamp. |
+| `updated_time` | string | ✓ | Last non-trading metadata update. |
+| `open_time` | string | ✓ | Market opens for trading. |
+| `close_time` | string | ✓ | Market closes for trading. |
+| `expected_expiration_time` | string | | Expected market expiry. |
+| `expiration_time` | string | ✓ | Final expiry. |
+| `latest_expiration_time` | string | ✓ | Latest possible expiry. |
+| `settlement_timer_seconds` | integer | ✓ | Time after determination until settlement. |
+| `status` | enum | ✓ | `initialized`, `inactive`, `active`, `closed`, `determined`, `disputed`, `amended`, `finalized`. |
+| `response_price_units` | enum | | **Deprecated** — `usd_cent`. |
+| `yes_bid_dollars` | FixedPointDollars | ✓ | Highest YES buy offer (best bid). |
+| `yes_bid_size_fp` | FixedPointCount | ✓ | Total contract size at best YES bid. |
+| `yes_ask_dollars` | FixedPointDollars | ✓ | Lowest YES sell offer (best ask). |
+| `yes_ask_size_fp` | FixedPointCount | ✓ | Total contract size at best YES ask. |
+| `no_bid_dollars` | FixedPointDollars | ✓ | Highest NO buy offer. |
+| `no_ask_dollars` | FixedPointDollars | ✓ | Lowest NO sell offer. |
+| `last_price_dollars` | FixedPointDollars | ✓ | Last traded YES price. |
+| `volume_fp` | FixedPointCount | ✓ | Lifetime volume in contracts. |
+| `volume_24h_fp` | FixedPointCount | ✓ | 24h volume in contracts. |
+| `result` | enum | ✓ | `yes`, `no`, `scalar`, or `""` (unsettled). |
+| `can_close_early` | boolean | ✓ | Whether the market can close before scheduled. |
+| `fractional_trading_enabled` | boolean | ✓ | **Deprecated** — always true. |
+| `open_interest_fp` | FixedPointCount | ✓ | Open contracts (no netting). |
+| `notional_value_dollars` | FixedPointDollars | ✓ | Total value of one contract at settlement. |
+| `previous_yes_bid_dollars` | FixedPointDollars | ✓ | YES bid 24h ago. |
+| `previous_yes_ask_dollars` | FixedPointDollars | ✓ | YES ask 24h ago. |
+| `previous_price_dollars` | FixedPointDollars | ✓ | Last traded YES 24h ago. |
+| `liquidity_dollars` | FixedPointDollars | ✓ | **Deprecated** — always `"0.0000"`. |
+| `settlement_value_dollars` | FixedPointDollars | | Settlement value of YES side. Filled only after determination. |
+| `settlement_ts` | string | | Settlement timestamp. Filled only for settled markets. |
+| `expiration_value` | string | ✓ | The value used at settlement. |
+| `occurrence_datetime` | string | | When the underlying event occurred (if applicable). |
+| `fee_waiver_expiration_time` | string | | Fee waiver expiry. |
+| `early_close_condition` | string | | Condition for early close. |
+| `strike_type` | enum | | `greater`, `greater_or_equal`, `less`, `less_or_equal`, `between`, `functional`, `custom`, `structured`. |
+| `floor_strike` | number | | Min expiration value for YES settlement. |
+| `cap_strike` | number | | Max expiration value for YES settlement. |
+| `functional_strike` | string | | Mapping from expiration values to settlement values. |
+| `custom_strike` | object | | Per-target expiration value mapping. |
+| `rules_primary` | string | ✓ | Plain-language description of primary terms. |
+| `rules_secondary` | string | ✓ | Plain-language description of secondary terms. |
+| `mve_collection_ticker` | string | | Multivariate event collection ticker. |
+| `mve_selected_legs` | array<MveSelectedLeg> | | Selected legs for multivariate. |
+| `primary_participant_key` | string | | |
+| `price_level_structure` | string | ✓ | Price level structure (defines tick sizes). |
+| `price_ranges` | array<PriceRange> | ✓ | Valid price ranges for orders. |
+| `is_provisional` | boolean | | If true, market may be removed after determination if no activity. |
+
+### Series
+
+Top-level grouping (e.g., `KXEPLGAME`, `KXNBA`, `KXMLB`). Multiple Events share a Series.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `ticker` | string | ✓ | Series ticker. |
+| `frequency` | string | ✓ | Human-readable cadence (`weekly`, `daily`, `one-off`). |
+| `title` | string | ✓ | Series title. |
+| `category` | string | ✓ | Top-level category (`Sports`, `World`, `Climate and Weather`, `Elections`, etc.). |
+| `tags` | array<string> | ✓ | Subject tags (cross-cuts categories). |
+| `settlement_sources` | array<SettlementSource> | ✓ | Official sources used for settlement. |
+| `contract_url` | string | ✓ | Direct link to original contract filing. |
+| `contract_terms_url` | string | ✓ | Current terms-of-contract URL. |
+| `product_metadata` | object | | Internal metadata. |
+| `fee_type` | enum | ✓ | `quadratic`, `quadratic_with_maker_fees`, `flat`. |
+| `fee_multiplier` | number | ✓ | Multiplier on fee calculations. |
+| `additional_prohibitions` | array<string> | ✓ | Trading prohibitions. |
+| `volume_fp` | FixedPointCount | | Total contracts traded across all events in this series. |
+| `last_updated_ts` | string | | Last metadata update. |
+
+### Trade
+
+A single executed trade between buyer and seller.
+
+| Field | Type | Description |
+|---|---|---|
+| `trade_id` | string | Unique trade ID. |
+| `ticker` | string | Market ticker. |
+| `count_fp` | FixedPointCount | Contracts in this trade. |
+| `yes_price_dollars` | FixedPointDollars | YES price. |
+| `no_price_dollars` | FixedPointDollars | NO price. |
+| `taker_side` | enum | `yes` or `no` — which side was taking. |
+| `created_time` | string | Trade execution time. |
+
+### Orderbook (`OrderbookCountFp`)
+
+Snapshot of pending orders. Returned by `/markets/{ticker}/orderbook`.
+
+```
+{
+  "yes_dollars": [["0.1500", "100.00"], ["0.1400", "250.00"], ...],
+  "no_dollars":  [["0.8400", "150.00"], ...]
+}
+```
+
+Each entry is `[price_in_dollars_str, contract_count_fp]`. The orderbook is **always quoted from the YES side** — selling YES at `P` is economically equivalent to buying NO at `1 - P`. **`bid` = buy YES, `ask` = sell YES.**
+
+### Settlement
+
+Records what happened when a market was settled.
+
+| Field | Type | Description |
+|---|---|---|
+| `ticker` | string | Settled market ticker. |
+| `event_ticker` | string | Parent event. |
+| `market_result` | enum | `yes`, `no`, `scalar`, `void`. |
+| `yes_count_fp` | FixedPointCount | YES contracts owned at settlement. |
+| `yes_total_cost_dollars` | FixedPointDollars | Total YES cost basis. |
+| `no_count_fp` | FixedPointCount | NO contracts owned at settlement. |
+| `no_total_cost_dollars` | FixedPointDollars | Total NO cost basis. |
+| `revenue` | integer | Total payout in cents (winning contracts pay 100¢ each). |
+| `settled_time` | string | Settlement timestamp. |
+| `fee_cost` | FixedPointDollars | Total fees paid. |
+| `value` | integer | Single-contract payout in cents. |
+
+### MarketCandlestick
+
+OHLC bar for charts. Returned by `/series/{}/markets/{}/candlesticks`.
+
+| Field | Type | Description |
+|---|---|---|
+| `end_period_ts` | integer | Unix timestamp (inclusive end of bar). |
+| `yes_bid` | BidAskDistribution | OHLC for YES bid prices. |
+| `yes_ask` | BidAskDistribution | OHLC for YES ask prices. |
+| `price` | PriceDistribution | OHLC + mean for trade prices. |
+| `volume_fp` | FixedPointCount | Contracts traded in this period. |
+| `open_interest_fp` | FixedPointCount | Open contracts at end of period. |
+
+`PriceDistribution` carries `open_dollars`, `low_dollars`, `high_dollars`, `close_dollars`, `mean_dollars`, `previous_dollars`, `min_dollars`, `max_dollars` — all `FixedPointDollars` strings, may be null when there's no trade in the period.
+
+### LiveData
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | Type of live data. |
+| `details` | object | Flexible live-data details. |
+| `milestone_id` | string | Associated milestone ID. |
+
+### EventPosition / MarketPosition (user-scoped)
+
+User-portfolio data. Not used by /sports v2 today; reserved for trading flow.
+
+### Pricing convention — fixed-point everywhere
+
+**`FixedPointDollars`** — string with up to 6 decimal places. Examples: `"0.1500"`, `"1.000000"`. Use string ops; never parse as float for storage.
+
+**`FixedPointCount`** — string with 2 decimals. Examples: `"10.00"`, `"2.50"`. Fractional contracts are supported on enabled markets (min 0.01). Integer fields without `_fp` suffix are **legacy** and being deprecated.
+
+Field naming convention: any field ending in `_dollars` is FixedPointDollars; any ending in `_fp` is FixedPointCount. Integer fields like `revenue` are in **cents**.
+
+### Status enum (Market lifecycle)
+
+| Status | Meaning |
+|---|---|
+| `initialized` | Market created, not yet open. |
+| `inactive` | Open but not actively trading. |
+| `active` | Open and trading. |
+| `closed` | Trading closed; awaiting determination. |
+| `determined` | Outcome decided; awaiting settlement. |
+| `disputed` | Outcome under dispute. |
+| `amended` | Determination amended. |
+| `finalized` | Fully settled, no further changes. |
+
+### OrderStatus enum
+
+`resting`, `canceled`, `executed`.
+
+### Other key enums
+
+- **`taker_side`** (Trade): `yes` or `no` — which side the taker was on.
+- **`side`** (Order/Fill): `yes` or `no`.
+- **`action`** (Order/Fill): `buy` or `sell`.
+- **`type`** (Order): `limit` or `market`.
+- **`market_result`** (Settlement): `yes`, `no`, `scalar`, `void`.
+- **`fee_type`** (Series): `quadratic`, `quadratic_with_maker_fees`, `flat`.
+- **`strike_type`** (Market): `greater`, `greater_or_equal`, `less`, `less_or_equal`, `between`, `functional`, `custom`, `structured`.
+- **`SelfTradePreventionType`**: `taker_at_cross`, `maker`.
+- **`Announcement.type`**: `info`, `warning`, `error`.
+- **`Announcement.status`**: `active`, `inactive`.
+- **`BookSide`**: `bid` (buy YES), `ask` (sell YES). Always YES-side.
+- **`ExchangeInstance`**: `event_contract`, `margined`.
+
+### ExchangeStatus
+
+| Field | Description |
+|---|---|
+| `exchange_active` | False if Kalshi is in maintenance (no state changes at all — no trading, no transfers, etc.). |
+| `trading_active` | True only during exchange hours and not paused. |
+| `exchange_estimated_resume_time` | Estimated resume time during maintenance. |
+
+### Schedule
+
+The exchange operates per a `WeeklySchedule` with per-day arrays of `DailySchedule`s (open/close in ET). `MaintenanceWindow`s override.
+
+### ErrorResponse
+
+| Field | Description |
+|---|---|
+| `code` | Machine-readable error code. |
+| `message` | Human-readable error message. |
+| `details` | Additional details. |
+| `service` | Source service of the error. |
+
+### MarketMetadata
+
+| Field | Description |
+|---|---|
+| `market_ticker` | Market ticker. |
+| `image_url` | Image representing the market. |
+| `color_code` | Color code for the market. |
+
+### Milestone
+
+Sports / events tracker. Categories include: `Sports`, `Elections`, `Esports`, `Crypto`. Types include: `football_game`, `basketball_game`, `soccer_tournament_multi_leg`, `baseball_game`, `hockey_match`, `golf_tournament`, `political_race`.
+
+| Field | Description |
+|---|---|
+| `id` / `category` / `type` / `title` | Self-explanatory. |
+| `start_date` / `end_date` | Window. |
+| `related_event_tickers` | All linked events. |
+| `primary_event_tickers` | Events directly related to outcome. |
+| `notification_message` | UI notification copy. |
+| `source_id` / `source_ids` | External source IDs. |
+| `details` | Flexible additional data. |
+
+### MultivariateEventCollection
+
+Cross-event combo betting (e.g. "Bayern AND PSG both reach final").
+
+Key fields: `collection_ticker`, `series_ticker`, `associated_events` (list of `AssociatedEvent`), `is_ordered`, `size_min`/`size_max`, `functional_description`.
+
+### Known deprecations to ignore
+
+- `Market.fractional_trading_enabled` — always true, slated for removal.
+- `Market.liquidity_dollars` — always `"0.0000"`.
+- `Market.response_price_units` — replaced by `price_level_structure` + `price_ranges`.
+- `MultivariateEventCollection.associated_event_tickers` / `is_single_market_per_event` / `is_all_yes` — use `associated_events` list instead.
+- `Event.category` — use series-level category instead.
+- `MarketPosition.resting_orders_count` — flagged as DEPRECATED.
+- Any non-`_fp` integer count fields (without the suffix) — legacy.
+
+---
+
 ## 2. Series tickers per sport
 
 Source: `probe_series.py` → `/api/_debug/series_tickers`.
