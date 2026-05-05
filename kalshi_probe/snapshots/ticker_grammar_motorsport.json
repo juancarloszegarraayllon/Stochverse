@@ -1,0 +1,412 @@
+{
+  "sample_size": 24,
+  "sport_filter": "Motorsport",
+  "base_count": 16,
+  "bases": [
+    {
+      "base": "KXNASCARTOP3",
+      "total": 3,
+      "patterns": {
+        "G5_handle": 3
+      },
+      "examples": {
+        "G5_handle": [
+          {
+            "ticker": "KXNASCARTOP3-GOBAT26",
+            "suffix": "GOBAT26",
+            "groups": [
+              "GOBAT26"
+            ]
+          },
+          {
+            "ticker": "KXNASCARTOP3-MIS2AT26",
+            "suffix": "MIS2AT26",
+            "groups": [
+              "MIS2AT26"
+            ]
+          },
+          {
+            "ticker": "KXNASCARTOP3-BULHV1AT26",
+            "suffix": "BULHV1AT26",
+            "groups": [
+              "BULHV1AT26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXNASCARTOP10",
+      "total": 3,
+      "patterns": {
+        "G5_handle": 3
+      },
+      "examples": {
+        "G5_handle": [
+          {
+            "ticker": "KXNASCARTOP10-GOBAT26",
+            "suffix": "GOBAT26",
+            "groups": [
+              "GOBAT26"
+            ]
+          },
+          {
+            "ticker": "KXNASCARTOP10-MIS2AT26",
+            "suffix": "MIS2AT26",
+            "groups": [
+              "MIS2AT26"
+            ]
+          },
+          {
+            "ticker": "KXNASCARTOP10-BULHV1AT26",
+            "suffix": "BULHV1AT26",
+            "groups": [
+              "BULHV1AT26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXNASCARFASTLAP",
+      "total": 3,
+      "patterns": {
+        "G5_handle": 3
+      },
+      "examples": {
+        "G5_handle": [
+          {
+            "ticker": "KXNASCARFASTLAP-GOBAT26",
+            "suffix": "GOBAT26",
+            "groups": [
+              "GOBAT26"
+            ]
+          },
+          {
+            "ticker": "KXNASCARFASTLAP-MIS2AT26",
+            "suffix": "MIS2AT26",
+            "groups": [
+              "MIS2AT26"
+            ]
+          },
+          {
+            "ticker": "KXNASCARFASTLAP-BULHV1AT26",
+            "suffix": "BULHV1AT26",
+            "groups": [
+              "BULHV1AT26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXNASCARRACE",
+      "total": 3,
+      "patterns": {
+        "G5_handle": 3
+      },
+      "examples": {
+        "G5_handle": [
+          {
+            "ticker": "KXNASCARRACE-GOBAT26",
+            "suffix": "GOBAT26",
+            "groups": [
+              "GOBAT26"
+            ]
+          },
+          {
+            "ticker": "KXNASCARRACE-MIS2AT26",
+            "suffix": "MIS2AT26",
+            "groups": [
+              "MIS2AT26"
+            ]
+          },
+          {
+            "ticker": "KXNASCARRACE-BULHV1AT26",
+            "suffix": "BULHV1AT26",
+            "groups": [
+              "BULHV1AT26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXF1RETIRE",
+      "total": 1,
+      "patterns": {
+
+      },
+      "examples": {
+
+      },
+      "unparsed": [
+        {
+          "ticker": "KXF1RETIRE-30VERSTAPPEN",
+          "suffix": "30VERSTAPPEN"
+        }
+      ],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXF1CHINA",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXF1CHINA-27",
+            "suffix": "27",
+            "groups": [
+              "27"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXF1",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXF1-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXF1CONSTRUCTORS",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXF1CONSTRUCTORS-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXMOTOGPTEAMS",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXMOTOGPTEAMS-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXMOTOGP",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXMOTOGP-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXNASCARCUPSERIES",
+      "total": 1,
+      "patterns": {
+        "G5_handle": 1
+      },
+      "examples": {
+        "G5_handle": [
+          {
+            "ticker": "KXNASCARCUPSERIES-NCS26",
+            "suffix": "NCS26",
+            "groups": [
+              "NCS26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXNASCARAUTOPARTSSERIES",
+      "total": 1,
+      "patterns": {
+        "G5_handle": 1
+      },
+      "examples": {
+        "G5_handle": [
+          {
+            "ticker": "KXNASCARAUTOPARTSSERIES-NAPS26",
+            "suffix": "NAPS26",
+            "groups": [
+              "NAPS26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXNASCARTRUCKSERIES",
+      "total": 1,
+      "patterns": {
+        "G5_handle": 1
+      },
+      "examples": {
+        "G5_handle": [
+          {
+            "ticker": "KXNASCARTRUCKSERIES-NTS26",
+            "suffix": "NTS26",
+            "groups": [
+              "NTS26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXINDYCARSERIES",
+      "total": 1,
+      "patterns": {
+        "G5_handle": 1
+      },
+      "examples": {
+        "G5_handle": [
+          {
+            "ticker": "KXINDYCARSERIES-NTTICS26",
+            "suffix": "NTTICS26",
+            "groups": [
+              "NTTICS26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXNASCARTOP5",
+      "total": 1,
+      "patterns": {
+        "G5_handle": 1
+      },
+      "examples": {
+        "G5_handle": [
+          {
+            "ticker": "KXNASCARTOP5-GOBAT26",
+            "suffix": "GOBAT26",
+            "groups": [
+              "GOBAT26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXNASCARTOP20",
+      "total": 1,
+      "patterns": {
+        "G5_handle": 1
+      },
+      "examples": {
+        "G5_handle": [
+          {
+            "ticker": "KXNASCARTOP20-GOBAT26",
+            "suffix": "GOBAT26",
+            "groups": [
+              "GOBAT26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    }
+  ]
+}
