@@ -1,6 +1,6 @@
 {
   "sample_size": 0,
-  "sport_filter": "Darts",
-  "bucket_count": 0,
-  "buckets": []
+  "sport_filter": "Other 20Sports",
+  "base_count": 0,
+  "bases": []
 }
