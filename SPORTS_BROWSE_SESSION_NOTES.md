@@ -411,3 +411,261 @@ document.querySelectorAll('.sp-c2-price-row[data-ticker], .sp-c2-mkt-row[data-ti
   — these are Chrome extension errors, not from our code. Ignore.
 - WS flashes are rare on illiquid markets — tested OK on actively-
   traded events; the 330-ticker subscription confirms WS is wired.
+
+---
+
+## Phase 8 — Kalshi audit + /sports v2 (Day 2)
+
+**TL;DR:** /sports v1 had recurring duplication / missing-team /
+wrong-date bugs from fuzzy team-name matching. Paused v1 fixes,
+did a complete Kalshi audit, then started building v2 from scratch
+on a deterministic identity-based join. Phases 1–4 of 7 done.
+~1,200 lines of new code, 195 passing tests, **zero changes to
+live /sports yet** — all new code sits alongside until phase 5
+swaps the handler.
+
+### Strategic pivot
+
+Started Day 2 trying to fix /sports v1 duplicates (Copa Libertadores
+showing twice, Bayern-PSG duplication, "Failed to load events"
+errors, Aston Villa missing team). Shipped multiple "universal"
+fixes (commits `091616a`, `a985a95`, `8232b90`, `61c4301`) and still
+hit issues with new team-name patterns. Called it: **stop patching
+v1**. Kalshi data is the source of truth — audit it completely,
+then rebuild /sports v2 against a deterministic contract.
+
+### Kalshi audit complete (KALSHI_AUDIT.md)
+
+Single comprehensive doc, ~900 lines. Sections:
+
+1. **Cache record schema** — universal fields, `_live_state` caveat
+2. **§1.5 Schema dictionary** — every Kalshi data object from
+   `kalshi-openapi.json`: Event, Market, Series, Trade, Settlement,
+   MarketCandlestick, Order, Fill, Position, Milestone, etc.
+   165 schemas extracted with field types, enums, descriptions.
+3. **§1.6 WebSocket protocol** — full subscribe/unsubscribe protocol,
+   heartbeat (10s ping/pong), all 22 server error codes, payload
+   schemas for all 11 channels (`ticker`, `orderbook_delta`, `trade`,
+   `market_lifecycle_v2`, `fill`, `user_orders`, `market_positions`,
+   `multivariate_market_lifecycle`, `communications`,
+   `order_group_updates`, `multivariate`)
+4. **Series tickers per sport** — suffix taxonomy
+5. **Title shapes** — vs/at orientation rule
+6. **§4 Outcome shapes** — per (sport × suffix × market_type) for
+   all 14 sport-tagged buckets
+7. **§5 Ticker grammar** — six patterns lock down fixture identity:
+   - G1: `{base}-{YYMMDD}{abbrs}` (most sports, no time)
+   - G7: `{base}-{YYMMDD}{HHMM}{abbrs}` (MLB, esports, AFL,
+     intl basketball/hockey — time disambiguates doubleheaders)
+   - G_LEG: G1/G7 + `-{N}` (tennis sets, esports maps)
+   - G_SERIES: `{YY}{abbrs}R{N}` (NBA/NHL playoff series)
+   - G_TOURNAMENT_HANDLE: `{HANDLE}{YY}` (Golf, NASCAR)
+   - G_YEAR / G_YEAR_HANDLE: outright variations
+8. **§7 Merge contract** — deterministic identity tuples + pairing
+   rule (replaces match_game + corroboration + second-pass + series
+   routing with one equality check)
+9. **§9 Cross-source field mapping** — per-field provenance for
+   FL / ESPN / SportsDB / SofaScore + canonical priority per sport
+
+Reference snapshots in `kalshi_probe/snapshots/`:
+- `sports_inventory.json`
+- `outcome_shapes_<sport>.json` × 14 sports
+- `ticker_grammar_<sport>.json` × 14 sports
+
+These lock the audit against real production data — every parser
+and shape rule is verified against them in tests.
+
+**14 of 20 sports inventoried** in cache (the other 6 are
+non-sports markets — politics/weather/novelty — out of /sports scope).
+
+### Deferred work (logged in audit doc)
+
+- Unclassified records audit (3,377 politics/weather/novelty records)
+- Cache builder classifier audit (OWGRRANK was misclassified as
+  Esports; may be more)
+- Edge-case ticker patterns (Mainz 05 `M05UNI`, CHOCHO2 rematch)
+- Multivariate event collections rendering rules
+
+### /sports v2 implementation plan (SPORTS_V2_PLAN.md)
+
+Reviewable plan doc, ~360 lines. Approved with two tweaks:
+- pytest in phase 1 (not deferred)
+- Phase 5 promotion exit criteria: time + zero P1 bugs +
+  pairing-rate parity + extension protocol (24h then redesign-flag,
+  not silent stretch); 7-day window for weekly-rhythm sports (NFL,
+  NCAAF, UFC)
+
+Architecture: 4 new modules + 2 file modifications. Net diff
+estimate: **−630 lines** across all files (delete more than add).
+
+```
+kalshi_identity.py        phase 1   parse Kalshi tickers → Identity
+outcome_shapes.py         phase 2   per-(sport, suffix, mt) shape rules
+kalshi_join.py            phase 3   identity-based FL ↔ Kalshi join
+live_source_selector.py   phase 4   per-sport canonical source dispatch
+```
+
+### Phase 1 — kalshi_identity.py ✅
+
+`d6f7e59` — 325 lines + 58 tests. Parses every Kalshi event_ticker
+into a hashable Identity tuple, computes FL-side identity,
+deterministic match() function. **100% snapshot-parse rate**
+(236/236 tickers). Snapshot tests caught one missing pattern
+(G_YEAR_HANDLE) and forced bidirectional suffix-stripping.
+
+### Phase 2 — outcome_shapes.py ✅
+
+`7528c78` — 340 lines + 31 tests. Per-(sport, suffix, market_type)
+rule table sourced from KALSHI_AUDIT.md §4. 80+ rules covering
+14 sports. `render_outcomes()` normalizes pricing across all three
+field formats (`_yb` compact, `yes_bid` int, `yes_bid_dollars`
+string). Snapshot sweep verifies every observed bucket has a rule
+and outcome counts validate.
+
+### Phase 3 — kalshi_join.py + diff endpoint ✅
+
+`a01d113` — 210 lines + 24 tests + `/api/_debug/sports_join_diff`
+endpoint. Identity-based join replaces the current
+`_build_kalshi_index_for_sport` + `_kalshi_title_corroborates_fl_game`
++ second-pass attach + series-routing pipeline.
+
+The diff endpoint is the **gate** for phase 5 promotion:
+
+```
+https://stochverse.com/api/_debug/sports_join_diff?sport_id=1&indent_days=0
+```
+
+Returns `{v1, v2, diff: {pairing_rate_v1_pct, pairing_rate_v2_pct,
+v2_only_pairings, v1_only_pairings, identical_pairings_count}}`.
+Promotion requires `v1_only_pairings == 0` and `pairing_rate_v2 >=
+pairing_rate_v1`.
+
+### Phase 4 — live_source_selector.py ✅
+
+`a3b868d` — 190 lines + 39 tests. Replaces
+`_enrich_record_live_state()`'s ~150-line nested fallback with three
+composable functions: `select_live_source()`, `is_cup_series()`,
+`overlay_soccer_aggregate()`, all wrapped by `enrich_for_record()`.
+
+Per-sport priority chain locked per audit §9. Source callers are
+injectable for testing — all 39 tests run with zero real-feed I/O.
+
+Bracket-cache and basketball-series-cache fallbacks deferred to
+phase 5's sports_feed_v2() handler — they need access to main.py's
+module-level _cache state.
+
+### Test suite
+
+195 tests passing, 0 regressions. Run:
+
+```bash
+python3 -m pytest
+```
+
+Breakdown: `test_kalshi_identity.py` 58 / `test_outcome_shapes.py` 31
+/ `test_kalshi_join.py` 24 / `test_live_source_selector.py` 39
+/ existing 43.
+
+### Resume tomorrow at phase 5
+
+**Phase 5 deliverable:** `sports_feed_v2()` handler at
+`/api/sports/{id}/feed?v=2`, behind `?v2=1` frontend flag.
+
+This is the integration phase that wires phases 1–4 together:
+
+```python
+# Pseudocode for the handler
+@app.get("/api/sports/{sport_id}/feed")
+async def sports_feed(sport_id: int, ..., v: int = 1):
+    if v == 2:
+        return await sports_feed_v2(...)
+    return await sports_feed_v1(...)  # existing handler
+
+async def sports_feed_v2(sport_id, indent_days, timezone):
+    # 1. Resolve sport
+    sport = _KALSHI_SPORT_BY_FL_ID[sport_id]
+    # 2. Fetch FL events list
+    fl_data = await _fl_get("/v1/events/list", ...)
+    fl_events = flatten(fl_data)
+    # 3. Identity-based join
+    cache_records = _cache.get("data_all") or []
+    idx = build_kalshi_index(cache_records, sport)
+    pairings, unpaired = join_with_fl(fl_events, idx, sport)
+    buckets = find_unpaired_buckets(unpaired, sport)
+    # 4. Per-pairing live-state enrichment
+    for p in pairings:
+        live = enrich_for_record(primary.title, sport, primary)
+        # + bracket-cache fallback (cache-coupled, lives here)
+        # + basketball-series fallback (cache-coupled, lives here)
+    # 5. Render outcomes per shape rules
+    for r in p.kalshi_records:
+        outs = outcomes_with_shape(r, sport, suffix, market_type)
+    # 6. Series-routing for unpaired buckets (route to FL bucket if
+    #    series_base has been seen paired before)
+    return {tournaments: out_tournaments + unpaired_buckets, ...}
+```
+
+Estimated effort: **~1 day**. Then phases 6–7 (promote + delete v1).
+
+### Phase 5 verification plan
+
+Before flipping the frontend default:
+1. Hit `/api/_debug/sports_join_diff` for Soccer / Basketball / Hockey
+   on today + tomorrow + Wed/Thu. Verify `v1_only_pairings == 0`.
+2. Hit `/api/sports/1/feed?v=2` and `/api/sports/1/feed?v=1`
+   side-by-side. Same tournaments? Same fixtures per tournament?
+   Same outcomes per fixture?
+3. Frontend opt-in: `/sports?v2=1` — manual QA across the 10-sport
+   matrix (Soccer / NBA / NHL / MLB / Tennis / MMA / Esports / Golf
+   / Cricket / Lacrosse).
+4. Run prod traffic on `?v=2` for ≥3 days (≥7 for NFL / NCAAF / UFC
+   weekly-rhythm sports). All 4 promotion criteria must hold:
+   - Zero P1 bugs
+   - `pairing_rate_v2 >= pairing_rate_v1`
+   - `null-clock`, `null-aggregate`, `null-outcome` events same or fewer
+   - `parse_failure_rate <= 0.5%`
+
+### Files to keep handy when resuming
+
+| File | What's in it |
+|---|---|
+| `KALSHI_AUDIT.md` | The full audit — answers "what does Kalshi ship?" |
+| `SPORTS_V2_PLAN.md` | Implementation plan with promotion criteria |
+| `kalshi_identity.py` | Phase 1: ticker → Identity |
+| `outcome_shapes.py` | Phase 2: outcome shape rules |
+| `kalshi_join.py` | Phase 3: identity-based join |
+| `live_source_selector.py` | Phase 4: source dispatch |
+| `tests/test_*.py` | All passing — `python3 -m pytest` |
+| `kalshi-openapi.json` | Kalshi REST spec (committed) |
+| `kalshi-websockets.json` | Kalshi WS spec (committed) |
+| `kalshi_probe/snapshots/` | Reference data for every sport |
+
+### Recent commit log (Day 2)
+
+```
+a3b868d  sports v2 phase 4: live_source_selector.py — canonical source dispatch
+a01d113  sports v2 phase 3: kalshi_join.py + /api/_debug/sports_join_diff endpoint
+7528c78  sports v2 phase 2: outcome_shapes.py — deterministic shape rules
+d6f7e59  sports v2 phase 1: kalshi_identity.py — deterministic ticker parsing
+0a28656  sports v2: implementation plan against KALSHI_AUDIT.md
+fc6527c  kalshi audit: §1.6 WebSocket protocol from kalshi-websockets.json
+9d1ae49  kalshi audit: complete §1.5 schema dictionary from kalshi-openapi.json
+e4958c8  kalshi audit: §9 cross-source field mapping (FL/ESPN/SportsDB/SofaScore)
+e0f3a74  kalshi audit: Esports section + multi-map structure (G_LEG generalized)
+d695515  kalshi audit: MMA section — most granular sub-market structure observed
+db7b7a2  kalshi audit: Tennis added — outcome shapes + ticker grammar
+1f05e37  kalshi audit: probe_outcomes + probe_tickers + debug endpoints (steps 5/6)
+85fc37e  kalshi audit: /api/_debug/sports_inventory for prioritizing per-sport probes
+e2281c4  kalshi audit: KALSHI_AUDIT.md — full audit doc + merge contract (step 7)
+61c4301  sports: nickname aliases + cosmetic enrichment for synthetic events
+8232b90  sports: series-routing pass — eliminates parallel league buckets
+a985a95  sports: universal second-pass attach — fixes ALL fl/kalshi pairing gaps
+091616a  sports: prefix-match fallback in corroboration to handle FL truncations
+```
+
+### One-line resume
+
+> Continue at SPORTS_V2_PLAN.md phase 5: build `sports_feed_v2()`
+> handler that wires `kalshi_identity` + `outcome_shapes` +
+> `kalshi_join` + `live_source_selector` into a parallel handler at
+> `/api/sports/{id}/feed?v=2`, with frontend `?v2=1` flag.
