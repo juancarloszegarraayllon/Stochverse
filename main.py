@@ -9085,13 +9085,349 @@ async def debug_sport_buckets(sport_id: int, timezone: int = 0,
     }
 
 
+# ── /sports v2 — identity-based feed handler ─────────────────────
+# Phase 5 of /sports v2 (per SPORTS_V2_PLAN.md). Wires the four
+# v2 modules together: kalshi_identity (parse), kalshi_join (index +
+# join), live_source_selector (live state), outcome_shapes (renderer).
+# Behind ?v=2 query param; v1 stays default until phase 6 promotion.
+
+def _v2_pick_primary(records: list) -> dict:
+    """From a pairing's kalshi_records, pick the headline (no market_type)
+    record. Falls back to records[0] if no headline exists."""
+    for r in records:
+        if not _market_type_from_title(r.get("title") or ""):
+            return r
+    return records[0]
+
+
+def _v2_aggregate_label(live: dict) -> str:
+    """Build the AGG label string from live_source_selector output."""
+    if not live: return ""
+    if live.get("aggregate_label"):
+        return live["aggregate_label"]
+    if live.get("leg_number") and live.get("round_name"):
+        return f"{live['round_name']} · LEG {live['leg_number']}"
+    return ""
+
+
+def _v2_build_kalshi_block(records: list, sport: str,
+                            home_name: str, away_name: str) -> dict:
+    """Build the `kalshi` block for an FL event paired with N records.
+
+    Mirrors the v1 shape exactly so the frontend doesn't change.
+    """
+    primary = _v2_pick_primary(records)
+    markets = []
+    for r in records:
+        markets.append({
+            "event_ticker":  r.get("event_ticker", ""),
+            "title":         r.get("title", ""),
+            "series_ticker": r.get("series_ticker", ""),
+            "market_type":   _market_type_from_title(r.get("title", "")),
+            "outcomes":      _extract_all_outcomes(r),
+        })
+    primary_prices = _extract_winner_prices(primary, home_name, away_name)
+    # Live state via the new dispatch.
+    try:
+        from live_source_selector import enrich_for_record
+        live = enrich_for_record(
+            primary.get("title", ""), sport, primary,
+        )
+    except Exception:
+        live = {}
+    return {
+        "event_ticker":  primary.get("event_ticker", ""),
+        "title":         primary.get("title", ""),
+        "series_ticker": primary.get("series_ticker", ""),
+        "count":         len(markets),
+        "markets":       markets,
+        "primary_prices": primary_prices,
+        "aggregate_home":  live.get("aggregate_home"),
+        "aggregate_away":  live.get("aggregate_away"),
+        "aggregate_label": _v2_aggregate_label(live),
+        "series_home_wins": live.get("series_home_wins"),
+        "series_away_wins": live.get("series_away_wins"),
+        "series_summary":   live.get("series_summary", "") or "",
+        "_v2_source":       live.get("_source", ""),  # diagnostic
+    }
+
+
+def _v2_synth_unpaired_event(records: list, sport: str) -> dict:
+    """Build a synthetic FL-shape event for a Kalshi-only fixture.
+
+    Parses home/away from the bare matchup title. Mirrors v1's
+    `kalshi-h2h-{ticker}` shape so the frontend treats it identically.
+    """
+    primary = _v2_pick_primary(records)
+    bare = _bare_matchup_from_title(primary.get("title", ""))
+    home_name = ""
+    away_name = ""
+    m = _HEAD_TO_HEAD_TITLE_RE.search(bare)
+    if m:
+        sep = m.group(0).strip().lower()
+        left = bare[:m.start()].strip()
+        right = bare[m.end():].strip()
+        if sep in ("at", "@"):
+            home_name, away_name = right, left
+        else:
+            home_name, away_name = left, right
+    primary_ticker = primary.get("event_ticker", "")
+    kalshi_block = _v2_build_kalshi_block(records, sport, home_name, away_name)
+    # Synthetic events get null primary_prices (v1 convention)
+    kalshi_block["primary_prices"] = None
+    return {
+        "EVENT_ID":           "kalshi-h2h-" + primary_ticker,
+        "START_TIME":         None,
+        "HOME_NAME":          home_name,
+        "AWAY_NAME":          away_name,
+        "HOME_SCORE_CURRENT": None,
+        "AWAY_SCORE_CURRENT": None,
+        "STAGE_TYPE":         "SCHEDULED",
+        "_kalshi_h2h_only":   True,
+        "kalshi":             kalshi_block,
+    }
+
+
+def _v2_route_unpaired(buckets: dict, sport: str,
+                        out_tournaments: list,
+                        target_date) -> tuple:
+    """Bucket Kalshi-only fixtures into competitions.
+
+    Returns (synthesized_tournaments, total_added_count).
+
+    Logic:
+      1. For each unpaired fixture, classify by series_base via SOCCER_COMP
+         (or just use series_base as the league name).
+      2. Group fixtures sharing the same league.
+      3. Apply persistent series-routing: if a fixture's series_base has
+         been seen paired before (in `_SERIES_TOURNAMENT_HINTS`), splice
+         the fixture into that FL tournament rather than synthesizing.
+      4. Remaining fixtures = synthetic tournaments under their league.
+    """
+    from kalshi_identity import strip_known_suffix
+    # Group fixtures by series_base → league_name
+    by_league: dict = {}
+    routed_count = 0
+    for fixture_key, records in buckets.items():
+        if not records:
+            continue
+        # Date filter (target_date set means we filter by it)
+        # fixture_key = (sport, date, time, abbr_block)
+        fk_date = fixture_key[1] if len(fixture_key) > 1 else None
+        if target_date is not None and fk_date and fk_date != target_date:
+            continue
+        primary = _v2_pick_primary(records)
+        series = (primary.get("series_ticker") or "").upper()
+        series_base, _ = strip_known_suffix(series)
+        # Try persistent routing (in-request first via out_tournaments,
+        # then persistent _SERIES_TOURNAMENT_HINTS)
+        target_t = None
+        # In-request: any FL tournament already containing a record
+        # with the same series_base?
+        for t_out in out_tournaments:
+            for ev in t_out.get("events") or []:
+                k = ev.get("kalshi") or {}
+                k_series = (k.get("series_ticker") or "").upper()
+                k_base, _ = strip_known_suffix(k_series)
+                if k_base == series_base and k_base:
+                    target_t = t_out
+                    break
+            if target_t:
+                break
+        # Persistent hint
+        if target_t is None and series_base:
+            hint = _SERIES_TOURNAMENT_HINTS.get((sport, series_base))
+            if hint and hint.get("name"):
+                # Find an existing tournament that matches the hint's name
+                for t_out in out_tournaments:
+                    if t_out.get("NAME") == hint.get("name"):
+                        target_t = t_out
+                        break
+        synth_event = _v2_synth_unpaired_event(records, sport)
+        if target_t is not None:
+            target_t.setdefault("events", []).append(synth_event)
+            routed_count += 1
+            continue
+        # Synthesize a new tournament under league bucket
+        league = ""
+        if sport == "Soccer" and series in SOCCER_COMP:
+            league = SOCCER_COMP[series]
+        if not league and series_base in SOCCER_COMP:
+            league = SOCCER_COMP[series_base]
+        if not league:
+            league = (series_base.replace("KX", "").title()
+                      if series_base else "Other")
+        by_league.setdefault(league, []).append(synth_event)
+        routed_count += 1
+    # Build synthetic tournaments
+    synth_tournaments = []
+    for league, evs in by_league.items():
+        region = _league_to_region(league)
+        synth_tournaments.append({
+            "TOURNAMENT_STAGE_ID": "kalshi-h2h-" + league.replace(" ", "-").lower(),
+            "NAME":                (region + ": " + league) if region else league,
+            "NAME_PART_1":         region,
+            "NAME_PART_2":         league,
+            "COUNTRY_NAME":        region,
+            "events":              evs,
+        })
+    return synth_tournaments, routed_count
+
+
+async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
+    """Identity-based feed handler. Replaces v1's match_game +
+    corroboration + second-pass + series-routing chain with phases
+    1-4 modules.
+    """
+    from flashlive_feed import _fl_get
+    from kalshi_join import build_kalshi_index, join_with_fl, find_unpaired_buckets
+
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    if not -12 <= timezone <= 12:
+        return {"error": "timezone must be between -12 and 12"}
+    if not -60 <= indent_days <= 60:
+        return {"error": "indent_days must be between -60 and 60"}
+
+    sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
+    from datetime import date as _date, timedelta as _td
+    target_date = (_date.today() + _td(days=indent_days)
+                   if indent_days != 0 else _date.today())
+
+    # Outrights — reuse v1's collector (works fine for both versions)
+    outright_tournaments = (_collect_outrights_for_sport(sport, target_date)
+                            if sport else [])
+
+    # Fetch FL events list (only when within FL's ±7 day window)
+    fl_data = None
+    if -7 <= indent_days <= 7:
+        try:
+            fl_data = await _fl_get("/v1/events/list", {
+                "sport_id": sport_id, "timezone": timezone,
+                "indent_days": indent_days,
+            })
+        except Exception:
+            fl_data = None
+
+    # Flatten FL events with their tournament context
+    fl_events_with_tournament: list = []
+    for t in ((fl_data or {}).get("DATA") or []):
+        for ev in (t.get("EVENTS") or []):
+            if isinstance(ev, dict):
+                fl_events_with_tournament.append((t, ev))
+    fl_events_flat = [ev for _, ev in fl_events_with_tournament]
+
+    # Build identity-based Kalshi index + join
+    get_data()
+    cache_records = _cache.get("data_all") or _cache.get("data") or []
+    matched_kalshi_tickers: set = set()
+    pairings = []
+    unpaired = []
+    if sport:
+        kalshi_idx = build_kalshi_index(cache_records, sport)
+        pairings, unpaired = join_with_fl(
+            fl_events_flat, kalshi_idx, sport, fuzz_days=1,
+        )
+        # Track matched tickers for the response footer
+        for p in pairings:
+            for r in p.kalshi_records:
+                tk = r.get("event_ticker") or ""
+                if tk:
+                    matched_kalshi_tickers.add(tk)
+
+    # Build out_tournaments preserving FL structure, attaching kalshi
+    # blocks for paired events.
+    pairing_by_event_id = {id(p.fl_event): p for p in pairings}
+    seen_tournaments: dict = {}
+    tournament_order: list = []
+    for t, ev in fl_events_with_tournament:
+        t_key = t.get("TOURNAMENT_STAGE_ID") or t.get("NAME") or "?"
+        if t_key not in seen_tournaments:
+            seen_tournaments[t_key] = {
+                "TOURNAMENT_STAGE_ID": t.get("TOURNAMENT_STAGE_ID"),
+                "NAME":                t.get("NAME"),
+                "NAME_PART_1":         t.get("NAME_PART_1"),
+                "NAME_PART_2":         t.get("NAME_PART_2"),
+                "COUNTRY_NAME":        t.get("COUNTRY_NAME"),
+                "events":              [],
+            }
+            tournament_order.append(t_key)
+        ev_out = dict(ev)
+        pairing = pairing_by_event_id.get(id(ev))
+        if pairing:
+            ev_out["kalshi"] = _v2_build_kalshi_block(
+                pairing.kalshi_records, sport,
+                ev.get("HOME_NAME") or "", ev.get("AWAY_NAME") or "",
+            )
+        else:
+            ev_out["kalshi"] = None
+        seen_tournaments[t_key]["events"].append(ev_out)
+    out_tournaments = [seen_tournaments[k] for k in tournament_order]
+
+    # Update persistent series routing hints from observed pairings
+    if sport:
+        from kalshi_identity import strip_known_suffix
+        import time as _t_hint
+        _now_hint = _t_hint.time()
+        for t_out in out_tournaments:
+            for ev in t_out.get("events") or []:
+                k = ev.get("kalshi") or {}
+                series = (k.get("series_ticker") or "").upper()
+                base, _ = strip_known_suffix(series)
+                if not base:
+                    continue
+                _SERIES_TOURNAMENT_HINTS[(sport, base)] = {
+                    "name":     t_out.get("NAME") or "",
+                    "country":  t_out.get("COUNTRY_NAME") or "",
+                    "stage_id": t_out.get("TOURNAMENT_STAGE_ID") or "",
+                    "ts":       _now_hint,
+                }
+
+    # Bucket unpaired Kalshi-only fixtures + route into existing FL
+    # tournaments where possible.
+    unpaired_tournaments: list = []
+    if sport and unpaired:
+        buckets = find_unpaired_buckets(unpaired, sport)
+        unpaired_tournaments, routed = _v2_route_unpaired(
+            buckets, sport, out_tournaments, target_date,
+        )
+        # Track matched tickers from unpaired (for footer count)
+        for items in buckets.values():
+            for r in items:
+                tk = r.get("event_ticker") or ""
+                if tk:
+                    matched_kalshi_tickers.add(tk)
+
+    # Outrights count toward matched_kalshi_count
+    for t in outright_tournaments:
+        for ev in t.get("events") or []:
+            tk = (ev.get("kalshi") or {}).get("event_ticker")
+            if tk:
+                matched_kalshi_tickers.add(tk)
+
+    return {
+        "fl_sport_id":          sport_id,
+        "kalshi_sport":         sport,
+        "tournaments":          outright_tournaments
+                                + unpaired_tournaments
+                                + out_tournaments,
+        "matched_kalshi_count": len(matched_kalshi_tickers),
+        "source":               "flashlive+kalshi+v2",
+    }
+
+
 @app.get("/api/sports/{sport_id}/feed")
 async def sports_feed(sport_id: int, timezone: int = 0,
-                       indent_days: int = 0):
+                       indent_days: int = 0, v: int = 1):
     """Sport-page feed — FL events for the sport_id merged with
     matched Kalshi market data. Drives /sports/:sport_id COL 2.
 
-    Response:
+    Feature flag: `?v=2` routes to the new identity-based handler
+    built on kalshi_identity / outcome_shapes / kalshi_join /
+    live_source_selector. v1 (the implementation below) is the
+    default until phase 6 promotes v2.
+
+    Response (same shape for both v1 and v2):
       {
         "fl_sport_id": 1,
         "kalshi_sport": "Soccer",
@@ -9113,6 +9449,9 @@ async def sports_feed(sport_id: int, timezone: int = 0,
     data (prices, orderbook) comes via the existing
     /api/event/{ticker} family on demand when COL 3 opens.
     """
+    if v == 2:
+        return await sports_feed_v2(sport_id, timezone, indent_days)
+    # ── v1 (existing implementation, unchanged below) ───────────
     from flashlive_feed import _fl_get
     if not 1 <= sport_id <= 42:
         return {"error": "sport_id must be between 1 and 42"}

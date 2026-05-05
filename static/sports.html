@@ -806,7 +806,11 @@ async function loadEvents() {
     //   events: [{...FL fields..., kalshi: {event_ticker} | null}]}]}.
     // Each event carries a .kalshi field — rich (matched market) vs
     // lite (FL-only, no markets yet).
-    const r = await fetch('/api/sports/' + sid + '/feed?indent_days=' + _indentDays);
+    // Feature flag: ?v2=1 in the page URL routes to the v2 feed
+    // handler (identity-based join). Default = v1.
+    const _useV2 = new URLSearchParams(window.location.search).get('v2') === '1';
+    const _vQs = _useV2 ? '&v=2' : '';
+    const r = await fetch('/api/sports/' + sid + '/feed?indent_days=' + _indentDays + _vQs);
     _httpStatus = r.status;
     const text = await r.text();
     _bodySnippet = (text || '').slice(0, 240);
