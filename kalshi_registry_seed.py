@@ -55,6 +55,7 @@ Phase C explicitly does NOT:
     * Implement guarded fuzzy. Phase C2.
 """
 from __future__ import annotations
+from datetime import datetime, timezone
 from typing import Optional
 
 from identity_registry import IdentityRegistry, Fixture, Market
@@ -64,6 +65,85 @@ from kalshi_identity import (
     strip_known_suffix,
     parent_fixture_identity,
 )
+
+
+# Time-fuzz window for matching Kalshi G7 tickers (date+time+abbr)
+# to FL fixtures. Mirrors v2's kalshi_join.match() default. Phase
+# C2e — applied as a TIEBREAKER within an already-filtered candidate
+# set, not as a hard filter. Records without time in their identity
+# fall through this gate unchanged.
+_TIME_FUZZ_MINUTES = 30
+
+
+def _identity_time_to_minutes(identity_time: str) -> Optional[int]:
+    """Convert an identity.time string ('HHMM') to minutes since
+    midnight. Returns None on bad input — caller treats as 'no
+    time component, fall through'."""
+    if not identity_time or len(identity_time) < 4:
+        return None
+    try:
+        return int(identity_time[:2]) * 60 + int(identity_time[2:4])
+    except (TypeError, ValueError):
+        return None
+
+
+def _fixture_utc_minutes(fixture: Fixture) -> Optional[int]:
+    """UTC minutes-since-midnight for the fixture's start_time.
+    Returns None if start_time_utc is missing or malformed."""
+    ts = fixture.start_time_utc
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+        return dt.hour * 60 + dt.minute
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _pick_best_by_time(matching: list, identity,
+                       fuzz_min: int = _TIME_FUZZ_MINUTES) -> Optional[Fixture]:
+    """Phase C2e — among Fixtures already known to match the Kalshi
+    identity by date+abbr_block, pick the one whose start_time_utc
+    is closest to the identity's time component.
+
+    Logic:
+      * If the identity has no time (G1 tickers like
+        KXNBAGAME-26MAY05CLEDET), any candidate is acceptable —
+        return the first. Behavior matches the pre-C2e seeder.
+      * If the identity has time, filter candidates to those within
+        ±fuzz_min minutes of identity time, then return the closest.
+      * If no candidate falls inside the fuzz window, return None
+        (caller treats as 'no match', falls through to next tier).
+
+    Edge cases:
+      * Empty `matching` list → None.
+      * Candidate with missing start_time_utc → skipped silently
+        (excluded from time scoring; if it was the only candidate,
+        falls through to first-match behavior).
+    """
+    if not matching:
+        return None
+    k_min = _identity_time_to_minutes(identity.time)
+    if k_min is None:
+        # No time on the Kalshi side → first abbr-match wins, same
+        # as pre-C2e behavior.
+        return matching[0]
+
+    best = None
+    best_diff = fuzz_min + 1  # strictly less-than below
+    for fx in matching:
+        f_min = _fixture_utc_minutes(fx)
+        if f_min is None:
+            continue
+        diff = abs(k_min - f_min)
+        # Handle wrap across UTC midnight: if diff > 12h, the
+        # closer interpretation is via 24h wrap.
+        if diff > 12 * 60:
+            diff = 24 * 60 - diff
+        if diff <= fuzz_min and diff < best_diff:
+            best = fx
+            best_diff = diff
+    return best
 
 
 # ── Tie-word detection ───────────────────────────────────────────
@@ -415,21 +495,30 @@ def seed_kalshi_record(registry: IdentityRegistry,
         if not parent_date or not parent_abbr:
             return None
         candidates = registry.lookup_fixtures_by_date(sport, parent_date)
-        for fx in candidates:
+        # Phase C2e: collect ALL abbr-matching candidates, then pick
+        # the time-closest. Per_leg tickers carry both date+time when
+        # they hit PATTERN_LEG_DATE_TIME (e.g. esports maps); G_LEG_DATE
+        # tennis-set tickers don't, in which case time is None and
+        # _pick_best_by_time falls through to first-match.
+        leg_matching = [
+            fx for fx in candidates
             if (parent_abbr in _orientations_strict(registry, fx)
                 or parent_abbr in _orientations_with_alias_table(
                     registry, fx, sport,
-                )):
-                registry.register_alias(
-                    source="kalshi", external_id=ticker,
-                    canonical_id=fx.id, method="strict",
-                    confidence=1.0,
-                )
-                _seed_per_leg_market_layer(
-                    registry, fx, kalshi_record, sport,
-                    leg_n=identity.leg_n or 0,
-                )
-                return fx
+                ))
+        ]
+        leg_winner = _pick_best_by_time(leg_matching, parent_id)
+        if leg_winner is not None:
+            registry.register_alias(
+                source="kalshi", external_id=ticker,
+                canonical_id=leg_winner.id, method="strict",
+                confidence=1.0,
+            )
+            _seed_per_leg_market_layer(
+                registry, leg_winner, kalshi_record, sport,
+                leg_n=identity.leg_n or 0,
+            )
+            return leg_winner
         return None
 
     if identity.kind != "per_fixture":
@@ -445,27 +534,45 @@ def seed_kalshi_record(registry: IdentityRegistry,
     if not candidates:
         return None
 
-    # Tier 1: strict abbr-equality on team aliases as-stored.
-    for fx in candidates:
-        if abbr_block in _orientations_strict(registry, fx):
-            registry.register_alias(
-                source="kalshi", external_id=ticker,
-                canonical_id=fx.id, method="strict",
-                confidence=1.0,
-            )
-            _seed_winner_market_layer(registry, fx, kalshi_record, sport)
-            return fx
+    # Tier 1: strict abbr-equality on team aliases. Phase C2e —
+    # collect ALL abbr-matching candidates, then pick the
+    # time-closest one. For G7 tickers (date+time+abbr) this
+    # disambiguates MLB doubleheaders, same-day intl basketball
+    # multi-fixture cases, etc. For G1 tickers (date+abbr only),
+    # _pick_best_by_time short-circuits to first-match (no time
+    # to score against), preserving pre-C2e behavior.
+    strict_matching = [
+        fx for fx in candidates
+        if abbr_block in _orientations_strict(registry, fx)
+    ]
+    strict_winner = _pick_best_by_time(strict_matching, identity)
+    if strict_winner is not None:
+        registry.register_alias(
+            source="kalshi", external_id=ticker,
+            canonical_id=strict_winner.id, method="strict",
+            confidence=1.0,
+        )
+        _seed_winner_market_layer(
+            registry, strict_winner, kalshi_record, sport,
+        )
+        return strict_winner
 
-    # Tier 2: alias-table expansion.
-    for fx in candidates:
-        if abbr_block in _orientations_with_alias_table(registry, fx, sport):
-            registry.register_alias(
-                source="kalshi", external_id=ticker,
-                canonical_id=fx.id, method="alias_table",
-                confidence=0.95,
-            )
-            _seed_winner_market_layer(registry, fx, kalshi_record, sport)
-            return fx
+    # Tier 2: alias-table expansion. Same time-aware tiebreaker.
+    alias_matching = [
+        fx for fx in candidates
+        if abbr_block in _orientations_with_alias_table(registry, fx, sport)
+    ]
+    alias_winner = _pick_best_by_time(alias_matching, identity)
+    if alias_winner is not None:
+        registry.register_alias(
+            source="kalshi", external_id=ticker,
+            canonical_id=alias_winner.id, method="alias_table",
+            confidence=0.95,
+        )
+        _seed_winner_market_layer(
+            registry, alias_winner, kalshi_record, sport,
+        )
+        return alias_winner
 
     # Tier 3 (guarded fuzzy) — only available via the batch seeder
     # since it requires bucket-level visibility (count of unpaired
@@ -549,14 +656,17 @@ def seed_kalshi_records(registry: IdentityRegistry,
                 stats["unpaired"] += 1
                 continue
             cands = registry.lookup_fixtures_by_date(sport, parent_id.date)
-            hit_leg = None
-            for fx in cands:
+            # Phase C2e: same time-aware tiebreaker as the per_fixture
+            # path. parent_id.time is populated for G_LEG_DATE_TIME
+            # tickers (esports maps); empty for G_LEG_DATE (tennis sets).
+            leg_matching = [
+                fx for fx in cands
                 if (parent_id.abbr_block in _orientations_strict(registry, fx)
                     or parent_id.abbr_block in _orientations_with_alias_table(
                         registry, fx, sport,
-                    )):
-                    hit_leg = fx
-                    break
+                    ))
+            ]
+            hit_leg = _pick_best_by_time(leg_matching, parent_id)
             if hit_leg is None:
                 stats["unpaired"] += 1
                 continue
@@ -584,17 +694,25 @@ def seed_kalshi_records(registry: IdentityRegistry,
         candidates = registry.lookup_fixtures_by_date(sport, fixture_date)
         hit = None
         hit_method = None
-        for fx in candidates:
-            if abbr_block in _orientations_strict(registry, fx):
-                hit, hit_method = fx, "strict"
-                break
+        # Phase C2e: time-aware tiebreaker. Collect ALL abbr-matching
+        # candidates, then pick by time. See _pick_best_by_time docs.
+        strict_matching = [
+            fx for fx in candidates
+            if abbr_block in _orientations_strict(registry, fx)
+        ]
+        strict_winner = _pick_best_by_time(strict_matching, identity)
+        if strict_winner is not None:
+            hit, hit_method = strict_winner, "strict"
         if hit is None:
-            for fx in candidates:
+            alias_matching = [
+                fx for fx in candidates
                 if abbr_block in _orientations_with_alias_table(
                     registry, fx, sport,
-                ):
-                    hit, hit_method = fx, "alias_table"
-                    break
+                )
+            ]
+            alias_winner = _pick_best_by_time(alias_matching, identity)
+            if alias_winner is not None:
+                hit, hit_method = alias_winner, "alias_table"
 
         if hit is not None:
             registry.register_alias(

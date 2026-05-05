@@ -215,7 +215,7 @@ class TestSeedFixture:
         ev = fl_response_ucl["DATA"][0]["EVENTS"][0]
         fx = seed_fixture_from_fl_event(r, ev, "Soccer")
         assert fx is not None
-        assert fx.id == "fixture:soccer:2026-05-05:arsenal-vs-atl-madrid"
+        assert fx.id == "fixture:soccer:2026-05-05:1900:arsenal-vs-atl-madrid"
         assert fx.start_time_utc == _ts(2026, 5, 5, 19, 0)
         assert fx.version == 1
 
@@ -266,19 +266,27 @@ class TestSeedFixture:
         assert a == b
         assert r.stats()["fixtures"] == 1
 
-    def test_rescheduled_bumps_version(self, fl_response_ucl):
-        """If FL ships a different START_TIME on a re-fetch, the
-        Fixture's version bumps and updated_at moves forward.
+    def test_reschedule_creates_distinct_fixture(self):
+        """Phase C2e — START_TIME is in the canonical ID (HHMM
+        component), so a reschedule produces a NEW Fixture rather
+        than bumping the existing one's version. Previous bump-
+        version behavior would have collided MLB doubleheaders.
         """
         r = IdentityRegistry()
-        ev = fl_response_ucl["DATA"][0]["EVENTS"][0]
+        ev = {
+            "EVENT_ID":       "fl_x",
+            "HOME_NAME":      "Arsenal",
+            "AWAY_NAME":      "Chelsea",
+            "SHORTNAME_HOME": "ARS",
+            "SHORTNAME_AWAY": "CHE",
+            "START_TIME":     _ts(2026, 5, 5, 19, 0),
+        }
         a = seed_fixture_from_fl_event(r, ev, "Soccer")
-        # FL re-ships with a new kickoff time (postponed +1h)
         ev2 = dict(ev)
-        ev2["START_TIME"] = _ts(2026, 5, 5, 20, 0)
+        ev2["START_TIME"] = _ts(2026, 5, 5, 20, 0)  # postponed +1h
         b = seed_fixture_from_fl_event(r, ev2, "Soccer")
-        assert b.id == a.id
-        assert b.version == 2
+        assert a is not None and b is not None
+        assert a.id != b.id  # distinct canonical fixtures
         assert b.start_time_utc == _ts(2026, 5, 5, 20, 0)
 
 
@@ -337,7 +345,7 @@ class TestSeedFromFLResponse:
         fx = r.resolve_through_alias("fl", "fl_okclal")
         assert fx is not None
         assert (fx.id ==
-                "fixture:basketball:2026-05-05:"
+                "fixture:basketball:2026-05-05:2330:"
                 "oklahoma-city-thunder-vs-los-angeles-lakers")
 
     def test_skips_malformed_events(self):
@@ -425,9 +433,10 @@ class TestSeedFromFLResponse:
         seed_from_fl_response(r, fl, "Soccer")
         fx = r.resolve_through_alias("fl", "fl_ucvind")
         assert fx is not None
-        # Canonical ID uses Argentine local date (May 5), NOT UTC May 6
+        # Canonical ID uses Argentine local date (May 5), NOT UTC
+        # May 6. Time component (HHMM) stays UTC: 00:00.
         assert fx.id == (
-            "fixture:soccer:2026-05-05:"
+            "fixture:soccer:2026-05-05:0000:"
             "universidad-catolica-vs-independiente-del-valle"
         )
         assert fx.local_date == date(2026, 5, 5)
