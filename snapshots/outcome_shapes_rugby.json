@@ -1,0 +1,167 @@
+{
+  "sample_size": 12,
+  "sport_filter": "Rugby",
+  "bucket_count": 5,
+  "buckets": [
+    {
+      "series_base": "KXRUGBYNRL",
+      "suffix": "MATCH",
+      "market_type": "",
+      "record_count": 8,
+      "most_common_outcome_count": 3,
+      "outcome_count_distribution": {
+        "3": 8
+      },
+      "label_classes": {
+        "team_like": 16,
+        "tie": 8
+      },
+      "label_samples": {
+        "team_like": [
+          "Canberra Raiders",
+          "Penrith Panthers",
+          "Melbourne Storm",
+          "Wests Tigers"
+        ],
+        "tie": [
+          "Tie"
+        ]
+      },
+      "title_samples": [
+        "Canberra Raiders vs Penrith Panthers",
+        "Melbourne Storm vs Wests Tigers",
+        "Manly Sea Eagles vs Brisbane Broncos"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNRLCHAMP",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 17,
+      "outcome_count_distribution": {
+        "17": 1
+      },
+      "label_classes": {
+        "team_like": 17
+      },
+      "label_samples": {
+        "team_like": [
+          "Brisbane Broncos",
+          "Canterbury-Bankstown Bulldogs",
+          "Canberra Raiders",
+          "Cronulla-Sutherland Sharks"
+        ]
+      },
+      "title_samples": [
+        "National Rugby League Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXSLRCHAMP",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 14,
+      "outcome_count_distribution": {
+        "14": 1
+      },
+      "label_classes": {
+        "team_like": 14
+      },
+      "label_samples": {
+        "team_like": [
+          "Castleford Tigers",
+          "Catalan Dragons",
+          "Huddersfield Giants",
+          "Hull FC"
+        ]
+      },
+      "title_samples": [
+        "Super League Rugby Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXFRA14CHAMP",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 14,
+      "outcome_count_distribution": {
+        "14": 1
+      },
+      "label_classes": {
+        "other": 1,
+        "team_like": 13
+      },
+      "label_samples": {
+        "other": [
+          "Racing 92"
+        ],
+        "team_like": [
+          "Stade Toulousain",
+          "Montpellier Herault Rugby",
+          "Lyon OU",
+          "Aviron Bayonne"
+        ]
+      },
+      "title_samples": [
+        "France Top 14 Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXPREMCHAMP",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 10,
+      "outcome_count_distribution": {
+        "10": 1
+      },
+      "label_classes": {
+        "team_like": 10
+      },
+      "label_samples": {
+        "team_like": [
+          "Bath Rugby",
+          "Bristol Bears",
+          "Exeter Chiefs",
+          "Gloucester Rugby"
+        ]
+      },
+      "title_samples": [
+        "Gallagher Premiership Rugby Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    }
+  ]
+}
