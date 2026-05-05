@@ -161,6 +161,49 @@ class TestStrictTier:
         )
         assert a.method == "strict"
 
+    def test_strict_via_local_date_argentine_timezone(self):
+        """Phase C2d end-to-end: Soccer CONMEBOL fixture with FL UTC
+        start = May 6 00:00 (= May 5 21:00 ART). Kalshi ticker date
+        = MAY05 (local Argentine convention). Strict-date pairing
+        works via the FL fixture's local_date (May 5), not the UTC
+        date (May 6). This is what fixes the v2_only CONMEBOL gap.
+        """
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_libertadores",
+                    "NAME": "CONMEBOL Libertadores",
+                    "EVENTS": [
+                        {
+                            "EVENT_ID":       "fl_ucvind",
+                            "HOME_NAME":      "Universidad Catolica",
+                            "AWAY_NAME":      "Independiente del Valle",
+                            "SHORTNAME_HOME": "UCV",
+                            "SHORTNAME_AWAY": "IND",
+                            "START_TIME":     _ts(2026, 5, 6, 0, 0),
+                        },
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Soccer")
+        rec = {
+            "event_ticker":  "KXCONMEBOLLIBGAME-26MAY05UCVIND",
+            "series_ticker": "KXCONMEBOLLIBGAME",
+        }
+        fx = seed_kalshi_record(r, rec, "Soccer")
+        assert fx is not None
+        # Strict-date match succeeded via local_date (May 5)
+        a = r.resolve_alias(
+            "kalshi", "KXCONMEBOLLIBGAME-26MAY05UCVIND",
+        )
+        assert a is not None
+        assert a.method == "strict"
+        assert a.confidence == 1.0
+        # Canonical fixture ID uses local date
+        assert fx.id.startswith("fixture:soccer:2026-05-05:")
+
     def test_strict_paired_nba_canonical(
         self, registry_seeded_nba_canonical,
     ):

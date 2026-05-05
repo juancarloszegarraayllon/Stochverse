@@ -59,6 +59,7 @@ from identity_registry import (
     Team, Competition, Fixture,
     slugify,
 )
+from competition_timezones import competition_tz, compute_local_date
 
 
 # ── Team seeding ─────────────────────────────────────────────────
@@ -154,13 +155,21 @@ def seed_competition_from_fl(registry: IdentityRegistry,
 
 def seed_fixture_from_fl_event(registry: IdentityRegistry,
                                  fl_event: dict, sport: str,
-                                 competition_id: Optional[str] = None
+                                 competition_id: Optional[str] = None,
+                                 fl_tournament: Optional[dict] = None
                                  ) -> Optional[Fixture]:
     """Register a fixture from a FL event dict.
 
     Requires both teams to be seedable (via seed_team_from_fl_event)
     and a START_TIME (or START_UTIME) to be present. Returns the
     Fixture, or None if any of these prerequisites fail.
+
+    Phase C2d: the fixture's canonical date is the LOCAL game date,
+    not the UTC date. The local timezone is resolved from
+    `fl_tournament['NAME']` via `competition_tz()`. Falls back to
+    UTC if no tournament context (or no NAME) is supplied — matches
+    pre-C2d behavior so callers that don't pass tournament still
+    work, just without timezone-aware disambiguation.
 
     The FL EVENT_ID is registered as an alias under source='fl' so
     fl-keyed lookups resolve to the canonical fixture.
@@ -175,9 +184,28 @@ def seed_fixture_from_fl_event(registry: IdentityRegistry,
         return None
     try:
         start_ts = int(start_ts)
-        when = datetime.fromtimestamp(start_ts, tz=timezone.utc).date()
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError):
         return None
+
+    # Local-date resolution: pull tz from the tournament's name when
+    # available; UTC fallback. Wrapped in try/except so a malformed
+    # tz string doesn't take the whole seeder down.
+    tz_name = "UTC"
+    if fl_tournament is not None:
+        tz_name = competition_tz(
+            fl_tournament.get("NAME") or "", sport,
+        )
+    try:
+        when = compute_local_date(start_ts, tz_name)
+    except (OSError, ValueError, KeyError):
+        # Fall back to UTC date if the tz lookup or epoch conversion
+        # fails for any reason.
+        try:
+            when = datetime.fromtimestamp(
+                start_ts, tz=timezone.utc,
+            ).date()
+        except (TypeError, ValueError, OSError):
+            return None
 
     fixture = registry.register_fixture(
         sport=sport, when=when,
@@ -263,6 +291,7 @@ def seed_from_fl_response(registry: IdentityRegistry,
             fx = seed_fixture_from_fl_event(
                 registry, ev, sport,
                 competition_id=(comp.id if comp else None),
+                fl_tournament=tournament,
             )
             if fx is not None:
                 stats["fixtures_seeded"] += 1

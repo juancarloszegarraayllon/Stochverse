@@ -170,6 +170,14 @@ class Fixture:
     home_team_id: str
     away_team_id: str
     start_time_utc: int  # epoch seconds, UTC
+    # Local game date — what timezone-aware Kalshi tickers use as
+    # their date component. Populated by the FL seeder via
+    # competition_timezones.compute_local_date(). Equals UTC date
+    # for sports/leagues whose local timezone is UTC, OR shifted
+    # by one day for evening-game-crosses-midnight cases (Soccer
+    # CONMEBOL, NBA West Coast, etc.). The canonical ID's date
+    # component matches this field.
+    local_date: Optional[date] = None
     version: int = 1
     updated_at_utc: int = 0
 
@@ -391,10 +399,14 @@ class IdentityRegistry:
                 self._fixtures[fid] = bumped
                 return bumped
             return existing
+        # `when` argument carries the local game date — the same
+        # date encoded in the canonical ID. Stored on Fixture as
+        # `local_date` for downstream consumers (Phase C2d).
         fixture = Fixture(
             id=fid, sport=sport, competition_id=competition_id,
             home_team_id=home_team_id, away_team_id=away_team_id,
             start_time_utc=start_time_utc,
+            local_date=when,
             version=1, updated_at_utc=now,
         )
         self._fixtures[fid] = fixture

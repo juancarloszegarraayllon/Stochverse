@@ -393,3 +393,91 @@ class TestSeedFromFLResponse:
         stats = seed_from_fl_response(r, {"DATA": "not a list"}, "Soccer")
         assert stats["tournaments_seeded"] == 0
         assert stats["fixtures_seeded"]    == 0
+
+    def test_local_date_used_for_conmebol_evening_game(self):
+        """Phase C2d — Soccer CONMEBOL evening game (21:00 ART) with
+        FL UTC start crossing midnight should produce a Fixture
+        whose canonical date is the LOCAL Argentine date, not the
+        UTC date. This is what makes Kalshi's MAY05 ticker (local-
+        Argentine convention) match the FL fixture (UTC May 6).
+        """
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_libertadores",
+                    "NAME": "CONMEBOL Libertadores",
+                    "EVENTS": [
+                        {
+                            "EVENT_ID":       "fl_ucvind",
+                            "HOME_NAME":      "Universidad Catolica",
+                            "AWAY_NAME":      "Independiente del Valle",
+                            "SHORTNAME_HOME": "UCV",
+                            "SHORTNAME_AWAY": "IND",
+                            # FL ships UTC: May 6 00:00 = May 5
+                            # 21:00 Buenos Aires (UTC-3)
+                            "START_TIME":     _ts(2026, 5, 6, 0, 0),
+                        },
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Soccer")
+        fx = r.resolve_through_alias("fl", "fl_ucvind")
+        assert fx is not None
+        # Canonical ID uses Argentine local date (May 5), NOT UTC May 6
+        assert fx.id == (
+            "fixture:soccer:2026-05-05:"
+            "universidad-catolica-vs-independiente-del-valle"
+        )
+        assert fx.local_date == date(2026, 5, 5)
+
+    def test_local_date_falls_back_to_utc_when_no_tournament_context(self):
+        """seed_fixture_from_fl_event called without fl_tournament
+        falls back to UTC date for backward compatibility."""
+        from fl_registry_seed import seed_fixture_from_fl_event
+        r = IdentityRegistry()
+        ev = {
+            "EVENT_ID":       "fl_x",
+            "HOME_NAME":      "Foo",
+            "AWAY_NAME":      "Bar",
+            "SHORTNAME_HOME": "FOO",
+            "SHORTNAME_AWAY": "BAR",
+            # May 6 00:00 UTC
+            "START_TIME":     _ts(2026, 5, 6, 0, 0),
+        }
+        # No fl_tournament passed → tz defaults to UTC → local_date
+        # equals UTC date (May 6)
+        fx = seed_fixture_from_fl_event(r, ev, "Soccer")
+        assert fx is not None
+        assert fx.local_date == date(2026, 5, 6)
+
+    def test_local_date_unchanged_for_kbo_afternoon_game(self):
+        """KBO afternoon games (14:00 KST = 05:00 UTC) don't cross
+        midnight — local_date and UTC date agree. Sanity check the
+        timezone work doesn't move dates that shouldn't move."""
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_kbo",
+                    "NAME": "KBO Regular Season",
+                    "EVENTS": [
+                        {
+                            "EVENT_ID":       "fl_samkiw",
+                            "HOME_NAME":      "Samsung Lions",
+                            "AWAY_NAME":      "Kiwoom Heroes",
+                            "SHORTNAME_HOME": "SAM",
+                            "SHORTNAME_AWAY": "KIW",
+                            # May 5 05:00 UTC = May 5 14:00 KST
+                            "START_TIME":     _ts(2026, 5, 5, 5, 0),
+                        },
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Baseball")
+        fx = r.resolve_through_alias("fl", "fl_samkiw")
+        assert fx is not None
+        # KST local date and UTC date both = May 5
+        assert fx.local_date == date(2026, 5, 5)
