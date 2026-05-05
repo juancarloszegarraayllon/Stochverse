@@ -1438,21 +1438,17 @@ function renderEventRow(ev, market, isMarketRow) {
     // outcome rows below stay plain so the crest isn't duplicated
     // for labels that are team names. Winner-shape views have no
     // matchup header, so the outcome row IS the team line and
-    // keeps its inline icon.
+    // keeps its inline icon. Match on full name first, then on
+    // partial (covers cases like outcome="Atletico" with
+    // HOME_NAME="Atl. Madrid").
     const homeLc = (ev.HOME_NAME || '').toLowerCase();
     const awayLc = (ev.AWAY_NAME || '').toLowerCase();
-    const homeAbbr = (ev.SHORTNAME_HOME || '').toLowerCase();
-    const awayAbbr = (ev.SHORTNAME_AWAY || '').toLowerCase();
     for (const o of outcomes) {
       const lblLc = (o.label || '').toLowerCase();
       let icon = '';
       if (!showMatchup) {
-        // Match on full name first, then on partial (covers cases
-        // like outcome="Atletico" with HOME_NAME="Atl. Madrid").
         if (lblLc === homeLc || (homeLc && lblLc.includes(homeLc))) icon = homeIconHtml;
         else if (lblLc === awayLc || (awayLc && lblLc.includes(awayLc))) icon = awayIconHtml;
-        else if (homeAbbr && lblLc === homeAbbr) icon = homeIconHtml;
-        else if (awayAbbr && lblLc === awayAbbr) icon = awayIconHtml;
       }
       html += '<span class="sp-c2-team" title="' + escH(o.label || '') +
               '">' + icon + escH(o.label || '') + '</span>';
