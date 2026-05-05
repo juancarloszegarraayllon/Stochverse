@@ -1,0 +1,29 @@
+{
+  "sample_size": 1,
+  "sport_filter": "Darts",
+  "base_count": 1,
+  "bases": [
+    {
+      "base": "KXPREMDARTS",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXPREMDARTS-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    }
+  ]
+}
