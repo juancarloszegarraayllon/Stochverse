@@ -1,6 +1,60 @@
 {
-  "sample_size": 0,
-  "sport_filter": "Table",
-  "base_count": 0,
-  "bases": []
+  "sample_size": 4,
+  "sport_filter": "Table Tennis",
+  "base_count": 2,
+  "bases": [
+    {
+      "base": "KXITTFMEN",
+      "total": 3,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXITTFMEN-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [
+        {
+          "ticker": "KXITTFMENMATCH-26APR290730FRAGRE",
+          "suffix": "26APR290730FRAGRE"
+        },
+        {
+          "ticker": "KXITTFMENMATCH-26APR281430HUNUZB",
+          "suffix": "26APR281430HUNUZB"
+        }
+      ],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXITTFWOMEN",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXITTFWOMEN-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    }
+  ]
 }
