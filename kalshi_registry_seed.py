@@ -62,12 +62,30 @@ from kalshi_identity import (
     parse_ticker,
     normalize_fl_abbr,
     strip_known_suffix,
+    parent_fixture_identity,
 )
 
 
 # ── Tie-word detection ───────────────────────────────────────────
 
 _TIE_WORDS = frozenset({"tie", "draw", "no winner", "no result"})
+
+
+# ── Per-sport per_leg market-type taxonomy ───────────────────────
+# Canonical name + slug for the parameterized sub-market a per_leg
+# Kalshi ticker resolves to. Keyed by sport. Unmapped sports get
+# `None` and the per_leg path early-returns (we still register the
+# fixture-level alias).
+#
+# Adding a sport:
+#   * Map the FlashLive sport label to (canonical_name, slug).
+#   * Each Kalshi outcome label still gets passed through
+#     _classify_outcome_side, so the sport's home/away vocabulary
+#     must overlap with FL's HOME_NAME / AWAY_NAME tokens.
+_PER_LEG_MARKET_TYPES: dict = {
+    "Tennis":  ("Set Winner", "set-winner"),
+    "Esports": ("Map Winner", "map-winner"),
+}
 
 
 # ── Market-type detection ────────────────────────────────────────
@@ -223,6 +241,86 @@ def _seed_winner_market_layer(registry: IdentityRegistry,
     return market
 
 
+# ── Per_leg market-layer seeding (Phase C2c) ─────────────────────
+
+def _seed_per_leg_market_layer(registry: IdentityRegistry,
+                                parent_fixture: Fixture,
+                                kalshi_record: dict,
+                                sport: str,
+                                leg_n: int) -> Optional[Market]:
+    """Register a parameterized sub-market (e.g. tennis Set Winner,
+    esports Map Winner) for a per_leg Kalshi record, anchored to
+    its parent fixture.
+
+    Each per_leg ticker (one per set / per map) creates ONE Market
+    under the parent fixture, with `params=(("leg_n", N),)` so
+    different legs of the same match map to distinct canonical
+    Markets. Outcomes are home/away (no tie — sets and maps decide
+    a winner).
+
+    Aliases written under the same namespaced sources as the Winner
+    market layer:
+        source='kalshi_market',  external_id=event_ticker
+                              → market.id  (strict, 1.0)
+        source='kalshi_outcome', external_id=<per-outcome ticker>
+                              → outcome.id (strict, 1.0)
+
+    Returns the Market on success, None if the sport has no per_leg
+    market-type mapping in _PER_LEG_MARKET_TYPES or required fields
+    are missing.
+    """
+    series = (kalshi_record.get("series_ticker") or "").upper().strip()
+    ticker = (kalshi_record.get("event_ticker") or "").upper().strip()
+    if not series or not ticker:
+        return None
+    mt_info = _PER_LEG_MARKET_TYPES.get(sport)
+    if mt_info is None:
+        return None
+    mt_name, mt_slug = mt_info
+
+    mt = registry.register_market_type(
+        sport=sport, canonical_name=mt_name, slug=mt_slug,
+        parameterized=True,
+    )
+    market = registry.register_market(
+        fixture_id=parent_fixture.id,
+        market_type_id=mt.id,
+        params=(("leg_n", leg_n),),
+    )
+    registry.register_alias(
+        source="kalshi_market", external_id=ticker,
+        canonical_id=market.id, method="strict", confidence=1.0,
+    )
+
+    outcomes = (kalshi_record.get("outcomes")
+                or kalshi_record.get("_outcomes")
+                or [])
+    for o in outcomes:
+        if not isinstance(o, dict):
+            continue
+        label = (o.get("label") or "").strip()
+        if not label:
+            continue
+        side = _classify_outcome_side(label, registry, parent_fixture)
+        # Sets / maps have no tie — if the label happens to match a
+        # tie-word, skip rather than register a meaningless outcome.
+        if side is None or side == "tie":
+            continue
+        outcome = registry.register_outcome(
+            market_id=market.id, side=side,
+            canonical_label=label,
+        )
+        outcome_ticker = (o.get("ticker") or "").strip()
+        if outcome_ticker:
+            registry.register_alias(
+                source="kalshi_outcome",
+                external_id=outcome_ticker,
+                canonical_id=outcome.id,
+                method="strict", confidence=1.0,
+            )
+    return market
+
+
 # ── Orientation builders ─────────────────────────────────────────
 
 def _team_alias_set(registry: IdentityRegistry,
@@ -304,10 +402,38 @@ def seed_kalshi_record(registry: IdentityRegistry,
     identity = parse_ticker(ticker, series, sport)
     if identity is None:
         return None
+
+    # Per_leg path (Phase C2c): tennis sets, esports maps. The
+    # per_leg ticker resolves to its PARENT fixture (the match) +
+    # a parameterized sub-market for the specific leg.
+    if identity.kind == "per_leg":
+        parent_id = parent_fixture_identity(identity)
+        if parent_id is None:
+            return None
+        parent_date = parent_id.date
+        parent_abbr = parent_id.abbr_block
+        if not parent_date or not parent_abbr:
+            return None
+        candidates = registry.lookup_fixtures_by_date(sport, parent_date)
+        for fx in candidates:
+            if (parent_abbr in _orientations_strict(registry, fx)
+                or parent_abbr in _orientations_with_alias_table(
+                    registry, fx, sport,
+                )):
+                registry.register_alias(
+                    source="kalshi", external_id=ticker,
+                    canonical_id=fx.id, method="strict",
+                    confidence=1.0,
+                )
+                _seed_per_leg_market_layer(
+                    registry, fx, kalshi_record, sport,
+                    leg_n=identity.leg_n or 0,
+                )
+                return fx
+        return None
+
     if identity.kind != "per_fixture":
-        # Outright / per_leg / per_series — don't pair to fixtures.
-        # Per_leg pairing will be handled in Phase C2 alongside the
-        # market-layer seeding.
+        # Outright / per_series — don't pair to fixtures.
         return None
 
     fixture_date = identity.date
@@ -387,11 +513,15 @@ def seed_kalshi_records(registry: IdentityRegistry,
         "paired_strict":  0,
         "paired_alias":   0,
         "paired_guarded": 0,
+        "paired_per_leg": 0,
         "unpaired":       0,
         "outright":       0,
         "unparseable":    0,
     }
-    # Pass-2 buffer: (ticker, identity) per still-unpaired record
+    # Pass-2 buffer: (ticker, identity, raw record) per still-
+    # unpaired per_fixture record. Per_leg never enters this buffer
+    # because guarded fuzzy doesn't make sense for per_leg (the
+    # parent fixture is always known via parent_fixture_identity).
     buffered: list = []
 
     # ── Pass 1: strict + alias_table ───────────────────────────
@@ -410,6 +540,36 @@ def seed_kalshi_records(registry: IdentityRegistry,
             continue
         if identity.kind == "outright":
             stats["outright"] += 1
+            continue
+        if identity.kind == "per_leg":
+            # Per_leg: resolve parent fixture via parent_fixture_identity,
+            # then attach a parameterized sub-market for the leg.
+            parent_id = parent_fixture_identity(identity)
+            if parent_id is None or not parent_id.date or not parent_id.abbr_block:
+                stats["unpaired"] += 1
+                continue
+            cands = registry.lookup_fixtures_by_date(sport, parent_id.date)
+            hit_leg = None
+            for fx in cands:
+                if (parent_id.abbr_block in _orientations_strict(registry, fx)
+                    or parent_id.abbr_block in _orientations_with_alias_table(
+                        registry, fx, sport,
+                    )):
+                    hit_leg = fx
+                    break
+            if hit_leg is None:
+                stats["unpaired"] += 1
+                continue
+            registry.register_alias(
+                source="kalshi", external_id=ticker,
+                canonical_id=hit_leg.id, method="strict",
+                confidence=1.0,
+            )
+            _seed_per_leg_market_layer(
+                registry, hit_leg, rec, sport,
+                leg_n=identity.leg_n or 0,
+            )
+            stats["paired_per_leg"] += 1
             continue
         if identity.kind != "per_fixture":
             stats["unparseable"] += 1
