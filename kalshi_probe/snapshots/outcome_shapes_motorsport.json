@@ -1,0 +1,534 @@
+{
+  "sample_size": 24,
+  "sport_filter": "Motorsport",
+  "bucket_count": 16,
+  "buckets": [
+    {
+      "series_base": "KXNASCARTOP3",
+      "suffix": "",
+      "market_type": "Top 3 Finishers",
+      "record_count": 3,
+      "most_common_outcome_count": 37,
+      "outcome_count_distribution": {
+        "35": 1,
+        "36": 1,
+        "37": 1
+      },
+      "label_classes": {
+        "team_like": 107,
+        "other": 1
+      },
+      "label_samples": {
+        "team_like": [
+          "Ricky Stenhouse",
+          "Ty Dillon",
+          "Michael McDowell",
+          "Ryan Preece"
+        ],
+        "other": [
+          "Daniel Suárez"
+        ]
+      },
+      "title_samples": [
+        "NASCAR Go Bowling at The Glen: Top 3 Finishers",
+        "NASCAR Mission 200 at The Glen: Top 3 Finishers",
+        "NASCAR Bully Hill Vineyards 176 at The Glen: Top 3 Finishers"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNASCARTOP10",
+      "suffix": "",
+      "market_type": "Top 10 Finishers",
+      "record_count": 3,
+      "most_common_outcome_count": 37,
+      "outcome_count_distribution": {
+        "35": 1,
+        "36": 1,
+        "37": 1
+      },
+      "label_classes": {
+        "team_like": 107,
+        "other": 1
+      },
+      "label_samples": {
+        "team_like": [
+          "Ricky Stenhouse",
+          "Ty Dillon",
+          "Michael McDowell",
+          "Ryan Preece"
+        ],
+        "other": [
+          "Daniel Suárez"
+        ]
+      },
+      "title_samples": [
+        "NASCAR Go Bowling at The Glen: Top 10 Finishers",
+        "NASCAR Mission 200 at The Glen: Top 10 Finishers",
+        "NASCAR Bully Hill Vineyards 176 at The Glen: Top 10 Finishers"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNASCARFASTLAP",
+      "suffix": "",
+      "market_type": "Fastest Lap",
+      "record_count": 3,
+      "most_common_outcome_count": 37,
+      "outcome_count_distribution": {
+        "35": 1,
+        "36": 1,
+        "37": 1
+      },
+      "label_classes": {
+        "team_like": 107,
+        "other": 1
+      },
+      "label_samples": {
+        "team_like": [
+          "Ricky Stenhouse",
+          "Ty Dillon",
+          "Michael McDowell",
+          "Ryan Preece"
+        ],
+        "other": [
+          "Daniel Suárez"
+        ]
+      },
+      "title_samples": [
+        "NASCAR Go Bowling at The Glen: Fastest Lap",
+        "NASCAR Mission 200 at The Glen: Fastest Lap",
+        "NASCAR Bully Hill Vineyards 176 at The Glen: Fastest Lap"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNASCARRACE",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 3,
+      "most_common_outcome_count": 37,
+      "outcome_count_distribution": {
+        "35": 1,
+        "36": 1,
+        "37": 1
+      },
+      "label_classes": {
+        "team_like": 107,
+        "other": 1
+      },
+      "label_samples": {
+        "team_like": [
+          "Ricky Stenhouse",
+          "Ty Dillon",
+          "Michael McDowell",
+          "Ryan Preece"
+        ],
+        "other": [
+          "Daniel Suárez"
+        ]
+      },
+      "title_samples": [
+        "Go Bowling at The Glen Winner",
+        "Mission 200 at The Glen Winner",
+        "Bully Hill Vineyards 176 at The Glen Winner"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXF1RETIRE",
+      "suffix": "",
+      "market_type": "Retirement",
+      "record_count": 1,
+      "most_common_outcome_count": 4,
+      "outcome_count_distribution": {
+        "4": 1
+      },
+      "label_classes": {
+        "other": 4
+      },
+      "label_samples": {
+        "other": [
+          "Before the 2027 season",
+          "Before the 2028 season",
+          "Before the 2029 season",
+          "Before the 2030 season"
+        ]
+      },
+      "title_samples": [
+        "Max Verstappen: Retirement"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXF1CHINA",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 1,
+      "outcome_count_distribution": {
+        "1": 1
+      },
+      "label_classes": {
+        "other": 1
+      },
+      "label_samples": {
+        "other": [
+          "Before 2027"
+        ]
+      },
+      "title_samples": [
+        "Will there be an F1 team from China before 2027?"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXF1",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 22,
+      "outcome_count_distribution": {
+        "22": 1
+      },
+      "label_classes": {
+        "team_like": 22
+      },
+      "label_samples": {
+        "team_like": [
+          "Lando Norris",
+          "Max Verstappen",
+          "Charles Leclerc",
+          "Lewis Hamilton"
+        ]
+      },
+      "title_samples": [
+        "F1 Drivers Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXF1CONSTRUCTORS",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 11,
+      "outcome_count_distribution": {
+        "11": 1
+      },
+      "label_classes": {
+        "team_like": 11
+      },
+      "label_samples": {
+        "team_like": [
+          "Red Bull Racing",
+          "Haas",
+          "Audi",
+          "Alpine"
+        ]
+      },
+      "title_samples": [
+        "F1 Constructors Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXMOTOGPTEAMS",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 11,
+      "outcome_count_distribution": {
+        "11": 1
+      },
+      "label_classes": {
+        "team_like": 8,
+        "other": 3
+      },
+      "label_samples": {
+        "team_like": [
+          "Aprilia Racing",
+          "Ducati Lenovo Team",
+          "Honda HRC Castrol",
+          "LCR Honda"
+        ],
+        "other": [
+          "BK8 Gresini Racing MotoGP",
+          "Pertamina Enduro VR46 Racing Team",
+          "Red Bull KTM Tech3"
+        ]
+      },
+      "title_samples": [
+        "MotoGP Teams' World Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXMOTOGP",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 22,
+      "outcome_count_distribution": {
+        "22": 1
+      },
+      "label_classes": {
+        "team_like": 22
+      },
+      "label_samples": {
+        "team_like": [
+          "Enea Bastianini",
+          "Franco Morbidelli",
+          "Jorge Martin",
+          "Fabio Quartararo"
+        ]
+      },
+      "title_samples": [
+        "MotoGP World Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNASCARCUPSERIES",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 30,
+      "outcome_count_distribution": {
+        "30": 1
+      },
+      "label_classes": {
+        "team_like": 30
+      },
+      "label_samples": {
+        "team_like": [
+          "Kyle Larson",
+          "Denny Hamlin",
+          "William Byron",
+          "Christopher Bell"
+        ]
+      },
+      "title_samples": [
+        "NASCAR Cup Series Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNASCARAUTOPARTSSERIES",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 40,
+      "outcome_count_distribution": {
+        "40": 1
+      },
+      "label_classes": {
+        "team_like": 40
+      },
+      "label_samples": {
+        "team_like": [
+          "Sheldon Creed",
+          "Garrett Smithley",
+          "Carson Kvapil",
+          "Jesse Love"
+        ]
+      },
+      "title_samples": [
+        "NASCAR O'Reilly Auto Parts Series Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNASCARTRUCKSERIES",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 36,
+      "outcome_count_distribution": {
+        "36": 1
+      },
+      "label_classes": {
+        "team_like": 36
+      },
+      "label_samples": {
+        "team_like": [
+          "Corey Heim",
+          "Clayton Green",
+          "Adam Andretti",
+          "Kyle Busch"
+        ]
+      },
+      "title_samples": [
+        "NASCAR Truck Series Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXINDYCARSERIES",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 25,
+      "outcome_count_distribution": {
+        "25": 1
+      },
+      "label_classes": {
+        "team_like": 24,
+        "other": 1
+      },
+      "label_samples": {
+        "team_like": [
+          "Alex Palou",
+          "Kyle Kirkwood",
+          "Scott McLaughlin",
+          "Josef Newgarden"
+        ],
+        "other": [
+          "Pato O’Ward"
+        ]
+      },
+      "title_samples": [
+        "NTT IndyCar Series Champion"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNASCARTOP5",
+      "suffix": "",
+      "market_type": "Top 5 Finishers",
+      "record_count": 1,
+      "most_common_outcome_count": 37,
+      "outcome_count_distribution": {
+        "37": 1
+      },
+      "label_classes": {
+        "team_like": 36,
+        "other": 1
+      },
+      "label_samples": {
+        "team_like": [
+          "Ricky Stenhouse",
+          "Ty Dillon",
+          "Michael McDowell",
+          "Ryan Preece"
+        ],
+        "other": [
+          "Daniel Suárez"
+        ]
+      },
+      "title_samples": [
+        "NASCAR Go Bowling at The Glen: Top 5 Finishers"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXNASCARTOP20",
+      "suffix": "",
+      "market_type": "Top 20 Finishers",
+      "record_count": 1,
+      "most_common_outcome_count": 37,
+      "outcome_count_distribution": {
+        "37": 1
+      },
+      "label_classes": {
+        "team_like": 36,
+        "other": 1
+      },
+      "label_samples": {
+        "team_like": [
+          "Ricky Stenhouse",
+          "Ty Dillon",
+          "Michael McDowell",
+          "Ryan Preece"
+        ],
+        "other": [
+          "Daniel Suárez"
+        ]
+      },
+      "title_samples": [
+        "NASCAR Go Bowling at The Glen: Top 20 Finishers"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    }
+  ]
+}
