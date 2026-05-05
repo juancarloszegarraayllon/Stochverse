@@ -514,12 +514,15 @@ _FL_ABBR_ALIASES: dict[str, dict[str, str]] = {
 }
 
 
-def _normalize_fl_abbr(sport: str, abbr: str) -> set[str]:
+def normalize_fl_abbr(sport: str, abbr: str) -> set[str]:
     """Return all known forms of `abbr` for `sport`, including the original.
 
     Used by compute_fl_identity to expand fl_orientations beyond the
     raw FL shortname so Kalshi's abbr_block matches under either
     convention. Returns at minimum `{abbr}` if no aliases are known.
+
+    Public — Phase C's kalshi_registry_seed imports this to expand
+    team aliases at seed time.
     """
     forms = {abbr}
     aliases = _FL_ABBR_ALIASES.get(sport, {})
@@ -537,7 +540,7 @@ def compute_fl_identity(fl_event: dict, sport: str) -> Optional[Identity]:
     The identity stores BOTH abbr orientations in `fl_orientations`
     because Kalshi's abbr_block can be home+away OR away+home depending
     on the title shape (vs vs at). Each side is also expanded through
-    `_normalize_fl_abbr` so per-sport alias maps catch FL/Kalshi
+    `normalize_fl_abbr` so per-sport alias maps catch FL/Kalshi
     shortname divergence (NBA: FL "OKL" → Kalshi "OKC", etc.).
     `match()` checks membership.
     """
@@ -554,8 +557,8 @@ def compute_fl_identity(fl_event: dict, sport: str) -> Optional[Identity]:
         return None
 
     # Cross-product of all known forms × both orientations.
-    home_forms = _normalize_fl_abbr(sport, home)
-    away_forms = _normalize_fl_abbr(sport, away)
+    home_forms = normalize_fl_abbr(sport, home)
+    away_forms = normalize_fl_abbr(sport, away)
     orientations = frozenset(
         h + a
         for h in home_forms

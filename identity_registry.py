@@ -403,6 +403,24 @@ class IdentityRegistry:
     def resolve_fixture(self, fixture_id: str) -> Optional[Fixture]:
         return self._fixtures.get(fixture_id)
 
+    def lookup_fixtures_by_date(self, sport: str,
+                                 when: date) -> list[Fixture]:
+        """Return every Fixture registered for (sport, when), order
+        not guaranteed. Used by Phase C+ source mappers to scope
+        candidate matching to one date bucket per Kalshi/Polymarket/
+        OddsAPI record.
+
+        O(N_fixtures) today — iterates the fixture dict and filters
+        by sport+date prefix on the canonical ID. Cheap at our scale
+        (low thousands of fixtures across ~14 sports). If the dataset
+        grows or perf becomes a concern, swap in a secondary
+        `_fixtures_by_date: dict[(sport, date), set[fixture_id]]`
+        index updated by register_fixture — public API doesn't change.
+        """
+        prefix = f"fixture:{slugify(sport)}:{when.isoformat()}:"
+        return [f for fid, f in self._fixtures.items()
+                if fid.startswith(prefix)]
+
     # ── MarketType ───────────────────────────────────────────────
 
     def register_market_type(self, sport: str, canonical_name: str,
