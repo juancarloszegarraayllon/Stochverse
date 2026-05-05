@@ -1,0 +1,134 @@
+{
+  "sample_size": 12,
+  "sport_filter": "Rugby",
+  "base_count": 5,
+  "bases": [
+    {
+      "base": "KXRUGBYNRL",
+      "total": 8,
+      "patterns": {
+        "G1_date_teams": 8
+      },
+      "examples": {
+        "G1_date_teams": [
+          {
+            "ticker": "KXRUGBYNRLMATCH-26MAY10CBRPEN",
+            "suffix": "26MAY10CBRPEN",
+            "groups": [
+              "26MAY10",
+              "CBRPEN"
+            ]
+          },
+          {
+            "ticker": "KXRUGBYNRLMATCH-26MAY10MBSWTG",
+            "suffix": "26MAY10MBSWTG",
+            "groups": [
+              "26MAY10",
+              "MBSWTG"
+            ]
+          },
+          {
+            "ticker": "KXRUGBYNRLMATCH-26MAY09MANBRI",
+            "suffix": "26MAY09MANBRI",
+            "groups": [
+              "26MAY09",
+              "MANBRI"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+        "6": 8
+      }
+    },
+    {
+      "base": "KXNRLCHAMP",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXNRLCHAMP-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXSLRCHAMP",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXSLRCHAMP-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXFRA14CHAMP",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXFRA14CHAMP-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXPREMCHAMP",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXPREMCHAMP-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    }
+  ]
+}
