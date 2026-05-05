@@ -1375,10 +1375,14 @@ function renderEventRow(ev, market, isMarketRow) {
   // Aggregate / playoff-series pill — its own row between the
   // tab strip and the event-row grid. Visible only when populated.
   // Sits left-aligned above the team names so it reads as
-  // contextual metadata for the row beneath.
+  // contextual metadata for the row beneath. Game-number chip
+  // (parsed from kalshi.title) renders alongside the series
+  // chip when both apply.
+  const _gameChipHtml = renderGameNumberChip(ev);
   const _aggRowHtml = renderAggOrSeries(ev);
-  if (_aggRowHtml) {
-    html += '<div class="sp-c2-event-aggrow">' + _aggRowHtml + '</div>';
+  const _aggCombined = [_gameChipHtml, _aggRowHtml].filter(s => s).join(' ');
+  if (_aggCombined) {
+    html += '<div class="sp-c2-event-aggrow">' + _aggCombined + '</div>';
   }
   // Compute outcomes BEFORE the header row reads `outcomes.length`
   // — `const` declarations have a temporal dead zone, so reading
@@ -1595,6 +1599,19 @@ function collectOutcomesForRender(ev, marketOverride) {
     return activeMarket.outcomes;
   }
   return [];
+}
+
+function renderGameNumberChip(ev) {
+  // Game number chip — parses "Game N:" out of the kalshi headline
+  // title and renders it as a small pill. Kalshi puts the game
+  // number directly in titles for series fixtures (e.g.
+  // "Game 1: Cleveland at Detroit"). Useful contextual metadata
+  // for playoffs alongside the series-state chip.
+  if (!ev.kalshi || !ev.kalshi.title) return '';
+  const m = /^Game\s+(\d+)\s*:/i.exec(ev.kalshi.title);
+  if (!m) return '';
+  return '<span class="sp-c2-agg" title="Game number in series">GAME ' +
+         escH(m[1]) + '</span>';
 }
 
 function renderAggOrSeries(ev) {
