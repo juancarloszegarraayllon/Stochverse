@@ -19,6 +19,32 @@
 7. [Merge contract: Kalshi ↔ FlashLive](#7-merge-contract-kalshi--flashlive)
 8. [What this doc replaces](#8-what-this-doc-replaces)
 
+## Sports covered (14 of 14 with sport-tagged records)
+
+| Sport | Records | Sub-market families | Per-fixture join | Notes |
+|---|---|---|---|---|
+| Soccer | 690 | GAME / 1H / TOTAL / SPREAD / BTTS / CORNERS / TCORNERS / ADVANCE | ✅ G1 | 3-outcome with tie |
+| Baseball | 417 | GAME / TOTAL / SPREAD / RFI / F5 / TEAM / player props | ✅ G7 (time) | Doubleheaders force time |
+| Tennis | 379 | MATCH / SETWINNER / GRANDSLAM | ✅ G1 | Surname-only abbrs (3+3) |
+| Basketball | 309 | GAME / 1H / 2H / TOTAL / SPREAD / OVERTIME / player props / SERIES | ✅ G1 (NBA) / G7 (intl) | Series-level for playoffs |
+| Esports | 292 | GAME / MAP / TOTALMAPS | ✅ G7 (time) | Multi-map structure |
+| Football | 131 | GAME / TOTAL / SPREAD / per-team WINS | ✅ G1 | NFL off-season; UFL active |
+| Hockey | 97 | GAME / TOTAL / SPREAD / OVERTIME / player props / SERIES | ✅ G1 (NHL) / G7 (intl) | Same as basketball |
+| MMA | 91 | FIGHT / DISTANCE / ROUNDS / VICROUND / MOV / MOF | ✅ G1 | 6 sub-markets share identity |
+| Golf | 59 | TOUR / R1LEAD / TOP5/10/20 / MAKECUT / HOLEINONE | tournament-handle (no FL) | 12 sub-markets per tournament |
+| Boxing | 25 | BOXING + WBC*WEIGHTTITLE | ✅ G1 | 8–12 char abbr blocks |
+| Cricket | 23 | IPLGAME / IPLTEAM / IPLSIX / IPLFOUR | ✅ G1 | T20 (no tie); boundary markets |
+| Motorsport | 24 | NASCARRACE + TOPN + FASTLAP / F1 / MotoGP | tournament-handle (no FL) | Same scoping as Golf |
+| Rugby | 12 | NRLMATCH + championship outrights | ✅ G1 | 3-outcome with tie |
+| Chess | 10 | WORLDCHAMPION / OLYMPIAD / ratings | outright-only (no FL) | All futures |
+| Aussie Rules | 9 | AFLGAME | ✅ G7 (time) | First non-baseball/intl sport using G7 |
+| Lacrosse | 5 | NCAAMLAXGAME + outrights | ✅ G1 | NCAA only |
+| Table Tennis | 4 | ITTFMEN/WOMEN MATCH | ✅ G7 (time) | Country-team format |
+| Darts | 5 | DARTSMATCH + championship | ✅ G1 (likely) | Small sample |
+| Other Sports | 5 | misc speculation | n/a | SailGP, WSOP, novelty futures |
+
+**Total tagged records covered**: ~2,786 across 14 sports + 1 misc bucket.
+
 ---
 
 ## 1. Cache record schema
@@ -256,6 +282,118 @@ Golf is **tournament-based** — fundamentally different from team sports. **No 
 
 **Cross-sport:** `KXGOLFTENNISMAJORS` (3 outcomes: golf player / tennis player / Tie).
 
+### Cricket (IPL + T20)
+
+Cricket follows the team-h2h pattern with sport-specific stats sub-markets (boundaries-as-markets — sixes and fours):
+
+| Series base | market_type | Outcomes | Labels |
+|---|---|---|---|
+| `KXIPLGAME` / `KXT20MATCH` | — | 2 | team names, **no tie** (T20 super-overs resolve ties) |
+| `KXIPLTEAM TOTAL` | `Team Total Runs` | 6 | `<team> over N runs scored` per team × thresholds |
+| `KXIPLSIX` | `Total Match Sixes` | 3 | `Over N.5 sixes` (boundary-count thresholds) |
+| `KXIPLFOUR` | `Total Match Fours` | 3 | `Over N.5 fours` (boundary-count thresholds) |
+| `KXIPL` / `KXIPLPLAYOFF` | — | 10 | team names (Champion / Playoff Qualifiers) |
+
+**Tickers**: G1 (date + 4–7 char abbrs). Examples: `KXIPLGAME-26MAY10MIRCB` (Mumbai Indians + RCB), `KXIPLGAME-26MAY11DCPBKS` (Delhi Capitals + Punjab Kings).
+
+### Boxing
+
+Combat sport, similar shape to MMA but simpler — no Method-of-Victory family:
+
+| Series base | market_type | Outcomes | Labels |
+|---|---|---|---|
+| `KXBOXING` | — | 2 | boxer names (no draw in headline) |
+| `KXWBC*WEIGHTTITLE` (8 weight classes) | — | 17–20 | challenger field per division |
+| `KXFLOYDTYSONFIGHT` | — | 1 | binary YES |
+
+**Boxing tickers** use **longer abbr blocks (8–12 chars)** because boxer surnames are concatenated: `KXBOXING-26SEP19FMAYMPAC` → Floyd MAYweather + Manny PACquiao (4+4 chars). All G1 (no time).
+
+### Motorsport (NASCAR + F1 + MotoGP + IndyCar)
+
+Tournament-handle scoping like Golf — each race is its own scoping unit:
+
+| Series base | market_type | Outcomes | Labels |
+|---|---|---|---|
+| `KXNASCARRACE` | — | ~37 | full field (race winner) |
+| `KXNASCARTOP3` / `TOP5` / `TOP10` / `TOP20` | `Top N Finishers` | ~37 | full field, multi-pick |
+| `KXNASCARFASTLAP` | `Fastest Lap` | ~37 | full field |
+| `KXF1` / `KXMOTOGP` / `KXNASCARCUPSERIES` / `KXINDYCARSERIES` | — | 22–40 | season champion (drivers) |
+| `KXF1CONSTRUCTORS` / `KXMOTOGPTEAMS` | — | 11 | season champion (constructors/teams) |
+| `KXF1RETIRE` | `Retirement` | 4 | thresholds (`Before the 2027 season`, etc.) |
+
+**Tickers**: G5 handle for per-race markets (`KXNASCARRACE-GOBAT26` → Go Bowling at The Glen 2026). G4 year for season-long champions (`KXF1-26`). All NASCAR sub-markets share the race handle — same insight as Golf and MMA.
+
+### Rugby (NRL + Top 14 + Premiership + Super League)
+
+| Series base | market_type | Outcomes | Notes |
+|---|---|---|---|
+| `KXRUGBYNRLMATCH` | — | **3** | home / away / **Tie** — rugby can draw |
+| `KXNRLCHAMP` / `KXSLRCHAMP` / `KXFRA14CHAMP` / `KXPREMCHAMP` | — | 10–17 | season champions |
+
+**Rugby has ties** — same as soccer. The 3-outcome shape applies. All matches G1 (date+teams).
+
+### Chess
+
+Outright-only sport (no per-fixture markets). All championship + ratings:
+
+| Series base | market_type | Outcomes | Labels |
+|---|---|---|---|
+| `KXCHESSWORLDCHAMPION` | — | 9 | player names |
+| `KXCHESSOLYMPIAD` | — | 40 | **country names** (team format) |
+| `KXCHESSOLYMPIADUSA` | `Team USA` | 15 | individual players (US team) |
+| `KXCHESSGRANDTOUR` / `KXCHESSPOLAND` / `KXCHESSNORWAY` | — | 6–18 | tournament winners |
+| `KXCHESSFIDERATING` | `#1 / #2 / #3 Rated in Month YYYY` | 14 | top players by rating |
+
+**Tickers**: G4 year mostly. `KXCHESSFIDERATING-26JUNR3` uses date+rank-number (custom). `KXCHESSNORWAY-26WOMEN` uses gender variant.
+
+### Aussie Rules (AFL)
+
+| Series base | market_type | Outcomes | Notes |
+|---|---|---|---|
+| `KXAFLGAME` | — | 2 | team names (no tie in this sample, but AFL can draw) |
+
+**Tickers**: NEW finding — AFL uses **G7 (date + time + abbrs)** like MLB and international leagues. Example: `KXAFLGAME-26MAY100115ADERIC` (date 26MAY10, time 01:15 UTC, ADE Crows + RIChmond). Plausible because AFL games can run concurrently across cities, time disambiguates.
+
+### Lacrosse (NCAA Men's)
+
+| Series base | market_type | Outcomes | Labels |
+|---|---|---|---|
+| `KXNCAAMLAXGAME` | — | 2 | team names (no tie) |
+| `KXLAXTEWAARATON` | — | 26 | player names (top-scorer award) |
+| `KXNCAALAXFINAL` | — | 52 | team names (D1 champion field) |
+| `KXNCAAMLAXF4` | — | 28 | team names (Final Four qualifiers) |
+
+**Tickers**: G1 (date+teams) for matches, G4 year for outrights. Example: `KXNCAAMLAXGAME-26MAY06ROBJAC` (Robert Morris + Jacksonville).
+
+### Table Tennis (ITTF — country team format)
+
+| Series base | market_type | Outcomes | Labels |
+|---|---|---|---|
+| `KXITTFMENMATCH` | — | 2 | country names (e.g. France vs Greece) |
+| `KXITTFMEN` / `KXITTFWOMEN` | — | 8 | country names (championship winner) |
+
+**Tickers**: G7 (date+time+teams). Example: `KXITTFMENMATCH-26APR290730FRAGRE` (date 26APR29, time 07:30 UTC, FRA+GRE).
+
+### Darts
+
+| Series base | market_type | Outcomes | Labels |
+|---|---|---|---|
+| `KXDARTSMATCH` | — | 2 | player names |
+| `KXPREMDARTS` | — | 8 | player names (Premier League champion) |
+
+Small sport in our cache. Tickers: G4 year for outrights; per-match grammar not yet in the sample.
+
+### "Other Sports" — cross-sport miscellany
+
+Mixed bucket of one-off speculation markets that don't fit a sport family:
+- `KXSAILGP` — 13 SailGP teams (championship outright)
+- `KXWSOPENTRANTS` — binary entries threshold
+- `KXEUROVISIONISRAELBAN` — binary geopolitical event
+- `KXCOLLEGEGAMEDAYGUEST` — binary celebrity attendance
+- `KXPIZZASCORE9` — binary (Dave Portnoy pizza review)
+
+All outrights, all binary or small N. No per-fixture pattern. Treat as edge cases for /sports v2 — likely render in their own "Specials" section if surfaced at all.
+
 ### Universal: outrights / futures (no suffix)
 
 Outcome count is variable (1 to 70+), labels are sport-specific:
@@ -432,6 +570,27 @@ Esports team abbr blocks vary 5–8 chars with **no consistent home/away split**
 - `1WINMOUZ` (1win + MOUZ) — leading digit, 4+4
 
 **Lesson for the merge contract**: for fixture identity, **treat the abbr block as opaque**. Don't attempt home/away split. Full date+time+block is the join key. Home/away orientation comes from outcome labels (which carry full team names) at render time, not from parsing the ticker. This rule generalizes across all sports — `OKCLAL` and `LALOKC` would normally need sorting to match, but if FL's tickers and Kalshi's tickers use the same author, equality on the raw block works directly.
+
+### Boxing fighter abbreviations — longer blocks
+
+Boxing concatenates fighters' surname-first-letter + 3-char surname (or full short name) → 8–12 char abbr blocks:
+- `FMAYMPAC` (Floyd MAYweather + Manny PACquiao)
+- `YSOYFERN` (Yo SOY Plex + FERNanfloo)
+- `RIVERORO` (RIVErs + RORO)
+
+The block is **not** symmetric like other sports' 6-char (3+3) shape. Parser must accept variable block lengths up to ~12 chars.
+
+### AFL — first sport to use G7 with no team count
+
+`KXAFLGAME-26MAY100115ADERIC`: date 26MAY10, time 01:15, abbrs ADE+RIC. Same G7 grammar as MLB / intl basketball / esports — confirms G7 is broadly used wherever same-day same-team-pair fixtures might collide.
+
+### NASCAR + Golf share G_TOURNAMENT_HANDLE
+
+Both use `{base}-{TOURNAMENT_CODE}{YY}` for per-race / per-tournament markets:
+- `KXNASCARRACE-GOBAT26` (Go Bowling at The Glen 2026)
+- `KXPGATOUR-PGC26` (PGA Championship 2026)
+
+All sub-markets attached to the same race/tournament share the handle, so identification is by `(sport, base, handle)` — same insight as MMA's per-fight identity.
 
 ### Sport-specific outright ticker variations
 
