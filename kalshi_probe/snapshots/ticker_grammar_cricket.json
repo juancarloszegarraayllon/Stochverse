@@ -1,0 +1,230 @@
+{
+  "sample_size": 23,
+  "sport_filter": "Cricket",
+  "base_count": 6,
+  "bases": [
+    {
+      "base": "KXIPL",
+      "total": 9,
+      "patterns": {
+        "G4_short_int": 1,
+        "G1_date_teams": 8
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXIPL-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ],
+        "G1_date_teams": [
+          {
+            "ticker": "KXIPLGAME-26MAY11DCPBKS",
+            "suffix": "26MAY11DCPBKS",
+            "groups": [
+              "26MAY11",
+              "DCPBKS"
+            ]
+          },
+          {
+            "ticker": "KXIPLGAME-26MAY10MIRCB",
+            "suffix": "26MAY10MIRCB",
+            "groups": [
+              "26MAY10",
+              "MIRCB"
+            ]
+          },
+          {
+            "ticker": "KXIPLGAME-26MAY10LSGCSK",
+            "suffix": "26MAY10LSGCSK",
+            "groups": [
+              "26MAY10",
+              "LSGCSK"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+        "6": 3,
+        "5": 3,
+        "4": 1,
+        "7": 1
+      }
+    },
+    {
+      "base": "KXIPLTEAM",
+      "total": 4,
+      "patterns": {
+        "G1_date_teams": 4
+      },
+      "examples": {
+        "G1_date_teams": [
+          {
+            "ticker": "KXIPLTEAMTOTAL-26MAY09GTRR",
+            "suffix": "26MAY09GTRR",
+            "groups": [
+              "26MAY09",
+              "GTRR"
+            ]
+          },
+          {
+            "ticker": "KXIPLTEAMTOTAL-26MAY07RCBLSG",
+            "suffix": "26MAY07RCBLSG",
+            "groups": [
+              "26MAY07",
+              "RCBLSG"
+            ]
+          },
+          {
+            "ticker": "KXIPLTEAMTOTAL-26MAY06PBKSSRH",
+            "suffix": "26MAY06PBKSSRH",
+            "groups": [
+              "26MAY06",
+              "PBKSSRH"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+        "4": 1,
+        "6": 1,
+        "7": 1,
+        "5": 1
+      }
+    },
+    {
+      "base": "KXIPLSIX",
+      "total": 4,
+      "patterns": {
+        "G1_date_teams": 4
+      },
+      "examples": {
+        "G1_date_teams": [
+          {
+            "ticker": "KXIPLSIX-26MAY09GTRR",
+            "suffix": "26MAY09GTRR",
+            "groups": [
+              "26MAY09",
+              "GTRR"
+            ]
+          },
+          {
+            "ticker": "KXIPLSIX-26MAY07RCBLSG",
+            "suffix": "26MAY07RCBLSG",
+            "groups": [
+              "26MAY07",
+              "RCBLSG"
+            ]
+          },
+          {
+            "ticker": "KXIPLSIX-26MAY06PBKSSRH",
+            "suffix": "26MAY06PBKSSRH",
+            "groups": [
+              "26MAY06",
+              "PBKSSRH"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+        "4": 1,
+        "6": 1,
+        "7": 1,
+        "5": 1
+      }
+    },
+    {
+      "base": "KXIPLFOUR",
+      "total": 4,
+      "patterns": {
+        "G1_date_teams": 4
+      },
+      "examples": {
+        "G1_date_teams": [
+          {
+            "ticker": "KXIPLFOUR-26MAY09GTRR",
+            "suffix": "26MAY09GTRR",
+            "groups": [
+              "26MAY09",
+              "GTRR"
+            ]
+          },
+          {
+            "ticker": "KXIPLFOUR-26MAY07RCBLSG",
+            "suffix": "26MAY07RCBLSG",
+            "groups": [
+              "26MAY07",
+              "RCBLSG"
+            ]
+          },
+          {
+            "ticker": "KXIPLFOUR-26MAY06PBKSSRH",
+            "suffix": "26MAY06PBKSSRH",
+            "groups": [
+              "26MAY06",
+              "PBKSSRH"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+        "4": 1,
+        "6": 1,
+        "7": 1,
+        "5": 1
+      }
+    },
+    {
+      "base": "KXIPLPLAYOFF",
+      "total": 1,
+      "patterns": {
+        "G4_short_int": 1
+      },
+      "examples": {
+        "G4_short_int": [
+          {
+            "ticker": "KXIPLPLAYOFF-26",
+            "suffix": "26",
+            "groups": [
+              "26"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+
+      }
+    },
+    {
+      "base": "KXT20",
+      "total": 1,
+      "patterns": {
+        "G1_date_teams": 1
+      },
+      "examples": {
+        "G1_date_teams": [
+          {
+            "ticker": "KXT20MATCH-26MAY04IDNMAL",
+            "suffix": "26MAY04IDNMAL",
+            "groups": [
+              "26MAY04",
+              "IDNMAL"
+            ]
+          }
+        ]
+      },
+      "unparsed": [],
+      "team_abbr_lengths": {
+        "6": 1
+      }
+    }
+  ]
+}
