@@ -1,6 +1,98 @@
 {
-  "sample_size": 0,
-  "sport_filter": "Table",
-  "bucket_count": 0,
-  "buckets": []
+  "sample_size": 4,
+  "sport_filter": "Table Tennis",
+  "bucket_count": 3,
+  "buckets": [
+    {
+      "series_base": "KXITTFMEN",
+      "suffix": "MATCH",
+      "market_type": "",
+      "record_count": 2,
+      "most_common_outcome_count": 2,
+      "outcome_count_distribution": {
+        "2": 2
+      },
+      "label_classes": {
+        "team_like": 4
+      },
+      "label_samples": {
+        "team_like": [
+          "France",
+          "Greece",
+          "Hungary",
+          "Uzbekistan"
+        ]
+      },
+      "title_samples": [
+        "France vs Greece",
+        "Hungary vs Uzbekistan"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXITTFMEN",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 8,
+      "outcome_count_distribution": {
+        "8": 1
+      },
+      "label_classes": {
+        "team_like": 8
+      },
+      "label_samples": {
+        "team_like": [
+          "China",
+          "Japan",
+          "France",
+          "Sweden"
+        ]
+      },
+      "title_samples": [
+        "ITTF World Team Table Tennis Men's Championship Finals"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    },
+    {
+      "series_base": "KXITTFWOMEN",
+      "suffix": "",
+      "market_type": "",
+      "record_count": 1,
+      "most_common_outcome_count": 8,
+      "outcome_count_distribution": {
+        "8": 1
+      },
+      "label_classes": {
+        "team_like": 8
+      },
+      "label_samples": {
+        "team_like": [
+          "China",
+          "Japan",
+          "Republic of Korea",
+          "Germany"
+        ]
+      },
+      "title_samples": [
+        "ITTF World Team Table Tennis Women's Championship Finals"
+      ],
+      "field_coverage_pct": {
+        "prob": 100,
+        "yes": 100,
+        "no": 100,
+        "ticker": 100
+      }
+    }
+  ]
 }
