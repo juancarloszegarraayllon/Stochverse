@@ -260,3 +260,138 @@ def test_invalid_timezone_returns_error():
         sport_id=1, timezone=99, indent_days=0,
     ))
     assert "error" in result
+
+
+# ── Safety-net fallback routing (phase 5 punch list 2026-05-05) ──
+
+def test_v2_safety_net_routes_unpaired_into_existing_fl_tournament():
+    """When an unpaired Kalshi fixture has no deterministic hint
+    (no in-request paired record, no _SERIES_TOURNAMENT_HINTS entry)
+    but its series_base maps to a known league pattern, route the
+    synthetic event INTO the matching FL tournament rather than
+    spawning a 'Other: <ticker>' sibling tournament. Mirrors the
+    NBA day-1 case: every fixture fails to pair via abbr, so the
+    paired-record hint never establishes — but we still want the
+    Kalshi data alongside the FL rows.
+    """
+    import main
+
+    # Pre-populate _SERIES_TOURNAMENT_HINTS empty for the test
+    main._SERIES_TOURNAMENT_HINTS.clear()
+
+    # FL tournament shaped like NBA Play Offs — has FL events but
+    # NONE paired (out_tournaments[0].events[*].kalshi is empty)
+    fl_tournament = {
+        "TOURNAMENT_STAGE_ID": "tour_nba_playoffs",
+        "NAME":                "NBA - Play Offs",
+        "NAME_PART_1":         "USA",
+        "NAME_PART_2":         "NBA - Play Offs",
+        "COUNTRY_NAME":        "USA",
+        "events": [
+            {
+                "EVENT_ID":   "fl_okclal",
+                "HOME_NAME":  "Oklahoma City Thunder",
+                "AWAY_NAME":  "Los Angeles Lakers",
+                "kalshi":     None,  # un-paired due to abbr gap
+            },
+        ],
+    }
+    out_tournaments = [fl_tournament]
+
+    # Bucket simulating the unpaired KXNBAGAME-26MAY05LALOKC record
+    from datetime import date
+    fixture_key = ("Basketball", date(2026, 5, 5), "2030", "LALOKC")
+    records = [{
+        "event_ticker":  "KXNBAGAME-26MAY05LALOKC",
+        "series_ticker": "KXNBAGAME",
+        "_sport":        "Basketball",
+        "title":         "Lakers at Thunder",
+        "outcomes": [
+            {"label": "Oklahoma City Thunder",
+             "_yb": 87, "_ya": 88, "_na": 12, "ticker": "T-OKC"},
+            {"label": "Los Angeles Lakers",
+             "_yb": 14, "_ya": 16, "_na": 84, "ticker": "T-LAL"},
+        ],
+    }]
+    buckets = {fixture_key: records}
+
+    synth_tournaments, routed = main._v2_route_unpaired(
+        buckets, "Basketball", out_tournaments,
+        target_date=date(2026, 5, 5),
+    )
+
+    # Synth was attached to the FL tournament — no sibling synthetic
+    # tournament was spawned.
+    assert synth_tournaments == [], (
+        f"Expected zero synthetic tournaments (safety-net should "
+        f"route inside FL); got {synth_tournaments!r}"
+    )
+    assert routed == 1
+    # FL tournament now contains the synth event alongside the
+    # original FL row
+    assert len(fl_tournament["events"]) == 2
+    synth_ev = fl_tournament["events"][1]
+    assert synth_ev["_kalshi_h2h_only"] is True
+    assert synth_ev["EVENT_ID"] == "kalshi-h2h-KXNBAGAME-26MAY05LALOKC"
+
+
+def test_v2_safety_net_does_not_fire_for_unknown_series():
+    """Series with no _V2_SAFETY_NET_LEAGUE_PATTERNS entry must
+    fall through to the synthetic-tournament path so untracked
+    competitions still surface (just under their own bucket).
+    """
+    import main
+    main._SERIES_TOURNAMENT_HINTS.clear()
+
+    fl_tournament = {
+        "TOURNAMENT_STAGE_ID": "tour_random",
+        "NAME":                "Some Random League",
+        "events": [],
+    }
+    out_tournaments = [fl_tournament]
+
+    from datetime import date
+    fixture_key = ("Basketball", date(2026, 5, 5), "2030", "ABCDEF")
+    records = [{
+        "event_ticker":  "KXMADEUPGAME-26MAY05ABCDEF",
+        "series_ticker": "KXMADEUPGAME",
+        "_sport":        "Basketball",
+        "title":         "Foo at Bar",
+        "outcomes":      [],
+    }]
+    buckets = {fixture_key: records}
+
+    synth_tournaments, routed = main._v2_route_unpaired(
+        buckets, "Basketball", out_tournaments,
+        target_date=date(2026, 5, 5),
+    )
+
+    # FL tournament untouched
+    assert fl_tournament["events"] == []
+    # Synthetic tournament created for the unrouted bucket
+    assert len(synth_tournaments) == 1
+    assert routed == 1
+
+
+def test_v2_safety_net_target_helper():
+    """Direct unit test for the _v2_safety_net_target helper:
+    case-insensitive substring match, first-match-wins.
+    """
+    import main
+    out = [
+        {"NAME": "USA: NBA - Play Offs"},
+        {"NAME": "Spain: ACB"},
+        {"NAME": "Other: UEFA Champions League - Group Stage"},
+    ]
+    # NBA series_base → NBA tournament. Keys are post-strip_known_suffix.
+    t = main._v2_safety_net_target("KXNBA", out)
+    assert t is not None
+    assert "NBA" in t["NAME"]
+    # UCL series_base → Champions League tournament
+    t = main._v2_safety_net_target("KXUCL", out)
+    assert t is not None
+    assert "Champions League" in t["NAME"]
+    # Unknown series → no match
+    assert main._v2_safety_net_target("KXMADEUP", out) is None
+    # Empty series → no match
+    assert main._v2_safety_net_target("", out) is None

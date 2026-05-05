@@ -9188,6 +9188,61 @@ def _v2_synth_unpaired_event(records: list, sport: str) -> dict:
     }
 
 
+# Phase 5 punch list 2026-05-05: when an unpaired Kalshi fixture has
+# no in-request paired-record hint and no persistent _SERIES_TOURNAMENT_HINTS
+# entry, fall back to fuzzy-matching the FL tournament name against
+# known league substrings for the series_base. Catches the day-1 case
+# where every fixture in a competition fails to pair via abbr (NBA
+# alias map first deploy, etc.) — the synthetic event lands inside
+# the FL tournament alongside the unpaired FL rows instead of getting
+# its own "Other: Nbagame" sibling tournament.
+#
+# Lower priority than deterministic in-request matching. Add entries
+# as gaps surface — this is a SAFETY NET, not the primary join.
+# Keys are series_BASE (after strip_known_suffix), not full series.
+# E.g. KXNBAGAME → base KXNBA; KXUCLTOTAL → base KXUCL.
+_V2_SAFETY_NET_LEAGUE_PATTERNS: dict = {
+    # Basketball — first sport surfaced (LAL@OKC pairing gap)
+    "KXNBA":            ["NBA"],
+    "KXNBA1H":          ["NBA"],
+    "KXNBA1HWINNER":    ["NBA"],
+    "KXNBA2HWINNER":    ["NBA"],
+    "KXNBASERIESSCORE": ["NBA"],
+    "KXNBATEAM":        ["NBA"],
+    "KXWNBA":           ["WNBA"],
+    "KXEUROLEAGUE":     ["Euroleague"],
+    # Soccer — paired-record hint usually catches these but provides
+    # day-1 resilience after a fresh deploy
+    "KXUCL":            ["Champions League"],
+    "KXEPL":            ["Premier League", "EPL"],
+    "KXMLS":            ["MLS", "Major League Soccer"],
+}
+
+
+def _v2_safety_net_target(series_base: str, out_tournaments: list):
+    """Return an FL tournament whose NAME matches the series_base's
+    fallback league pattern, or None if no match.
+
+    The match is a case-insensitive substring check against the
+    tournament NAME field. First match wins (stable: respects
+    out_tournaments insertion order). Used by _v2_route_unpaired
+    as a tertiary routing fallback after deterministic hints fail.
+    """
+    if not series_base:
+        return None
+    patterns = _V2_SAFETY_NET_LEAGUE_PATTERNS.get(series_base.upper(), [])
+    if not patterns:
+        return None
+    for t_out in out_tournaments:
+        name = (t_out.get("NAME") or "").upper()
+        if not name:
+            continue
+        for pat in patterns:
+            if pat.upper() in name:
+                return t_out
+    return None
+
+
 def _v2_route_unpaired(buckets: dict, sport: str,
                         out_tournaments: list,
                         target_date) -> tuple:
@@ -9243,6 +9298,13 @@ def _v2_route_unpaired(buckets: dict, sport: str,
                     if t_out.get("NAME") == hint.get("name"):
                         target_t = t_out
                         break
+        # Safety-net fallback (Phase 5 punch list 2026-05-05): if no
+        # deterministic hint found, fuzzy-match against known league
+        # name substrings. Lands the synthetic event next to its
+        # likely FL siblings even when day-1 abbr gaps prevent any
+        # pairing from establishing a hint.
+        if target_t is None:
+            target_t = _v2_safety_net_target(series_base, out_tournaments)
         synth_event = _v2_synth_unpaired_event(records, sport)
         if target_t is not None:
             target_t.setdefault("events", []).append(synth_event)
