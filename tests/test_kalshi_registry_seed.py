@@ -122,7 +122,7 @@ class TestStrictTier:
         }
         fx = seed_kalshi_record(registry_seeded_ucl, rec, "Soccer")
         assert fx is not None
-        assert fx.id == "fixture:soccer:2026-05-05:arsenal-vs-atl-madrid"
+        assert fx.id == "fixture:soccer:2026-05-05:1900:arsenal-vs-atl-madrid"
         # Alias was written
         a = registry_seeded_ucl.resolve_alias(
             "kalshi", "KXUCLGAME-26MAY05ARSATM",
@@ -660,7 +660,7 @@ class TestMarketLayerSeeding:
         assert mt.parameterized is False
         # Market registered for this fixture
         expected_market_id = (
-            "market:soccer:2026-05-05:arsenal-vs-atl-madrid:winner"
+            "market:soccer:2026-05-05:1900:arsenal-vs-atl-madrid:winner"
         )
         market = registry_seeded_ucl.resolve_market(expected_market_id)
         assert market is not None
@@ -704,7 +704,7 @@ class TestMarketLayerSeeding:
         seed_kalshi_record(registry_seeded_ucl, rec, "Soccer")
         # Three outcomes registered with sides home/away/tie
         market_id = (
-            "market:soccer:2026-05-05:arsenal-vs-atl-madrid:winner"
+            "market:soccer:2026-05-05:1900:arsenal-vs-atl-madrid:winner"
         )
         home_o = registry_seeded_ucl.resolve_outcome(
             f"outcome:{market_id}:home",
@@ -1114,3 +1114,212 @@ class TestPerLegMarketLayer:
         assert stats["paired_per_leg"] == 2
         assert stats["paired_strict"]  == 0
         assert stats["unpaired"]       == 0
+
+
+# ── Phase C2e: time-aware tiebreaker ─────────────────────────────
+
+class TestTimeAwareTiebreaker:
+    """Phase C2e — when multiple FL fixtures share (sport, local_date,
+    abbr_block), the one whose start_time_utc is closest to the Kalshi
+    ticker's encoded time wins. Prevents MLB doubleheader false-pairs
+    and same-day multi-fixture mismatches.
+    """
+
+    def _seed_two_mlb_fixtures(self):
+        """MLB doubleheader: same teams (ATH-PHI), same date, two
+        different start times. Game 1 at 17:00 UTC, Game 2 at 23:00
+        UTC. Kalshi ships two G7 tickers, one per game."""
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_mlb",
+                    "NAME": "MLB Regular Season",
+                    "EVENTS": [
+                        {"EVENT_ID":       "fl_g1",
+                         "HOME_NAME":      "Philadelphia Phillies",
+                         "AWAY_NAME":      "Athletics",
+                         "SHORTNAME_HOME": "PHI",
+                         "SHORTNAME_AWAY": "ATH",
+                         "START_TIME":     _ts(2026, 5, 5, 17, 0)},
+                        {"EVENT_ID":       "fl_g2",
+                         "HOME_NAME":      "Philadelphia Phillies",
+                         "AWAY_NAME":      "Athletics",
+                         "SHORTNAME_HOME": "PHI",
+                         "SHORTNAME_AWAY": "ATH",
+                         "START_TIME":     _ts(2026, 5, 5, 23, 0)},
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Baseball")
+        return r
+
+    def test_doubleheader_g1_pairs_to_early_fixture(self):
+        """Kalshi 17:00 UTC ticker → fl_g1 (early game)."""
+        r = self._seed_two_mlb_fixtures()
+        rec = {
+            "event_ticker":  "KXMLBGAME-26MAY051700ATHPHI",
+            "series_ticker": "KXMLBGAME",
+        }
+        fx = seed_kalshi_record(r, rec, "Baseball")
+        assert fx is not None
+        a = r.resolve_alias("kalshi", "KXMLBGAME-26MAY051700ATHPHI")
+        # The 17:00 ticker must pair to the 17:00 fixture, not the
+        # 23:00 one (which would happen with the pre-C2e first-match
+        # behavior if fl_g2 were registered first).
+        resolved_fx = r.resolve_through_alias(
+            "kalshi", "KXMLBGAME-26MAY051700ATHPHI",
+        )
+        assert resolved_fx is not None
+        # The Fixture's start_time_utc must equal the early game.
+        assert resolved_fx.start_time_utc == _ts(2026, 5, 5, 17, 0)
+
+    def test_doubleheader_g2_pairs_to_late_fixture(self):
+        """Kalshi 23:00 UTC ticker → fl_g2 (late game)."""
+        r = self._seed_two_mlb_fixtures()
+        rec = {
+            "event_ticker":  "KXMLBGAME-26MAY052300ATHPHI",
+            "series_ticker": "KXMLBGAME",
+        }
+        fx = seed_kalshi_record(r, rec, "Baseball")
+        assert fx is not None
+        resolved_fx = r.resolve_through_alias(
+            "kalshi", "KXMLBGAME-26MAY052300ATHPHI",
+        )
+        assert resolved_fx is not None
+        assert resolved_fx.start_time_utc == _ts(2026, 5, 5, 23, 0)
+
+    def test_both_doubleheader_games_seed_to_distinct_fixtures(self):
+        """Sanity: seeding both tickers in sequence binds each to its
+        own canonical fixture."""
+        r = self._seed_two_mlb_fixtures()
+        rec_early = {"event_ticker":  "KXMLBGAME-26MAY051700ATHPHI",
+                      "series_ticker": "KXMLBGAME"}
+        rec_late = {"event_ticker":  "KXMLBGAME-26MAY052300ATHPHI",
+                      "series_ticker": "KXMLBGAME"}
+        fx1 = seed_kalshi_record(r, rec_early, "Baseball")
+        fx2 = seed_kalshi_record(r, rec_late, "Baseball")
+        assert fx1 is not None and fx2 is not None
+        assert fx1.id != fx2.id  # distinct canonical fixtures
+        assert r.stats()["aliases"] >= 4  # 2 fl + 2 kalshi minimum
+
+    def test_g1_ticker_no_time_falls_through_to_first_match(self):
+        """When the Kalshi identity has no time component (G1
+        tickers like KXNBAGAME-26MAY05CLEDET), behavior matches
+        pre-C2e: first abbr-match wins. No doubleheader case for NBA
+        in practice, but we verify the fall-through works."""
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_nba",
+                    "NAME": "NBA - Play Offs",
+                    "EVENTS": [
+                        {"EVENT_ID":       "fl_only_one",
+                         "HOME_NAME":      "Detroit Pistons",
+                         "AWAY_NAME":      "Cleveland Cavaliers",
+                         "SHORTNAME_HOME": "DET",
+                         "SHORTNAME_AWAY": "CLE",
+                         "START_TIME":     _ts(2026, 5, 5, 23, 0)},
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Basketball")
+        rec = {
+            "event_ticker":  "KXNBAGAME-26MAY05CLEDET",
+            "series_ticker": "KXNBAGAME",
+        }
+        # G1 ticker (no time component in identity). Should still
+        # pair via the abbr-only path.
+        fx = seed_kalshi_record(r, rec, "Basketball")
+        assert fx is not None
+
+    def test_no_match_when_time_outside_fuzz_window(self):
+        """Kalshi 17:00 UTC ticker with FL fixtures only at 12:00
+        UTC and 19:00 UTC — both more than 30 min away. The time
+        filter rejects both → no pair (rather than gluing to the
+        wrong fixture).
+
+        This is the protective behavior that prevents NBA series
+        Game 2 ticker from snapping to Game 1's fixture if there's
+        no exact match.
+        """
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_mlb",
+                    "NAME": "MLB",
+                    "EVENTS": [
+                        {"EVENT_ID":       "fl_morning",
+                         "HOME_NAME":      "Phillies", "AWAY_NAME": "Athletics",
+                         "SHORTNAME_HOME": "PHI", "SHORTNAME_AWAY": "ATH",
+                         "START_TIME":     _ts(2026, 5, 5, 12, 0)},
+                        {"EVENT_ID":       "fl_evening",
+                         "HOME_NAME":      "Phillies", "AWAY_NAME": "Athletics",
+                         "SHORTNAME_HOME": "PHI", "SHORTNAME_AWAY": "ATH",
+                         "START_TIME":     _ts(2026, 5, 5, 19, 0)},
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Baseball")
+        rec = {
+            "event_ticker":  "KXMLBGAME-26MAY051700ATHPHI",
+            "series_ticker": "KXMLBGAME",
+        }
+        fx = seed_kalshi_record(r, rec, "Baseball")
+        # 17:00 UTC ticker, FL games at 12:00 (5h diff) and 19:00
+        # (2h diff). Both outside ±30min → no pair.
+        assert fx is None
+
+    def test_picks_closest_when_multiple_inside_window(self):
+        """If two FL fixtures are both within ±30min, pick the
+        closer one."""
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_mlb",
+                    "NAME": "MLB",
+                    "EVENTS": [
+                        # 16:55 UTC — 5 min before Kalshi 17:00
+                        {"EVENT_ID":       "fl_close",
+                         "HOME_NAME":      "Phillies", "AWAY_NAME": "Athletics",
+                         "SHORTNAME_HOME": "PHI", "SHORTNAME_AWAY": "ATH",
+                         "START_TIME":     _ts(2026, 5, 5, 16, 55)},
+                        # 17:25 UTC — 25 min after Kalshi 17:00
+                        {"EVENT_ID":       "fl_far",
+                         "HOME_NAME":      "Phillies", "AWAY_NAME": "Athletics",
+                         "SHORTNAME_HOME": "PHI", "SHORTNAME_AWAY": "ATH",
+                         "START_TIME":     _ts(2026, 5, 5, 17, 25)},
+                    ],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Baseball")
+        rec = {
+            "event_ticker":  "KXMLBGAME-26MAY051700ATHPHI",
+            "series_ticker": "KXMLBGAME",
+        }
+        fx = seed_kalshi_record(r, rec, "Baseball")
+        # 16:55 (5min) closer than 17:25 (25min) → fl_close wins
+        assert fx is not None
+        assert fx.start_time_utc == _ts(2026, 5, 5, 16, 55)
+
+    def test_pick_best_by_time_helper_direct(self):
+        """Direct unit test on the helper to lock in edge cases:
+        empty list → None; identity with no time → first match;
+        wrap-across-midnight handled."""
+        from kalshi_registry_seed import _pick_best_by_time
+        from types import SimpleNamespace
+        # Empty
+        assert _pick_best_by_time([], SimpleNamespace(time="1700")) is None
+        # No identity time → first match
+        fake_fx_a = SimpleNamespace(start_time_utc=_ts(2026, 5, 5, 12, 0))
+        fake_fx_b = SimpleNamespace(start_time_utc=_ts(2026, 5, 5, 18, 0))
+        assert _pick_best_by_time(
+            [fake_fx_a, fake_fx_b], SimpleNamespace(time=""),
+        ) is fake_fx_a

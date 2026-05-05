@@ -101,7 +101,25 @@ def make_competition_id(sport: str, slug: str) -> str:
 
 
 def make_fixture_id(sport: str, when: date,
-                    home_slug: str, away_slug: str) -> str:
+                    home_slug: str, away_slug: str,
+                    hhmm: str = "") -> str:
+    """Canonical Fixture ID.
+
+    Phase C2e — `hhmm` (UTC `'HHMM'` string) is included in the ID
+    when supplied so multiple fixtures sharing (sport, date, teams)
+    but different start times — MLB doubleheaders, same-day intl
+    basketball multi-fixtures, etc. — get DISTINCT canonical IDs.
+    Without `hhmm`, falls back to the pre-C2e date-only format for
+    backward compatibility with callers (and tests) that don't
+    care about time.
+
+    The time component lives between date and team slugs for
+    readability:
+        fixture:basketball:2026-05-05:1900:lakers-vs-thunder
+    """
+    if hhmm:
+        return (f"fixture:{slugify(sport)}:{when.isoformat()}:"
+                f"{hhmm}:{home_slug}-vs-{away_slug}")
     return (f"fixture:{slugify(sport)}:{when.isoformat()}:"
             f"{home_slug}-vs-{away_slug}")
 
@@ -379,7 +397,17 @@ class IdentityRegistry:
                 f"Both teams must be registered before fixture: "
                 f"home={home_team_id!r}, away={away_team_id!r}"
             )
-        fid = make_fixture_id(sport, when, home.slug, away.slug)
+        # Phase C2e: include UTC HHMM in the canonical ID so
+        # doubleheaders and same-day-multi-fixture cases (MLB, intl
+        # basketball, esports) get distinct canonical Fixtures
+        # rather than colliding to the same ID and losing one.
+        try:
+            _hhmm = datetime.fromtimestamp(
+                start_time_utc, tz=timezone.utc,
+            ).strftime("%H%M")
+        except (TypeError, ValueError, OSError):
+            _hhmm = ""
+        fid = make_fixture_id(sport, when, home.slug, away.slug, _hhmm)
         now = int(datetime.now(timezone.utc).timestamp())
         existing = self._fixtures.get(fid)
         if existing is not None:

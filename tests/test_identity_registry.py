@@ -268,7 +268,7 @@ class TestFixtureRegistry:
             competition_id=comp.id,
         )
         assert isinstance(f, Fixture)
-        assert f.id == ("fixture:basketball:2026-05-05:"
+        assert f.id == ("fixture:basketball:2026-05-05:2010:"
                         "lal-vs-okc")
         assert f.version == 1
         assert f.start_time_utc == 1746475800
@@ -291,7 +291,14 @@ class TestFixtureRegistry:
         assert b.version == 1
         assert r.stats()["fixtures"] == 1
 
-    def test_register_bumps_version_on_time_change(self):
+    def test_reschedule_creates_distinct_fixture(self):
+        """Phase C2e — start_time is part of the canonical ID, so a
+        rescheduled game produces a NEW Fixture rather than bumping
+        the existing one's version. This intentionally changed when
+        time was added to the canonical ID; the previous bump-version-
+        on-time-change behavior would have collided MLB doubleheaders
+        and other same-day-multi-fixture cases.
+        """
         r = IdentityRegistry()
         home, away, _ = self._setup(r)
         a = r.register_fixture(
@@ -304,10 +311,11 @@ class TestFixtureRegistry:
             home_team_id=home.id, away_team_id=away.id,
             start_time_utc=1746479400,  # rescheduled +1h
         )
-        assert b.id == a.id
-        assert b.version == 2
+        # Distinct canonical fixtures now (time differs)
+        assert a.id != b.id
+        assert a.version == 1
+        assert b.version == 1
         assert b.start_time_utc == 1746479400
-        assert b.updated_at_utc >= a.updated_at_utc
 
     def test_register_bumps_version_on_competition_change(self):
         r = IdentityRegistry()
