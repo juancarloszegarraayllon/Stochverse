@@ -905,14 +905,14 @@ function renderCol1() {
 
   // Country sections — alphabetical, each with its own collapsible
   // header. Leagues within a country sorted alphabetically too.
-  // Special-case 'Outrights' to the very top so tournament/season
-  // futures (Champions League Winner, Super Bowl Winner, MVP) are
-  // the first thing the user sees.
+  // 'Outrights' is special-cased to the BOTTOM so live games take
+  // priority in the user's eye-line; outright/season futures
+  // (Champions League Winner, Super Bowl Winner, MVP) drop below.
   const countries = Object.keys(byCountry).sort();
   const orIdx = countries.indexOf('Outrights');
-  if (orIdx > 0) {
+  if (orIdx !== -1) {
     countries.splice(orIdx, 1);
-    countries.unshift('Outrights');
+    countries.push('Outrights');
   }
   for (const country of countries) {
     const leagues = byCountry[country].sort((a, b) => a.name.localeCompare(b.name));
@@ -1029,7 +1029,16 @@ function renderCol2() {
     html += '</div>';
 
   }
-  for (const t of _eventsCache) {
+  // Sort tournaments so outright/season-futures tournaments render
+  // AFTER live game tournaments. Mirrors the side-nav 'Outrights at
+  // the bottom' rule — games are higher priority in the user's
+  // eye-line, outrights drop below as a secondary section.
+  const sortedTournaments = [..._eventsCache].sort((a, b) => {
+    const aOut = bucketCountry(a) === 'Outrights' ? 1 : 0;
+    const bOut = bucketCountry(b) === 'Outrights' ? 1 : 0;
+    return aOut - bOut;  // stable; only moves outrights down
+  });
+  for (const t of sortedTournaments) {
     const stageId = t.TOURNAMENT_STAGE_ID || '';
     if (_activeLeagueFilter && _activeLeagueFilter !== stageId) continue;
     const evs = (t.events || t.EVENTS || []).filter(passesStateFilter);
