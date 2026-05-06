@@ -56,6 +56,8 @@ from enrichment.normalized_helpers import (
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+print("DEBUG MAIN_PY_LOADED: version=49", flush=True)
+
 logging.basicConfig(level=logging.INFO)
 
 # ── Sentry error tracking (optional) ────────────────────────────────
