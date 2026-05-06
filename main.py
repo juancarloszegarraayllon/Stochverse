@@ -10228,34 +10228,182 @@ def _match_fixture_for_synth_event(fixtures: list,
     return None
 
 
+def _epoch_to_utc_date_str(epoch_seconds: int) -> str:
+    """Convert UTC epoch seconds → YYYY-MM-DD string. Empty when
+    input is missing/invalid."""
+    if not epoch_seconds:
+        return ""
+    try:
+        return datetime.fromtimestamp(
+            int(epoch_seconds), tz=timezone.utc,
+        ).date().isoformat()
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def _build_paired_event_lookup(paired_tournaments: list) -> dict:
+    """Build a dict mapping `(frozenset({home_norm, away_norm}),
+    date_str)` → the paired FL event dict. Direction-blind on the
+    team pair. Date is UTC YYYY-MM-DD. Used by synthetic-event dedup
+    to BOTH detect duplicates AND find the paired event to merge
+    Kalshi markets into.
+    """
+    lookup: dict = {}
+    if not paired_tournaments:
+        return lookup
+    try:
+        from kalshi_registry_seed import _normalize_team_name
+    except Exception:
+        return lookup
+    for t in paired_tournaments:
+        if not isinstance(t, dict):
+            continue
+        for ev in (t.get("events") or []):
+            if not isinstance(ev, dict):
+                continue
+            home_n = _normalize_team_name(ev.get("HOME_NAME") or "")
+            away_n = _normalize_team_name(ev.get("AWAY_NAME") or "")
+            if not home_n or not away_n:
+                continue
+            start = ev.get("START_TIME") or 0
+            date_str = _epoch_to_utc_date_str(start)
+            if not date_str:
+                continue
+            key = (frozenset((home_n, away_n)), date_str)
+            # First-seen wins (paired events are ordered by FL feed)
+            lookup.setdefault(key, ev)
+    return lookup
+
+
+def _find_paired_match_via_fl_fixtures(home_data: dict,
+                                          paired_lookup: dict) -> Optional[dict]:
+    """Walk the home team's FL fixtures (from `_fetch_fl_team_data`).
+    Return the matching paired-event dict from `paired_lookup` if any
+    fixture's `(team_pair, date)` matches a paired entry. None when
+    no fixture matches.
+    """
+    if not paired_lookup:
+        return None
+    try:
+        from kalshi_registry_seed import _normalize_team_name
+    except Exception:
+        return None
+    for fx in (home_data.get("fixtures") or []):
+        if not isinstance(fx, dict):
+            continue
+        fx_home_n = _normalize_team_name(fx.get("home") or "")
+        fx_away_n = _normalize_team_name(fx.get("away") or "")
+        if not fx_home_n or not fx_away_n:
+            continue
+        date_str = _epoch_to_utc_date_str(fx.get("start_time") or 0)
+        if not date_str:
+            continue
+        key = (frozenset((fx_home_n, fx_away_n)), date_str)
+        paired_ev = paired_lookup.get(key)
+        if paired_ev is not None:
+            return paired_ev
+    return None
+
+
+def _merge_synth_kalshi_into_paired(synth_event: dict,
+                                       paired_event: dict) -> None:
+    """Merge a synthetic event's Kalshi markets into the paired
+    event's `kalshi` block. Preserves the paired event's
+    `event_ticker` / `title` / `series_ticker` / `primary_prices`
+    (those describe the main GAME ticker — the source of truth
+    for the headline Winner). Synth's `markets` array is appended
+    to paired's, deduped by `event_ticker` so re-runs are
+    idempotent. `count` is updated to reflect the merged total.
+    """
+    if not isinstance(synth_event, dict) or not isinstance(paired_event, dict):
+        return
+    synth_kalshi = synth_event.get("kalshi") or {}
+    if not isinstance(synth_kalshi, dict):
+        return
+    synth_markets = synth_kalshi.get("markets") or []
+    if not synth_markets:
+        return
+    paired_kalshi = paired_event.get("kalshi")
+    if not isinstance(paired_kalshi, dict):
+        # Paired event has no kalshi block — copy synth's whole block
+        # but null primary_prices (synth events get None per v1
+        # convention; paired-event invariant should hold).
+        paired_event["kalshi"] = dict(synth_kalshi)
+        paired_event["kalshi"].setdefault("primary_prices", None)
+        return
+    paired_markets = paired_kalshi.get("markets") or []
+    seen_tickers = {
+        m.get("event_ticker")
+        for m in paired_markets
+        if isinstance(m, dict) and m.get("event_ticker")
+    }
+    appended = 0
+    for m in synth_markets:
+        if not isinstance(m, dict):
+            continue
+        ticker = m.get("event_ticker")
+        if not ticker or ticker in seen_tickers:
+            continue
+        paired_markets.append(m)
+        seen_tickers.add(ticker)
+        appended += 1
+    if appended:
+        paired_kalshi["markets"] = paired_markets
+        paired_kalshi["count"] = len(paired_markets)
+        paired_event["kalshi"] = paired_kalshi
+
+
 async def _enrich_synthetic_events_with_fl_data(
-        unpaired_tournaments: list, sport_id: int) -> None:
+        unpaired_tournaments: list, sport_id: int,
+        paired_tournaments: Optional[list] = None) -> None:
     """For every `_kalshi_h2h_only` event in `unpaired_tournaments`,
     fetch FL team data for HOME_NAME and AWAY_NAME (in parallel via
     `asyncio.gather`), then:
-      - Populate HOME_IMAGES / AWAY_IMAGES from the returned
-        logo URLs (when present).
-      - Match the Kalshi-estimated START_TIME against the home
-        team's fixtures by opponent name + date proximity. When a
-        match is found, override START_TIME with the FL fixture's
-        authoritative kickoff and mark `_kickoff_source` =
-        'fl_fixture_match'. When no match, leave START_TIME as-is
-        and mark `_kickoff_source` = 'kalshi_estimate'.
+
+      1. **Dedup**: if `paired_tournaments` is provided AND the FL
+         fixtures returned for the home team contain a fixture
+         that matches an already-paired event by team pair + date,
+         the synth event is a DUPLICATE of a paired event. It's
+         removed from `unpaired_tournaments` in place. No
+         enrichment runs (the paired event already has logos +
+         authoritative kickoff from FL).
+
+      2. Populate HOME_IMAGES / AWAY_IMAGES from logo URLs when
+         present and missing on the event.
+
+      3. Match the Kalshi-estimated START_TIME against the home
+         team's fixtures by opponent name + date proximity. When
+         a match is found, override START_TIME with the FL
+         fixture's authoritative kickoff and mark
+         `_kickoff_source` = 'fl_fixture_match'. When no match,
+         leave START_TIME as-is and mark `_kickoff_source` =
+         'kalshi_estimate'.
 
     All FL roundtrips happen here in parallel, then mutate the
     events in place. Safe to no-op when there are no synth events.
+
+    Dedup catches the case (Phase C2g+ user audit, 2026-05-06)
+    where Kalshi has multiple series for the same fixture
+    (KXUCLGAME + KXUCLGOAL + KXUCLCORNERS …) — only the GAME
+    one pairs with FL via existing tiers, the rest fall through
+    to synthetic. Without dedup, the user sees 2+ cards for the
+    same fixture under different tournament headers.
     """
     if not unpaired_tournaments or not 1 <= sport_id <= 42:
         return
-    target_events = []
-    fetch_coros = []
+
+    paired_lookup = _build_paired_event_lookup(paired_tournaments)
+
+    # Collect synth events + FL fetch coroutines (home + away per event)
+    target_entries: list = []  # [(tournament_dict, event_dict)]
+    fetch_coros: list = []
     for ut in unpaired_tournaments:
         if not isinstance(ut, dict):
             continue
         for ev in (ut.get("events") or []):
             if not isinstance(ev, dict) or not ev.get("_kalshi_h2h_only"):
                 continue
-            target_events.append(ev)
+            target_entries.append((ut, ev))
             home = (ev.get("HOME_NAME") or "").strip()
             away = (ev.get("AWAY_NAME") or "").strip()
             fetch_coros.append(_fetch_fl_team_data(home, sport_id)
@@ -10264,16 +10412,38 @@ async def _enrich_synthetic_events_with_fl_data(
             fetch_coros.append(_fetch_fl_team_data(away, sport_id)
                                if away else
                                asyncio.sleep(0, result={"logo_url": None, "fixtures": []}))
-    if not target_events:
+    if not target_entries:
         return
     results = await asyncio.gather(*fetch_coros, return_exceptions=True)
-    for i, ev in enumerate(target_events):
+
+    # Track duplicates for in-place removal after the loop (don't
+    # mutate the events list while iterating). When a duplicate is
+    # detected, MERGE its Kalshi markets into the paired event
+    # before removal — so the paired card gets every sub-market
+    # (including KXUCLGOAL/KXUCLCORNERS/etc. that escaped pairing)
+    # accessible via its tab strip.
+    duplicates: list = []
+
+    for i, (ut, ev) in enumerate(target_entries):
         home_data = results[i * 2]
         away_data = results[i * 2 + 1]
         if not isinstance(home_data, dict):
             home_data = {"logo_url": None, "fixtures": []}
         if not isinstance(away_data, dict):
             away_data = {"logo_url": None, "fixtures": []}
+
+        # Dedup check — if FL's fixtures for the home team include
+        # the same matchup that's already paired, merge synth's
+        # Kalshi block into the paired event then drop the synth.
+        if paired_lookup:
+            paired_match = _find_paired_match_via_fl_fixtures(
+                home_data, paired_lookup,
+            )
+            if paired_match is not None:
+                _merge_synth_kalshi_into_paired(ev, paired_match)
+                duplicates.append((ut, ev))
+                continue
+
         # Logos
         if home_data.get("logo_url") and not ev.get("HOME_IMAGES"):
             ev["HOME_IMAGES"] = [home_data["logo_url"]]
@@ -10290,9 +10460,23 @@ async def _enrich_synthetic_events_with_fl_data(
             ev["START_TIME"] = matched_ts
             ev["_kickoff_source"] = "fl_fixture_match"
         else:
-            # Keep existing START_TIME (the Kalshi estimate). Tag
-            # source for observability.
             ev["_kickoff_source"] = "kalshi_estimate"
+
+    # Remove duplicates from the response. After this, empty
+    # tournaments (no events left) are also pruned so the side-nav
+    # doesn't show empty league entries.
+    for ut, ev in duplicates:
+        events_list = ut.get("events")
+        if isinstance(events_list, list):
+            try:
+                events_list.remove(ev)
+            except ValueError:
+                pass
+    # Prune empty tournaments
+    unpaired_tournaments[:] = [
+        ut for ut in unpaired_tournaments
+        if isinstance(ut, dict) and (ut.get("events") or [])
+    ]
 
 
 def _v2_synth_unpaired_event(records: list, sport: str,
@@ -10652,6 +10836,7 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
         try:
             await _enrich_synthetic_events_with_fl_data(
                 unpaired_tournaments, sport_id,
+                paired_tournaments=out_tournaments,
             )
         except Exception:
             pass  # never let enrichment break the response
@@ -10868,6 +11053,7 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
         try:
             await _enrich_synthetic_events_with_fl_data(
                 unpaired_tournaments, sport_id,
+                paired_tournaments=out_tournaments,
             )
         except Exception:
             pass

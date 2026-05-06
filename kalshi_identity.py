@@ -598,6 +598,15 @@ _FL_ABBR_ALIASES: dict[str, dict] = {
         "PSG": "PAR", "PAR": "PSG",       # Paris Saint-Germain
                                            # (Kalshi ships PSG, FL
                                            # sometimes uses PAR).
+        # Bayern Munich — FL ships 'BAY' (from "Bayern"), Kalshi
+        # ships 'BMU' (from "BayernMUnich") for UCL-side tickers
+        # like KXUCLGOAL / KXUCLCORNERS / KXUCLBTTS / KXUCLADVANCE
+        # that share the same abbr_block as KXUCLGAME but escape
+        # the title_match tier when their title shape differs from
+        # "Bayern Munich vs PSG". Confirmed via 2026-05-06 prod
+        # audit (DUPLICATE: kalshi-h2h-KXUCLGOAL-26MAY06BMUPSG +
+        # FL WzCGgkEU).
+        "BAY": "BMU", "BMU": "BAY",
     },
     # Other sports get populated as gaps surface.
 }
