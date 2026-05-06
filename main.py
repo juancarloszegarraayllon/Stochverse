@@ -8664,6 +8664,153 @@ async def debug_registry_duplicates_all(indent_days: int = 0,
     return out
 
 
+@app.get("/api/_debug/unpaired_pairs")
+async def debug_unpaired_pairs(sport_id: int, indent_days: int = 0,
+                                 timezone: int = 0):
+    """List unpaired FL events and unpaired Kalshi tickers side-by-side
+    so operators can populate the alias_table data-driven instead of
+    guessing.
+
+    For each FL event with no Kalshi pairing, surfaces:
+      event_id, home/away long names, SHORTNAME_HOME/AWAY (the abbrs
+      strict-tier compares), start_time, tournament name.
+
+    For each Kalshi ticker with no FL pairing in this sport, surfaces:
+      event_ticker, series_ticker, title, parsed abbr_block, parsed
+      date.
+
+    Both are bucketed by `(sport, local_date)` so reviewing same-day
+    candidates is visual.
+
+    Use case: a Conmebol Wednesday shows 4 unpaired FL events and 4
+    unpaired Kalshi tickers in the same bucket — comparing
+    SHORTNAME_HOME/AWAY ('ALW' / 'LAN') against parsed abbr_block
+    ('AREARG' or whatever Kalshi actually ships) tells you exactly
+    which alias entries to add. Replaces the guessing loop.
+    """
+    from flashlive_feed import _fl_get
+    from registry_pairing import seed_and_pair_via_registry
+    from kalshi_identity import parse_ticker
+    from datetime import datetime, timezone as _tz
+
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
+    if not sport:
+        return {"error":
+                f"no Kalshi sport mapping for FL sport_id={sport_id}"}
+
+    fl_data = None
+    if -7 <= indent_days <= 7:
+        try:
+            fl_data = await _fl_get("/v1/events/list", {
+                "sport_id": sport_id, "timezone": timezone,
+                "indent_days": indent_days,
+            })
+        except Exception:
+            fl_data = None
+    fl_data = fl_data or {"DATA": []}
+
+    get_data()
+    cache_records = _cache.get("data_all") or _cache.get("data") or []
+    sport_kalshi = [r for r in cache_records
+                      if (r.get("_sport") or "") == sport]
+
+    pairings, _registry = seed_and_pair_via_registry(
+        sport, fl_data, sport_kalshi,
+    )
+    paired_tickers: set = set()
+    for tickers in pairings.values():
+        for tk in (tickers or []):
+            if tk:
+                paired_tickers.add(tk)
+
+    # Bucket FL events by date with their tournament context.
+    fl_unpaired: list = []
+    for t in (fl_data.get("DATA") or []):
+        tournament_name = (t.get("NAME") or "").strip()
+        for ev in (t.get("EVENTS") or []):
+            if not isinstance(ev, dict):
+                continue
+            fl_id = (ev.get("EVENT_ID") or "").strip()
+            if not fl_id:
+                continue
+            if pairings.get(fl_id):
+                continue
+            ts = ev.get("START_TIME") or ev.get("START_UTIME") or 0
+            try:
+                dt = datetime.fromtimestamp(int(ts), tz=_tz.utc)
+                date_iso = dt.date().isoformat()
+                hhmm = dt.strftime("%H%M")
+            except (TypeError, ValueError, OSError):
+                date_iso = ""
+                hhmm = ""
+            fl_unpaired.append({
+                "event_id":      fl_id,
+                "home":          ev.get("HOME_NAME") or "",
+                "away":          ev.get("AWAY_NAME") or "",
+                "shortname_home": (ev.get("SHORTNAME_HOME") or "").upper(),
+                "shortname_away": (ev.get("SHORTNAME_AWAY") or "").upper(),
+                "start_time_utc": ts,
+                "date":          date_iso,
+                "time_utc":      hhmm,
+                "tournament":    tournament_name,
+            })
+
+    # Unpaired Kalshi records — per_fixture only (outrights/per_leg
+    # don't pair to FL fixtures).
+    kalshi_unpaired: list = []
+    for r in sport_kalshi:
+        ticker = (r.get("event_ticker") or "").strip()
+        if not ticker or ticker in paired_tickers:
+            continue
+        series = (r.get("series_ticker") or "").strip()
+        ident = parse_ticker(ticker, series, sport)
+        if ident is None or ident.kind != "per_fixture":
+            continue
+        kalshi_unpaired.append({
+            "event_ticker":  ticker,
+            "series_ticker": series,
+            "title":         r.get("title") or "",
+            "abbr_block":    ident.abbr_block or "",
+            "date":          ident.date.isoformat() if ident.date else "",
+            "time_utc":      ident.time or "",
+        })
+
+    # Bucket both sides by date for visual side-by-side review.
+    buckets: dict = {}
+    for ev in fl_unpaired:
+        d = ev.get("date") or "_no_date"
+        buckets.setdefault(d, {"fl_unpaired": [], "kalshi_unpaired": []})
+        buckets[d]["fl_unpaired"].append(ev)
+    for r in kalshi_unpaired:
+        d = r.get("date") or "_no_date"
+        buckets.setdefault(d, {"fl_unpaired": [], "kalshi_unpaired": []})
+        buckets[d]["kalshi_unpaired"].append(r)
+
+    bucket_list = []
+    for d in sorted(buckets.keys()):
+        b = buckets[d]
+        if not b["fl_unpaired"] and not b["kalshi_unpaired"]:
+            continue
+        bucket_list.append({
+            "date":            d,
+            "fl_unpaired":     b["fl_unpaired"],
+            "kalshi_unpaired": b["kalshi_unpaired"],
+            "fl_count":        len(b["fl_unpaired"]),
+            "kalshi_count":    len(b["kalshi_unpaired"]),
+        })
+
+    return {
+        "sport":       sport,
+        "sport_id":    sport_id,
+        "indent_days": indent_days,
+        "fl_unpaired_total":     len(fl_unpaired),
+        "kalshi_unpaired_total": len(kalshi_unpaired),
+        "buckets":               bucket_list,
+    }
+
+
 @app.get("/api/_debug/sports_inventory")
 async def debug_sports_inventory():
     """Sport-level inventory: every distinct _sport value in the
