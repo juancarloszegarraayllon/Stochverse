@@ -10217,6 +10217,28 @@ def _extract_logo_from_fl_fixtures(resp: dict, team_id: str) -> Optional[str]:
     return None
 
 
+# ── TEMPORARY DEBUG (synth-event FL fetch) ──────────────────────
+# Names are matched as lowercase substrings so variants like
+# "Universidad Catolica (Chi)" or "Tolima FC" all trigger.
+_DEBUG_FL_FETCH_TARGET_TEAMS = (
+    "universidad catolica",
+    "tolima",
+    "alianza atletico",
+    "audax",
+)
+
+
+def _should_debug_fl_fetch(team_name: str) -> bool:
+    if not team_name:
+        return False
+    n = team_name.lower()
+    for needle in _DEBUG_FL_FETCH_TARGET_TEAMS:
+        if needle in n:
+            return True
+    return False
+# ── /TEMPORARY DEBUG ────────────────────────────────────────────
+
+
 async def _fetch_fl_team_data(team_name: str, sport_id: int) -> dict:
     """Fetch a team's FL data — logo URL + upcoming fixtures.
 
@@ -10253,23 +10275,107 @@ async def _fetch_fl_team_data(team_name: str, sport_id: int) -> dict:
     except Exception:
         norm = ""
 
+    # ── TEMPORARY DEBUG ─────────────────────────────────────────
+    _dbg = _should_debug_fl_fetch(team_name)
+    if _dbg:
+        print(
+            f"DEBUG fl_fetch[{team_name!r}] sport_id={sport_id} "
+            f"norm={norm!r}",
+            flush=True,
+        )
+    # ── /TEMPORARY DEBUG ────────────────────────────────────────
+
     # Cache check
     cache_key = (norm, sport_id)
     cached = _TEAM_FIXTURE_CACHE.get(cache_key)
     if cached and (time.time() - cached.get("ts", 0)) < _TEAM_FIXTURE_CACHE_TTL_SEC:
+        if _dbg:
+            print(
+                f"DEBUG fl_fetch[{team_name!r}] CACHE HIT "
+                f"logo_url={cached['data'].get('logo_url')!r} "
+                f"fixtures={len(cached['data'].get('fixtures') or [])}",
+                flush=True,
+            )
         return cached["data"]
 
     from flashlive_feed import _resolve_team_id, _fl_get
+
+    # ── TEMPORARY DEBUG: also peek at the raw search response so we
+    # can see the first result's id+name (the user explicitly asked).
+    # Only fires for the four target teams, otherwise no extra call.
+    if _dbg:
+        try:
+            search_resp = await _fl_get("/v1/search/multi-search", {
+                "query":  team_name,
+                "locale": "en_INT",
+            })
+            results = []
+            if isinstance(search_resp, dict):
+                results = (search_resp.get("DATA") or
+                           search_resp.get("data") or [])
+            elif isinstance(search_resp, list):
+                results = search_resp
+            participants = [
+                r for r in (results or [])
+                if isinstance(r, dict) and
+                (r.get("TYPE") or r.get("type") or "").lower()
+                    in ("participants", "participant")
+            ]
+            if participants:
+                first = participants[0]
+                first_id = first.get("ID") or first.get("EVENT_ID") or ""
+                first_name = (first.get("NAME") or first.get("name")
+                              or first.get("title") or "")
+                first_sport = (first.get("SPORT_ID") or first.get("SPORT")
+                               or first.get("sport_id") or "")
+                print(
+                    f"DEBUG fl_fetch[{team_name!r}] search_first "
+                    f"id={first_id!r} name={first_name!r} "
+                    f"sport={first_sport!r} (of {len(participants)} participants)",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"DEBUG fl_fetch[{team_name!r}] search_no_participants "
+                    f"raw_results_count={len(results) if isinstance(results, list) else 0}",
+                    flush=True,
+                )
+        except Exception as e:
+            print(
+                f"DEBUG fl_fetch[{team_name!r}] search_call_failed "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+
     try:
         team_id = await _resolve_team_id(team_name, str(sport_id))
-    except Exception:
+    except Exception as e:
+        if _dbg:
+            print(
+                f"DEBUG fl_fetch[{team_name!r}] resolve_team_id_FAILED "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
         team_id = ""
+
+    if _dbg:
+        print(
+            f"DEBUG fl_fetch[{team_name!r}] resolved team_id={team_id!r}",
+            flush=True,
+        )
+
     if not team_id:
         empty = {"logo_url": None, "fixtures": []}
         # Cache the miss too — short-circuits repeat lookups for
         # teams FL doesn't know about (frequent for Kalshi-only
         # tournaments). Same TTL.
         _TEAM_FIXTURE_CACHE[cache_key] = {"data": empty, "ts": time.time()}
+        if _dbg:
+            print(
+                f"DEBUG fl_fetch[{team_name!r}] EARLY EXIT no team_id, "
+                f"caching empty",
+                flush=True,
+            )
         return empty
 
     try:
@@ -10278,13 +10384,35 @@ async def _fetch_fl_team_data(team_name: str, sport_id: int) -> dict:
             "sport_id": sport_id,
             "team_id":  team_id,
         })
-    except Exception:
+    except Exception as e:
+        if _dbg:
+            print(
+                f"DEBUG fl_fetch[{team_name!r}] fixtures_call_FAILED "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
         resp = None
     resp = resp or {}
 
     logo_url = _extract_logo_from_fl_fixtures(resp, team_id)
     fixtures = _parse_fl_fixtures_response(resp, team_id)
     data = {"logo_url": logo_url, "fixtures": fixtures}
+
+    if _dbg:
+        # Show first 3 fixtures so we can verify date/opponent shape
+        sample = [
+            {"start_time": fx.get("start_time"),
+             "home":       fx.get("home"),
+             "away":       fx.get("away"),
+             "tournament": fx.get("tournament")}
+            for fx in fixtures[:3]
+        ]
+        print(
+            f"DEBUG fl_fetch[{team_name!r}] FINAL "
+            f"logo_url={logo_url!r} fixtures_count={len(fixtures)} "
+            f"first3={sample}",
+            flush=True,
+        )
 
     _TEAM_FIXTURE_CACHE[cache_key] = {"data": data, "ts": time.time()}
     # Also feed the existing logo cache so tier-2 / tier-4 lookups
@@ -10541,6 +10669,30 @@ async def _enrich_synthetic_events_with_fl_data(
         if not isinstance(away_data, dict):
             away_data = {"logo_url": None, "fixtures": []}
 
+        # ── TEMPORARY DEBUG ─────────────────────────────────────
+        _home_name = (ev.get("HOME_NAME") or "").strip()
+        _away_name = (ev.get("AWAY_NAME") or "").strip()
+        _dbg_evt = (_should_debug_fl_fetch(_home_name)
+                    or _should_debug_fl_fetch(_away_name))
+        if _dbg_evt:
+            print(
+                f"DEBUG synth_enrich event_id={ev.get('EVENT_ID')!r} "
+                f"home={_home_name!r} away={_away_name!r} "
+                f"start_time={ev.get('START_TIME')}",
+                flush=True,
+            )
+            print(
+                f"  home_data: logo_url={home_data.get('logo_url')!r} "
+                f"fixtures={len(home_data.get('fixtures') or [])}",
+                flush=True,
+            )
+            print(
+                f"  away_data: logo_url={away_data.get('logo_url')!r} "
+                f"fixtures={len(away_data.get('fixtures') or [])}",
+                flush=True,
+            )
+        # ── /TEMPORARY DEBUG ────────────────────────────────────
+
         # Dedup check — if FL's fixtures for the home team include
         # the same matchup that's already paired, merge synth's
         # Kalshi block into the paired event then drop the synth.
@@ -10551,6 +10703,12 @@ async def _enrich_synthetic_events_with_fl_data(
             if paired_match is not None:
                 _merge_synth_kalshi_into_paired(ev, paired_match)
                 duplicates.append((ut, ev))
+                if _dbg_evt:
+                    print(
+                        f"  → DEDUP merged into paired EVENT_ID="
+                        f"{paired_match.get('EVENT_ID')!r}, dropping synth",
+                        flush=True,
+                    )
                 continue
 
         # Logos
@@ -10570,6 +10728,20 @@ async def _enrich_synthetic_events_with_fl_data(
             ev["_kickoff_source"] = "fl_fixture_match"
         else:
             ev["_kickoff_source"] = "kalshi_estimate"
+
+        # ── TEMPORARY DEBUG ─────────────────────────────────────
+        if _dbg_evt:
+            print(
+                f"  AFTER: HOME_IMAGES={ev.get('HOME_IMAGES')} "
+                f"AWAY_IMAGES={ev.get('AWAY_IMAGES')}",
+                flush=True,
+            )
+            print(
+                f"  AFTER: START_TIME={ev.get('START_TIME')} "
+                f"_kickoff_source={ev.get('_kickoff_source')!r}",
+                flush=True,
+            )
+        # ── /TEMPORARY DEBUG ────────────────────────────────────
 
     # Remove duplicates from the response. After this, empty
     # tournaments (no events left) are also pruned so the side-nav
