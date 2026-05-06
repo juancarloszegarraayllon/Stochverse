@@ -1444,6 +1444,13 @@ _FL_TEAM_HINTS: dict = {}
 # real-world club's imagery so the collision is benign.
 _TEAM_LOGO_CACHE: dict = {}
 
+# Persistent FL team-data cache. Keyed by `(normalized_team_name,
+# sport_id)` → `{"data": {"logo_url": ..., "fixtures": [...]}, "ts": epoch}`.
+# Populated by `_fetch_fl_team_data` and read by /api/fl/team-logo.
+# 1-hour TTL — fixtures change rarely.
+_TEAM_FIXTURE_CACHE: dict = {}
+_TEAM_FIXTURE_CACHE_TTL_SEC = 3600
+
 # FlashLive capability map cache. Populated by /api/debug_fl_capabilities.
 # A full scan can spend ~150-300 RapidAPI calls so we hold the result
 # for a day. Pass ?refresh=1 to force a re-scan.
@@ -4603,6 +4610,248 @@ def refresh():
     global _cache
     _cache = {"data": None, "ts": 0}  # cache cleared on startup
     return {"ok": True}
+
+
+# ── FL team-logo lookup (Plan A: endpoint only, no auto-enrichment) ──
+# Re-introduces the FL search → fixtures → logo URL flow as a
+# standalone HTTP endpoint. Nothing in the request path
+# (sports_feed_v2 / v3) calls these — they exist exclusively for
+# manual triage / cache-warmer scripts / frontend lazy-fetch.
+# Plan B (server-side automatic enrichment) is a separate later PR
+# with bounded concurrency + per-call timeouts. Plan A by design
+# can NEVER cause a `/healthz` outage because nothing in the
+# critical path calls any of this code.
+
+def _parse_fl_fixtures_response(resp: dict, team_id: str) -> list:
+    """Walk an FL `/v1/teams/fixtures` response into a flat list of
+    {start_time, home, away, tournament}. Used by `_fetch_fl_team_data`.
+    """
+    if not isinstance(resp, dict):
+        return []
+    out = []
+    for entry in (resp.get("DATA") or []):
+        if not isinstance(entry, dict):
+            continue
+        tournament_name = entry.get("NAME") or ""
+        for ev in (entry.get("EVENTS") or []):
+            if not isinstance(ev, dict):
+                continue
+            ts = ev.get("START_TIME") or ev.get("START_UTIME") or 0
+            try:
+                ts = int(ts)
+            except (TypeError, ValueError):
+                ts = 0
+            out.append({
+                "start_time": ts,
+                "home":       ev.get("HOME_NAME") or "",
+                "away":       ev.get("AWAY_NAME") or "",
+                "tournament": tournament_name,
+            })
+    return out
+
+
+def _extract_logo_from_fl_fixtures(resp: dict, team_id: str) -> Optional[str]:
+    """Return the first image URL belonging to `team_id` in an FL
+    `/v1/teams/fixtures` response. Pass 1 prefers the side whose
+    PARTICIPANT_TEAM_ID matches; pass 2 falls back to any first image.
+    """
+    if not isinstance(resp, dict):
+        return None
+    data = resp.get("DATA") or []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        for ev in (entry.get("EVENTS") or []):
+            if not isinstance(ev, dict):
+                continue
+            home_pid = (ev.get("HOME_PARTICIPANT_TEAM_ID")
+                        or ev.get("HOME_PARTICIPANT_IDS"))
+            away_pid = (ev.get("AWAY_PARTICIPANT_TEAM_ID")
+                        or ev.get("AWAY_PARTICIPANT_IDS"))
+            home_imgs = ev.get("HOME_IMAGES") or []
+            away_imgs = ev.get("AWAY_IMAGES") or []
+            if home_pid == team_id and home_imgs:
+                return home_imgs[0]
+            if away_pid == team_id and away_imgs:
+                return away_imgs[0]
+            if isinstance(home_pid, list) and team_id in home_pid and home_imgs:
+                return home_imgs[0]
+            if isinstance(away_pid, list) and team_id in away_pid and away_imgs:
+                return away_imgs[0]
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        for ev in (entry.get("EVENTS") or []):
+            if not isinstance(ev, dict):
+                continue
+            if ev.get("HOME_IMAGES"):
+                return ev["HOME_IMAGES"][0]
+            if ev.get("AWAY_IMAGES"):
+                return ev["AWAY_IMAGES"][0]
+    return None
+
+
+async def _fetch_fl_team_data(team_name: str, sport_id: int) -> dict:
+    """Resolve team_name → team_id → fixtures → logo URL via FL APIs.
+
+    Two-step FL flow:
+      1. /v1/search/multi-search via existing `_resolve_team_id` —
+         memoized team_id resolution with sport-aware preference.
+      2. /v1/teams/fixtures?team_id={...} — walk fixtures, extract
+         first image URL belonging to team_id.
+
+    Cached per `(normalized_name, sport_id)` for
+    `_TEAM_FIXTURE_CACHE_TTL_SEC` (1 hour). Cache hits skip both
+    FL roundtrips. Misses are also cached so repeat lookups for
+    teams FL doesn't know about don't hammer the API.
+
+    Returns: `{"logo_url": str | None, "fixtures": [...]}`. Empty
+    `{"logo_url": None, "fixtures": []}` on any failure — same
+    shape, safe for callers to consume.
+
+    NOTE: This function is not called from sports_feed_v2 or v3.
+    It exists for the /api/fl/team-logo endpoint and any future
+    bounded-concurrency enrichment (Plan B).
+    """
+    if not team_name:
+        return {"logo_url": None, "fixtures": []}
+    if not 1 <= sport_id <= 42:
+        return {"logo_url": None, "fixtures": []}
+    try:
+        from kalshi_registry_seed import _normalize_team_name
+        norm = _normalize_team_name(team_name)
+    except Exception:
+        norm = ""
+
+    cache_key = (norm, sport_id)
+    cached = _TEAM_FIXTURE_CACHE.get(cache_key)
+    if cached and (time.time() - cached.get("ts", 0)) < _TEAM_FIXTURE_CACHE_TTL_SEC:
+        return cached["data"]
+
+    from flashlive_feed import _resolve_team_id, _fl_get
+    try:
+        team_id = await _resolve_team_id(team_name, str(sport_id))
+    except Exception:
+        team_id = ""
+    if not team_id:
+        empty = {"logo_url": None, "fixtures": []}
+        _TEAM_FIXTURE_CACHE[cache_key] = {"data": empty, "ts": time.time()}
+        return empty
+
+    try:
+        resp = await _fl_get("/v1/teams/fixtures", {
+            "locale":   "en_INT",
+            "sport_id": sport_id,
+            "team_id":  team_id,
+        })
+    except Exception:
+        resp = None
+    resp = resp or {}
+
+    logo_url = _extract_logo_from_fl_fixtures(resp, team_id)
+    fixtures = _parse_fl_fixtures_response(resp, team_id)
+    data = {"logo_url": logo_url, "fixtures": fixtures}
+
+    _TEAM_FIXTURE_CACHE[cache_key] = {"data": data, "ts": time.time()}
+    if norm and logo_url:
+        _TEAM_LOGO_CACHE[norm] = [logo_url]
+    return data
+
+
+@app.get("/api/fl/team-logo")
+async def fl_team_logo(team_name: str, sport_id: int = 1):
+    """Look up a team's logo URL via FL search + fixtures APIs.
+
+    Flow:
+      1. Cache check → if hit, return cached logo_url (no FL calls).
+      2. /v1/search/multi-search → resolve team_id (via existing
+         `_resolve_team_id` memoization).
+      3. /v1/teams/fixtures?team_id={...} → walk fixtures, extract
+         first image URL belonging to team_id.
+      4. Cache result. Subsequent calls — and any future code that
+         reads `_TEAM_LOGO_CACHE` — see the warmed entry.
+
+    Use cases:
+      - Manual triage: `curl '.../api/fl/team-logo?team_name=Universidad+Catolica&sport_id=1'`
+      - Frontend lazy-fetch: detect synth event with empty
+        HOME_IMAGES/AWAY_IMAGES and call this per-team
+      - Cache warmer scripts
+
+    Response:
+      { team_name, team_id|None, logo_url|None,
+        source: "cache" | "fl" | "fl_no_team" | "fl_no_image" | "error" }
+    """
+    if not team_name or not team_name.strip():
+        return {"error": "team_name required"}
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+
+    try:
+        from kalshi_registry_seed import _normalize_team_name
+        norm = _normalize_team_name(team_name)
+    except Exception:
+        norm = ""
+
+    if norm and norm in _TEAM_LOGO_CACHE:
+        cached = _TEAM_LOGO_CACHE[norm]
+        return {
+            "team_name": team_name,
+            "logo_url":  cached[0] if cached else None,
+            "source":    "cache",
+        }
+
+    from flashlive_feed import _resolve_team_id, _fl_get
+    try:
+        team_id = await _resolve_team_id(team_name, str(sport_id))
+    except Exception as e:
+        return {
+            "team_name": team_name,
+            "logo_url":  None,
+            "source":    "error",
+            "error":     f"FL search failed: {type(e).__name__}: {e}",
+        }
+    if not team_id:
+        return {
+            "team_name": team_name,
+            "team_id":   None,
+            "logo_url":  None,
+            "source":    "fl_no_team",
+        }
+
+    try:
+        resp = await _fl_get("/v1/teams/fixtures", {
+            "locale":   "en_INT",
+            "sport_id": sport_id,
+            "team_id":  team_id,
+        })
+    except Exception as e:
+        return {
+            "team_name": team_name,
+            "team_id":   team_id,
+            "logo_url":  None,
+            "source":    "error",
+            "error":     f"FL fixtures failed: {type(e).__name__}: {e}",
+        }
+
+    logo_url = _extract_logo_from_fl_fixtures(resp or {}, team_id)
+    if not logo_url:
+        return {
+            "team_name": team_name,
+            "team_id":   team_id,
+            "logo_url":  None,
+            "source":    "fl_no_image",
+        }
+
+    if norm:
+        _TEAM_LOGO_CACHE[norm] = [logo_url]
+
+    return {
+        "team_name": team_name,
+        "team_id":   team_id,
+        "logo_url":  logo_url,
+        "source":    "fl",
+    }
+# ── /FL team-logo lookup ─────────────────────────────────────────────
 
 @app.get("/api/ws_status")
 def ws_status():
