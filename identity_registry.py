@@ -700,9 +700,10 @@ class IdentityRegistry:
 # ── Method precedence ────────────────────────────────────────────
 
 _METHOD_PRIORITY = {
-    "manual":        4,  # operator override — never replaced
-    "strict":        3,
-    "alias_table":   2,
+    "manual":        5,  # operator override — never replaced
+    "strict":        4,
+    "alias_table":   3,
+    "title_match":   2,  # Kalshi `title` token-overlap with FL HOME/AWAY_NAME
     "guarded_fuzzy": 1,
 }
 

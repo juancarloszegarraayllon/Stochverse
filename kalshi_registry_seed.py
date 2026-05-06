@@ -55,6 +55,7 @@ Phase C explicitly does NOT:
     * Implement guarded fuzzy. Phase C2.
 """
 from __future__ import annotations
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -183,6 +184,117 @@ def _is_winner_market(series_ticker: str) -> bool:
     series = (series_ticker or "").upper()
     _, suffix = strip_known_suffix(series)
     return suffix in ("GAME", "MATCH")
+
+
+# ── Title-based pairing tier (Phase C2f) ─────────────────────────
+# Universal pairing route. Kalshi `title` field carries the full team
+# names (e.g. "Bayern Munich vs PSG", "Always Ready vs Lanus"). FL
+# ships HOME_NAME / AWAY_NAME with the same long forms. Token-overlap
+# match between them reaches every pair Kalshi names in the title —
+# without requiring an alias_table entry per team.
+#
+# Inserted between alias_table (tier 2) and guarded_fuzzy (tier 3).
+# Confidence 0.85 — below alias_table (0.95) since title parsing is
+# format-fragile, but above guarded_fuzzy (0.7) since both teams must
+# show overlapping tokens (no blind 1+1 inference).
+
+_KALSHI_TITLE_PATTERNS = (
+    # "TeamA vs TeamB" or "TeamA vs TeamB: <suffix>"
+    re.compile(r"^(.+?)\s+vs\s+(.+?)(?:\s*:.*)?$", re.IGNORECASE),
+    # "TeamA at TeamB" or "TeamA at TeamB: <suffix>"
+    re.compile(r"^(.+?)\s+at\s+(.+?)(?:\s*:.*)?$", re.IGNORECASE),
+    # "Will TeamA beat TeamB?"
+    re.compile(r"^Will\s+(.+?)\s+beat\s+(.+?)\??$", re.IGNORECASE),
+    # "TeamA - TeamB" (em-dash variants — uncommon but seen)
+    re.compile(r"^(.+?)\s+[-–—]\s+(.+?)(?:\s*:.*)?$"),
+)
+
+
+def _parse_kalshi_title(title: str) -> Optional[tuple]:
+    """Extract (team_a, team_b) from a Kalshi title.
+
+    Tries the common Kalshi title shapes in order. Returns None if
+    no pattern matches.
+    """
+    if not title:
+        return None
+    title = title.strip()
+    for pat in _KALSHI_TITLE_PATTERNS:
+        m = pat.match(title)
+        if m:
+            a = m.group(1).strip()
+            b = m.group(2).strip()
+            if a and b:
+                return (a, b)
+    return None
+
+
+def _title_name_tokens(s: str) -> set:
+    """Lowercase ≥3-char alphanum tokens from a team-name string."""
+    if not s:
+        return set()
+    return {t for t in re.split(r"[^a-z0-9]+", s.lower()) if len(t) >= 3}
+
+
+def _title_overlap_score(fl_name: str, kalshi_name: str) -> float:
+    """Token-set Jaccard between an FL HOME_NAME and a Kalshi title-side
+    name. Returns 0..1.
+    """
+    a = _title_name_tokens(fl_name)
+    b = _title_name_tokens(kalshi_name)
+    if not a or not b:
+        return 0.0
+    inter = a & b
+    if not inter:
+        return 0.0
+    return len(inter) / max(len(a), len(b))
+
+
+def _pair_via_title(registry: IdentityRegistry,
+                     fixture_candidates: list,
+                     kalshi_record: dict,
+                     min_score: float = 0.4) -> Optional[Fixture]:
+    """Pair a Kalshi record to one of the FL fixture candidates by
+    parsing its `title` and token-matching the two extracted names
+    against fixture home/away team canonical names.
+
+    Both sides must contribute non-zero overlap (so a single team-name
+    coincidence can't satisfy the match). Tries home/away in both
+    orientations since Kalshi's 'X at Y' notation puts the away side
+    first.
+    """
+    title = (kalshi_record.get("title") or "").strip()
+    parsed = _parse_kalshi_title(title)
+    if parsed is None:
+        return None
+    title_a, title_b = parsed
+
+    best_fx: Optional[Fixture] = None
+    best_score = min_score
+    for fx in fixture_candidates:
+        home_team = registry.resolve_team(fx.home_team_id)
+        away_team = registry.resolve_team(fx.away_team_id)
+        if home_team is None or away_team is None:
+            continue
+        # Orientation 1: title_a → home, title_b → away
+        h1 = _title_overlap_score(home_team.canonical_name, title_a)
+        a1 = _title_overlap_score(away_team.canonical_name, title_b)
+        # Orientation 2: title_a → away, title_b → home
+        h2 = _title_overlap_score(home_team.canonical_name, title_b)
+        a2 = _title_overlap_score(away_team.canonical_name, title_a)
+        if h1 > 0 and a1 > 0:
+            s1 = (h1 + a1) / 2.0
+        else:
+            s1 = 0.0
+        if h2 > 0 and a2 > 0:
+            s2 = (h2 + a2) / 2.0
+        else:
+            s2 = 0.0
+        score = max(s1, s2)
+        if score > best_score:
+            best_score = score
+            best_fx = fx
+    return best_fx
 
 
 # ── Outcome side classification ──────────────────────────────────
@@ -619,6 +731,7 @@ def seed_kalshi_records(registry: IdentityRegistry,
         "total":          0,
         "paired_strict":  0,
         "paired_alias":   0,
+        "paired_title":   0,
         "paired_guarded": 0,
         "paired_per_leg": 0,
         "unpaired":       0,
@@ -714,17 +827,31 @@ def seed_kalshi_records(registry: IdentityRegistry,
             if alias_winner is not None:
                 hit, hit_method = alias_winner, "alias_table"
 
+        # Tier 2.5 — title-based matching. Universal route that
+        # bypasses alias_table for any pair Kalshi mentions by name.
+        if hit is None:
+            title_winner = _pair_via_title(registry, candidates, rec)
+            if title_winner is not None:
+                hit, hit_method = title_winner, "title_match"
+
         if hit is not None:
+            confidence_by_method = {
+                "strict":      1.0,
+                "alias_table": 0.95,
+                "title_match": 0.85,
+            }
             registry.register_alias(
                 source="kalshi", external_id=ticker,
                 canonical_id=hit.id, method=hit_method,
-                confidence=1.0 if hit_method == "strict" else 0.95,
+                confidence=confidence_by_method.get(hit_method, 0.7),
             )
             _seed_winner_market_layer(registry, hit, rec, sport)
             if hit_method == "strict":
                 stats["paired_strict"] += 1
-            else:
+            elif hit_method == "alias_table":
                 stats["paired_alias"] += 1
+            elif hit_method == "title_match":
+                stats["paired_title"] += 1
             continue
 
         # Buffer for tier-3 attempt
