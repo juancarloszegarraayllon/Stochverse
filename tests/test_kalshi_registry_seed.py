@@ -1760,3 +1760,126 @@ class TestPersistentLogoCache:
         # Key should be the normalized form, not the raw FL name
         assert "universidad catolica" in _TEAM_LOGO_CACHE
         assert "u. catolica (chi)" not in _TEAM_LOGO_CACHE
+
+
+class TestPartialMatchFallback:
+    """Phase C2g+ — when normalized exact match misses, fall back
+    to UNIQUE substring containment ("New York" → "New York
+    Knicks"). Refuses to guess when 2+ candidates match.
+    """
+
+    def setup_method(self):
+        from main import _TEAM_LOGO_CACHE
+        _TEAM_LOGO_CACHE.clear()
+
+    def test_in_request_short_form_finds_full_form(self):
+        """Kalshi 'New York' → unique FL 'New York Knicks'."""
+        from main import _lookup_team_images_by_name
+        paired = [{"events": [
+            {"HOME_NAME": "New York Knicks",
+             "HOME_IMAGES": ["https://fl.cdn/knicks.png"],
+             "AWAY_NAME": "Boston Celtics",
+             "AWAY_IMAGES": ["https://fl.cdn/celtics.png"]},
+        ]}]
+        assert _lookup_team_images_by_name("New York", paired) == \
+            ["https://fl.cdn/knicks.png"]
+
+    def test_san_antonio_finds_spurs(self):
+        """Real-world: SAS Kalshi labels 'San Antonio' should find
+        FL 'San Antonio Spurs'."""
+        from main import _lookup_team_images_by_name
+        paired = [{"events": [
+            {"HOME_NAME": "San Antonio Spurs",
+             "HOME_IMAGES": ["https://fl.cdn/spurs.png"],
+             "AWAY_NAME": "Lakers",
+             "AWAY_IMAGES": ["https://fl.cdn/lakers.png"]},
+        ]}]
+        assert _lookup_team_images_by_name("San Antonio", paired) == \
+            ["https://fl.cdn/spurs.png"]
+
+    def test_ambiguous_partial_returns_empty(self):
+        """Kalshi 'New York' against ['New York Knicks', 'New York
+        Mets'] → 2+ candidates contain 'new york' → refuses to
+        guess. Returns empty list rather than the wrong logo."""
+        from main import _lookup_team_images_by_name
+        paired = [{"events": [
+            {"HOME_NAME": "New York Knicks",
+             "HOME_IMAGES": ["https://fl.cdn/knicks.png"],
+             "AWAY_NAME": "New York Mets",
+             "AWAY_IMAGES": ["https://fl.cdn/mets.png"]},
+        ]}]
+        assert _lookup_team_images_by_name("New York", paired) == []
+
+    def test_real_family_ambiguous(self):
+        """Real Madrid / Real Sociedad / Real Betis all contain
+        'real' — 'Real' search must NOT collapse them."""
+        from main import (_lookup_team_images_by_name,
+                            _remember_team_logos)
+        _remember_team_logos({"HOME_NAME": "Real Madrid",
+                               "HOME_IMAGES": ["rm.png"]})
+        _remember_team_logos({"HOME_NAME": "Real Sociedad",
+                               "HOME_IMAGES": ["rs.png"]})
+        _remember_team_logos({"HOME_NAME": "Real Betis",
+                               "HOME_IMAGES": ["rb.png"]})
+        # Bare 'Real' is ambiguous → empty
+        assert _lookup_team_images_by_name("Real", None) == []
+        # 'Real Madrid' is exact → tier 2 catches it
+        assert _lookup_team_images_by_name("Real Madrid", None) == ["rm.png"]
+
+    def test_exact_in_request_beats_partial_in_request(self):
+        """If both exact and partial would match in tier 1, exact
+        wins (returns early before partial pass runs)."""
+        from main import _lookup_team_images_by_name
+        paired = [{"events": [
+            {"HOME_NAME": "San Antonio",
+             "HOME_IMAGES": ["https://fl.cdn/exact.png"],
+             "AWAY_NAME": "San Antonio Spurs",
+             "AWAY_IMAGES": ["https://fl.cdn/spurs.png"]},
+        ]}]
+        # 'San Antonio' has exact match on home, partial on away.
+        # Exact wins.
+        assert _lookup_team_images_by_name("San Antonio", paired) == \
+            ["https://fl.cdn/exact.png"]
+
+    def test_cache_partial_fallback(self):
+        """When in-request has no match (exact or partial), cache
+        partial match runs as last tier."""
+        from main import (_lookup_team_images_by_name,
+                            _remember_team_logos)
+        _remember_team_logos({"HOME_NAME": "New York Knicks",
+                               "HOME_IMAGES": ["cached_knicks.png"]})
+        # No paired tournaments → tier 1 + tier 3 skip; tier 2 exact
+        # misses (cache key is 'new york knicks' not 'new york');
+        # tier 4 partial fires.
+        assert _lookup_team_images_by_name("New York", None) == \
+            ["cached_knicks.png"]
+
+    def test_short_target_skipped(self):
+        """Targets under 3 chars should NOT match anything (avoid
+        'fc'/'ny'/etc. matching everything)."""
+        from main import _partial_match_unique_team
+        cands = [("new york knicks", ["x"])]
+        assert _partial_match_unique_team("ny", cands) is None
+        assert _partial_match_unique_team("",   cands) is None
+
+    def test_partial_helper_direct(self):
+        """Direct unit test on the helper for edge cases."""
+        from main import _partial_match_unique_team
+        # 0 candidates → None
+        assert _partial_match_unique_team("foo", []) is None
+        # 1 unique partial → return imgs
+        assert _partial_match_unique_team(
+            "tolima", [("deportes tolima", ["t.png"])]
+        ) == ["t.png"]
+        # 2 distinct partials → None
+        assert _partial_match_unique_team(
+            "real",
+            [("real madrid", ["rm.png"]), ("real sociedad", ["rs.png"])],
+        ) is None
+        # Same name appearing twice (e.g. home of one event also
+        # away of another) → still 1 unique entry → match
+        assert _partial_match_unique_team(
+            "tolima",
+            [("deportes tolima", ["t.png"]),
+             ("deportes tolima", ["t.png"])],
+        ) == ["t.png"]

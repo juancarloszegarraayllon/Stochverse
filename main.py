@@ -9895,6 +9895,36 @@ def _remember_team_logos(fl_event: dict) -> None:
             _TEAM_LOGO_CACHE[norm] = list(imgs)
 
 
+def _partial_match_unique_team(target_n: str,
+                                  candidates: list) -> Optional[list]:
+    """Return imgs from the UNIQUE candidate whose normalized name
+    has bidirectional substring overlap with `target_n`. Used as a
+    fallback for short Kalshi names ("New York" → FL "New York
+    Knicks"; "San Antonio" → FL "San Antonio Spurs") that miss
+    exact normalization equality.
+
+    Strict guard against ambiguity: returns None when 0 OR 2+
+    distinct candidate names match. So "New York" against ["New
+    York Knicks", "New York Mets"] returns None (caller falls back
+    to no match), preventing the wrong logo from being attached.
+
+    `candidates`: iterable of `(normalized_name, images_list)`.
+    """
+    if not target_n or len(target_n) < 3:
+        return None
+    matches: dict = {}  # norm_name → imgs (dedup by name)
+    for cand_n, imgs in candidates:
+        if not cand_n or not imgs or len(cand_n) < 3:
+            continue
+        if cand_n == target_n:
+            continue  # exact match would have been caught earlier
+        if target_n in cand_n or cand_n in target_n:
+            matches[cand_n] = imgs
+    if len(matches) == 1:
+        return next(iter(matches.values()))
+    return None
+
+
 def _lookup_team_images_by_name(target_name: str,
                                   paired_tournaments: list) -> list:
     """Walk paired FL tournaments looking for a team whose canonical
@@ -9906,6 +9936,15 @@ def _lookup_team_images_by_name(target_name: str,
     seeder (PR #32) — strip country suffix, expand abbreviations,
     strip generic prefix, lowercase. So Kalshi-only "Bayern Munich"
     matches FL-paired "FC Bayern Munich" or "Bayern Munich (Ger)".
+
+    Lookup tiers, tried in order:
+      1. In-request paired events, EXACT normalized match
+      2. Process-memory cache, EXACT normalized match
+      3. In-request paired events, UNIQUE partial match (substring
+         containment in either direction). Catches "New York" →
+         "New York Knicks" — but only when exactly one paired team
+         contains the search term.
+      4. Process-memory cache, UNIQUE partial match.
 
     Used by `_v2_synth_unpaired_event` to attach team logos on
     synthetic Kalshi-only events using FL imagery from the same
@@ -9950,6 +9989,39 @@ def _lookup_team_images_by_name(target_name: str,
     cached = _TEAM_LOGO_CACHE.get(target_n)
     if cached:
         return cached
+    # Tier 3: same-request paired events, unique partial match.
+    # Handles short Kalshi forms ('New York', 'San Antonio') that
+    # don't normalize exactly to FL's full forms ('New York Knicks',
+    # 'San Antonio Spurs'). Returns only when EXACTLY ONE paired
+    # team has substring overlap — ambiguous matches refuse to guess.
+    if paired_tournaments:
+        in_request_candidates = []
+        for t in paired_tournaments:
+            if not isinstance(t, dict):
+                continue
+            for ev in (t.get("events") or []):
+                if not isinstance(ev, dict):
+                    continue
+                for name_field, img_field in (
+                    ("HOME_NAME", "HOME_IMAGES"),
+                    ("AWAY_NAME", "AWAY_IMAGES"),
+                ):
+                    name = ev.get(name_field) or ""
+                    imgs = ev.get(img_field) or []
+                    if name and imgs:
+                        in_request_candidates.append(
+                            (_normalize_team_name(name), imgs)
+                        )
+        partial = _partial_match_unique_team(target_n, in_request_candidates)
+        if partial is not None:
+            return partial
+    # Tier 4: persistent cache, unique partial match. Last resort —
+    # same ambiguity guard applies.
+    partial = _partial_match_unique_team(
+        target_n, list(_TEAM_LOGO_CACHE.items()),
+    )
+    if partial is not None:
+        return partial
     return []
 
 
