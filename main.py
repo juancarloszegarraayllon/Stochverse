@@ -8400,6 +8400,270 @@ async def debug_registry_diff(sport_id: int, indent_days: int = 0,
     }
 
 
+def _notify_webhook(payload: dict,
+                     url: Optional[str] = None) -> dict:
+    """POST a JSON payload to a webhook URL (Discord/Slack-style).
+
+    URL resolution order:
+      1. explicit `url` arg
+      2. STOCHVERSE_NOTIFY_WEBHOOK_URL env var
+
+    No-op (returns {'sent': False, 'reason': 'no_url'}) when no URL
+    is configured. Designed for cron jobs that want to POST a duplicate-
+    scan summary to Discord/Slack without coupling the registry layer to
+    any specific provider. Discord and Slack both accept simple JSON;
+    Slack expects {"text": ...}, Discord expects {"content": ...} —
+    callers shape the payload to match their target.
+
+    Returns {'sent': bool, 'status_code': int|None, 'reason': str|None}.
+    Failures are logged and swallowed — never throws.
+    """
+    import os
+    import json as _json
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+    target = url or os.environ.get("STOCHVERSE_NOTIFY_WEBHOOK_URL", "")
+    if not target:
+        return {"sent": False, "reason": "no_url"}
+    try:
+        body = _json.dumps(payload).encode("utf-8")
+        req = Request(target, data=body,
+                       headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=5) as resp:
+            return {"sent": True, "status_code": resp.status,
+                    "reason": None}
+    except HTTPError as e:
+        return {"sent": False, "status_code": e.code,
+                "reason": f"http_error: {e.reason}"}
+    except URLError as e:
+        return {"sent": False, "status_code": None,
+                "reason": f"url_error: {e.reason}"}
+    except Exception as e:
+        return {"sent": False, "status_code": None,
+                "reason": f"exception: {type(e).__name__}: {e}"}
+
+
+@app.get("/api/_debug/registry_duplicates")
+async def debug_registry_duplicates(sport_id: int,
+                                      indent_days: int = 0,
+                                      timezone: int = 0,
+                                      min_overlap: float = 0.5,
+                                      notify: bool = False):
+    """Surface duplicate Team and Fixture candidates in the registry
+    seeded from current FL+Kalshi data for the given sport.
+
+    Query params:
+      sport_id     — FL sport id (1..42)
+      indent_days  — date offset (-7..+7), default 0 (today)
+      timezone     — FL tz hint, default 0 (UTC)
+      min_overlap  — Jaccard threshold for team-name candidates (0..1)
+      notify       — when true, POST a compact summary to
+                     STOCHVERSE_NOTIFY_WEBHOOK_URL (no-op without env var)
+
+    Response:
+      {
+        sport, sport_id, indent_days,
+        registry: { team_count, fixture_count },
+        duplicate_team_candidates: [...],
+        duplicate_fixture_candidates: [...],
+        notify: { sent, status_code, reason }   # only when notify=true
+      }
+
+    Read-only — does NOT mutate the registry. Resolution (merging,
+    retiring stale aliases) is a separate operator action.
+    """
+    from flashlive_feed import _fl_get
+    from registry_pairing import seed_and_pair_via_registry
+    from registry_duplicates import (
+        find_duplicate_team_candidates,
+        find_duplicate_fixture_candidates,
+        summarize_for_notification,
+    )
+
+    if not 1 <= sport_id <= 42:
+        return {"error": "sport_id must be between 1 and 42"}
+    sport = _KALSHI_SPORT_BY_FL_ID.get(sport_id, "")
+    if not sport:
+        return {"error":
+                f"no Kalshi sport mapping for FL sport_id={sport_id}"}
+
+    fl_data = None
+    if -7 <= indent_days <= 7:
+        try:
+            fl_data = await _fl_get("/v1/events/list", {
+                "sport_id": sport_id, "timezone": timezone,
+                "indent_days": indent_days,
+            })
+        except Exception:
+            fl_data = None
+    fl_data = fl_data or {"DATA": []}
+
+    get_data()
+    cache_records = _cache.get("data_all") or _cache.get("data") or []
+    sport_kalshi = [r for r in cache_records
+                      if (r.get("_sport") or "") == sport]
+
+    _, registry = seed_and_pair_via_registry(sport, fl_data, sport_kalshi)
+
+    team_candidates = find_duplicate_team_candidates(
+        registry, sport=sport, min_overlap=min_overlap,
+    )
+    fixture_candidates = find_duplicate_fixture_candidates(
+        registry, sport=sport,
+    )
+
+    out = {
+        "sport":       sport,
+        "sport_id":    sport_id,
+        "indent_days": indent_days,
+        "registry": {
+            "team_count":    len(registry._teams),
+            "fixture_count": len(registry._fixtures),
+        },
+        "duplicate_team_candidates":     team_candidates[:30],
+        "duplicate_fixture_candidates":  fixture_candidates[:30],
+        "duplicate_team_candidates_count":
+            len(team_candidates),
+        "duplicate_fixture_candidates_count":
+            len(fixture_candidates),
+    }
+    if notify:
+        summary = summarize_for_notification(
+            team_candidates, fixture_candidates,
+        )
+        summary["sport"] = sport
+        summary["indent_days"] = indent_days
+        # Discord-friendly content shape; Slack callers can rewrap.
+        content_lines = [
+            f"Registry duplicate scan — {sport} (indent_days={indent_days})",
+            f"  Team candidates:    {summary['duplicate_team_candidates_count']}",
+            f"  Fixture candidates: {summary['duplicate_fixture_candidates_count']}",
+        ]
+        if summary["top_team_candidates"]:
+            content_lines.append("  Top team examples:")
+            for c in summary["top_team_candidates"]:
+                content_lines.append(
+                    f"    {c['a']} ↔ {c['b']} (overlap {c['overlap']})"
+                )
+        out["notify"] = _notify_webhook({
+            "content": "\n".join(content_lines),
+            "summary": summary,
+        })
+    return out
+
+
+@app.get("/api/_debug/registry_duplicates_all")
+async def debug_registry_duplicates_all(indent_days: int = 0,
+                                          timezone: int = 0,
+                                          min_overlap: float = 0.5,
+                                          notify: bool = False):
+    """Cross-sport duplicate scan. Walks every FL sport_id mapped to
+    a Kalshi sport, seeds an ephemeral registry per sport, and
+    aggregates the candidate counts.
+
+    Same query params as /registry_duplicates plus the cross-sport
+    aggregation. Suitable for a Render cron job that posts a single
+    daily/weekly Discord message via the `notify` flag — env var
+    STOCHVERSE_NOTIFY_WEBHOOK_URL controls the destination.
+
+    Response shape:
+      {
+        indent_days, totals: {team, fixture}, by_sport: {...},
+        notify?: {sent, status_code, reason}
+      }
+    """
+    from flashlive_feed import _fl_get
+    from registry_pairing import seed_and_pair_via_registry
+    from registry_duplicates import (
+        find_duplicate_team_candidates,
+        find_duplicate_fixture_candidates,
+        summarize_for_notification,
+    )
+
+    by_sport: dict = {}
+    total_team = 0
+    total_fixture = 0
+    aggregate_team_candidates: list = []
+    aggregate_fixture_candidates: list = []
+
+    get_data()
+    cache_records = _cache.get("data_all") or _cache.get("data") or []
+
+    for sport_id, sport in _KALSHI_SPORT_BY_FL_ID.items():
+        if not sport:
+            continue
+        fl_data = None
+        if -7 <= indent_days <= 7:
+            try:
+                fl_data = await _fl_get("/v1/events/list", {
+                    "sport_id": sport_id, "timezone": timezone,
+                    "indent_days": indent_days,
+                })
+            except Exception:
+                fl_data = None
+        fl_data = fl_data or {"DATA": []}
+
+        sport_kalshi = [r for r in cache_records
+                          if (r.get("_sport") or "") == sport]
+        _, registry = seed_and_pair_via_registry(
+            sport, fl_data, sport_kalshi,
+        )
+
+        t_cands = find_duplicate_team_candidates(
+            registry, sport=sport, min_overlap=min_overlap,
+        )
+        f_cands = find_duplicate_fixture_candidates(
+            registry, sport=sport,
+        )
+        by_sport[sport] = {
+            "sport_id":            sport_id,
+            "team_candidates":     len(t_cands),
+            "fixture_candidates":  len(f_cands),
+            "registry_team_count":    len(registry._teams),
+            "registry_fixture_count": len(registry._fixtures),
+        }
+        total_team += len(t_cands)
+        total_fixture += len(f_cands)
+        aggregate_team_candidates.extend(t_cands)
+        aggregate_fixture_candidates.extend(f_cands)
+
+    out = {
+        "indent_days": indent_days,
+        "totals": {
+            "duplicate_team_candidates":    total_team,
+            "duplicate_fixture_candidates": total_fixture,
+        },
+        "by_sport": by_sport,
+    }
+    if notify:
+        summary = summarize_for_notification(
+            aggregate_team_candidates, aggregate_fixture_candidates,
+        )
+        content_lines = [
+            f"Registry duplicate scan (cross-sport, indent_days={indent_days})",
+            f"  Team candidates total:    {total_team}",
+            f"  Fixture candidates total: {total_fixture}",
+        ]
+        # Per-sport non-zero rollup
+        nonzero = [
+            (s, b) for s, b in by_sport.items()
+            if b["team_candidates"] or b["fixture_candidates"]
+        ]
+        if nonzero:
+            content_lines.append("  Per-sport breakdown (non-zero):")
+            for s, b in nonzero:
+                content_lines.append(
+                    f"    {s}: team={b['team_candidates']}, "
+                    f"fixture={b['fixture_candidates']}"
+                )
+        out["notify"] = _notify_webhook({
+            "content": "\n".join(content_lines),
+            "summary": summary,
+            "by_sport": by_sport,
+        })
+    return out
+
+
 @app.get("/api/_debug/sports_inventory")
 async def debug_sports_inventory():
     """Sport-level inventory: every distinct _sport value in the
