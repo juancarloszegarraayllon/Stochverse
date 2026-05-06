@@ -10708,7 +10708,25 @@ async def _enrich_synthetic_events_with_fl_data(
                 )
         # ── /TEMPORARY DEBUG ────────────────────────────────────
         return
-    results = await asyncio.gather(*fetch_coros, return_exceptions=True)
+    # ── TEMPORARY DEBUG: bracket the gather so we can tell if it's
+    # being reached at all and whether it completes vs raises.
+    print(
+        f"DEBUG enrich PRE-GATHER: fetch_coros_count={len(fetch_coros)} "
+        f"target_entries_count={len(target_entries)}",
+        flush=True,
+    )
+    try:
+        results = await asyncio.gather(*fetch_coros, return_exceptions=True)
+        print(
+            f"DEBUG enrich POST-GATHER: results_count={len(results)}",
+            flush=True,
+        )
+    except Exception as _ge:
+        import traceback
+        print(f"DEBUG enrich GATHER EXCEPTION: {_ge}", flush=True)
+        traceback.print_exc()
+        return
+    # ── /TEMPORARY DEBUG ────────────────────────────────────────
 
     # Track duplicates for in-place removal after the loop (don't
     # mutate the events list while iterating). When a duplicate is
