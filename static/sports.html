@@ -1378,10 +1378,9 @@ function renderEventRow(ev, market, isMarketRow) {
   // contextual metadata for the row beneath. Game-number chip
   // (parsed from kalshi.title) renders alongside the series
   // chip when both apply.
-  const _kickoffChipHtml = renderKickoffTimeChip(ev);
   const _gameChipHtml = renderGameNumberChip(ev);
   const _aggRowHtml = renderAggOrSeries(ev);
-  const _aggCombined = [_kickoffChipHtml, _gameChipHtml, _aggRowHtml]
+  const _aggCombined = [_gameChipHtml, _aggRowHtml]
     .filter(s => s).join(' ');
   if (_aggCombined) {
     html += '<div class="sp-c2-event-aggrow">' + _aggCombined + '</div>';
