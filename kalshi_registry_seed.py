@@ -405,6 +405,58 @@ def _pair_via_title(registry: IdentityRegistry,
             f"candidates_count={len(fixture_candidates)}",
             flush=True,
         )
+        # Diagnostic: which candidates fall within ±2hr of the Kalshi
+        # kickoff? Reveals whether the time gate is too tight or
+        # whether the expected FL fixture isn't in the pool at all.
+        if kalshi_kickoff_ts is not None:
+            near = []
+            for fx in fixture_candidates:
+                if not fx.start_time_utc:
+                    continue
+                diff = abs(fx.start_time_utc - kalshi_kickoff_ts)
+                if diff < 2 * 3600:
+                    h = registry.resolve_team(fx.home_team_id)
+                    a = registry.resolve_team(fx.away_team_id)
+                    near.append({
+                        "fl_start": fx.start_time_utc,
+                        "diff_s":   diff,
+                        "home":     h.canonical_name if h else "?",
+                        "away":     a.canonical_name if a else "?",
+                    })
+            print(
+                f"DEBUG title_match[{_ticker_dbg}] near-time (±2hr): "
+                f"{near}",
+                flush=True,
+            )
+        # Diagnostic: does ANY candidate (regardless of time) have a
+        # canonical team name that name-matches the parsed Kalshi
+        # title sides? If yes but they're outside the time window,
+        # it's a time-gate issue. If no, the team isn't in the pool
+        # at all — upstream issue (FL didn't ship it, or local_date
+        # bucketed it elsewhere).
+        title_a_n = _normalize_team_name(title_a)
+        title_b_n = _normalize_team_name(title_b)
+        by_name = []
+        for fx in fixture_candidates:
+            h = registry.resolve_team(fx.home_team_id)
+            a = registry.resolve_team(fx.away_team_id)
+            h_n = _normalize_team_name(h.canonical_name) if h else ""
+            a_n = _normalize_team_name(a.canonical_name) if a else ""
+            # Substring check on normalized names — looser than
+            # token-Jaccard, just for diagnosis.
+            if (title_a_n in h_n or title_a_n in a_n
+                or title_b_n in h_n or title_b_n in a_n
+                or h_n in title_a_n or a_n in title_a_n):
+                by_name.append({
+                    "fl_start": fx.start_time_utc,
+                    "home":     h.canonical_name if h else "?",
+                    "away":     a.canonical_name if a else "?",
+                })
+        print(
+            f"DEBUG title_match[{_ticker_dbg}] by-name (any time): "
+            f"{by_name}",
+            flush=True,
+        )
 
     best_fx: Optional[Fixture] = None
     best_score = min_score
