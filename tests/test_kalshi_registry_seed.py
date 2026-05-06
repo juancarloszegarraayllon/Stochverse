@@ -1883,3 +1883,259 @@ class TestPartialMatchFallback:
             [("deportes tolima", ["t.png"]),
              ("deportes tolima", ["t.png"])],
         ) == ["t.png"]
+
+
+class TestFlTeamDataFetch:
+    """Phase C2g+ — `_fetch_fl_team_data` returns logo + fixtures
+    via FL search + fixtures APIs, caches with TTL, and feeds
+    `_TEAM_LOGO_CACHE` for the existing lookup helper.
+    """
+
+    def setup_method(self):
+        from main import _TEAM_FIXTURE_CACHE, _TEAM_LOGO_CACHE
+        _TEAM_FIXTURE_CACHE.clear()
+        _TEAM_LOGO_CACHE.clear()
+
+    def test_returns_logo_and_fixtures(self):
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        async def fake_resolve(name, sport_id):
+            return "BMU01"
+
+        async def fake_fl_get(path, params):
+            return {"DATA": [{
+                "NAME": "Bundesliga",
+                "EVENTS": [{
+                    "HOME_PARTICIPANT_TEAM_ID": "BMU01",
+                    "HOME_NAME": "Bayern Munich",
+                    "AWAY_NAME": "Dortmund",
+                    "HOME_IMAGES": ["https://fl.cdn/bayern.png"],
+                    "AWAY_IMAGES": ["https://fl.cdn/bvb.png"],
+                    "START_TIME": 1778119200,
+                }],
+            }]}
+
+        import flashlive_feed
+        with patch.object(flashlive_feed, "_resolve_team_id",
+                            side_effect=fake_resolve):
+            with patch.object(flashlive_feed, "_fl_get",
+                                side_effect=fake_fl_get):
+                result = asyncio.run(
+                    main._fetch_fl_team_data("Bayern Munich", 1)
+                )
+        assert result["logo_url"] == "https://fl.cdn/bayern.png"
+        assert len(result["fixtures"]) == 1
+        fx = result["fixtures"][0]
+        assert fx["home"] == "Bayern Munich"
+        assert fx["away"] == "Dortmund"
+        assert fx["tournament"] == "Bundesliga"
+        assert fx["start_time"] == 1778119200
+        assert ("bayern munich", 1) in main._TEAM_FIXTURE_CACHE
+        assert main._TEAM_LOGO_CACHE.get("bayern munich") == \
+            ["https://fl.cdn/bayern.png"]
+
+    def test_cache_hit_within_ttl_skips_fl(self):
+        import asyncio
+        import time as _time
+        import main
+
+        main._TEAM_FIXTURE_CACHE[("bayern munich", 1)] = {
+            "data": {
+                "logo_url": "https://cached.png",
+                "fixtures": [{"start_time": 1, "home": "X",
+                               "away": "Y", "tournament": "T"}],
+            },
+            "ts": _time.time(),
+        }
+        result = asyncio.run(main._fetch_fl_team_data("Bayern Munich", 1))
+        assert result["logo_url"] == "https://cached.png"
+
+    def test_empty_team_id_caches_miss(self):
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        async def fake_resolve(name, sport_id):
+            return ""
+
+        import flashlive_feed
+        with patch.object(flashlive_feed, "_resolve_team_id",
+                            side_effect=fake_resolve):
+            result = asyncio.run(main._fetch_fl_team_data("Foo", 1))
+        assert result == {"logo_url": None, "fixtures": []}
+        assert ("foo", 1) in main._TEAM_FIXTURE_CACHE
+
+
+class TestMatchFixtureForSynthEvent:
+    def test_matches_by_opponent_and_date(self):
+        from main import _match_fixture_for_synth_event
+        fixtures = [
+            {"start_time": 1778119200, "home": "Bayern Munich",
+             "away": "Dortmund", "tournament": "Bundesliga"},
+            {"start_time": 1778205600, "home": "Bayern Munich",
+             "away": "Wolfsburg", "tournament": "Bundesliga"},
+        ]
+        ts = _match_fixture_for_synth_event(
+            fixtures, "Dortmund", 1778119200,
+        )
+        assert ts == 1778119200
+
+    def test_rejects_outside_fuzz_window(self):
+        from main import _match_fixture_for_synth_event
+        fixtures = [
+            {"start_time": 1778119200, "home": "Bayern Munich",
+             "away": "Dortmund", "tournament": "Bundesliga"},
+        ]
+        ts = _match_fixture_for_synth_event(
+            fixtures, "Dortmund",
+            1778119200 + 48 * 3600,
+        )
+        assert ts is None
+
+    def test_substring_opponent_matches(self):
+        from main import _match_fixture_for_synth_event
+        fixtures = [
+            {"start_time": 1, "home": "FC Bayern Munich",
+             "away": "Dortmund BVB", "tournament": "T"},
+        ]
+        assert _match_fixture_for_synth_event(
+            fixtures, "Bayern Munich", 0,
+        ) == 1
+        assert _match_fixture_for_synth_event(
+            fixtures, "Dortmund", 0,
+        ) == 1
+
+    def test_no_target_disables_time_check(self):
+        from main import _match_fixture_for_synth_event
+        fixtures = [
+            {"start_time": 9999999999, "home": "Bayern",
+             "away": "Dortmund", "tournament": "T"},
+        ]
+        # target_kickoff_ts=0 → match purely on opponent name.
+        assert _match_fixture_for_synth_event(
+            fixtures, "Dortmund", 0,
+        ) == 9999999999
+
+    def test_short_opponent_skipped(self):
+        from main import _match_fixture_for_synth_event
+        fixtures = [{"start_time": 1, "home": "X",
+                     "away": "Boca", "tournament": "T"}]
+        assert _match_fixture_for_synth_event(fixtures, "XY", 0) is None
+
+    def test_empty_fixtures_returns_none(self):
+        from main import _match_fixture_for_synth_event
+        assert _match_fixture_for_synth_event([], "Dortmund", 0) is None
+
+
+class TestSyntheticEventEnrichment:
+    def setup_method(self):
+        from main import _TEAM_FIXTURE_CACHE, _TEAM_LOGO_CACHE
+        _TEAM_FIXTURE_CACHE.clear()
+        _TEAM_LOGO_CACHE.clear()
+
+    def test_enriches_logos_and_kickoff(self):
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        team_data_map = {
+            "Bayern Munich": {
+                "logo_url": "https://fl.cdn/bayern.png",
+                "fixtures": [{"start_time": 1778119200,
+                               "home": "Bayern Munich",
+                               "away": "PSG",
+                               "tournament": "UCL"}],
+            },
+            "PSG": {
+                "logo_url": "https://fl.cdn/psg.png",
+                "fixtures": [{"start_time": 1778119200,
+                               "home": "Bayern Munich",
+                               "away": "PSG",
+                               "tournament": "UCL"}],
+            },
+        }
+
+        async def fake_fetch(name, sport_id):
+            return team_data_map.get(
+                name, {"logo_url": None, "fixtures": []}
+            )
+
+        unpaired = [{
+            "events": [{
+                "_kalshi_h2h_only": True,
+                "HOME_NAME":        "Bayern Munich",
+                "AWAY_NAME":        "PSG",
+                "START_TIME":       1778119200 + 10800,
+            }],
+        }]
+
+        with patch.object(main, "_fetch_fl_team_data",
+                            side_effect=fake_fetch):
+            asyncio.run(main._enrich_synthetic_events_with_fl_data(
+                unpaired, sport_id=1,
+            ))
+        ev = unpaired[0]["events"][0]
+        assert ev["HOME_IMAGES"] == ["https://fl.cdn/bayern.png"]
+        assert ev["AWAY_IMAGES"] == ["https://fl.cdn/psg.png"]
+        assert ev["START_TIME"] == 1778119200
+        assert ev["_kickoff_source"] == "fl_fixture_match"
+
+    def test_keeps_kalshi_estimate_when_no_fl_match(self):
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        async def fake_fetch(name, sport_id):
+            return {
+                "logo_url": "https://fl.cdn/x.png",
+                "fixtures": [{"start_time": 1, "home": "X",
+                               "away": "DifferentTeam",
+                               "tournament": "T"}],
+            }
+
+        unpaired = [{
+            "events": [{
+                "_kalshi_h2h_only": True,
+                "HOME_NAME":        "Bayern Munich",
+                "AWAY_NAME":        "PSG",
+                "START_TIME":       12345,
+            }],
+        }]
+
+        with patch.object(main, "_fetch_fl_team_data",
+                            side_effect=fake_fetch):
+            asyncio.run(main._enrich_synthetic_events_with_fl_data(
+                unpaired, sport_id=1,
+            ))
+        ev = unpaired[0]["events"][0]
+        assert ev["HOME_IMAGES"] == ["https://fl.cdn/x.png"]
+        assert ev["START_TIME"] == 12345
+        assert ev["_kickoff_source"] == "kalshi_estimate"
+
+    def test_skips_non_synthetic_events(self):
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        called = {"count": 0}
+
+        async def fake_fetch(name, sport_id):
+            called["count"] += 1
+            return {"logo_url": None, "fixtures": []}
+
+        unpaired = [{
+            "events": [
+                {"_kalshi_h2h_only": False, "HOME_NAME": "X",
+                 "AWAY_NAME": "Y", "START_TIME": 1},
+                {"HOME_NAME": "A", "AWAY_NAME": "B", "START_TIME": 2},
+            ],
+        }]
+
+        with patch.object(main, "_fetch_fl_team_data",
+                            side_effect=fake_fetch):
+            asyncio.run(main._enrich_synthetic_events_with_fl_data(
+                unpaired, sport_id=1,
+            ))
+        assert called["count"] == 0
