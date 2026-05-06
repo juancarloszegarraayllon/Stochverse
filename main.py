@@ -1425,6 +1425,25 @@ _SERIES_TOURNAMENT_HINTS: dict = {}
 # events to 'atl. madrid' hints.
 _FL_TEAM_HINTS: dict = {}
 
+# Persistent team-logo cache keyed by normalized team name.
+# Populated incrementally as FL-paired events flow through the feed
+# builder — every paired event contributes its HOME_IMAGES /
+# AWAY_IMAGES under the normalized form of HOME_NAME / AWAY_NAME.
+# Used by `_lookup_team_images_by_name` as a fallback when the
+# current request's FL feed doesn't contain the team — synthetic
+# Kalshi-only events still inherit imagery seen on prior requests.
+#
+# Lifetime: process memory only (no DB). Builds up naturally over
+# time. Worst case: empty cache on first deploy → no fallback hits
+# until paired events warm it.
+#
+# Keyed by normalized name only (not by sport). Cross-sport name
+# collisions are theoretically possible — e.g. soccer Real Madrid
+# vs basketball Real Madrid both normalize to "real madrid" and
+# would share an entry. In practice both would link to the same
+# real-world club's imagery so the collision is benign.
+_TEAM_LOGO_CACHE: dict = {}
+
 # FlashLive capability map cache. Populated by /api/debug_fl_capabilities.
 # A full scan can spend ~150-300 RapidAPI calls so we hold the result
 # for a day. Pass ?refresh=1 to force a re-scan.
@@ -9848,6 +9867,34 @@ def _v2_build_kalshi_block(records: list, sport: str,
     }
 
 
+def _remember_team_logos(fl_event: dict) -> None:
+    """Store HOME_IMAGES / AWAY_IMAGES from a paired FL event into
+    `_TEAM_LOGO_CACHE` keyed by `_normalize_team_name(HOME_NAME)` /
+    `_normalize_team_name(AWAY_NAME)`.
+
+    Idempotent: re-runs over the same event are a no-op (later
+    requests refresh the cache value to whatever FL ships now).
+    Skips empty names and empty image lists.
+    """
+    if not isinstance(fl_event, dict):
+        return
+    try:
+        from kalshi_registry_seed import _normalize_team_name
+    except Exception:
+        return
+    for name_field, img_field in (
+        ("HOME_NAME", "HOME_IMAGES"),
+        ("AWAY_NAME", "AWAY_IMAGES"),
+    ):
+        name = fl_event.get(name_field) or ""
+        imgs = fl_event.get(img_field) or []
+        if not name or not imgs:
+            continue
+        norm = _normalize_team_name(name)
+        if norm:
+            _TEAM_LOGO_CACHE[norm] = list(imgs)
+
+
 def _lookup_team_images_by_name(target_name: str,
                                   paired_tournaments: list) -> list:
     """Walk paired FL tournaments looking for a team whose canonical
@@ -9866,7 +9913,7 @@ def _lookup_team_images_by_name(target_name: str,
     render with empty HOME_IMAGES/AWAY_IMAGES because there's no
     direct FL pairing to inherit from.
     """
-    if not target_name or not paired_tournaments:
+    if not target_name:
         return []
     try:
         from kalshi_registry_seed import _normalize_team_name
@@ -9875,23 +9922,34 @@ def _lookup_team_images_by_name(target_name: str,
     target_n = _normalize_team_name(target_name)
     if not target_n:
         return []
-    for t in paired_tournaments:
-        if not isinstance(t, dict):
-            continue
-        for ev in (t.get("events") or []):
-            if not isinstance(ev, dict):
+    # Tier 1: same-request paired FL events. Highest confidence —
+    # this is data we just received from FL, so any imagery is fresh.
+    if paired_tournaments:
+        for t in paired_tournaments:
+            if not isinstance(t, dict):
                 continue
-            for name_field, img_field in (
-                ("HOME_NAME", "HOME_IMAGES"),
-                ("AWAY_NAME", "AWAY_IMAGES"),
-            ):
-                name = ev.get(name_field) or ""
-                if not name:
+            for ev in (t.get("events") or []):
+                if not isinstance(ev, dict):
                     continue
-                if _normalize_team_name(name) == target_n:
-                    imgs = ev.get(img_field) or []
-                    if imgs:
-                        return imgs
+                for name_field, img_field in (
+                    ("HOME_NAME", "HOME_IMAGES"),
+                    ("AWAY_NAME", "AWAY_IMAGES"),
+                ):
+                    name = ev.get(name_field) or ""
+                    if not name:
+                        continue
+                    if _normalize_team_name(name) == target_n:
+                        imgs = ev.get(img_field) or []
+                        if imgs:
+                            return imgs
+    # Tier 2: persistent in-process cache, populated by paired
+    # events on prior requests. Catches teams that aren't in
+    # today's FL feed but were seen on previous days. e.g. Tolima
+    # appeared as paired on Sunday → cached → still works on
+    # Wednesday's UCL synthetic card when FL only ships UCL.
+    cached = _TEAM_LOGO_CACHE.get(target_n)
+    if cached:
+        return cached
     return []
 
 
@@ -10204,6 +10262,7 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
                 pairing.kalshi_records, sport,
                 ev.get("HOME_NAME") or "", ev.get("AWAY_NAME") or "",
             )
+            _remember_team_logos(ev_out)
         else:
             ev_out["kalshi"] = None
         seen_tournaments[t_key]["events"].append(ev_out)
@@ -10396,6 +10455,7 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
                 ev.get("AWAY_NAME") or "",
                 registry=registry,
             )
+            _remember_team_logos(ev_out)
             for tk in ticker_list:
                 if tk:
                     matched_kalshi_tickers.add(tk)
