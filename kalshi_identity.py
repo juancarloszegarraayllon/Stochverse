@@ -510,6 +510,69 @@ _FL_ABBR_ALIASES: dict[str, dict[str, str]] = {
         "BKN": "BRK",      # Nets
         "BRK": "BKN",
     },
+    "Soccer": {
+        # Conmebol clubs (Copa Libertadores / Sudamericana / domestic
+        # leagues). Bidirectional pairs cover the common Kalshi vs FL
+        # divergence — Kalshi tends to use the most-common-fan-form
+        # 3-letter, FL sometimes uses an alternate. Add new entries
+        # as `/api/_debug/registry_diff` surfaces unpaired Conmebol
+        # pairs with shortname disagreement.
+        #
+        # Argentina
+        "BOC": "BJN", "BJN": "BOC",       # Boca Juniors
+        "BOJ": "BOC", "BOCJU": "BOC",
+        "RIV": "RVP", "RVP": "RIV",       # River Plate
+        "RIP": "RIV",
+        "RAC": "RCG", "RCG": "RAC",       # Racing Club
+        "IND": "IDA", "IDA": "IND",       # Independiente (Arg) —
+                                           # collides with Independiente
+                                           # del Valle (Ecu); resolved
+                                           # by date+league context.
+        "SLO": "SLZ", "SLZ": "SLO",       # San Lorenzo
+        "EST": "EDP", "EDP": "EST",       # Estudiantes
+        "VEL": "VLZ", "VLZ": "VEL",       # Velez Sarsfield
+        "LAN": "LNS", "LNS": "LAN",       # Lanus
+        # Brazil
+        "FLA": "FLM", "FLM": "FLA",       # Flamengo
+        "PAL": "PLM", "PLM": "PAL",       # Palmeiras
+        "COR": "CTH", "CTH": "COR",       # Corinthians
+        "SAN": "SNS", "SNS": "SAN",       # Santos
+        "INT": "INC", "INC": "INT",       # Internacional
+        "GRE": "GRM", "GRM": "GRE",       # Gremio
+        "FLU": "FLN", "FLN": "FLU",       # Fluminense (avoid FLM
+                                           # collision with Flamengo)
+        "BOT": "BFR", "BFR": "BOT",       # Botafogo
+        "SAO": "SPL", "SPL": "SAO",       # Sao Paulo
+        "ATM": "AMI", "AMI": "ATM",       # Atletico Mineiro
+        # Ecuador / Colombia / Venezuela / Peru / Bolivia / Paraguay
+        "BSC": "BAR", "BAR": "BSC",       # Barcelona SC (Ecu) —
+                                           # collides with FC Barcelona;
+                                           # date+league disambiguates.
+        "IDV": "IND",                      # Independiente del Valle
+                                           # (one-way — IND already
+                                           # mapped above).
+        "LDU": "LIQ", "LIQ": "LDU",       # LDU Quito
+        "EME": "CSE", "CSE": "EME",       # Emelec
+        "NAC": "NCU", "NCU": "NAC",       # Nacional (Uruguay)
+        "PEN": "PNL", "PNL": "PEN",       # Penarol
+        "OLI": "OLA", "OLA": "OLI",       # Olimpia (Paraguay)
+        "CER": "CPO", "CPO": "CER",       # Cerro Porteno
+        "ALR": "ARB", "ARB": "ALR",       # Always Ready (Bolivia)
+        "BOL": "BLV", "BLV": "BOL",       # Bolivar
+        "TST": "STR", "STR": "TST",       # The Strongest
+        "ANA": "ANL", "ANL": "ANA",       # Atletico Nacional (Col)
+        "MIL": "MFC", "MFC": "MIL",       # Millonarios
+        "JUN": "JBQ", "JBQ": "JUN",       # Junior Barranquilla
+        # La Liga short-form pairs (Atletico Madrid is the canonical
+        # 'Atletico' / 'Atletico Madrid' / 'Atl. Madrid' spread; FL
+        # ships ATM, Kalshi sometimes ships ATL).
+        "ATL": "ATM",                      # one-way to avoid double-
+                                           # mapping with Atletico
+                                           # Mineiro.
+        "PSG": "PAR", "PAR": "PSG",       # Paris Saint-Germain
+                                           # (Kalshi ships PSG, FL
+                                           # sometimes uses PAR).
+    },
     # Other sports get populated as gaps surface.
 }
 

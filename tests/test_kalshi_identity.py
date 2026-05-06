@@ -481,7 +481,12 @@ class TestFLIdentity:
         assert i.sport == "Soccer"
         assert i.date == date(2026, 5, 5)
         assert i.time == "1500"
-        assert i.fl_orientations == frozenset({"ARSATM", "ATMARS"})
+        # ATM expands to {ATM, AMI} via the Soccer alias table
+        # (ATM↔AMI covers Atletico Mineiro). Arsenal has no aliases,
+        # so only ATM/AMI variants appear.
+        assert i.fl_orientations == frozenset(
+            {"ARSATM", "ATMARS", "ARSAMI", "AMIARS"}
+        )
 
     def test_missing_fields_returns_none(self):
         for missing in ("SHORTNAME_HOME", "SHORTNAME_AWAY", "START_TIME"):
