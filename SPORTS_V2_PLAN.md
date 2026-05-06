@@ -421,3 +421,12 @@ These stay in v1 OR don't change at all (per `KALSHI_AUDIT.md` deferred work):
 - Cache builder classifier audit (the OWGRRANK family of bugs) — separate cleanup
 - Player headshots / news / lineups for Kalshi-only sports — additive features post-v2
 - Settlement UI — needs lifecycle channel; covered in phase 6 if we add it then, otherwise v2.1
+- **Settled-Kalshi-data lookup for Finished tab** (deferred, not a priority — traders may want to refer back to closing data)
+  - **Problem**: when a Kalshi market settles, the websocket drops it from the active cache. FL rows for FINISHED games then render with `kalshi: null`, so the Finished tab on /sports has no closing line / final YES-NO / last trade, even on the same day the game was played. Same applies if the user navigates back to a prior day via the date pill.
+  - **Scope**: backend lookup only. Does NOT change Finished-tab visibility window (still scoped to whatever date the user has selected via the navigator). Does NOT add live updates or trading capability — settled markets are immutable.
+  - **What it would surface**: final YES/NO outcome (where the market settled), closing price / last-trade price, optionally open/high/low for that market's last day. Available on Kalshi's REST `/trade-api/v2/markets/?status=settled` indefinitely.
+  - **Implementation sketch** (~50 lines + short-TTL cache):
+    - New `kalshi_settled_lookup.py` with an async `fetch_settled_for(date, abbr_block)` that hits Kalshi REST and returns a `{ticker: {final, close, last_trade}}` dict
+    - Wire into `sports_feed_v3` as a fallback when an FL event is FINISHED and `kalshi` would otherwise be null
+    - Cache by `(date, abbr_block)` for ~5 min — settled data doesn't change, but we want to bound REST volume
+  - **Why deferred**: not required for live trading or pre-game surfaces. Pure historical reference. Build it once user feedback confirms traders are actually navigating back to look at closing lines.
