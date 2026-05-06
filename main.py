@@ -10626,7 +10626,46 @@ async def _enrich_synthetic_events_with_fl_data(
     to synthetic. Without dedup, the user sees 2+ cards for the
     same fixture under different tournament headers.
     """
+    # ── TEMPORARY DEBUG (always-on, unconditional) ──────────────
+    # Per user diagnostic request — fires on EVERY call so we can
+    # tell from the logs whether the function is being invoked at
+    # all, and what it's seeing on entry. Not gated on team names.
+    try:
+        _ut_count = (len(unpaired_tournaments)
+                     if unpaired_tournaments is not None else 0)
+        _synth_count = sum(
+            1
+            for ut in (unpaired_tournaments or [])
+            if isinstance(ut, dict)
+            for ev in (ut.get("events") or [])
+            if isinstance(ev, dict) and ev.get("_kalshi_h2h_only")
+        )
+        _paired_count = sum(
+            1
+            for t in (paired_tournaments or [])
+            if isinstance(t, dict)
+            for ev in (t.get("events") or [])
+            if isinstance(ev, dict)
+        )
+        print(
+            f"DEBUG enrich ENTRY: unpaired_tournaments_count={_ut_count} "
+            f"synth_event_count={_synth_count} "
+            f"paired_event_count={_paired_count} sport_id={sport_id}",
+            flush=True,
+        )
+    except Exception as _e:
+        print(f"DEBUG enrich ENTRY logging FAILED: {_e}", flush=True)
+    # ── /TEMPORARY DEBUG ────────────────────────────────────────
+
     if not unpaired_tournaments or not 1 <= sport_id <= 42:
+        # ── TEMPORARY DEBUG ─────────────────────────────────────
+        print(
+            f"DEBUG enrich EARLY EXIT: unpaired_empty="
+            f"{not unpaired_tournaments} "
+            f"sport_id_in_range={1 <= sport_id <= 42}",
+            flush=True,
+        )
+        # ── /TEMPORARY DEBUG ────────────────────────────────────
         return
 
     paired_lookup = _build_paired_event_lookup(paired_tournaments)
@@ -11113,14 +11152,30 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
     # team for every _kalshi_h2h_only event, in parallel, then
     # attach HOME_IMAGES/AWAY_IMAGES and override START_TIME with
     # the matched FL fixture when one matches by opponent + date.
+    # ── TEMPORARY DEBUG: log call-site state regardless of gate ──
+    print(
+        f"DEBUG v2 call site: unpaired_tournaments_count="
+        f"{len(unpaired_tournaments) if unpaired_tournaments else 0} "
+        f"sport_id={sport_id} will_call="
+        f"{bool(unpaired_tournaments)}",
+        flush=True,
+    )
     if unpaired_tournaments:
         try:
             await _enrich_synthetic_events_with_fl_data(
                 unpaired_tournaments, sport_id,
                 paired_tournaments=out_tournaments,
             )
-        except Exception:
-            pass  # never let enrichment break the response
+        except Exception as _enrich_err:
+            # ── TEMPORARY DEBUG: surface the swallowed exception ──
+            import traceback
+            print(
+                f"DEBUG v2 enrich SWALLOWED EXCEPTION: "
+                f"{type(_enrich_err).__name__}: {_enrich_err}\n"
+                f"{traceback.format_exc()}",
+                flush=True,
+            )
+            # ── /TEMPORARY DEBUG ──
 
     # Outrights count toward matched_kalshi_count
     for t in outright_tournaments:
@@ -11330,14 +11385,29 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
     # team for every _kalshi_h2h_only event, in parallel, attach
     # HOME_IMAGES/AWAY_IMAGES, override START_TIME with the
     # matched FL fixture's authoritative kickoff when found.
+    # ── TEMPORARY DEBUG: log call-site state regardless of gate ──
+    print(
+        f"DEBUG v3 call site: unpaired_tournaments_count="
+        f"{len(unpaired_tournaments) if unpaired_tournaments else 0} "
+        f"sport_id={sport_id} will_call="
+        f"{bool(unpaired_tournaments)}",
+        flush=True,
+    )
     if unpaired_tournaments:
         try:
             await _enrich_synthetic_events_with_fl_data(
                 unpaired_tournaments, sport_id,
                 paired_tournaments=out_tournaments,
             )
-        except Exception:
-            pass
+        except Exception as _enrich_err:
+            # ── TEMPORARY DEBUG: surface the swallowed exception ──
+            import traceback
+            print(
+                f"DEBUG v3 enrich SWALLOWED EXCEPTION: "
+                f"{type(_enrich_err).__name__}: {_enrich_err}\n"
+                f"{traceback.format_exc()}",
+                flush=True,
+            )
 
     # ── Synthetic-event cosmetic enrichment ──────────────────────
     # Synthetic Kalshi-only events from _v2_route_unpaired have
