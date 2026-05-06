@@ -487,7 +487,7 @@ def parse_ticker(event_ticker: str, series_ticker: str, sport: str) -> Identity:
 # canonical reference; aliases only translate FL's vocabulary in.
 #
 # Add new entries as gaps surface via /api/_debug/sports_join_diff.
-_FL_ABBR_ALIASES: dict[str, dict[str, str]] = {
+_FL_ABBR_ALIASES: dict[str, dict] = {
     "Basketball": {
         # NBA — Kalshi uses canonical 3-letter, FL sometimes diverges
         "LAK": "LAL",      # Lakers
@@ -557,8 +557,17 @@ _FL_ABBR_ALIASES: dict[str, dict[str, str]] = {
         "PEN": "PNL", "PNL": "PEN",       # Penarol
         "OLI": "OLA", "OLA": "OLI",       # Olimpia (Paraguay)
         "CER": "CPO", "CPO": "CER",       # Cerro Porteno
-        "ALR": "ARB", "ARB": "ALR",       # Always Ready (Bolivia)
-        "ALW": "ALR", "ARE": "ALR",       # Always Ready alternates
+        # Always Ready (Bolivia) — FL ships 'ALW' (from "Always"),
+        # Kalshi ships 'ARE' (from "Always REady") in the
+        # CONMEBOLLIB tickers (verified via /api/_debug/unpaired_pairs
+        # — KXCONMEBOLLIBGAME-26MAY05ARELAN). ALR/ARB are older
+        # forms kept for back-compat in case Kalshi rolls back to
+        # the Spanish-style abbreviation. Multi-value list lets one
+        # FL abbr expand to all known Kalshi counterparts at once.
+        "ALW": ["ALR", "ARE", "ARB"],
+        "ARE": ["ALW", "ALR", "ARB"],
+        "ALR": ["ALW", "ARE", "ARB"],
+        "ARB": ["ALW", "ALR", "ARE"],
         "BOL": "BLV", "BLV": "BOL",       # Bolivar
         "TST": "STR", "STR": "TST",       # The Strongest
         "ANA": "ANL", "ANL": "ANA",       # Atletico Nacional (Col)
@@ -601,13 +610,21 @@ def normalize_fl_abbr(sport: str, abbr: str) -> set[str]:
     raw FL shortname so Kalshi's abbr_block matches under either
     convention. Returns at minimum `{abbr}` if no aliases are known.
 
-    Public — Phase C's kalshi_registry_seed imports this to expand
-    team aliases at seed time.
+    Alias values may be a single string OR a list/tuple/set — the
+    list form is used when one FL abbr has multiple Kalshi-side
+    counterparts (e.g. Always Ready: FL `ALW` → Kalshi can ship
+    `ALR` (Bolivia/Spanish full) or `ARE` (English contraction)
+    depending on series). Public — Phase C's kalshi_registry_seed
+    imports this to expand team aliases at seed time.
     """
     forms = {abbr}
     aliases = _FL_ABBR_ALIASES.get(sport, {})
     if abbr in aliases:
-        forms.add(aliases[abbr])
+        v = aliases[abbr]
+        if isinstance(v, (list, tuple, set)):
+            forms.update(v)
+        else:
+            forms.add(v)
     return forms
 
 
