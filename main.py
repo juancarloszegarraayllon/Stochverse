@@ -10668,185 +10668,24 @@ async def _enrich_synthetic_events_with_fl_data(
         # ── /TEMPORARY DEBUG ────────────────────────────────────
         return
 
-    # ── TEMPORARY DEBUG: bracket the paired-lookup builder so we
-    # see if the crash is here. Falls back to empty dict on error
-    # so enrichment can still run.
+    # ── TEMPORARY DEBUG STUB (per user diagnostic request) ────────
+    # Everything between the ENTRY logging and end-of-function has
+    # been replaced with this isolated test of
+    # `_build_paired_event_lookup`. If "STEP 1 FAILED" prints,
+    # we have the crash. If "STEP 2" prints, the crash is later
+    # and we'll restore the original body next.
+    # Catches BaseException (broader than Exception — includes
+    # SystemExit, KeyboardInterrupt, asyncio.CancelledError) so
+    # nothing slips past silently.
+    print(f"DEBUG enrich STEP 1: about to call _build_paired_event_lookup", flush=True)
     try:
-        paired_lookup = _build_paired_event_lookup(paired_tournaments)
-        print(
-            f"DEBUG enrich PAIRED LOOKUP OK: {len(paired_lookup)} entries",
-            flush=True,
-        )
-    except Exception as _ple:
-        import traceback
-        print(f"DEBUG enrich PAIRED LOOKUP CRASH: {_ple}", flush=True)
-        traceback.print_exc()
-        paired_lookup = {}
-    # ── /TEMPORARY DEBUG ────────────────────────────────────────
-
-    # Collect synth events + FL fetch coroutines (home + away per event)
-    target_entries: list = []  # [(tournament_dict, event_dict)]
-    fetch_coros: list = []
-    for ut in unpaired_tournaments:
-        if not isinstance(ut, dict):
-            continue
-        for ev in (ut.get("events") or []):
-            if not isinstance(ev, dict) or not ev.get("_kalshi_h2h_only"):
-                continue
-            target_entries.append((ut, ev))
-            home = (ev.get("HOME_NAME") or "").strip()
-            away = (ev.get("AWAY_NAME") or "").strip()
-            fetch_coros.append(_fetch_fl_team_data(home, sport_id)
-                               if home else
-                               asyncio.sleep(0, result={"logo_url": None, "fixtures": []}))
-            fetch_coros.append(_fetch_fl_team_data(away, sport_id)
-                               if away else
-                               asyncio.sleep(0, result={"logo_url": None, "fixtures": []}))
-    if not target_entries:
-        # ── TEMPORARY DEBUG: per-event detail when no synth events
-        # qualified for enrichment. Surfaces whether _kalshi_h2h_only
-        # is set, what HOME_NAME looks like, and a sample of keys
-        # so we can confirm the event shape vs what the loop expects.
-        print(
-            f"DEBUG enrich NO TARGETS: checking unpaired_tournaments...",
-            flush=True,
-        )
-        for _ut in (unpaired_tournaments or []):
-            for _ev in (_ut.get("events") or []):
-                print(
-                    f"DEBUG enrich NO TARGETS event: "
-                    f"HOME={_ev.get('HOME_NAME')} "
-                    f"_kalshi_h2h_only={_ev.get('_kalshi_h2h_only')} "
-                    f"keys_sample={list(_ev.keys())[:8]}",
-                    flush=True,
-                )
-        # ── /TEMPORARY DEBUG ────────────────────────────────────
+        x = _build_paired_event_lookup(paired_tournaments)
+        print(f"DEBUG enrich STEP 2: paired_lookup done type={type(x)}", flush=True)
+    except BaseException as e:
+        print(f"DEBUG enrich STEP 1 FAILED: {type(e).__name__}: {e}", flush=True)
         return
-    # ── TEMPORARY DEBUG: bracket the gather so we can tell if it's
-    # being reached at all and whether it completes vs raises.
-    print(
-        f"DEBUG enrich PRE-GATHER: fetch_coros_count={len(fetch_coros)} "
-        f"target_entries_count={len(target_entries)}",
-        flush=True,
-    )
-    try:
-        results = await asyncio.gather(*fetch_coros, return_exceptions=True)
-        print(
-            f"DEBUG enrich POST-GATHER: results_count={len(results)}",
-            flush=True,
-        )
-    except Exception as _ge:
-        import traceback
-        print(f"DEBUG enrich GATHER EXCEPTION: {_ge}", flush=True)
-        traceback.print_exc()
-        return
-    # ── /TEMPORARY DEBUG ────────────────────────────────────────
-
-    # Track duplicates for in-place removal after the loop (don't
-    # mutate the events list while iterating). When a duplicate is
-    # detected, MERGE its Kalshi markets into the paired event
-    # before removal — so the paired card gets every sub-market
-    # (including KXUCLGOAL/KXUCLCORNERS/etc. that escaped pairing)
-    # accessible via its tab strip.
-    duplicates: list = []
-
-    for i, (ut, ev) in enumerate(target_entries):
-        home_data = results[i * 2]
-        away_data = results[i * 2 + 1]
-        if not isinstance(home_data, dict):
-            home_data = {"logo_url": None, "fixtures": []}
-        if not isinstance(away_data, dict):
-            away_data = {"logo_url": None, "fixtures": []}
-
-        # ── TEMPORARY DEBUG ─────────────────────────────────────
-        _home_name = (ev.get("HOME_NAME") or "").strip()
-        _away_name = (ev.get("AWAY_NAME") or "").strip()
-        _dbg_evt = (_should_debug_fl_fetch(_home_name)
-                    or _should_debug_fl_fetch(_away_name))
-        if _dbg_evt:
-            print(
-                f"DEBUG synth_enrich event_id={ev.get('EVENT_ID')!r} "
-                f"home={_home_name!r} away={_away_name!r} "
-                f"start_time={ev.get('START_TIME')}",
-                flush=True,
-            )
-            print(
-                f"  home_data: logo_url={home_data.get('logo_url')!r} "
-                f"fixtures={len(home_data.get('fixtures') or [])}",
-                flush=True,
-            )
-            print(
-                f"  away_data: logo_url={away_data.get('logo_url')!r} "
-                f"fixtures={len(away_data.get('fixtures') or [])}",
-                flush=True,
-            )
-        # ── /TEMPORARY DEBUG ────────────────────────────────────
-
-        # Dedup check — if FL's fixtures for the home team include
-        # the same matchup that's already paired, merge synth's
-        # Kalshi block into the paired event then drop the synth.
-        if paired_lookup:
-            paired_match = _find_paired_match_via_fl_fixtures(
-                home_data, paired_lookup,
-            )
-            if paired_match is not None:
-                _merge_synth_kalshi_into_paired(ev, paired_match)
-                duplicates.append((ut, ev))
-                if _dbg_evt:
-                    print(
-                        f"  → DEDUP merged into paired EVENT_ID="
-                        f"{paired_match.get('EVENT_ID')!r}, dropping synth",
-                        flush=True,
-                    )
-                continue
-
-        # Logos
-        if home_data.get("logo_url") and not ev.get("HOME_IMAGES"):
-            ev["HOME_IMAGES"] = [home_data["logo_url"]]
-        if away_data.get("logo_url") and not ev.get("AWAY_IMAGES"):
-            ev["AWAY_IMAGES"] = [away_data["logo_url"]]
-        # Kickoff override via opponent+date match against home's
-        # fixtures (away's fixtures would yield the same fixture).
-        target_ts = ev.get("START_TIME") or 0
-        opponent = ev.get("AWAY_NAME") or ""
-        matched_ts = _match_fixture_for_synth_event(
-            home_data.get("fixtures") or [], opponent, target_ts,
-        )
-        if matched_ts:
-            ev["START_TIME"] = matched_ts
-            ev["_kickoff_source"] = "fl_fixture_match"
-        else:
-            ev["_kickoff_source"] = "kalshi_estimate"
-
-        # ── TEMPORARY DEBUG ─────────────────────────────────────
-        if _dbg_evt:
-            print(
-                f"  AFTER: HOME_IMAGES={ev.get('HOME_IMAGES')} "
-                f"AWAY_IMAGES={ev.get('AWAY_IMAGES')}",
-                flush=True,
-            )
-            print(
-                f"  AFTER: START_TIME={ev.get('START_TIME')} "
-                f"_kickoff_source={ev.get('_kickoff_source')!r}",
-                flush=True,
-            )
-        # ── /TEMPORARY DEBUG ────────────────────────────────────
-
-    # Remove duplicates from the response. After this, empty
-    # tournaments (no events left) are also pruned so the side-nav
-    # doesn't show empty league entries.
-    for ut, ev in duplicates:
-        events_list = ut.get("events")
-        if isinstance(events_list, list):
-            try:
-                events_list.remove(ev)
-            except ValueError:
-                pass
-    # Prune empty tournaments
-    unpaired_tournaments[:] = [
-        ut for ut in unpaired_tournaments
-        if isinstance(ut, dict) and (ut.get("events") or [])
-    ]
+    return
+    # ── /TEMPORARY DEBUG STUB ─────────────────────────────────────
 
 
 def _v2_synth_unpaired_event(records: list, sport: str,
