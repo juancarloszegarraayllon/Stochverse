@@ -1166,28 +1166,64 @@ def _estimate_kickoff_from_kalshi_record(rec: dict, sport: str):
     Could improve synthetic event team identification vs the current
     title-parsing approach in `_v2_synth_unpaired_event`. Separate PR.
     """
+    # ── TEMPORARY DEBUG (remove after verifying production behavior) ──
+    _ticker_dbg = rec.get("event_ticker", "?")
+    kdt_str = rec.get("_kickoff_dt")
+    print(
+        f"DEBUG kickoff[{_ticker_dbg}] sport={sport} "
+        f"_kickoff_dt={kdt_str!r}",
+        flush=True,
+    )
+    # ── /TEMPORARY DEBUG ──
+
     # Path 1: precomputed _kickoff_dt from cache builder (preferred —
     # may already include ESPN/SofaScore authoritative override).
-    kdt_str = rec.get("_kickoff_dt")
     if kdt_str:
         kdt = safe_dt(kdt_str)
+        print(  # TEMPORARY DEBUG
+            f"DEBUG kickoff[{_ticker_dbg}] safe_dt({kdt_str!r}) -> {kdt!r}",
+            flush=True,
+        )
         if kdt is not None:
             return kdt
     # Path 2: local recompute fallback (kept until _kickoff_dt
     # coverage is confirmed sufficient in production — separate
     # cleanup PR will retire this once that's verified).
     if sport not in _KALSHI_KICKOFF_DURATION_BY_SPORT:
+        print(  # TEMPORARY DEBUG
+            f"DEBUG kickoff[{_ticker_dbg}] sport not in duration table -> None",
+            flush=True,
+        )
         return None
     mkts = rec.get("markets")
     if not isinstance(mkts, list) or not mkts:
+        print(  # TEMPORARY DEBUG
+            f"DEBUG kickoff[{_ticker_dbg}] no markets -> None",
+            flush=True,
+        )
         return None
     first_mk = mkts[0] if isinstance(mkts[0], dict) else None
     if not first_mk:
+        print(  # TEMPORARY DEBUG
+            f"DEBUG kickoff[{_ticker_dbg}] markets[0] not dict -> None",
+            flush=True,
+        )
         return None
-    exp_dt = safe_dt(first_mk.get("expected_expiration_time"))
+    exp_str = first_mk.get("expected_expiration_time")
+    exp_dt = safe_dt(exp_str)
+    print(  # TEMPORARY DEBUG
+        f"DEBUG kickoff[{_ticker_dbg}] path2 exp_str={exp_str!r} "
+        f"exp_dt={exp_dt!r}",
+        flush=True,
+    )
     if exp_dt is None:
         return None
-    return exp_dt - _KALSHI_KICKOFF_DURATION_BY_SPORT[sport]
+    result = exp_dt - _KALSHI_KICKOFF_DURATION_BY_SPORT[sport]
+    print(  # TEMPORARY DEBUG
+        f"DEBUG kickoff[{_ticker_dbg}] path2 result={result!r}",
+        flush=True,
+    )
+    return result
 
 
 def fmt_date(d):
