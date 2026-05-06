@@ -372,15 +372,22 @@ def _pair_via_title(registry: IdentityRegistry,
     absent. Direction-blind: tries home/away in both orientations
     since Kalshi's 'X at Y' notation puts the away team first.
     """
+    # ── TEMPORARY DEBUG (filtered to specific tickers only) ──
+    _ticker_dbg = kalshi_record.get("event_ticker", "?")
+    _debug_this = _ticker_dbg in (
+        "KXCONMEBOLLIBGAME-26MAY06TOLNAC",
+        "KXCONMEBOLLIBGAME-26MAY06UCCRU",
+    )
+
     title = (kalshi_record.get("title") or "").strip()
     parsed = _parse_kalshi_title(title)
     if parsed is None:
-        # ── TEMPORARY DEBUG ──
-        print(
-            f"DEBUG title_match[{kalshi_record.get('event_ticker')}] "
-            f"title_parse_FAILED title={title!r}",
-            flush=True,
-        )
+        if _debug_this:
+            print(
+                f"DEBUG title_match[{_ticker_dbg}] "
+                f"title_parse_FAILED title={title!r}",
+                flush=True,
+            )
         return None
     title_a, title_b = parsed
 
@@ -389,16 +396,15 @@ def _pair_via_title(registry: IdentityRegistry,
     # Either is good enough for a ±30 min gate.
     kalshi_kickoff_ts = _parse_iso_to_epoch(kalshi_record.get("_kickoff_dt"))
 
-    # ── TEMPORARY DEBUG (entry) ──
-    _ticker_dbg = kalshi_record.get("event_ticker", "?")
     _kdt_raw = kalshi_record.get("_kickoff_dt")
-    print(
-        f"DEBUG title_match[{_ticker_dbg}] entry "
-        f"title={title!r} parsed=({title_a!r}, {title_b!r}) "
-        f"_kickoff_dt={_kdt_raw!r} kalshi_kickoff_ts={kalshi_kickoff_ts!r} "
-        f"candidates_count={len(fixture_candidates)}",
-        flush=True,
-    )
+    if _debug_this:
+        print(
+            f"DEBUG title_match[{_ticker_dbg}] entry "
+            f"title={title!r} parsed=({title_a!r}, {title_b!r}) "
+            f"_kickoff_dt={_kdt_raw!r} kalshi_kickoff_ts={kalshi_kickoff_ts!r} "
+            f"candidates_count={len(fixture_candidates)}",
+            flush=True,
+        )
 
     best_fx: Optional[Fixture] = None
     best_score = min_score
@@ -414,24 +420,25 @@ def _pair_via_title(registry: IdentityRegistry,
                 gate_rejected = True
         home_team = registry.resolve_team(fx.home_team_id)
         away_team = registry.resolve_team(fx.away_team_id)
-        # ── TEMPORARY DEBUG (per candidate) ──
         _h_name = home_team.canonical_name if home_team else "?"
         _a_name = away_team.canonical_name if away_team else "?"
         if gate_rejected:
-            print(
-                f"DEBUG title_match[{_ticker_dbg}]   cand "
-                f"FL={_h_name!r} vs {_a_name!r} "
-                f"fl_start={fx.start_time_utc} time_diff={time_diff}s "
-                f"-> REJECT (outside ±30 min gate)",
-                flush=True,
-            )
+            if _debug_this:
+                print(
+                    f"DEBUG title_match[{_ticker_dbg}]   cand "
+                    f"FL={_h_name!r} vs {_a_name!r} "
+                    f"fl_start={fx.start_time_utc} time_diff={time_diff}s "
+                    f"-> REJECT (outside ±30 min gate)",
+                    flush=True,
+                )
             continue
         if home_team is None or away_team is None:
-            print(  # TEMPORARY DEBUG
-                f"DEBUG title_match[{_ticker_dbg}]   cand "
-                f"home/away team unresolved -> SKIP",
-                flush=True,
-            )
+            if _debug_this:
+                print(
+                    f"DEBUG title_match[{_ticker_dbg}]   cand "
+                    f"home/away team unresolved -> SKIP",
+                    flush=True,
+                )
             continue
         # Orientation 1: title_a → home, title_b → away
         h1 = _title_overlap_score(home_team.canonical_name, title_a)
@@ -448,24 +455,25 @@ def _pair_via_title(registry: IdentityRegistry,
         else:
             s2 = 0.0
         score = max(s1, s2)
-        # ── TEMPORARY DEBUG (per candidate score) ──
-        print(
-            f"DEBUG title_match[{_ticker_dbg}]   cand "
-            f"FL={_h_name!r} vs {_a_name!r} "
-            f"fl_start={fx.start_time_utc} time_diff={time_diff}s "
-            f"h1={h1:.2f} a1={a1:.2f} h2={h2:.2f} a2={a2:.2f} "
-            f"score={score:.3f} (threshold>{min_score})",
-            flush=True,
-        )
+        if _debug_this:
+            print(
+                f"DEBUG title_match[{_ticker_dbg}]   cand "
+                f"FL={_h_name!r} vs {_a_name!r} "
+                f"fl_start={fx.start_time_utc} time_diff={time_diff}s "
+                f"h1={h1:.2f} a1={a1:.2f} h2={h2:.2f} a2={a2:.2f} "
+                f"score={score:.3f} (threshold>{min_score})",
+                flush=True,
+            )
         if score > best_score:
             best_score = score
             best_fx = fx
-    print(  # TEMPORARY DEBUG (final)
-        f"DEBUG title_match[{_ticker_dbg}] FINAL "
-        f"best_fx={best_fx.id if best_fx else None!r} "
-        f"best_score={best_score:.3f}",
-        flush=True,
-    )
+    if _debug_this:
+        print(
+            f"DEBUG title_match[{_ticker_dbg}] FINAL "
+            f"best_fx={best_fx.id if best_fx else None!r} "
+            f"best_score={best_score:.3f}",
+            flush=True,
+        )
     return best_fx
 
 
