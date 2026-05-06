@@ -1662,3 +1662,101 @@ class TestSyntheticEventImageLookup:
         ]
         imgs = _lookup_team_images_by_name("Bayern Munich", paired)
         assert imgs == ["https://fl.cdn/bayern.png"]
+
+
+class TestPersistentLogoCache:
+    """Phase C2g+ — `_TEAM_LOGO_CACHE` lets synthetic events inherit
+    team imagery from prior requests' paired FL events, so a team
+    seen on Sunday still shows its logo on Wednesday's Kalshi-only
+    card.
+    """
+
+    def setup_method(self):
+        # Clear the module-level cache before each test.
+        from main import _TEAM_LOGO_CACHE
+        _TEAM_LOGO_CACHE.clear()
+
+    def test_remember_populates_cache(self):
+        from main import _remember_team_logos, _TEAM_LOGO_CACHE
+        _remember_team_logos({
+            "HOME_NAME":   "Deportes Tolima (Col)",
+            "HOME_IMAGES": ["https://fl.cdn/tolima.png"],
+            "AWAY_NAME":   "Atletico Nacional",
+            "AWAY_IMAGES": ["https://fl.cdn/anacional.png"],
+        })
+        assert _TEAM_LOGO_CACHE.get("tolima") == ["https://fl.cdn/tolima.png"]
+        assert _TEAM_LOGO_CACHE.get("atletico nacional") == ["https://fl.cdn/anacional.png"]
+
+    def test_lookup_falls_back_to_cache(self):
+        """When in-request paired tournaments have no match, the
+        cache (populated by prior requests) is consulted."""
+        from main import (_remember_team_logos,
+                            _lookup_team_images_by_name)
+        # Prior request — Tolima paired and cached
+        _remember_team_logos({
+            "HOME_NAME":   "Deportes Tolima (Col)",
+            "HOME_IMAGES": ["https://fl.cdn/tolima.png"],
+        })
+        # Current request — no paired tournaments contain Tolima
+        empty_paired = [{"events": [
+            {"HOME_NAME": "Bayern Munich", "HOME_IMAGES": ["x"]},
+        ]}]
+        imgs = _lookup_team_images_by_name("Tolima", empty_paired)
+        assert imgs == ["https://fl.cdn/tolima.png"]
+
+    def test_in_request_wins_over_cache(self):
+        """Same-request paired event takes priority — cache is a
+        fallback, not an override. Catches the case where a team's
+        imagery changes (e.g. league rebrand) and we want fresh
+        URLs from this request, not stale cached ones."""
+        from main import (_remember_team_logos,
+                            _lookup_team_images_by_name)
+        _remember_team_logos({
+            "HOME_NAME":   "Tolima",
+            "HOME_IMAGES": ["https://fl.cdn/tolima_old.png"],
+        })
+        paired = [{"events": [
+            {"HOME_NAME":   "Deportes Tolima (Col)",
+             "HOME_IMAGES": ["https://fl.cdn/tolima_new.png"]},
+        ]}]
+        imgs = _lookup_team_images_by_name("Tolima", paired)
+        assert imgs == ["https://fl.cdn/tolima_new.png"]
+
+    def test_remember_skips_empty(self):
+        """Empty name or empty images list → no cache entry.
+        Prevents cache pollution with junk."""
+        from main import _remember_team_logos, _TEAM_LOGO_CACHE
+        _remember_team_logos({
+            "HOME_NAME":   "",
+            "HOME_IMAGES": ["x"],
+            "AWAY_NAME":   "Bayern",
+            "AWAY_IMAGES": [],
+        })
+        assert "bayern" not in _TEAM_LOGO_CACHE
+        assert _TEAM_LOGO_CACHE == {}
+
+    def test_lookup_with_no_paired_uses_cache_directly(self):
+        """When `paired_tournaments` is None or empty list, lookup
+        skips tier 1 and goes straight to the cache."""
+        from main import (_remember_team_logos,
+                            _lookup_team_images_by_name)
+        _remember_team_logos({
+            "HOME_NAME":   "Bayern Munich",
+            "HOME_IMAGES": ["https://fl.cdn/bayern.png"],
+        })
+        assert _lookup_team_images_by_name("Bayern Munich", None) == \
+            ["https://fl.cdn/bayern.png"]
+        assert _lookup_team_images_by_name("Bayern Munich", []) == \
+            ["https://fl.cdn/bayern.png"]
+
+    def test_remember_uses_normalized_key(self):
+        """Verify the cache key is the normalized form so lookups
+        with the short Kalshi form find the cached entry."""
+        from main import _remember_team_logos, _TEAM_LOGO_CACHE
+        _remember_team_logos({
+            "HOME_NAME":   "U. Catolica (Chi)",  # FL form
+            "HOME_IMAGES": ["https://fl.cdn/ucat.png"],
+        })
+        # Key should be the normalized form, not the raw FL name
+        assert "universidad catolica" in _TEAM_LOGO_CACHE
+        assert "u. catolica (chi)" not in _TEAM_LOGO_CACHE
