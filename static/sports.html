@@ -1378,9 +1378,11 @@ function renderEventRow(ev, market, isMarketRow) {
   // contextual metadata for the row beneath. Game-number chip
   // (parsed from kalshi.title) renders alongside the series
   // chip when both apply.
+  const _kickoffChipHtml = renderKickoffTimeChip(ev);
   const _gameChipHtml = renderGameNumberChip(ev);
   const _aggRowHtml = renderAggOrSeries(ev);
-  const _aggCombined = [_gameChipHtml, _aggRowHtml].filter(s => s).join(' ');
+  const _aggCombined = [_kickoffChipHtml, _gameChipHtml, _aggRowHtml]
+    .filter(s => s).join(' ');
   if (_aggCombined) {
     html += '<div class="sp-c2-event-aggrow">' + _aggCombined + '</div>';
   }
@@ -1501,14 +1503,23 @@ function renderEventRow(ev, market, isMarketRow) {
       const lblLc = (o.label || '').toLowerCase();
       let icon = '';
       if (!showMatchup) {
-        const matchesTeam = function(team) {
-          if (!team || !lblLc) return false;
-          if (lblLc === team) return true;
-          if (lblLc.length < 3) return false;
-          return lblLc.includes(team) || team.includes(lblLc);
-        };
-        if (matchesTeam(homeLc)) icon = homeIconHtml;
-        else if (matchesTeam(awayLc)) icon = awayIconHtml;
+        // Prefer the explicit side field (set on Winner outcomes
+        // by collectOutcomesForRender — authoritative since the
+        // backend builds primary_prices from registry-resolved
+        // sides). Fall back to substring matching for raw outcomes
+        // (per-leg, spreads, etc. that don't carry .side).
+        if (o.side === 'home') icon = homeIconHtml;
+        else if (o.side === 'away') icon = awayIconHtml;
+        else {
+          const matchesTeam = function(team) {
+            if (!team || !lblLc) return false;
+            if (lblLc === team) return true;
+            if (lblLc.length < 3) return false;
+            return lblLc.includes(team) || team.includes(lblLc);
+          };
+          if (matchesTeam(homeLc)) icon = homeIconHtml;
+          else if (matchesTeam(awayLc)) icon = awayIconHtml;
+        }
       }
       html += '<span class="sp-c2-team" title="' + escH(o.label || '') +
               '">' + icon + escH(o.label || '') + '</span>';
@@ -1585,17 +1596,17 @@ function collectOutcomesForRender(ev, marketOverride) {
     const out = [];
     const has = (a, b, c) => a != null || b != null || c != null;
     if (has(p.home_prob, p.home_yes, p.home_no)) {
-      out.push({ label: ev.HOME_NAME || 'Home',
+      out.push({ label: ev.HOME_NAME || 'Home', side: 'home',
                  prob: p.home_prob, yes: p.home_yes, no: p.home_no,
                  ticker: p.home_ticker });
     }
     if (has(p.away_prob, p.away_yes, p.away_no)) {
-      out.push({ label: ev.AWAY_NAME || 'Away',
+      out.push({ label: ev.AWAY_NAME || 'Away', side: 'away',
                  prob: p.away_prob, yes: p.away_yes, no: p.away_no,
                  ticker: p.away_ticker });
     }
     if (has(p.tie_prob, p.tie_yes, p.tie_no)) {
-      out.push({ label: 'Tie',
+      out.push({ label: 'Tie', side: 'tie',
                  prob: p.tie_prob, yes: p.tie_yes, no: p.tie_no,
                  ticker: p.tie_ticker });
     }
@@ -1618,6 +1629,26 @@ function renderGameNumberChip(ev) {
   if (!m) return '';
   return '<span class="sp-c2-agg" title="Game number in series">GAME ' +
          escH(m[1]) + '</span>';
+}
+
+function renderKickoffTimeChip(ev) {
+  // Kickoff time chip — shown on winner-shape cards where the
+  // matchup header is suppressed (so kickoff time would otherwise
+  // be invisible). Formats START_TIME in the user's browser TZ as
+  // HH:MM. Hidden for events without START_TIME (outrights) and
+  // for events whose state already shows a live clock in the
+  // score column (1H/2H/HT/etc.).
+  const ts = ev.START_TIME || ev.START_UTIME;
+  if (!ts) return '';
+  const stage = (ev.STAGE_TYPE || '').toUpperCase();
+  if (stage === 'LIVE' || stage === 'INPROGRESS' || stage === 'FINISHED') {
+    return '';
+  }
+  const d = new Date(ts * 1000);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return '<span class="sp-c2-agg" title="Kickoff time (your local timezone)">' +
+         escH(hh + ':' + mm) + '</span>';
 }
 
 function renderAggOrSeries(ev) {
