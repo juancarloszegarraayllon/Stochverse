@@ -10462,39 +10462,23 @@ async def _enrich_synthetic_events_with_fl_data(
     """Walk every `_kalshi_h2h_only` event in `unpaired_tournaments`
     and populate HOME_IMAGES / AWAY_IMAGES from FL.
 
-    Minimal implementation — no dedup, no fixture matching, no
-    paired_lookup. Just logos. All FL fetches (home + away of every
-    synth event) run concurrently in a single `asyncio.gather`.
+    Minimal sequential implementation — no dedup, no fixture matching,
+    no paired_lookup, no parallel gather. Just logos.
     """
-    target_events: list = []
-    fetch_coros: list = []
     for ut in (unpaired_tournaments or []):
-        if not isinstance(ut, dict):
-            continue
         for ev in (ut.get("events") or []):
-            if not isinstance(ev, dict) or not ev.get("_kalshi_h2h_only"):
+            if not ev.get("_kalshi_h2h_only"):
                 continue
             home = (ev.get("HOME_NAME") or "").strip()
             away = (ev.get("AWAY_NAME") or "").strip()
-            target_events.append(ev)
-            fetch_coros.append(
-                _fetch_fl_team_data(home, sport_id) if home
-                else asyncio.sleep(0, result={})
-            )
-            fetch_coros.append(
-                _fetch_fl_team_data(away, sport_id) if away
-                else asyncio.sleep(0, result={})
-            )
-    if not target_events:
-        return
-    results = await asyncio.gather(*fetch_coros, return_exceptions=True)
-    for i, ev in enumerate(target_events):
-        home_data = results[i * 2]
-        away_data = results[i * 2 + 1]
-        if isinstance(home_data, dict) and home_data.get("logo_url"):
-            ev["HOME_IMAGES"] = [home_data["logo_url"]]
-        if isinstance(away_data, dict) and away_data.get("logo_url"):
-            ev["AWAY_IMAGES"] = [away_data["logo_url"]]
+            if home:
+                data = await _fetch_fl_team_data(home, sport_id)
+                if isinstance(data, dict) and data.get("logo_url"):
+                    ev["HOME_IMAGES"] = [data["logo_url"]]
+            if away:
+                data = await _fetch_fl_team_data(away, sport_id)
+                if isinstance(data, dict) and data.get("logo_url"):
+                    ev["AWAY_IMAGES"] = [data["logo_url"]]
 
 
 def _v2_synth_unpaired_event(records: list, sport: str,
