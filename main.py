@@ -10668,7 +10668,21 @@ async def _enrich_synthetic_events_with_fl_data(
         # ── /TEMPORARY DEBUG ────────────────────────────────────
         return
 
-    paired_lookup = _build_paired_event_lookup(paired_tournaments)
+    # ── TEMPORARY DEBUG: bracket the paired-lookup builder so we
+    # see if the crash is here. Falls back to empty dict on error
+    # so enrichment can still run.
+    try:
+        paired_lookup = _build_paired_event_lookup(paired_tournaments)
+        print(
+            f"DEBUG enrich PAIRED LOOKUP OK: {len(paired_lookup)} entries",
+            flush=True,
+        )
+    except Exception as _ple:
+        import traceback
+        print(f"DEBUG enrich PAIRED LOOKUP CRASH: {_ple}", flush=True)
+        traceback.print_exc()
+        paired_lookup = {}
+    # ── /TEMPORARY DEBUG ────────────────────────────────────────
 
     # Collect synth events + FL fetch coroutines (home + away per event)
     target_entries: list = []  # [(tournament_dict, event_dict)]
