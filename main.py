@@ -10394,75 +10394,6 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
 
 # ── /sports v3 — registry-based pairing (Phase C2c-c2) ────────────
 
-# TEMPORARY KILL-SWITCH — when True, /sports skips ALL Kalshi
-# processing (pairing, synthetic events, outrights, cache lookup)
-# and serves FL events only. Each event ships with `kalshi: None`
-# so the frontend renders FL-only cards.
-#
-# Per user request as a momentary intervention. To revert: flip
-# to False (or delete this block + the `_sports_feed_fl_only`
-# helper + the early-exit in sports_feed dispatch).
-_SPORTS_FL_ONLY = True
-
-
-async def _sports_feed_fl_only(sport_id: int, timezone: int,
-                                 indent_days: int):
-    """FL-only feed handler. Mirrors the response shape of v3 so the
-    frontend renders cleanly, but bypasses every Kalshi pathway —
-    no cache fetch, no pairing, no synthetic events, no outrights.
-
-    Each FL event gets `kalshi: None`. Tournaments preserve FL's
-    shape (TOURNAMENT_STAGE_ID / NAME / COUNTRY_NAME / events).
-    """
-    from flashlive_feed import _fl_get
-
-    if not 1 <= sport_id <= 42:
-        return {"error": "sport_id must be between 1 and 42"}
-    if not -12 <= timezone <= 12:
-        return {"error": "timezone must be between -12 and 12"}
-    if not -60 <= indent_days <= 60:
-        return {"error": "indent_days must be between -60 and 60"}
-
-    fl_data = None
-    if -7 <= indent_days <= 7:
-        try:
-            fl_data = await _fl_get("/v1/events/list", {
-                "sport_id": sport_id, "timezone": timezone,
-                "indent_days": indent_days,
-            })
-        except Exception:
-            fl_data = None
-    fl_data = fl_data or {"DATA": []}
-
-    tournaments = []
-    for t in (fl_data.get("DATA") or []):
-        if not isinstance(t, dict):
-            continue
-        events = []
-        for ev in (t.get("EVENTS") or []):
-            if not isinstance(ev, dict):
-                continue
-            ev_out = dict(ev)
-            ev_out["kalshi"] = None
-            events.append(ev_out)
-        tournaments.append({
-            "TOURNAMENT_STAGE_ID": t.get("TOURNAMENT_STAGE_ID"),
-            "NAME":                t.get("NAME"),
-            "NAME_PART_1":         t.get("NAME_PART_1"),
-            "NAME_PART_2":         t.get("NAME_PART_2"),
-            "COUNTRY_NAME":        t.get("COUNTRY_NAME"),
-            "events":              events,
-        })
-
-    return {
-        "fl_sport_id":          sport_id,
-        "kalshi_sport":         "",
-        "tournaments":          tournaments,
-        "matched_kalshi_count": 0,
-        "source":               "flashlive_only",
-    }
-
-
 async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
     """Registry-based feed handler. Replaces v2's kalshi_join chain
     with pair_via_registry, which seeds an ephemeral IdentityRegistry
@@ -10756,17 +10687,6 @@ async def sports_feed(sport_id: int, timezone: int = 0,
     data (prices, orderbook) comes via the existing
     /api/event/{ticker} family on demand when COL 3 opens.
     """
-    # ── TEMPORARY: FL-only mode ────────────────────────────────
-    # Per user request — bypass all Kalshi processing and serve
-    # FL events only. No pairing, no synthetic events, no
-    # outrights, no Kalshi cache lookup. Each event ships with
-    # `kalshi: None` so the frontend renders FL-only cards.
-    #
-    # To revert: delete this block + `_SPORTS_FL_ONLY` constant +
-    # `_sports_feed_fl_only()` helper. Single git revert.
-    if _SPORTS_FL_ONLY:
-        return await _sports_feed_fl_only(sport_id, timezone, indent_days)
-    # ── /TEMPORARY ─────────────────────────────────────────────
     if v == 2:
         return await sports_feed_v2(sport_id, timezone, indent_days)
     if v == 3:
