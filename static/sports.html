@@ -1378,10 +1378,12 @@ function renderEventRow(ev, market, isMarketRow) {
   // contextual metadata for the row beneath. Game-number chip
   // (parsed from kalshi.title) renders alongside the series
   // chip when both apply.
+  const _marketChipHtml = renderActiveMarketChip(ev, isMarketRow);
   const _kickoffChipHtml = renderKickoffTimeChip(ev);
   const _gameChipHtml = renderGameNumberChip(ev);
   const _aggRowHtml = renderAggOrSeries(ev);
-  const _aggCombined = [_kickoffChipHtml, _gameChipHtml, _aggRowHtml]
+  const _aggCombined = [_marketChipHtml, _kickoffChipHtml,
+                        _gameChipHtml, _aggRowHtml]
     .filter(s => s).join(' ');
   if (_aggCombined) {
     html += '<div class="sp-c2-event-aggrow">' + _aggCombined + '</div>';
@@ -1629,6 +1631,23 @@ function renderGameNumberChip(ev) {
   if (!m) return '';
   return '<span class="sp-c2-agg" title="Game number in series">GAME ' +
          escH(m[1]) + '</span>';
+}
+
+function renderActiveMarketChip(ev, isMarketRow) {
+  // Tells the user which market the right-side prices belong to.
+  // Game-view cards reflect the per-event active market tab —
+  // 'WINNER' for headline, or the market_type name for sub-markets.
+  // Market-view rows already show the market type below outcome
+  // labels (renderEventRow line ~1543), so this chip is suppressed
+  // there to avoid duplication.
+  if (isMarketRow) return '';
+  if (!ev.kalshi || !ev.kalshi.markets || !ev.kalshi.markets.length) {
+    return '';
+  }
+  const t = _eventActiveMarketType.get(ev.EVENT_ID) || '';
+  const label = t === '' ? 'WINNER' : t.toUpperCase();
+  return '<span class="sp-c2-agg" title="Active market for this card">' +
+         escH(label) + '</span>';
 }
 
 function renderKickoffTimeChip(ev) {

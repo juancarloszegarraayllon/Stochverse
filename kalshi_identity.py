@@ -558,11 +558,28 @@ _FL_ABBR_ALIASES: dict[str, dict[str, str]] = {
         "OLI": "OLA", "OLA": "OLI",       # Olimpia (Paraguay)
         "CER": "CPO", "CPO": "CER",       # Cerro Porteno
         "ALR": "ARB", "ARB": "ALR",       # Always Ready (Bolivia)
+        "ALW": "ALR", "ARE": "ALR",       # Always Ready alternates
         "BOL": "BLV", "BLV": "BOL",       # Bolivar
         "TST": "STR", "STR": "TST",       # The Strongest
         "ANA": "ANL", "ANL": "ANA",       # Atletico Nacional (Col)
         "MIL": "MFC", "MFC": "MIL",       # Millonarios
         "JUN": "JBQ", "JBQ": "JUN",       # Junior Barranquilla
+        # Venezuela — top-flight Liga FUTVE clubs
+        "PUE": "PCB", "PCB": "PUE",       # Puerto Cabello
+        "PCA": "PUE",                      # Puerto Cabello alternate
+        "CAR": "CFC", "CFC": "CAR",       # Caracas FC
+        "DTA": "DEP", "DEP": "DTA",       # Deportivo Tachira
+        "MET": "MTR", "MTR": "MET",       # Metropolitanos
+        "MIN": "MNR", "MNR": "MIN",       # Mineros de Guayana
+        # Peru — Liga 1 + Cienciano-style smaller clubs
+        "CIE": "CCN", "CCN": "CIE",       # Cienciano
+        "CIN": "CIE",                      # Cienciano alternate
+        "ALI": "ALN", "ALN": "ALI",       # Alianza Lima
+        "UNI": "UNV", "UNV": "UNI",       # Universitario
+        "SCC": "SPC", "SPC": "SCC",       # Sporting Cristal
+        "MEL": "FBC", "FBC": "MEL",       # Melgar
+        # Lanus alternates (already had LAN↔LNS above)
+        "LNU": "LAN", "LANS": "LAN",
         # La Liga short-form pairs (Atletico Madrid is the canonical
         # 'Atletico' / 'Atletico Madrid' / 'Atl. Madrid' spread; FL
         # ships ATM, Kalshi sometimes ships ATL).
