@@ -210,6 +210,89 @@ _KALSHI_TITLE_PATTERNS = (
 )
 
 
+# Time-gate window for title-match. FL ships authoritative kickoff
+# times; Kalshi's `_kickoff_dt` is either ESPN/SofaScore-authoritative
+# (when matched upstream) or estimated via `expected_expiration_time
+# − sport_duration` (precise to ~30 min). A ±30 min gate is tight
+# enough to reject "same-name different-team" false positives like
+# Nacional (Uru) vs Nacional-AM playing on the same date but at
+# different kickoffs, while still admitting legitimate matches.
+_TITLE_MATCH_TIME_WINDOW_SEC = 30 * 60
+
+
+def _parse_iso_to_epoch(iso_str: str) -> Optional[int]:
+    """Parse an ISO 8601 datetime string to UTC epoch seconds.
+
+    Accepts common Kalshi shapes:
+      '2026-05-07T05:00:00Z'         (Z suffix)
+      '2026-05-07T05:00:00+00:00'    (explicit offset)
+      '2026-05-07T05:00:00'          (naive — assumed UTC)
+    Returns None on failure.
+    """
+    if not iso_str:
+        return None
+    try:
+        s = str(iso_str).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
+# Normalization for cross-source team-name matching. Kalshi titles use
+# short/common forms ("Tolima", "U. Catolica", "Nacional"); FL ships
+# qualified forms ("Deportes Tolima (Col)", "U. Catolica (Chi)",
+# "Nacional (Uru)"). A static alias_table per team isn't sustainable
+# (hundreds of teams, dozens of leagues). Stripping suffixes / expanding
+# abbreviations BEFORE token comparison lets the same Jaccard scoring
+# reach all of them with no per-team config.
+
+_COUNTRY_SUFFIX_RE = re.compile(r"\s*\(\s*[A-Za-z]{2,4}\s*\)\s*$")
+
+# Order matters — match longer or anchored patterns first so 'St.'
+# doesn't get partially expanded inside another word.
+_TEAM_ABBR_EXPANSIONS = (
+    (re.compile(r"\bAtl\.\s*", re.I), "Atletico "),
+    (re.compile(r"\bSt\.\s*",  re.I), "Saint "),
+    (re.compile(r"\bU\.\s*",   re.I), "Universidad "),
+    (re.compile(r"\bDep\.\s*", re.I), "Deportivo "),
+)
+
+# Anchored to the START of the name only — generic brand modifiers
+# like 'Deportes' / 'FC' / 'CD' precede the actual identifier in
+# Spanish/Portuguese/etc. naming conventions. Stripping mid-string
+# would break legitimate names. NOT included: 'Real' (canonical to
+# Real Madrid / Sociedad / Betis — stripping loses identity).
+_TEAM_GENERIC_PREFIXES_RE = re.compile(
+    r"^(?:Deportes|Deportivo|Club|CD|FC|AC|SC|CF|AS|SK)\s+",
+    re.IGNORECASE,
+)
+
+
+def _normalize_team_name(name: str) -> str:
+    """Normalize a team name for cross-source matching.
+
+    Pipeline:
+      1. Strip country suffix in parens: 'Tolima (Col)' → 'Tolima'
+      2. Expand common abbreviations: 'U. Catolica' → 'Universidad
+         Catolica'; 'Atl. Madrid' → 'Atletico Madrid'
+      3. Strip generic prefix: 'Deportes Tolima' → 'Tolima';
+         'FC Köln' → 'Köln'
+      4. Lowercase + trim
+
+    Idempotent: normalize(normalize(x)) == normalize(x).
+    """
+    if not name:
+        return ""
+    s = _COUNTRY_SUFFIX_RE.sub("", name).strip()
+    for pat, replacement in _TEAM_ABBR_EXPANSIONS:
+        s = pat.sub(replacement, s)
+    s = _TEAM_GENERIC_PREFIXES_RE.sub("", s).strip()
+    return s.lower()
+
+
 def _parse_kalshi_title(title: str) -> Optional[tuple]:
     """Extract (team_a, team_b) from a Kalshi title.
 
@@ -230,15 +313,28 @@ def _parse_kalshi_title(title: str) -> Optional[tuple]:
 
 
 def _title_name_tokens(s: str) -> set:
-    """Lowercase ≥3-char alphanum tokens from a team-name string."""
+    """Lowercase ≥3-char alphanum tokens from a NORMALIZED team-name
+    string. Normalization (suffix-strip, abbr-expand, prefix-strip)
+    runs first so equivalent forms produce overlapping token sets.
+    """
     if not s:
         return set()
-    return {t for t in re.split(r"[^a-z0-9]+", s.lower()) if len(t) >= 3}
+    norm = _normalize_team_name(s)
+    return {t for t in re.split(r"[^a-z0-9]+", norm) if len(t) >= 3}
 
 
 def _title_overlap_score(fl_name: str, kalshi_name: str) -> float:
-    """Token-set Jaccard between an FL HOME_NAME and a Kalshi title-side
-    name. Returns 0..1.
+    """Token-set Jaccard between an FL HOME_NAME and a Kalshi
+    title-side name: |A ∩ B| / |A ∪ B|. Returns 0..1.
+
+    Both inputs are normalized inside `_title_name_tokens` before
+    comparison, so 'Tolima' and 'Deportes Tolima (Col)' both produce
+    {tolima} → score 1.0.
+
+    Standard Jaccard (union denominator) penalizes pairs where one
+    side has extra tokens. Critical for distinguishing same-prefix
+    teams like 'Real Madrid' vs 'Real Sociedad' (intersection {real},
+    union {real, madrid, sociedad} → 1/3 = 0.33, below threshold).
     """
     a = _title_name_tokens(fl_name)
     b = _title_name_tokens(kalshi_name)
@@ -247,21 +343,34 @@ def _title_overlap_score(fl_name: str, kalshi_name: str) -> float:
     inter = a & b
     if not inter:
         return 0.0
-    return len(inter) / max(len(a), len(b))
+    return len(inter) / len(a | b)
 
 
 def _pair_via_title(registry: IdentityRegistry,
                      fixture_candidates: list,
                      kalshi_record: dict,
-                     min_score: float = 0.4) -> Optional[Fixture]:
-    """Pair a Kalshi record to one of the FL fixture candidates by
-    parsing its `title` and token-matching the two extracted names
-    against fixture home/away team canonical names.
+                     min_score: float = 0.5) -> Optional[Fixture]:
+    """Pair a Kalshi record to one of the FL fixture candidates using
+    BOTH name overlap AND kickoff-time proximity.
 
-    Both sides must contribute non-zero overlap (so a single team-name
-    coincidence can't satisfy the match). Tries home/away in both
-    orientations since Kalshi's 'X at Y' notation puts the away side
-    first.
+    Signals:
+      1. Name overlap — token-set Jaccard against FL home/away
+         canonical names, after normalization (suffix-strip,
+         abbr-expand, prefix-strip). Both sides must contribute
+         non-zero overlap, so single-team-name coincidences (e.g.
+         'Real Madrid' vs 'Real Sociedad' sharing 'Real') can't
+         satisfy the match unless the OTHER pair also overlaps.
+      2. Time gate — when both sides have a kickoff timestamp, the
+         FL fixture's `start_time_utc` and the Kalshi record's
+         `_kickoff_dt` must be within ±30 min. Rejects the
+         "same-name different-team different-kickoff" class —
+         e.g. Nacional (Uru) vs Nacional-AM (Brazil) playing on
+         the same date but at different kickoffs.
+
+    The time gate is bypassed (name-only) only when one side is
+    missing a kickoff — which is rare for both signals to be
+    absent. Direction-blind: tries home/away in both orientations
+    since Kalshi's 'X at Y' notation puts the away team first.
     """
     title = (kalshi_record.get("title") or "").strip()
     parsed = _parse_kalshi_title(title)
@@ -269,9 +378,21 @@ def _pair_via_title(registry: IdentityRegistry,
         return None
     title_a, title_b = parsed
 
+    # Time gate setup. _kickoff_dt may be set by the cache builder
+    # via ESPN/SofaScore (authoritative) or via DURATION estimate.
+    # Either is good enough for a ±30 min gate.
+    kalshi_kickoff_ts = _parse_iso_to_epoch(kalshi_record.get("_kickoff_dt"))
+
     best_fx: Optional[Fixture] = None
     best_score = min_score
     for fx in fixture_candidates:
+        # Time gate — only when BOTH sides have a kickoff. When
+        # missing on either side, fall through to name-only (the
+        # name guards above are still strict enough for most cases).
+        if kalshi_kickoff_ts is not None and fx.start_time_utc:
+            time_diff = abs(fx.start_time_utc - kalshi_kickoff_ts)
+            if time_diff > _TITLE_MATCH_TIME_WINDOW_SEC:
+                continue
         home_team = registry.resolve_team(fx.home_team_id)
         away_team = registry.resolve_team(fx.away_team_id)
         if home_team is None or away_team is None:
@@ -685,6 +806,21 @@ def seed_kalshi_record(registry: IdentityRegistry,
             registry, alias_winner, kalshi_record, sport,
         )
         return alias_winner
+
+    # Tier 2.5: title-match — name normalization + ±30 min time gate.
+    # Mirrors the batch seeder's behavior (Phase C2f+) so singular
+    # and batch paths behave identically per-record.
+    title_winner = _pair_via_title(registry, candidates, kalshi_record)
+    if title_winner is not None:
+        registry.register_alias(
+            source="kalshi", external_id=ticker,
+            canonical_id=title_winner.id, method="title_match",
+            confidence=0.85,
+        )
+        _seed_winner_market_layer(
+            registry, title_winner, kalshi_record, sport,
+        )
+        return title_winner
 
     # Tier 3 (guarded fuzzy) — only available via the batch seeder
     # since it requires bucket-level visibility (count of unpaired

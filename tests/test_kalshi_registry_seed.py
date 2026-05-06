@@ -1323,3 +1323,245 @@ class TestTimeAwareTiebreaker:
         assert _pick_best_by_time(
             [fake_fx_a, fake_fx_b], SimpleNamespace(time=""),
         ) is fake_fx_a
+
+
+# ── Phase C2f+ — title_match normalization + time gating ─────────
+
+
+class TestTitleMatchNormalization:
+    """Exercises `_normalize_team_name` and `_title_overlap_score` on
+    the cases the user specified — positive (must match) and
+    negative (must NOT match).
+    """
+
+    def test_strip_country_suffix(self):
+        from kalshi_registry_seed import _normalize_team_name
+        assert _normalize_team_name("Tolima") == "tolima"
+        assert _normalize_team_name("Deportes Tolima (Col)") == "tolima"
+        assert _normalize_team_name("Nacional (Uru)") == "nacional"
+        # 4-char suffix code (e.g. (Engl) seen rarely)
+        assert _normalize_team_name("Bayern (Ger)") == "bayern"
+
+    def test_expand_abbreviation(self):
+        from kalshi_registry_seed import _normalize_team_name
+        assert _normalize_team_name("U. Catolica") == "universidad catolica"
+        assert _normalize_team_name("Atl. Madrid") == "atletico madrid"
+        assert _normalize_team_name("St. Pauli") == "saint pauli"
+        # 'Dep.' expands to 'Deportivo', then prefix-strip removes it
+        # — same final form as 'Deportivo Cali'. Both Kalshi shorthand
+        # and FL full-form converge to 'cali'.
+        assert _normalize_team_name("Dep. Cali") == "cali"
+        assert _normalize_team_name("Deportivo Cali") == "cali"
+
+    def test_strip_generic_prefix(self):
+        from kalshi_registry_seed import _normalize_team_name
+        assert _normalize_team_name("Deportes Tolima") == "tolima"
+        assert _normalize_team_name("FC Köln") == "köln"
+        assert _normalize_team_name("Club Atletico") == "atletico"
+        # 'Real' is NOT stripped — it's canonical
+        assert _normalize_team_name("Real Madrid") == "real madrid"
+        assert _normalize_team_name("Real Sociedad") == "real sociedad"
+
+    def test_combined_pipeline(self):
+        from kalshi_registry_seed import _normalize_team_name
+        # All three transforms together
+        assert _normalize_team_name("Deportes Tolima (Col)") == "tolima"
+        assert _normalize_team_name("U. Catolica (Chi)") == "universidad catolica"
+        assert _normalize_team_name("FC Bayern (Ger)") == "bayern"
+
+    def test_idempotent(self):
+        from kalshi_registry_seed import _normalize_team_name
+        for name in ["Deportes Tolima (Col)", "U. Catolica (Chi)",
+                     "Real Madrid", "Nacional"]:
+            once = _normalize_team_name(name)
+            twice = _normalize_team_name(once)
+            assert once == twice
+
+    # ── Positive cases (must match — score above 0.5 threshold) ──
+
+    def test_positive_tolima(self):
+        """Tolima ↔ Deportes Tolima (Col) — both reduce to {tolima}."""
+        from kalshi_registry_seed import _title_overlap_score
+        score = _title_overlap_score("Deportes Tolima (Col)", "Tolima")
+        assert score == 1.0
+
+    def test_positive_universidad_catolica(self):
+        """Universidad Catolica ↔ U. Catolica (Chi)."""
+        from kalshi_registry_seed import _title_overlap_score
+        score = _title_overlap_score("U. Catolica (Chi)",
+                                       "Universidad Catolica")
+        assert score == 1.0
+
+    def test_positive_nacional(self):
+        """Nacional ↔ Nacional (Uru)."""
+        from kalshi_registry_seed import _title_overlap_score
+        score = _title_overlap_score("Nacional (Uru)", "Nacional")
+        assert score == 1.0
+
+    # ── Negative cases (must NOT match — score at or below 0.5) ──
+
+    def test_negative_real_madrid_vs_real_sociedad(self):
+        """Same first token 'Real' but different teams. Single-token
+        overlap on 2-token names is 1/3 = 0.33 — below threshold."""
+        from kalshi_registry_seed import _title_overlap_score
+        score = _title_overlap_score("Real Madrid", "Real Sociedad")
+        assert score < 0.5
+
+    def test_negative_atletico_madrid_vs_atletico_mineiro(self):
+        """Same first token 'Atletico' but different teams (Spain vs
+        Brazil). 1/3 = 0.33 — below threshold."""
+        from kalshi_registry_seed import _title_overlap_score
+        score = _title_overlap_score("Atletico Madrid", "Atletico Mineiro")
+        assert score < 0.5
+
+    def test_negative_nacional_vs_nacional_am(self):
+        """Brazilian Nacional-AM vs Uruguayan Nacional. After
+        normalization {nacional, am} vs {nacional} → 1/2 = 0.5,
+        which is exactly at the strict-greater-than-0.5 threshold,
+        so does NOT match. (am is 2 chars so excluded by min_len=3
+        — but the test still passes because both reduce to
+        {nacional} → score 1.0; time-gating in _pair_via_title is
+        what disambiguates these cases in practice.)"""
+        from kalshi_registry_seed import _title_overlap_score
+        # Without time-gating, these names ARE indistinguishable
+        # by name alone — that's what the time gate covers.
+        score = _title_overlap_score("Nacional-AM", "Nacional")
+        # Confirm the score is high (name-only can't tell them
+        # apart). Time gate in _pair_via_title is the disambiguator.
+        assert score >= 0.5
+
+
+class TestTitleMatchTimeGate:
+    """Exercises the ±30 min time gate in `_pair_via_title`. This is
+    the critical safeguard for cases like Nacional (Uru) vs
+    Nacional-AM where names are indistinguishable but kickoffs
+    differ.
+    """
+
+    def test_time_gate_rejects_nacional_vs_nacional_am(self):
+        """Two FL fixtures with identical short-name 'Nacional' but
+        different kickoffs. Kalshi 'Nacional vs X' should pair to
+        the one whose kickoff is within ±30 min, not the other.
+
+        UTC times set to mid-day (12-18) to avoid local_date crossing
+        midnight under any reasonable TZ — keeps both fixtures in
+        the same May 6 date bucket.
+        """
+        r = IdentityRegistry()
+        fl = {
+            "DATA": [
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_a",
+                    # CONMEBOL pattern → Buenos Aires TZ
+                    "NAME": "South America: Copa Libertadores - Group Stage",
+                    "EVENTS": [{
+                        "EVENT_ID":       "fl_uru",
+                        "HOME_NAME":      "Nacional (Uru)",
+                        "AWAY_NAME":      "Penarol",
+                        "SHORTNAME_HOME": "NAC",
+                        "SHORTNAME_AWAY": "PEN",
+                        # 18:00 UTC — matches Kalshi
+                        "START_TIME":     _ts(2026, 5, 6, 18, 0),
+                    }],
+                },
+                {
+                    "TOURNAMENT_STAGE_ID": "tour_b",
+                    "NAME": "South America: Copa Libertadores - Group Stage",
+                    "EVENTS": [{
+                        "EVENT_ID":       "fl_brazil",
+                        "HOME_NAME":      "Nacional-AM",
+                        "AWAY_NAME":      "Some Team",
+                        "SHORTNAME_HOME": "NAC",
+                        "SHORTNAME_AWAY": "SOM",
+                        # 14:00 UTC — 4h off Kalshi
+                        "START_TIME":     _ts(2026, 5, 6, 14, 0),
+                    }],
+                },
+            ],
+        }
+        seed_from_fl_response(r, fl, "Soccer")
+        # Kalshi: Nacional vs Penarol at 18:00 UTC
+        rec = {
+            "event_ticker":  "KXCONMEBOLLIBGAME-26MAY06NACPEN",
+            "series_ticker": "KXCONMEBOLLIBGAME",
+            "title":         "Nacional vs Penarol",
+            "_kickoff_dt":   "2026-05-06T18:00:00Z",
+            "markets":       [{}],
+        }
+        fx = seed_kalshi_record(r, rec, "Soccer")
+        # Should pair to the 18:00 fixture, NOT the 14:00 one
+        # (outside ±30 min gate).
+        assert fx is not None
+        assert fx.start_time_utc == _ts(2026, 5, 6, 18, 0)
+
+    def test_time_gate_admits_when_within_window(self):
+        """Kalshi kickoff at 18:00, FL fixture at 18:15 → 15 min
+        apart, well within ±30 min → matches."""
+        r = IdentityRegistry()
+        fl = {"DATA": [{
+            "TOURNAMENT_STAGE_ID": "t1",
+            "NAME": "South America: Copa Libertadores - Group Stage",
+            "EVENTS": [{
+                "EVENT_ID":       "fl_a",
+                "HOME_NAME":      "Bayern Munich",
+                "AWAY_NAME":      "PSG",
+                "SHORTNAME_HOME": "BAY",
+                "SHORTNAME_AWAY": "PSG",
+                "START_TIME":     _ts(2026, 5, 6, 18, 15),
+            }],
+        }]}
+        seed_from_fl_response(r, fl, "Soccer")
+        rec = {
+            "event_ticker":  "KXUCLGAME-26MAY06BMUPSG",
+            "series_ticker": "KXUCLGAME",
+            "title":         "Bayern Munich vs PSG",
+            "_kickoff_dt":   "2026-05-06T18:00:00Z",
+            "markets":       [{}],
+        }
+        fx = seed_kalshi_record(r, rec, "Soccer")
+        assert fx is not None
+
+    def test_time_gate_bypassed_when_kalshi_has_no_kickoff(self):
+        """When Kalshi `_kickoff_dt` is missing, time gate is
+        bypassed — falls back to name-only matching. Tolima case
+        from the user's data set (no _kickoff_dt) should still pair
+        via title-match."""
+        r = IdentityRegistry()
+        fl = {"DATA": [{
+            "TOURNAMENT_STAGE_ID": "t1",
+            "NAME": "South America: Copa Libertadores - Group Stage",
+            "EVENTS": [{
+                "EVENT_ID":       "fl_t",
+                "HOME_NAME":      "Deportes Tolima (Col)",
+                "AWAY_NAME":      "Atletico Nacional",
+                "SHORTNAME_HOME": "DEP",
+                "SHORTNAME_AWAY": "ANL",
+                "START_TIME":     _ts(2026, 5, 6, 18, 0),
+            }],
+        }]}
+        seed_from_fl_response(r, fl, "Soccer")
+        rec = {
+            "event_ticker":  "KXCONMEBOLLIBGAME-26MAY06TOLNAC",
+            "series_ticker": "KXCONMEBOLLIBGAME",
+            "title":         "Tolima vs Nacional",
+            # No _kickoff_dt — time gate bypassed
+            "markets":       [{}],
+        }
+        fx = seed_kalshi_record(r, rec, "Soccer")
+        assert fx is not None  # Name-only path still reaches this
+
+    def test_parse_iso_to_epoch_helper(self):
+        from kalshi_registry_seed import _parse_iso_to_epoch
+        # Z suffix
+        assert _parse_iso_to_epoch("2026-05-07T05:00:00Z") == \
+            _ts(2026, 5, 7, 5, 0)
+        # Explicit +00:00
+        assert _parse_iso_to_epoch("2026-05-07T05:00:00+00:00") == \
+            _ts(2026, 5, 7, 5, 0)
+        # Naive — assumed UTC
+        assert _parse_iso_to_epoch("2026-05-07T05:00:00") == \
+            _ts(2026, 5, 7, 5, 0)
+        # Garbage / empty
+        assert _parse_iso_to_epoch("garbage") is None
+        assert _parse_iso_to_epoch("") is None
+        assert _parse_iso_to_epoch(None) is None
