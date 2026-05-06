@@ -37,34 +37,15 @@ from fl_registry_seed import seed_from_fl_response
 from kalshi_registry_seed import seed_kalshi_records
 
 
-def pair_via_registry(sport: str,
-                       fl_response: dict,
-                       kalshi_records: list) -> dict:
-    """Compute fixture→ticker pairings via a fresh registry.
+def seed_and_pair_via_registry(sport: str,
+                                 fl_response: dict,
+                                 kalshi_records: list) -> tuple:
+    """Same as pair_via_registry but also returns the seeded registry.
 
-    Steps:
-      1. Build an empty IdentityRegistry.
-      2. Seed FL teams / competitions / fixtures from `fl_response`
-         (the FlashLive events-list shape — `{'DATA': [...]}`).
-      3. Seed Kalshi pairings via the three-tier matcher (strict →
-         alias_table → guarded_fuzzy on still-unpaired records).
-         Per_leg records resolve to their parent fixture; outright
-         records are skipped.
-      4. For every FL event in the response, recover the canonical
-         fixture, then look up every alias that points at it under
-         source='kalshi'. Build the result dict mapping FL event_id
-         → list of Kalshi event_tickers.
-
-    Returns:
-        {
-          fl_event_id: [kalshi_ticker, ...],   # ordered insertion-stably
-          ...
-        }
-
-    FL events that don't seed (missing teams or start_time) get
-    empty lists. Kalshi records that don't pair to any fixture
-    contribute nothing to the result; they're recoverable via
-    `seed_kalshi_records`'s stats dict if a caller wants them.
+    Returns (pairings, registry). v3 uses this to keep the registry
+    around past the pairing step so it can resolve Kalshi outcome
+    tickers → canonical Outcome.side for the primary_prices builder
+    (avoids re-running the token-overlap matcher in main.py).
     """
     registry = IdentityRegistry()
     seed_from_fl_response(registry, fl_response, sport)
@@ -73,7 +54,7 @@ def pair_via_registry(sport: str,
     pairings: dict = {}
     data = fl_response.get("DATA") or []
     if not isinstance(data, list):
-        return pairings
+        return pairings, registry
 
     for tournament in data:
         if not isinstance(tournament, dict):
@@ -87,8 +68,6 @@ def pair_via_registry(sport: str,
             fl_event_id = (ev.get("EVENT_ID") or "").strip()
             if not fl_event_id:
                 continue
-            # Resolve FL event_id to canonical fixture via the alias
-            # written by fl_registry_seed.
             fixture = registry.resolve_through_alias("fl", fl_event_id)
             if fixture is None or not fixture.id.startswith("fixture:"):
                 pairings[fl_event_id] = []
@@ -98,7 +77,54 @@ def pair_via_registry(sport: str,
             )
             pairings[fl_event_id] = [a.external_id
                                        for a in kalshi_aliases]
+    return pairings, registry
+
+
+def pair_via_registry(sport: str,
+                       fl_response: dict,
+                       kalshi_records: list) -> dict:
+    """Compute fixture→ticker pairings via a fresh registry.
+
+    Thin wrapper over seed_and_pair_via_registry that drops the
+    registry. Kept as the public API for callers that only need
+    the pairings (tests, the diff endpoint).
+    """
+    pairings, _ = seed_and_pair_via_registry(
+        sport, fl_response, kalshi_records,
+    )
     return pairings
+
+
+def classify_outcomes_via_registry(registry,
+                                     kalshi_record: dict) -> dict:
+    """For each outcome in `kalshi_record` with a per-outcome ticker,
+    look up its side ('home' / 'away' / 'tie') via the registry's
+    `kalshi_outcome` alias index. Returns {outcome_ticker: side}.
+
+    Outcomes whose ticker isn't registered (e.g. non-Winner markets,
+    or sports we haven't seeded the market layer for) are omitted —
+    callers should fall back to their existing classifier for those.
+    """
+    sides: dict = {}
+    if registry is None:
+        return sides
+    outcomes = (kalshi_record.get("outcomes")
+                or kalshi_record.get("_outcomes")
+                or [])
+    for o in outcomes:
+        if not isinstance(o, dict):
+            continue
+        ticker = (o.get("ticker") or "").strip()
+        if not ticker:
+            continue
+        alias = registry.resolve_alias("kalshi_outcome", ticker)
+        if alias is None:
+            continue
+        outcome = registry.resolve_outcome(alias.canonical_id)
+        if outcome is None:
+            continue
+        sides[ticker] = outcome.side
+    return sides
 
 
 def diff_pairings(v2_pairings: dict,

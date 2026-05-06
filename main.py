@@ -7952,7 +7952,8 @@ def _extract_all_outcomes(kalshi_record: dict) -> list:
 
 
 def _extract_winner_prices(kalshi_record: dict, home_name: str,
-                            away_name: str) -> dict:
+                            away_name: str,
+                            outcome_side_overrides: dict = None) -> dict:
     """For a Kalshi headline-Winner record (3-way: home/away/tie),
     pick the YES price (in cents) for each side by fuzzy-matching
     outcome labels to FL home_name / away_name. Returns a dict
@@ -8040,6 +8041,34 @@ def _extract_winner_prices(kalshi_record: dict, home_name: str,
                   if o.get("_na") is not None
                   else _coerce_cents(o, "no_ask"))
         outcome_ticker = o.get("ticker") or ""
+        # Registry override: when the caller passes a side dict
+        # (Phase C2c-c3 — sports_feed_v3 sources sides from the
+        # registry's `kalshi_outcome` aliases, which honor team
+        # alias_table entries the token-overlap path here can't
+        # see). This fixes cases like Universidad Central (Ven) vs
+        # a Kalshi outcome label that shares zero ≥3-char tokens
+        # with the FL home/away name — registry has the alias, so
+        # the side is correct, while the token path silently drops
+        # the outcome.
+        forced_side = (outcome_side_overrides or {}).get(outcome_ticker)
+        if forced_side == "home":
+            if out["home_prob"]   is None: out["home_prob"]   = prob
+            if out["home_yes"]    is None: out["home_yes"]    = yes_ask
+            if out["home_no"]     is None: out["home_no"]     = no_ask
+            if out["home_ticker"] is None: out["home_ticker"] = outcome_ticker
+            continue
+        if forced_side == "away":
+            if out["away_prob"]   is None: out["away_prob"]   = prob
+            if out["away_yes"]    is None: out["away_yes"]    = yes_ask
+            if out["away_no"]     is None: out["away_no"]     = no_ask
+            if out["away_ticker"] is None: out["away_ticker"] = outcome_ticker
+            continue
+        if forced_side == "tie":
+            if out["tie_prob"]   is None: out["tie_prob"]   = prob
+            if out["tie_yes"]    is None: out["tie_yes"]    = yes_ask
+            if out["tie_no"]     is None: out["tie_no"]     = no_ask
+            if out["tie_ticker"] is None: out["tie_ticker"] = outcome_ticker
+            continue
         # Tie / Draw catch — these are short labels that won't
         # token-match either team; handle first so they don't fall
         # through to noisy team-name matching.
@@ -9265,10 +9294,15 @@ def _v2_aggregate_label(live: dict) -> str:
 
 
 def _v2_build_kalshi_block(records: list, sport: str,
-                            home_name: str, away_name: str) -> dict:
+                            home_name: str, away_name: str,
+                            registry=None) -> dict:
     """Build the `kalshi` block for an FL event paired with N records.
 
     Mirrors the v1 shape exactly so the frontend doesn't change.
+    When `registry` is supplied (sports_feed_v3 path), Kalshi outcome
+    sides come from `kalshi_outcome` aliases — which honor team
+    alias_table entries the local token-overlap matcher can't see.
+    Falls back to token-overlap when no override is available.
     """
     primary = _v2_pick_primary(records)
     markets = []
@@ -9280,7 +9314,17 @@ def _v2_build_kalshi_block(records: list, sport: str,
             "market_type":   _market_type_from_title(r.get("title", "")),
             "outcomes":      _extract_all_outcomes(r),
         })
-    primary_prices = _extract_winner_prices(primary, home_name, away_name)
+    side_overrides = None
+    if registry is not None:
+        try:
+            from registry_pairing import classify_outcomes_via_registry
+            side_overrides = classify_outcomes_via_registry(registry, primary)
+        except Exception:
+            side_overrides = None
+    primary_prices = _extract_winner_prices(
+        primary, home_name, away_name,
+        outcome_side_overrides=side_overrides,
+    )
     # Live state via the new dispatch.
     try:
         from live_source_selector import enrich_for_record
@@ -9656,7 +9700,7 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
     """
     from flashlive_feed import _fl_get
     from kalshi_join import find_unpaired_buckets
-    from registry_pairing import pair_via_registry
+    from registry_pairing import seed_and_pair_via_registry
 
     if not 1 <= sport_id <= 42:
         return {"error": "sport_id must be between 1 and 42"}
@@ -9699,8 +9743,11 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
     sport_kalshi = [r for r in cache_records
                       if (r.get("_sport") or "") == sport] if sport else []
     pairings_dict: dict = {}
+    registry = None
     if sport:
-        pairings_dict = pair_via_registry(sport, fl_data, sport_kalshi)
+        pairings_dict, registry = seed_and_pair_via_registry(
+            sport, fl_data, sport_kalshi,
+        )
 
     # ticker → original Kalshi cache record (for downstream block build)
     record_by_ticker = {(r.get("event_ticker") or ""): r
@@ -9734,6 +9781,7 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
                 kalshi_records, sport,
                 ev.get("HOME_NAME") or "",
                 ev.get("AWAY_NAME") or "",
+                registry=registry,
             )
             for tk in ticker_list:
                 if tk:
