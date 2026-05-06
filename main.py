@@ -60,6 +60,12 @@ print("DEBUG MAIN_PY_LOADED: version=49", flush=True)
 
 logging.basicConfig(level=logging.INFO)
 
+# Module-level logger for DEBUG-prefixed diagnostic messages. Routed
+# through the standard logging framework so platforms that capture
+# logger output (Railway, Sentry, journald) see them even if their
+# stdout capture is buffering or filtering plain `print()`.
+logger = logging.getLogger("stochverse")
+
 # ── Sentry error tracking (optional) ────────────────────────────────
 # Enabled automatically when SENTRY_DSN is set in the environment.
 # No-op otherwise, so local dev and unconfigured deploys skip it.
@@ -10649,23 +10655,21 @@ async def _enrich_synthetic_events_with_fl_data(
             for ev in (t.get("events") or [])
             if isinstance(ev, dict)
         )
-        print(
+        logger.warning(
             f"DEBUG enrich ENTRY: unpaired_tournaments_count={_ut_count} "
             f"synth_event_count={_synth_count} "
-            f"paired_event_count={_paired_count} sport_id={sport_id}",
-            flush=True,
+            f"paired_event_count={_paired_count} sport_id={sport_id}"
         )
     except Exception as _e:
-        print(f"DEBUG enrich ENTRY logging FAILED: {_e}", flush=True)
+        logger.warning(f"DEBUG enrich ENTRY logging FAILED: {_e}")
     # ── /TEMPORARY DEBUG ────────────────────────────────────────
 
     if not unpaired_tournaments or not 1 <= sport_id <= 42:
         # ── TEMPORARY DEBUG ─────────────────────────────────────
-        print(
+        logger.warning(
             f"DEBUG enrich EARLY EXIT: unpaired_empty="
             f"{not unpaired_tournaments} "
-            f"sport_id_in_range={1 <= sport_id <= 42}",
-            flush=True,
+            f"sport_id_in_range={1 <= sport_id <= 42}"
         )
         # ── /TEMPORARY DEBUG ────────────────────────────────────
         return
@@ -10679,12 +10683,12 @@ async def _enrich_synthetic_events_with_fl_data(
     # Catches BaseException (broader than Exception — includes
     # SystemExit, KeyboardInterrupt, asyncio.CancelledError) so
     # nothing slips past silently.
-    print(f"DEBUG enrich STEP 1: about to call _build_paired_event_lookup", flush=True)
+    logger.warning("DEBUG enrich STEP 1: about to call _build_paired_event_lookup")
     try:
         x = _build_paired_event_lookup(paired_tournaments)
-        print(f"DEBUG enrich STEP 2: paired_lookup done type={type(x)}", flush=True)
+        logger.warning(f"DEBUG enrich STEP 2: paired_lookup done type={type(x)}")
     except BaseException as e:
-        print(f"DEBUG enrich STEP 1 FAILED: {type(e).__name__}: {e}", flush=True)
+        logger.warning(f"DEBUG enrich STEP 1 FAILED: {type(e).__name__}: {e}")
         return
     return
     # ── /TEMPORARY DEBUG STUB ─────────────────────────────────────
@@ -11044,12 +11048,11 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
     # attach HOME_IMAGES/AWAY_IMAGES and override START_TIME with
     # the matched FL fixture when one matches by opponent + date.
     # ── TEMPORARY DEBUG: log call-site state regardless of gate ──
-    print(
+    logger.warning(
         f"DEBUG v2 call site: unpaired_tournaments_count="
         f"{len(unpaired_tournaments) if unpaired_tournaments else 0} "
         f"sport_id={sport_id} will_call="
-        f"{bool(unpaired_tournaments)}",
-        flush=True,
+        f"{bool(unpaired_tournaments)}"
     )
     if unpaired_tournaments:
         try:
@@ -11060,11 +11063,10 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
         except Exception as _enrich_err:
             # ── TEMPORARY DEBUG: surface the swallowed exception ──
             import traceback
-            print(
+            logger.warning(
                 f"DEBUG v2 enrich SWALLOWED EXCEPTION: "
                 f"{type(_enrich_err).__name__}: {_enrich_err}\n"
-                f"{traceback.format_exc()}",
-                flush=True,
+                f"{traceback.format_exc()}"
             )
             # ── /TEMPORARY DEBUG ──
 
@@ -11277,12 +11279,11 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
     # HOME_IMAGES/AWAY_IMAGES, override START_TIME with the
     # matched FL fixture's authoritative kickoff when found.
     # ── TEMPORARY DEBUG: log call-site state regardless of gate ──
-    print(
+    logger.warning(
         f"DEBUG v3 call site: unpaired_tournaments_count="
         f"{len(unpaired_tournaments) if unpaired_tournaments else 0} "
         f"sport_id={sport_id} will_call="
-        f"{bool(unpaired_tournaments)}",
-        flush=True,
+        f"{bool(unpaired_tournaments)}"
     )
     if unpaired_tournaments:
         try:
@@ -11293,11 +11294,10 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
         except Exception as _enrich_err:
             # ── TEMPORARY DEBUG: surface the swallowed exception ──
             import traceback
-            print(
+            logger.warning(
                 f"DEBUG v3 enrich SWALLOWED EXCEPTION: "
                 f"{type(_enrich_err).__name__}: {_enrich_err}\n"
-                f"{traceback.format_exc()}",
-                flush=True,
+                f"{traceback.format_exc()}"
             )
 
     # ── Synthetic-event cosmetic enrichment ──────────────────────
