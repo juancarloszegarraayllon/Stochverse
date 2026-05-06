@@ -310,6 +310,20 @@ Single running list of every issue surfaced from live `/sports?v2=1` testing. On
 | 2026-05-05 | All | When FL has a fixture but Kalshi pairing fails, the Kalshi market vanished into a sibling 'Other: <ticker>' tournament instead of surfacing inside the FL tournament | Added `_V2_SAFETY_NET_LEAGUE_PATTERNS` map + `_v2_safety_net_target()` fallback in `_v2_route_unpaired` — fuzzy-matches series_base to FL tournament NAME substring as a tertiary routing fallback (after deterministic in-request match and persistent hint) | _next commit_ |
 | 2026-05-05 | UX | Outright/season-future tournaments were rendered at the TOP of side nav AND cards column, blocking the user from seeing live games | Reordered: outrights now `push` to bottom of side nav, cards column stable-sorts so outrights render last | `fed6818` |
 | 2026-05-05 | Basketball | DET-CLE WINNER tab rendered empty even though KXNBAGAME-26MAY05CLEDET was paired and the data was sitting in the markets array | `_v2_pick_primary` chose `KXNBASERIES` (no market_type, came first in records) over `KXNBAGAME` (the actual 2-way Winner). `_extract_winner_prices` then ran on series-level outcomes with no home/away prices. Primary now prefers GAME/MATCH-suffixed series_ticker before falling through to the any-empty-market_type heuristic | `bd6255d` |
+| 2026-05-06 | All | "Tomorrow" date pill showed late-evening current-day games (DET-CLE, OKC-LAL); some west-coast tonight games appeared under tomorrow | Backend buckets by UTC date; user thinks in browser-local. Added client-side `passesDateFilter` that compares event START_TIME vs `today + indent_days` in browser TZ | PR #15 |
+| 2026-05-06 | Basketball | Orphan "What will the announcers say…" cards (KXNBAMENTION) showed instead of the headline Winner | Frontend `pickMarketForGameRow` returned first market with empty `market_type`; KXNBAMENTION came before KXNBAGAME. Now prefers the market whose `event_ticker` equals backend's chosen `event_ticker` | PR #15 |
+| 2026-05-06 | All | GAME N context missing from playoff series cards | Added `renderGameNumberChip(ev)` parsing `^Game N:` from kalshi.title; renders next to SERIES chip | PR #15 |
+| 2026-05-06 | Basketball | SAS-MIN/DET-CLE cards rendered without icons / time / full names while NYK-PHI rendered correctly | `isWinnerShapedOutcomes` used strict equality between Kalshi labels ("San Antonio") and FL HOME_NAME ("San Antonio Spurs"). Relaxed to bidirectional substring (≥3 char) with different-side guard | PR #16 |
+| 2026-05-06 | Soccer | Universidad Central (Ven) vs Ind. del Valle showed only 2 of 3 Winner outcomes (home dropped) | `_extract_winner_prices` token-overlap couldn't classify "Caracas FC"-style Kalshi labels against FL home/away. Wired sports_feed_v3 to consult registry's `kalshi_outcome` aliases (Phase C2b) for authoritative side mapping; falls back to token-overlap when registry has no info | PR #18 |
+| 2026-05-06 | All | Winner-shape cards (Champions League etc.) showed no kickoff time anywhere — matchup header was suppressed | Added `renderKickoffTimeChip(ev)` that renders START_TIME as `HH:MM` chip in aggrow strip; hidden for live/finished/outright | PR #19 |
+| 2026-05-06 | All | Inline icon match in winner-shape cards required substring overlap (failed for Kalshi="PSG" vs FL="Paris Saint-Germain") | `collectOutcomesForRender` now stamps `side: 'home'/'away'/'tie'` on Winner outcomes; icon loop reads `o.side` directly instead of substring guessing. Substring kept as fallback for non-Winner outcomes | PR #19 |
+| 2026-05-06 | Soccer | Boca/Barcelona SC and other Conmebol fixtures had no Kalshi block — `_FL_ABBR_ALIASES["Soccer"]` was empty | Backfilled ~30 Argentina/Brazil/Ecuador/Colombia/Peru/Bolivia/Paraguay/Uruguay aliases plus Atletico Madrid + PSG cross-league entries | PR #20 |
+| 2026-05-06 | All | No "tool to let us know" surface — alias gaps and duplicate canonical entities were invisible | Built `registry_duplicates.py` with `find_duplicate_team_candidates` (token-Jaccard) and `find_duplicate_fixture_candidates` (orientation-blind same-day pair). Added `/api/_debug/registry_duplicates` (per-sport) and `/api/_debug/registry_duplicates_all` (cross-sport). `_notify_webhook` helper POSTs JSON to `STOCHVERSE_NOTIFY_WEBHOOK_URL` (Discord/Slack-compatible) | PR #22 |
+| 2026-05-06 | All | Alias backfill was guesswork — needed actual abbrs production was shipping | Built `/api/_debug/unpaired_pairs?sport_id=N&indent_days=M` — surfaces unpaired FL events (with their SHORTNAME_HOME/AWAY) alongside unpaired Kalshi tickers (with parsed abbr_block) per (sport, date) bucket. Replaces guessing loop with data-driven backfill | PR #23 |
+| 2026-05-06 | Soccer | Single-string `_FL_ABBR_ALIASES` couldn't represent ALW → {ALR, ARE, ARB} all at once | `normalize_fl_abbr` now accepts list/tuple/set values; Always Ready entries upgraded to list form covering all four equivalence-class members. Verified ARELAN appears in fl_orientations for the real FL fixture | PR #24 |
+| 2026-05-06 | Soccer | Bayern Munich vs PSG (UCL Play Offs) rendered as bare synthetic event with no icons / time / matchup header | Initial diagnosis: synthetic Kalshi-only event needing enrichment. Found v3 was missing v1's two synthetic-event helpers (FL_TEAM_HINTS population + cosmetic enrichment pass). Ported both into sports_feed_v3 | PR #26 |
+| 2026-05-06 | All | **Hand-coded alias_table approach hit unsustainability wall** — 379 unpaired FL events / 686 unpaired Kalshi tickers in single /unpaired_pairs response. User correctly called out that infrastructure was universal but data layer was manual | Added `title_match` tier between `alias_table` (2) and `guarded_fuzzy` (3). Parses Kalshi `title` ("Bayern Munich vs PSG", "Will X beat Y", etc.), token-Jaccard against FL HOME_NAME/AWAY_NAME canonical names with both-sides-must-overlap guard. Pairs every team Kalshi names without alias maintenance. Confidence 0.85. Resolved Bayern/PSG, Academia Puerto Cabello/Cienciano, and an open-ended set of future pairs | PR #27 |
+| 2026-05-06 | All | After Bayern/PSG re-diagnosis: turned out NOT to be synthetic. FL had the fixture; PR #26's enrichment was barking up the wrong tree for this case. PR #27's title-match closed it as a regular paired event | (corrected by PR #27) | — |
 
 ### Phase 5+ — canonical entity registry (parallel track)
 
@@ -430,3 +444,82 @@ These stay in v1 OR don't change at all (per `KALSHI_AUDIT.md` deferred work):
     - Wire into `sports_feed_v3` as a fallback when an FL event is FINISHED and `kalshi` would otherwise be null
     - Cache by `(date, abbr_block)` for ~5 min — settled data doesn't change, but we want to bound REST volume
   - **Why deferred**: not required for live trading or pre-game surfaces. Pure historical reference. Build it once user feedback confirms traders are actually navigating back to look at closing lines.
+
+## 11. Session retrospective — 2026-05-06
+
+### What worked
+
+- **Title-based matching tier (PR #27) is the structural answer** to the alias-maintenance problem. Closes a class of bugs (Bayern/PSG, Conmebol unpaired, J-League, EPL when FL/Kalshi abbrs diverge) without per-team manual coding.
+- **`/api/_debug/unpaired_pairs` (PR #23)** turned alias backfill from guesswork into data-driven work. The right move would have been to ship this *first*, before any guessed alias rounds.
+- **Registry-aware outcome side classification (PR #18)** correctly fixed Universidad Central's missing outcome — registry's existing alias data, just not consulted by the legacy `_extract_winner_prices` path.
+- **Synthetic event enrichment in v3 (PR #26)** ports v1's `_FL_TEAM_HINTS` + cosmetic enrichment block into v3 — necessary for genuinely Kalshi-only events. Note: was *not* the right diagnosis for Bayern/PSG (which is a real FL fixture) — that needed PR #27 instead.
+
+### What didn't work / was wasted
+
+- **Two rounds of guessed Conmebol aliases (PRs #20, #21)** before building the diagnostic. Should have built `/unpaired_pairs` first, used it once, and shipped precise aliases. The order cost iterations and user patience.
+- **Multiple chip-styling iterations (PRs #21 → #23 → #25)** for the WINNER chip. Should have asked for a mockup before shipping a shape and iterating. Net result: feature removed, awaiting mockup.
+- **Wrong root-cause diagnosis on Bayern/PSG icons.** Burned several PRs (#16 substring relax, #19 explicit side, #26 synthetic enrichment) before realizing the actual bug was fixture-pairing failure, not synthetic-event handling. PR #27 closed it for real.
+
+### Operating-mode adjustments going forward
+
+- **For pairing/data bugs**: always run `/api/_debug/unpaired_pairs` or `registry_diff` *before* touching aliases. No more guesses.
+- **For visual changes**: mockup or precise reference *first*, then implement once. No "let me try this and see."
+- **For rendering bugs where the symptom is missing data**: 30 seconds of DevTools verification *before* changing code. Saves rounds.
+- **Bias toward universal/structural solutions** (title-match) over per-team fixes (alias_table entries) when the problem class is broad.
+
+### Today's PR ledger
+
+| PR | Title | Status |
+|---|---|---|
+| #15 | Local-date filter + headline market picker + GAME N chip | merged |
+| #16 | Substring-relaxed `isWinnerShapedOutcomes` (SAS-MIN icons) | merged |
+| #17 | Plan doc — settled-Kalshi entry | merged |
+| #18 | Registry-aware outcome side classification (Universidad Central) | merged |
+| #19 | Kickoff time chip + explicit `side` on Winner outcomes | merged |
+| #20 | Conmebol alias backfill — Argentina/Brazil/Ecuador/Colombia | merged |
+| #21 | WINNER market chip (later removed) + Venezuela/Peru aliases | merged |
+| #22 | Duplicate-detection endpoints + Discord/Slack webhook helper | merged |
+| #23 | Thinner WINNER chip (later removed) + `/unpaired_pairs` diagnostic | merged |
+| #24 | List-valued `_FL_ABBR_ALIASES` + Always Ready ARE | merged |
+| #25 | Removed WINNER chip — pending mockup | merged |
+| #26 | sports_feed_v3 — synthetic event enrichment (FL_TEAM_HINTS port) | merged |
+| #27 | **Title-match tier** — universal pairing without alias maintenance | merged |
+
+### Open issues / things left to do
+
+See § 12 below.
+
+## 12. Open punch list — picked up next session
+
+### High-priority — verify today's deploy
+
+- [ ] **Verify PR #27 (title-match) post-deploy**: refresh `/sports`, confirm Bayern Munich vs PSG renders as a regular fixture card (icons + kickoff time + matchup header). Check `/api/_debug/unpaired_pairs` to confirm bucket counts dropped.
+- [ ] **Verify PR #26 (synthetic enrichment) post-deploy**: any genuinely Kalshi-only fixture with no FL counterpart should now show team icons + estimated kickoff time.
+- [ ] **Confirm Conmebol pairs**: Boca/Barcelona SC, Always Ready/Lanus, Puerto Cabello/Cienciano all show Kalshi prices.
+
+### WINNER chip — pending
+
+- [ ] **Awaiting mockup from user.** Previous iterations (PR #21 pill, PR #23 underline-strip) were rejected. Removed in PR #25. Implement once mockup is shared.
+
+### Active follow-ups (already on the deferred list, ready to pick up)
+
+- [ ] **NBA per-team timezone for cross-tz clubs** — Phase C2d follow-up. Lakers/Warriors/Suns evening games tipping off late ET could still drift dates if league-level TZ differs from team-local. Small extension to `competition_timezones.py`.
+- [ ] **Backend ±1 day expansion in `sports_feed_v3`** — flagged in PR #15 description. PT users navigating to "tomorrow" can't see late-evening events whose UTC date is day-after-tomorrow.
+- [ ] **Series-chip parser bug** — "SERIES SPU 1-0" displaying even when Spurs lost. FL `INFO_NOTICE` / `WINNER` parsing in chip generator.
+- [ ] **"Upcoming" + date navigation UX nit** — when user has "All" state pill active alongside "Tomorrow," FINISHED games still appear. Either auto-toggle to Upcoming when navigating dates forward, or change "All" semantics.
+- [ ] **Discord webhook setup** (user action, not me) — create webhook URL, set `STOCHVERSE_NOTIFY_WEBHOOK_URL` env var on Render, optionally add Render Cron Service hitting `/registry_duplicates_all?notify=true` daily.
+
+### Deferred (in plan doc, not blocking)
+
+- **Phase C2c-b parameterized sub-markets** (Spread / Total / Over-Under) — wait for Polymarket + OddsAPI audit
+- **Settled-Kalshi-data lookup for Finished tab** — pure historical reference; build when user demand confirms traders navigate back
+- **Settlement UI** (live FT badges) — needs WS lifecycle channel
+- **Player headshots / news / lineups** for Kalshi-only sports — additive feature post-v2
+- **Phase 7 — delete v1 code** — once v3 proves itself over a verification window. Not urgent; v1 is the safety rollback.
+
+### Polymarket / OddsAPI integration (future phase)
+
+- Polymarket source mapper (separate seeder module)
+- OddsAPI source mapper
+- Cross-source price aggregation surfaces (uses canonical Outcome IDs from Phase C2b)
+- Phase C2c-b parameterized sub-markets (gated on this audit)
