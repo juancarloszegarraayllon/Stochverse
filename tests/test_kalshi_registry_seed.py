@@ -1565,3 +1565,100 @@ class TestTitleMatchTimeGate:
         assert _parse_iso_to_epoch("garbage") is None
         assert _parse_iso_to_epoch("") is None
         assert _parse_iso_to_epoch(None) is None
+
+
+class TestSyntheticEventImageLookup:
+    """Phase C2g — `_lookup_team_images_by_name` lets synthetic
+    Kalshi-only events inherit FL imagery from same-name paired
+    teams in the same request, using the PR #32 normalization.
+    """
+
+    def test_short_kalshi_form_finds_full_fl_form(self):
+        """Kalshi 'Bayern Munich' should find FL 'FC Bayern Munich'
+        via prefix-strip normalization."""
+        from main import _lookup_team_images_by_name
+        paired = [{
+            "events": [{
+                "HOME_NAME":   "FC Bayern Munich",
+                "HOME_IMAGES": ["https://fl.cdn/bayern.png"],
+                "AWAY_NAME":   "Real Madrid",
+                "AWAY_IMAGES": ["https://fl.cdn/realmadrid.png"],
+            }],
+        }]
+        imgs = _lookup_team_images_by_name("Bayern Munich", paired)
+        assert imgs == ["https://fl.cdn/bayern.png"]
+
+    def test_country_suffix_strip(self):
+        """Kalshi 'Tolima' should find FL 'Deportes Tolima (Col)'."""
+        from main import _lookup_team_images_by_name
+        paired = [{
+            "events": [{
+                "HOME_NAME":   "Deportes Tolima (Col)",
+                "HOME_IMAGES": ["https://fl.cdn/tolima.png"],
+                "AWAY_NAME":   "Atletico Nacional",
+                "AWAY_IMAGES": [],
+            }],
+        }]
+        imgs = _lookup_team_images_by_name("Tolima", paired)
+        assert imgs == ["https://fl.cdn/tolima.png"]
+
+    def test_abbreviation_expansion(self):
+        """Kalshi 'Universidad Catolica' should find FL 'U. Catolica
+        (Chi)'."""
+        from main import _lookup_team_images_by_name
+        paired = [{
+            "events": [{
+                "HOME_NAME":   "U. Catolica (Chi)",
+                "HOME_IMAGES": ["https://fl.cdn/ucatolica.png"],
+                "AWAY_NAME":   "Cruzeiro",
+                "AWAY_IMAGES": [],
+            }],
+        }]
+        imgs = _lookup_team_images_by_name("Universidad Catolica", paired)
+        assert imgs == ["https://fl.cdn/ucatolica.png"]
+
+    def test_away_side_match(self):
+        """Lookup walks both home and away sides."""
+        from main import _lookup_team_images_by_name
+        paired = [{
+            "events": [{
+                "HOME_NAME":   "PSG",
+                "HOME_IMAGES": ["https://fl.cdn/psg.png"],
+                "AWAY_NAME":   "Real Madrid",
+                "AWAY_IMAGES": ["https://fl.cdn/realmadrid.png"],
+            }],
+        }]
+        imgs = _lookup_team_images_by_name("Real Madrid", paired)
+        assert imgs == ["https://fl.cdn/realmadrid.png"]
+
+    def test_no_match_returns_empty(self):
+        from main import _lookup_team_images_by_name
+        paired = [{
+            "events": [{
+                "HOME_NAME":   "Bayern Munich",
+                "HOME_IMAGES": ["https://fl.cdn/bayern.png"],
+                "AWAY_NAME":   "PSG",
+                "AWAY_IMAGES": ["https://fl.cdn/psg.png"],
+            }],
+        }]
+        assert _lookup_team_images_by_name("Brighton", paired) == []
+
+    def test_empty_inputs_return_empty(self):
+        from main import _lookup_team_images_by_name
+        paired = [{"events": [{"HOME_NAME": "Bayern", "HOME_IMAGES": ["x"]}]}]
+        assert _lookup_team_images_by_name("", paired) == []
+        assert _lookup_team_images_by_name("Bayern", []) == []
+        assert _lookup_team_images_by_name("Bayern", None) == []
+
+    def test_skips_team_with_empty_images(self):
+        """When a name match has no images on that side, walk past
+        it to find the next match (don't return [] just because the
+        first match had empty images)."""
+        from main import _lookup_team_images_by_name
+        paired = [
+            {"events": [{"HOME_NAME": "Bayern Munich", "HOME_IMAGES": []}]},
+            {"events": [{"HOME_NAME": "Bayern Munich",
+                          "HOME_IMAGES": ["https://fl.cdn/bayern.png"]}]},
+        ]
+        imgs = _lookup_team_images_by_name("Bayern Munich", paired)
+        assert imgs == ["https://fl.cdn/bayern.png"]
