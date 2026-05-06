@@ -1116,6 +1116,57 @@ def parse_game_date_from_ticker(event_ticker: str):
         return _date(yr, mo, int(dd))
     except: return None
 
+
+# Sport-typical game duration. Kalshi's `expected_expiration_time`
+# on each market is approximately final-whistle + a settlement
+# buffer. Subtracting this duration gives an estimated kickoff time
+# accurate within ~30 min — good enough to display on Kalshi-only
+# cards that haven't been paired with FL.
+#
+# Same values as the homepage card logic in main.py:1593-1612.
+# Hoisted to module scope so v3's _v2_synth_unpaired_event can reuse
+# it (was previously defined inline in the homepage extract()
+# closure, leaving v3 to fall back to a crude ticker_date+18:00 UTC).
+_KALSHI_KICKOFF_DURATION_BY_SPORT = {
+    "Soccer":     timedelta(hours=3),
+    "Baseball":   timedelta(hours=3, minutes=30),
+    "Basketball": timedelta(hours=3),
+    "Hockey":     timedelta(hours=2, minutes=45),
+    "Football":   timedelta(hours=3, minutes=45),
+    "Cricket":    timedelta(hours=4),
+    "Tennis":     timedelta(hours=3),
+    "Golf":       timedelta(hours=4),
+    "MMA":        timedelta(hours=3),
+    "Esports":    timedelta(hours=2),
+    "Motorsport": timedelta(hours=3),
+    "Rugby":      timedelta(hours=2, minutes=30),
+}
+
+
+def _estimate_kickoff_from_kalshi_record(rec: dict, sport: str):
+    """Return estimated kickoff datetime (UTC-aware) for a Kalshi
+    record by reading the first market's `expected_expiration_time`
+    and subtracting `_KALSHI_KICKOFF_DURATION_BY_SPORT[sport]`.
+
+    Returns None if the sport isn't in the duration table or
+    `expected_expiration_time` is missing/unparseable. Callers
+    should fall back to the cruder ticker_date + 18:00 UTC
+    estimate when this returns None.
+    """
+    if sport not in _KALSHI_KICKOFF_DURATION_BY_SPORT:
+        return None
+    mkts = rec.get("markets")
+    if not isinstance(mkts, list) or not mkts:
+        return None
+    first_mk = mkts[0] if isinstance(mkts[0], dict) else None
+    if not first_mk:
+        return None
+    exp_dt = safe_dt(first_mk.get("expected_expiration_time"))
+    if exp_dt is None:
+        return None
+    return exp_dt - _KALSHI_KICKOFF_DURATION_BY_SPORT[sport]
+
+
 def fmt_date(d):
     from datetime import datetime, date as _date
     try:
@@ -7583,9 +7634,20 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
                         if not series_summary: series_summary = fg.get("series_summary") or ""
                 except Exception:
                     pass
+        # Estimate kickoff from expected_expiration_time − sport duration
+        # (same as homepage card and v3 synth events).
+        _kickoff_dt = _estimate_kickoff_from_kalshi_record(primary, sport_name)
+        _start_time_utc = None
+        _kickoff_estimated = False
+        if _kickoff_dt is not None:
+            try:
+                _start_time_utc = int(_kickoff_dt.timestamp())
+                _kickoff_estimated = True
+            except (TypeError, ValueError, OSError):
+                pass
         ev = {
             "EVENT_ID": "kalshi-h2h-" + primary_ticker,
-            "START_TIME": None,
+            "START_TIME": _start_time_utc,
             "HOME_NAME": home_name,
             "AWAY_NAME": away_name,
             "HOME_SCORE_CURRENT": None,
@@ -7614,6 +7676,8 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
                 "series_summary":   series_summary,
             },
         }
+        if _kickoff_estimated:
+            ev["_kickoff_estimated"] = True
         by_league.setdefault(league, []).append(ev)
         total_events += 1
     out = []
@@ -9784,9 +9848,23 @@ def _v2_synth_unpaired_event(records: list, sport: str) -> dict:
     kalshi_block = _v2_build_kalshi_block(records, sport, home_name, away_name)
     # Synthetic events get null primary_prices (v1 convention)
     kalshi_block["primary_prices"] = None
-    return {
+    # Estimate kickoff from `expected_expiration_time − sport duration`
+    # (same approach as the homepage Kalshi-only card). Falls through
+    # to None when no expected_expiration is present; the downstream
+    # enrichment pass in sports_feed_v3 then applies the cruder
+    # ticker_date+18:00 UTC fallback.
+    kickoff_dt = _estimate_kickoff_from_kalshi_record(primary, sport)
+    start_time_utc = None
+    kickoff_estimated = False
+    if kickoff_dt is not None:
+        try:
+            start_time_utc = int(kickoff_dt.timestamp())
+            kickoff_estimated = True
+        except (TypeError, ValueError, OSError):
+            pass
+    out = {
         "EVENT_ID":           "kalshi-h2h-" + primary_ticker,
-        "START_TIME":         None,
+        "START_TIME":         start_time_utc,
         "HOME_NAME":          home_name,
         "AWAY_NAME":          away_name,
         "HOME_SCORE_CURRENT": None,
@@ -9795,6 +9873,9 @@ def _v2_synth_unpaired_event(records: list, sport: str) -> dict:
         "_kalshi_h2h_only":   True,
         "kalshi":             kalshi_block,
     }
+    if kickoff_estimated:
+        out["_kickoff_estimated"] = True
+    return out
 
 
 # Phase 5 punch list 2026-05-05: when an unpaired Kalshi fixture has
