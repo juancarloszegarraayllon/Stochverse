@@ -10689,6 +10689,24 @@ async def _enrich_synthetic_events_with_fl_data(
                                if away else
                                asyncio.sleep(0, result={"logo_url": None, "fixtures": []}))
     if not target_entries:
+        # ── TEMPORARY DEBUG: per-event detail when no synth events
+        # qualified for enrichment. Surfaces whether _kalshi_h2h_only
+        # is set, what HOME_NAME looks like, and a sample of keys
+        # so we can confirm the event shape vs what the loop expects.
+        print(
+            f"DEBUG enrich NO TARGETS: checking unpaired_tournaments...",
+            flush=True,
+        )
+        for _ut in (unpaired_tournaments or []):
+            for _ev in (_ut.get("events") or []):
+                print(
+                    f"DEBUG enrich NO TARGETS event: "
+                    f"HOME={_ev.get('HOME_NAME')} "
+                    f"_kalshi_h2h_only={_ev.get('_kalshi_h2h_only')} "
+                    f"keys_sample={list(_ev.keys())[:8]}",
+                    flush=True,
+                )
+        # ── /TEMPORARY DEBUG ────────────────────────────────────
         return
     results = await asyncio.gather(*fetch_coros, return_exceptions=True)
 
