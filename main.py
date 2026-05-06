@@ -9848,11 +9848,67 @@ def _v2_build_kalshi_block(records: list, sport: str,
     }
 
 
-def _v2_synth_unpaired_event(records: list, sport: str) -> dict:
+def _lookup_team_images_by_name(target_name: str,
+                                  paired_tournaments: list) -> list:
+    """Walk paired FL tournaments looking for a team whose canonical
+    name normalizes to the same form as `target_name`. Returns the
+    matching HOME_IMAGES or AWAY_IMAGES list (whichever side hit).
+    Empty list when no match is found.
+
+    Uses the same `_normalize_team_name` pipeline as the title-match
+    seeder (PR #32) — strip country suffix, expand abbreviations,
+    strip generic prefix, lowercase. So Kalshi-only "Bayern Munich"
+    matches FL-paired "FC Bayern Munich" or "Bayern Munich (Ger)".
+
+    Used by `_v2_synth_unpaired_event` to attach team logos on
+    synthetic Kalshi-only events using FL imagery from the same
+    request's paired events. Without this, _kalshi_h2h_only cards
+    render with empty HOME_IMAGES/AWAY_IMAGES because there's no
+    direct FL pairing to inherit from.
+    """
+    if not target_name or not paired_tournaments:
+        return []
+    try:
+        from kalshi_registry_seed import _normalize_team_name
+    except Exception:
+        return []
+    target_n = _normalize_team_name(target_name)
+    if not target_n:
+        return []
+    for t in paired_tournaments:
+        if not isinstance(t, dict):
+            continue
+        for ev in (t.get("events") or []):
+            if not isinstance(ev, dict):
+                continue
+            for name_field, img_field in (
+                ("HOME_NAME", "HOME_IMAGES"),
+                ("AWAY_NAME", "AWAY_IMAGES"),
+            ):
+                name = ev.get(name_field) or ""
+                if not name:
+                    continue
+                if _normalize_team_name(name) == target_n:
+                    imgs = ev.get(img_field) or []
+                    if imgs:
+                        return imgs
+    return []
+
+
+def _v2_synth_unpaired_event(records: list, sport: str,
+                              paired_tournaments: Optional[list] = None) -> dict:
     """Build a synthetic FL-shape event for a Kalshi-only fixture.
 
     Parses home/away from the bare matchup title. Mirrors v1's
     `kalshi-h2h-{ticker}` shape so the frontend treats it identically.
+
+    `paired_tournaments` (optional) is the partial out_tournaments
+    structure from sports_feed_v3 — paired FL events with HOME_IMAGES
+    / AWAY_IMAGES already attached. Used to look up team logos by
+    name so synthetic events can inherit imagery from same-name
+    teams that DID pair on this request. Pass None on legacy paths
+    that don't have paired-tournament context (HOME_IMAGES /
+    AWAY_IMAGES will then be empty — same as before).
     """
     primary = _v2_pick_primary(records)
     bare = _bare_matchup_from_title(primary.get("title", ""))
@@ -9896,6 +9952,18 @@ def _v2_synth_unpaired_event(records: list, sport: str) -> dict:
         "_kalshi_h2h_only":   True,
         "kalshi":             kalshi_block,
     }
+    # Image lookup against same-request paired FL events. Runs only
+    # for synthetic events (which is the only path through here) and
+    # only when paired_tournaments was provided by the caller.
+    if paired_tournaments:
+        if home_name:
+            home_imgs = _lookup_team_images_by_name(home_name, paired_tournaments)
+            if home_imgs:
+                out["HOME_IMAGES"] = home_imgs
+        if away_name:
+            away_imgs = _lookup_team_images_by_name(away_name, paired_tournaments)
+            if away_imgs:
+                out["AWAY_IMAGES"] = away_imgs
     if kickoff_estimated:
         out["_kickoff_estimated"] = True
     return out
@@ -10018,7 +10086,9 @@ def _v2_route_unpaired(buckets: dict, sport: str,
         # pairing from establishing a hint.
         if target_t is None:
             target_t = _v2_safety_net_target(series_base, out_tournaments)
-        synth_event = _v2_synth_unpaired_event(records, sport)
+        synth_event = _v2_synth_unpaired_event(
+            records, sport, paired_tournaments=out_tournaments,
+        )
         if target_t is not None:
             target_t.setdefault("events", []).append(synth_event)
             routed_count += 1
