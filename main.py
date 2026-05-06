@@ -10141,6 +10141,34 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
             fl_data = None
     fl_data = fl_data or {"DATA": []}
 
+    # Harvest team-data hints from FL response — image URLs +
+    # shortnames keyed by normalized team name. Persists across
+    # requests so synthetic Kalshi-only events can pick up icons
+    # for teams seen on prior days. Read by the synthetic-event
+    # cosmetic enrichment pass after unpaired_tournaments is built.
+    # Mirrors the v1 hint-population block (main.py ~10342) so v3
+    # synthetic events are visually consistent with v1's.
+    if fl_data and sport:
+        import time as _t_hint
+        _now_hint = _t_hint.time()
+        for _t in (fl_data.get("DATA") or []):
+            for _ev in (_t.get("EVENTS") or []):
+                for _name_f, _img_f, _sh_f in (
+                    ("HOME_NAME", "HOME_IMAGES", "SHORTNAME_HOME"),
+                    ("AWAY_NAME", "AWAY_IMAGES", "SHORTNAME_AWAY"),
+                ):
+                    _nm = (_ev.get(_name_f) or "").strip().lower()
+                    if not _nm:
+                        continue
+                    _imgs = _ev.get(_img_f) or []
+                    _sh = _ev.get(_sh_f) or ""
+                    if _imgs:
+                        _FL_TEAM_HINTS[(sport, _nm)] = {
+                            "image_url": _imgs[0],
+                            "shortname": _sh,
+                            "ts":        _now_hint,
+                        }
+
     # Flatten FL events with their tournament context (same as v2).
     fl_events_with_tournament: list = []
     for t in (fl_data.get("DATA") or []):
@@ -10243,6 +10271,55 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
                     tk = r.get("event_ticker") or ""
                     if tk:
                         matched_kalshi_tickers.add(tk)
+
+    # ── Synthetic-event cosmetic enrichment ──────────────────────
+    # Synthetic Kalshi-only events from _v2_route_unpaired have
+    # START_TIME=None and no team images, so they look bare in COL 2
+    # next to FL-paired events that have icons + kickoff times.
+    # Mirrors v1's enrichment pass (main.py ~10739) so v3 synthetic
+    # events are visually consistent.
+    #   - Team images: alias-aware lookup against _FL_TEAM_HINTS
+    #     (populated above from this request's FL data + cumulative
+    #     prior requests).
+    #   - START_TIME: derived from the Kalshi ticker date at 18:00
+    #     UTC. Marked _kickoff_estimated so the frontend can render
+    #     with a marker if needed.
+    if sport and unpaired_tournaments:
+        from flashlive_feed import find_team_aliases as _find_aliases
+        from datetime import datetime as _dt_t, time as _time_t, timezone as _tz_t
+        for _ut in unpaired_tournaments:
+            for _ev in _ut.get("events") or []:
+                for _name_f, _img_f, _sh_f in (
+                    ("HOME_NAME", "HOME_IMAGES", "SHORTNAME_HOME"),
+                    ("AWAY_NAME", "AWAY_IMAGES", "SHORTNAME_AWAY"),
+                ):
+                    if _ev.get(_img_f):
+                        continue
+                    _nm = (_ev.get(_name_f) or "").strip().lower()
+                    if not _nm:
+                        continue
+                    _hint = _FL_TEAM_HINTS.get((sport, _nm))
+                    if not _hint:
+                        for _alias in _find_aliases(_nm):
+                            _hint = _FL_TEAM_HINTS.get((sport, _alias))
+                            if _hint:
+                                break
+                    if _hint:
+                        _ev[_img_f] = [_hint["image_url"]]
+                        if not _ev.get(_sh_f) and _hint.get("shortname"):
+                            _ev[_sh_f] = _hint["shortname"]
+                if not _ev.get("START_TIME"):
+                    _k = _ev.get("kalshi") or {}
+                    _tk = _k.get("event_ticker") or ""
+                    _td = parse_game_date_from_ticker(_tk)
+                    if _td:
+                        try:
+                            _ev["START_TIME"] = int(_dt_t.combine(
+                                _td, _time_t(18, 0), tzinfo=_tz_t.utc
+                            ).timestamp())
+                            _ev["_kickoff_estimated"] = True
+                        except Exception:
+                            pass
 
     # Outrights count toward matched_kalshi_count (same as v2)
     for t in outright_tournaments:
