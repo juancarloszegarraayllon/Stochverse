@@ -2139,3 +2139,421 @@ class TestSyntheticEventEnrichment:
                 unpaired, sport_id=1,
             ))
         assert called["count"] == 0
+
+
+class TestSyntheticEventDedupAgainstPaired:
+    """Phase C2g+ — when an FL paired event for the same matchup
+    already exists in `out_tournaments`, the synth Kalshi-only card
+    should be DROPPED (not enriched, not kept). Catches the
+    KXUCLGOAL/KXUCLCORNERS-style series duplicates that share an
+    abbr_block with the main GAME ticker but fail to pair via the
+    matching tiers.
+    """
+
+    def setup_method(self):
+        from main import _TEAM_FIXTURE_CACHE, _TEAM_LOGO_CACHE
+        _TEAM_FIXTURE_CACHE.clear()
+        _TEAM_LOGO_CACHE.clear()
+
+    def test_drops_synth_when_fl_fixtures_match_paired(self):
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        async def fake_fetch(name, sport_id):
+            if name == "Bayern Munich":
+                return {
+                    "logo_url": "https://fl.cdn/bayern.png",
+                    "fixtures": [{
+                        "start_time": 1778130000,
+                        "home":       "Bayern Munich",
+                        "away":       "PSG",
+                        "tournament": "UCL",
+                    }],
+                }
+            return {"logo_url": None, "fixtures": []}
+
+        # Paired event already in out_tournaments
+        out_tournaments = [{
+            "NAME": "Champions League - Play Offs",
+            "events": [{
+                "EVENT_ID":   "WzCGgkEU",
+                "HOME_NAME":  "Bayern Munich",
+                "AWAY_NAME":  "PSG",
+                "START_TIME": 1778130000,
+                "kalshi":     {"event_ticker": "KXUCLGAME-..."},
+            }],
+        }]
+
+        # Synth duplicate
+        unpaired = [{
+            "NAME": "Champions League",
+            "events": [{
+                "EVENT_ID":         "kalshi-h2h-KXUCLGOAL-26MAY06BMUPSG",
+                "_kalshi_h2h_only": True,
+                "HOME_NAME":        "Bayern Munich",
+                "AWAY_NAME":        "PSG",
+                "START_TIME":       1778130000,
+            }],
+        }]
+
+        with patch.object(main, "_fetch_fl_team_data",
+                            side_effect=fake_fetch):
+            asyncio.run(main._enrich_synthetic_events_with_fl_data(
+                unpaired, sport_id=1,
+                paired_tournaments=out_tournaments,
+            ))
+
+        # Synth event removed; tournament pruned (no events left)
+        assert unpaired == []
+
+    def test_keeps_synth_when_no_paired_match(self):
+        """Only drops when paired event has same teams + date.
+        Different opponents → keep + enrich."""
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        async def fake_fetch(name, sport_id):
+            return {
+                "logo_url": "https://fl.cdn/x.png",
+                "fixtures": [{
+                    "start_time": 1778130000,
+                    "home":       "Real Madrid",
+                    "away":       "Barcelona",
+                    "tournament": "La Liga",
+                }],
+            }
+
+        out_tournaments = [{
+            "NAME": "Champions League",
+            "events": [{
+                "EVENT_ID":   "FL_OTHER",
+                "HOME_NAME":  "Bayern Munich",
+                "AWAY_NAME":  "PSG",
+                "START_TIME": 1778130000,
+            }],
+        }]
+        # Synth event: Real Madrid vs Barcelona, NOT in paired
+        unpaired = [{
+            "events": [{
+                "EVENT_ID":         "kalshi-h2h-X",
+                "_kalshi_h2h_only": True,
+                "HOME_NAME":        "Real Madrid",
+                "AWAY_NAME":        "Barcelona",
+                "START_TIME":       1778130000,
+            }],
+        }]
+
+        with patch.object(main, "_fetch_fl_team_data",
+                            side_effect=fake_fetch):
+            asyncio.run(main._enrich_synthetic_events_with_fl_data(
+                unpaired, sport_id=1,
+                paired_tournaments=out_tournaments,
+            ))
+
+        # Synth event survives + enriched with logo + kickoff override
+        assert len(unpaired) == 1
+        ev = unpaired[0]["events"][0]
+        assert ev["HOME_IMAGES"] == ["https://fl.cdn/x.png"]
+        assert ev["_kickoff_source"] == "fl_fixture_match"
+
+    def test_dedup_is_direction_blind(self):
+        """Synth has HOME='Bayern' / AWAY='PSG', paired has
+        HOME='PSG' / AWAY='Bayern' (FL flipped orientation).
+        Should still dedup."""
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        async def fake_fetch(name, sport_id):
+            return {
+                "logo_url": None,
+                "fixtures": [{
+                    "start_time": 1778130000,
+                    "home":       "Bayern Munich",
+                    "away":       "PSG",
+                    "tournament": "UCL",
+                }],
+            }
+
+        # Paired event with FLIPPED orientation
+        out_tournaments = [{
+            "events": [{
+                "HOME_NAME":  "PSG",
+                "AWAY_NAME":  "Bayern Munich",
+                "START_TIME": 1778130000,
+            }],
+        }]
+        unpaired = [{
+            "events": [{
+                "EVENT_ID":         "synth",
+                "_kalshi_h2h_only": True,
+                "HOME_NAME":        "Bayern Munich",
+                "AWAY_NAME":        "PSG",
+                "START_TIME":       1778130000,
+            }],
+        }]
+
+        with patch.object(main, "_fetch_fl_team_data",
+                            side_effect=fake_fetch):
+            asyncio.run(main._enrich_synthetic_events_with_fl_data(
+                unpaired, sport_id=1,
+                paired_tournaments=out_tournaments,
+            ))
+
+        # Direction-blind dedup: still dropped
+        assert unpaired == []
+
+    def test_no_paired_tournaments_argument_skips_dedup(self):
+        """When `paired_tournaments` is None, dedup is bypassed and
+        all synth events are enriched + retained."""
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        async def fake_fetch(name, sport_id):
+            return {"logo_url": "x.png", "fixtures": []}
+
+        unpaired = [{
+            "events": [{
+                "_kalshi_h2h_only": True,
+                "HOME_NAME":        "A", "AWAY_NAME": "B",
+                "START_TIME":       1,
+            }],
+        }]
+
+        with patch.object(main, "_fetch_fl_team_data",
+                            side_effect=fake_fetch):
+            asyncio.run(main._enrich_synthetic_events_with_fl_data(
+                unpaired, sport_id=1,  # no paired_tournaments
+            ))
+
+        assert len(unpaired) == 1
+
+
+class TestEpochToDateStr:
+    def test_epoch_conversion(self):
+        from main import _epoch_to_utc_date_str
+        # 2026-05-07 02:00 UTC
+        assert _epoch_to_utc_date_str(1778119200) == "2026-05-07"
+        assert _epoch_to_utc_date_str(0) == ""
+        assert _epoch_to_utc_date_str(None) == ""
+
+
+class TestSyntheticEventMergeIntoPaired:
+    """Phase C2g+ — when dedup detects a synth ↔ paired equivalence,
+    the synth's Kalshi `markets` array is MERGED into the paired
+    event's kalshi block before the synth is dropped. So paired
+    card retains both KXUCLGAME (its original) AND KXUCLGOAL /
+    KXUCLCORNERS markets via the tab strip.
+    """
+
+    def setup_method(self):
+        from main import _TEAM_FIXTURE_CACHE, _TEAM_LOGO_CACHE
+        _TEAM_FIXTURE_CACHE.clear()
+        _TEAM_LOGO_CACHE.clear()
+
+    def test_markets_merged_into_paired(self):
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        async def fake_fetch(name, sport_id):
+            return {
+                "logo_url": None,
+                "fixtures": [{
+                    "start_time": 1778130000,
+                    "home":       "Bayern Munich",
+                    "away":       "PSG",
+                    "tournament": "UCL",
+                }],
+            }
+
+        # Paired event with 1 market (KXUCLGAME)
+        paired_event = {
+            "EVENT_ID":   "WzCGgkEU",
+            "HOME_NAME":  "Bayern Munich",
+            "AWAY_NAME":  "PSG",
+            "START_TIME": 1778130000,
+            "kalshi": {
+                "event_ticker":  "KXUCLGAME-26MAY06BMUPSG",
+                "title":         "Bayern Munich vs PSG",
+                "series_ticker": "KXUCLGAME",
+                "count":         1,
+                "markets": [{"event_ticker": "KXUCLGAME-26MAY06BMUPSG",
+                              "title": "Bayern Munich vs PSG"}],
+                "primary_prices": {"home_yes": 60},
+            },
+        }
+        out_tournaments = [{"events": [paired_event]}]
+
+        # Synth event (KXUCLGOAL) with 2 distinct markets
+        unpaired = [{
+            "events": [{
+                "EVENT_ID":         "kalshi-h2h-KXUCLGOAL-26MAY06BMUPSG",
+                "_kalshi_h2h_only": True,
+                "HOME_NAME":        "Bayern Munich",
+                "AWAY_NAME":        "PSG",
+                "START_TIME":       1778130000,
+                "kalshi": {
+                    "event_ticker":  "KXUCLGOAL-26MAY06BMUPSG",
+                    "markets": [
+                        {"event_ticker": "KXUCLGOAL-...-MUSIALA",
+                         "title": "Goals by Musiala"},
+                        {"event_ticker": "KXUCLGOAL-...-OLISE",
+                         "title": "Goals by Olise"},
+                    ],
+                },
+            }],
+        }]
+
+        with patch.object(main, "_fetch_fl_team_data",
+                            side_effect=fake_fetch):
+            asyncio.run(main._enrich_synthetic_events_with_fl_data(
+                unpaired, sport_id=1,
+                paired_tournaments=out_tournaments,
+            ))
+
+        # Synth dropped, paired event's kalshi.markets has all 3
+        assert unpaired == []
+        merged_markets = paired_event["kalshi"]["markets"]
+        assert len(merged_markets) == 3
+        merged_tickers = {m["event_ticker"] for m in merged_markets}
+        assert merged_tickers == {
+            "KXUCLGAME-26MAY06BMUPSG",
+            "KXUCLGOAL-...-MUSIALA",
+            "KXUCLGOAL-...-OLISE",
+        }
+        # count updated
+        assert paired_event["kalshi"]["count"] == 3
+        # primary_prices preserved (paired's KXUCLGAME source of truth)
+        assert paired_event["kalshi"]["primary_prices"] == {"home_yes": 60}
+
+    def test_merge_dedups_by_event_ticker(self):
+        """If synth has a market with the same event_ticker as one
+        paired already has, don't double-add."""
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        async def fake_fetch(name, sport_id):
+            return {"logo_url": None, "fixtures": [{
+                "start_time": 1, "home": "A", "away": "B",
+                "tournament": "T",
+            }]}
+
+        paired_event = {
+            "HOME_NAME": "A", "AWAY_NAME": "B", "START_TIME": 1,
+            "kalshi": {
+                "markets": [{"event_ticker": "TICK-1", "title": "X"}],
+                "count": 1,
+            },
+        }
+        out_tournaments = [{"events": [paired_event]}]
+        unpaired = [{
+            "events": [{
+                "_kalshi_h2h_only": True,
+                "HOME_NAME": "A", "AWAY_NAME": "B", "START_TIME": 1,
+                "kalshi": {
+                    "markets": [
+                        {"event_ticker": "TICK-1", "title": "X (dup)"},
+                        {"event_ticker": "TICK-2", "title": "New"},
+                    ],
+                },
+            }],
+        }]
+
+        with patch.object(main, "_fetch_fl_team_data",
+                            side_effect=fake_fetch):
+            asyncio.run(main._enrich_synthetic_events_with_fl_data(
+                unpaired, sport_id=1,
+                paired_tournaments=out_tournaments,
+            ))
+
+        merged = paired_event["kalshi"]["markets"]
+        # TICK-1 not duplicated, TICK-2 appended
+        tickers = [m["event_ticker"] for m in merged]
+        assert tickers.count("TICK-1") == 1
+        assert "TICK-2" in tickers
+        assert paired_event["kalshi"]["count"] == 2
+
+    def test_paired_with_no_kalshi_block_takes_synth_block(self):
+        """Paired event arrived without a kalshi block (rare —
+        edge case, e.g. registry pairing produced a fixture but
+        v3's kalshi_block builder skipped). Synth's kalshi block
+        becomes paired's, with primary_prices nulled per v1
+        synth-event invariant."""
+        import asyncio
+        import main
+        from unittest.mock import patch
+
+        async def fake_fetch(name, sport_id):
+            return {"logo_url": None, "fixtures": [{
+                "start_time": 1, "home": "A", "away": "B",
+                "tournament": "T",
+            }]}
+
+        paired_event = {
+            "HOME_NAME": "A", "AWAY_NAME": "B", "START_TIME": 1,
+            # no 'kalshi' field
+        }
+        out_tournaments = [{"events": [paired_event]}]
+        unpaired = [{
+            "events": [{
+                "_kalshi_h2h_only": True,
+                "HOME_NAME": "A", "AWAY_NAME": "B", "START_TIME": 1,
+                "kalshi": {
+                    "event_ticker": "TICK-X",
+                    "markets": [{"event_ticker": "TICK-X",
+                                  "title": "X"}],
+                },
+            }],
+        }]
+
+        with patch.object(main, "_fetch_fl_team_data",
+                            side_effect=fake_fetch):
+            asyncio.run(main._enrich_synthetic_events_with_fl_data(
+                unpaired, sport_id=1,
+                paired_tournaments=out_tournaments,
+            ))
+
+        # Paired now has the kalshi block; primary_prices None
+        assert paired_event.get("kalshi") is not None
+        assert paired_event["kalshi"]["event_ticker"] == "TICK-X"
+        assert paired_event["kalshi"].get("primary_prices") is None
+
+
+class TestBayBmuAlias:
+    """Phase C2g+ — BAY ↔ BMU alias entry. FL ships 'BAY' for
+    Bayern Munich, Kalshi ships 'BMU' on UCL-side tickers like
+    KXUCLGOAL / KXUCLCORNERS that share the abbr_block with the
+    main GAME ticker but escape title_match.
+    """
+
+    def test_bay_normalizes_to_include_bmu(self):
+        from kalshi_identity import normalize_fl_abbr
+        forms = normalize_fl_abbr("Soccer", "BAY")
+        assert "BAY" in forms
+        assert "BMU" in forms
+
+    def test_bmu_normalizes_to_include_bay(self):
+        from kalshi_identity import normalize_fl_abbr
+        forms = normalize_fl_abbr("Soccer", "BMU")
+        assert "BMU" in forms
+        assert "BAY" in forms
+
+    def test_bayern_psg_orientations_include_bmupsg(self):
+        """End-to-end: FL fixture with SHORTNAME_HOME='BAY',
+        SHORTNAME_AWAY='PSG' should now produce orientations
+        that include BMUPSG (matching Kalshi's KXUCLGOAL-...
+        abbr_block)."""
+        from kalshi_identity import compute_fl_identity
+        ev = {
+            "SHORTNAME_HOME": "BAY",
+            "SHORTNAME_AWAY": "PSG",
+            "START_TIME":     1778130000,
+        }
+        identity = compute_fl_identity(ev, "Soccer")
+        assert identity is not None
+        assert "BMUPSG" in identity.fl_orientations
