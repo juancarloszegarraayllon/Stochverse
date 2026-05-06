@@ -56,15 +56,7 @@ from enrichment.normalized_helpers import (
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-print("DEBUG MAIN_PY_LOADED: version=49", flush=True)
-
 logging.basicConfig(level=logging.INFO)
-
-# Module-level logger for DEBUG-prefixed diagnostic messages. Routed
-# through the standard logging framework so platforms that capture
-# logger output (Railway, Sentry, journald) see them even if their
-# stdout capture is buffering or filtering plain `print()`.
-logger = logging.getLogger("stochverse")
 
 # ── Sentry error tracking (optional) ────────────────────────────────
 # Enabled automatically when SENTRY_DSN is set in the environment.
@@ -10225,28 +10217,6 @@ def _extract_logo_from_fl_fixtures(resp: dict, team_id: str) -> Optional[str]:
     return None
 
 
-# ── TEMPORARY DEBUG (synth-event FL fetch) ──────────────────────
-# Names are matched as lowercase substrings so variants like
-# "Universidad Catolica (Chi)" or "Tolima FC" all trigger.
-_DEBUG_FL_FETCH_TARGET_TEAMS = (
-    "universidad catolica",
-    "tolima",
-    "alianza atletico",
-    "audax",
-)
-
-
-def _should_debug_fl_fetch(team_name: str) -> bool:
-    if not team_name:
-        return False
-    n = team_name.lower()
-    for needle in _DEBUG_FL_FETCH_TARGET_TEAMS:
-        if needle in n:
-            return True
-    return False
-# ── /TEMPORARY DEBUG ────────────────────────────────────────────
-
-
 async def _fetch_fl_team_data(team_name: str, sport_id: int) -> dict:
     """Fetch a team's FL data — logo URL + upcoming fixtures.
 
@@ -10283,107 +10253,19 @@ async def _fetch_fl_team_data(team_name: str, sport_id: int) -> dict:
     except Exception:
         norm = ""
 
-    # ── TEMPORARY DEBUG ─────────────────────────────────────────
-    _dbg = _should_debug_fl_fetch(team_name)
-    if _dbg:
-        print(
-            f"DEBUG fl_fetch[{team_name!r}] sport_id={sport_id} "
-            f"norm={norm!r}",
-            flush=True,
-        )
-    # ── /TEMPORARY DEBUG ────────────────────────────────────────
-
-    # Cache check
     cache_key = (norm, sport_id)
     cached = _TEAM_FIXTURE_CACHE.get(cache_key)
     if cached and (time.time() - cached.get("ts", 0)) < _TEAM_FIXTURE_CACHE_TTL_SEC:
-        if _dbg:
-            print(
-                f"DEBUG fl_fetch[{team_name!r}] CACHE HIT "
-                f"logo_url={cached['data'].get('logo_url')!r} "
-                f"fixtures={len(cached['data'].get('fixtures') or [])}",
-                flush=True,
-            )
         return cached["data"]
 
     from flashlive_feed import _resolve_team_id, _fl_get
-
-    # ── TEMPORARY DEBUG: also peek at the raw search response so we
-    # can see the first result's id+name (the user explicitly asked).
-    # Only fires for the four target teams, otherwise no extra call.
-    if _dbg:
-        try:
-            search_resp = await _fl_get("/v1/search/multi-search", {
-                "query":  team_name,
-                "locale": "en_INT",
-            })
-            results = []
-            if isinstance(search_resp, dict):
-                results = (search_resp.get("DATA") or
-                           search_resp.get("data") or [])
-            elif isinstance(search_resp, list):
-                results = search_resp
-            participants = [
-                r for r in (results or [])
-                if isinstance(r, dict) and
-                (r.get("TYPE") or r.get("type") or "").lower()
-                    in ("participants", "participant")
-            ]
-            if participants:
-                first = participants[0]
-                first_id = first.get("ID") or first.get("EVENT_ID") or ""
-                first_name = (first.get("NAME") or first.get("name")
-                              or first.get("title") or "")
-                first_sport = (first.get("SPORT_ID") or first.get("SPORT")
-                               or first.get("sport_id") or "")
-                print(
-                    f"DEBUG fl_fetch[{team_name!r}] search_first "
-                    f"id={first_id!r} name={first_name!r} "
-                    f"sport={first_sport!r} (of {len(participants)} participants)",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"DEBUG fl_fetch[{team_name!r}] search_no_participants "
-                    f"raw_results_count={len(results) if isinstance(results, list) else 0}",
-                    flush=True,
-                )
-        except Exception as e:
-            print(
-                f"DEBUG fl_fetch[{team_name!r}] search_call_failed "
-                f"{type(e).__name__}: {e}",
-                flush=True,
-            )
-
     try:
         team_id = await _resolve_team_id(team_name, str(sport_id))
-    except Exception as e:
-        if _dbg:
-            print(
-                f"DEBUG fl_fetch[{team_name!r}] resolve_team_id_FAILED "
-                f"{type(e).__name__}: {e}",
-                flush=True,
-            )
+    except Exception:
         team_id = ""
-
-    if _dbg:
-        print(
-            f"DEBUG fl_fetch[{team_name!r}] resolved team_id={team_id!r}",
-            flush=True,
-        )
-
     if not team_id:
         empty = {"logo_url": None, "fixtures": []}
-        # Cache the miss too — short-circuits repeat lookups for
-        # teams FL doesn't know about (frequent for Kalshi-only
-        # tournaments). Same TTL.
         _TEAM_FIXTURE_CACHE[cache_key] = {"data": empty, "ts": time.time()}
-        if _dbg:
-            print(
-                f"DEBUG fl_fetch[{team_name!r}] EARLY EXIT no team_id, "
-                f"caching empty",
-                flush=True,
-            )
         return empty
 
     try:
@@ -10392,13 +10274,7 @@ async def _fetch_fl_team_data(team_name: str, sport_id: int) -> dict:
             "sport_id": sport_id,
             "team_id":  team_id,
         })
-    except Exception as e:
-        if _dbg:
-            print(
-                f"DEBUG fl_fetch[{team_name!r}] fixtures_call_FAILED "
-                f"{type(e).__name__}: {e}",
-                flush=True,
-            )
+    except Exception:
         resp = None
     resp = resp or {}
 
@@ -10406,25 +10282,7 @@ async def _fetch_fl_team_data(team_name: str, sport_id: int) -> dict:
     fixtures = _parse_fl_fixtures_response(resp, team_id)
     data = {"logo_url": logo_url, "fixtures": fixtures}
 
-    if _dbg:
-        # Show first 3 fixtures so we can verify date/opponent shape
-        sample = [
-            {"start_time": fx.get("start_time"),
-             "home":       fx.get("home"),
-             "away":       fx.get("away"),
-             "tournament": fx.get("tournament")}
-            for fx in fixtures[:3]
-        ]
-        print(
-            f"DEBUG fl_fetch[{team_name!r}] FINAL "
-            f"logo_url={logo_url!r} fixtures_count={len(fixtures)} "
-            f"first3={sample}",
-            flush=True,
-        )
-
     _TEAM_FIXTURE_CACHE[cache_key] = {"data": data, "ts": time.time()}
-    # Also feed the existing logo cache so tier-2 / tier-4 lookups
-    # in `_lookup_team_images_by_name` benefit immediately.
     if norm and logo_url:
         _TEAM_LOGO_CACHE[norm] = [logo_url]
     return data
@@ -10601,97 +10459,26 @@ def _merge_synth_kalshi_into_paired(synth_event: dict,
 async def _enrich_synthetic_events_with_fl_data(
         unpaired_tournaments: list, sport_id: int,
         paired_tournaments: Optional[list] = None) -> None:
-    """For every `_kalshi_h2h_only` event in `unpaired_tournaments`,
-    fetch FL team data for HOME_NAME and AWAY_NAME (in parallel via
-    `asyncio.gather`), then:
+    """Walk every `_kalshi_h2h_only` event in `unpaired_tournaments`
+    and populate HOME_IMAGES / AWAY_IMAGES from FL.
 
-      1. **Dedup**: if `paired_tournaments` is provided AND the FL
-         fixtures returned for the home team contain a fixture
-         that matches an already-paired event by team pair + date,
-         the synth event is a DUPLICATE of a paired event. It's
-         removed from `unpaired_tournaments` in place. No
-         enrichment runs (the paired event already has logos +
-         authoritative kickoff from FL).
-
-      2. Populate HOME_IMAGES / AWAY_IMAGES from logo URLs when
-         present and missing on the event.
-
-      3. Match the Kalshi-estimated START_TIME against the home
-         team's fixtures by opponent name + date proximity. When
-         a match is found, override START_TIME with the FL
-         fixture's authoritative kickoff and mark
-         `_kickoff_source` = 'fl_fixture_match'. When no match,
-         leave START_TIME as-is and mark `_kickoff_source` =
-         'kalshi_estimate'.
-
-    All FL roundtrips happen here in parallel, then mutate the
-    events in place. Safe to no-op when there are no synth events.
-
-    Dedup catches the case (Phase C2g+ user audit, 2026-05-06)
-    where Kalshi has multiple series for the same fixture
-    (KXUCLGAME + KXUCLGOAL + KXUCLCORNERS …) — only the GAME
-    one pairs with FL via existing tiers, the rest fall through
-    to synthetic. Without dedup, the user sees 2+ cards for the
-    same fixture under different tournament headers.
+    Minimal sequential implementation — no dedup, no fixture matching,
+    no paired_lookup, no parallel gather. Just logos.
     """
-    # ── TEMPORARY DEBUG (always-on, unconditional) ──────────────
-    # Per user diagnostic request — fires on EVERY call so we can
-    # tell from the logs whether the function is being invoked at
-    # all, and what it's seeing on entry. Not gated on team names.
-    try:
-        _ut_count = (len(unpaired_tournaments)
-                     if unpaired_tournaments is not None else 0)
-        _synth_count = sum(
-            1
-            for ut in (unpaired_tournaments or [])
-            if isinstance(ut, dict)
-            for ev in (ut.get("events") or [])
-            if isinstance(ev, dict) and ev.get("_kalshi_h2h_only")
-        )
-        _paired_count = sum(
-            1
-            for t in (paired_tournaments or [])
-            if isinstance(t, dict)
-            for ev in (t.get("events") or [])
-            if isinstance(ev, dict)
-        )
-        logger.warning(
-            f"DEBUG enrich ENTRY: unpaired_tournaments_count={_ut_count} "
-            f"synth_event_count={_synth_count} "
-            f"paired_event_count={_paired_count} sport_id={sport_id}"
-        )
-    except Exception as _e:
-        logger.warning(f"DEBUG enrich ENTRY logging FAILED: {_e}")
-    # ── /TEMPORARY DEBUG ────────────────────────────────────────
-
-    if not unpaired_tournaments or not 1 <= sport_id <= 42:
-        # ── TEMPORARY DEBUG ─────────────────────────────────────
-        logger.warning(
-            f"DEBUG enrich EARLY EXIT: unpaired_empty="
-            f"{not unpaired_tournaments} "
-            f"sport_id_in_range={1 <= sport_id <= 42}"
-        )
-        # ── /TEMPORARY DEBUG ────────────────────────────────────
-        return
-
-    # ── TEMPORARY DEBUG STUB (per user diagnostic request) ────────
-    # Everything between the ENTRY logging and end-of-function has
-    # been replaced with this isolated test of
-    # `_build_paired_event_lookup`. If "STEP 1 FAILED" prints,
-    # we have the crash. If "STEP 2" prints, the crash is later
-    # and we'll restore the original body next.
-    # Catches BaseException (broader than Exception — includes
-    # SystemExit, KeyboardInterrupt, asyncio.CancelledError) so
-    # nothing slips past silently.
-    logger.warning("DEBUG enrich STEP 1: about to call _build_paired_event_lookup")
-    try:
-        x = _build_paired_event_lookup(paired_tournaments)
-        logger.warning(f"DEBUG enrich STEP 2: paired_lookup done type={type(x)}")
-    except BaseException as e:
-        logger.warning(f"DEBUG enrich STEP 1 FAILED: {type(e).__name__}: {e}")
-        return
-    return
-    # ── /TEMPORARY DEBUG STUB ─────────────────────────────────────
+    for ut in (unpaired_tournaments or []):
+        for ev in (ut.get("events") or []):
+            if not ev.get("_kalshi_h2h_only"):
+                continue
+            home = (ev.get("HOME_NAME") or "").strip()
+            away = (ev.get("AWAY_NAME") or "").strip()
+            if home:
+                data = await _fetch_fl_team_data(home, sport_id)
+                if isinstance(data, dict) and data.get("logo_url"):
+                    ev["HOME_IMAGES"] = [data["logo_url"]]
+            if away:
+                data = await _fetch_fl_team_data(away, sport_id)
+                if isinstance(data, dict) and data.get("logo_url"):
+                    ev["AWAY_IMAGES"] = [data["logo_url"]]
 
 
 def _v2_synth_unpaired_event(records: list, sport: str,
@@ -11043,32 +10830,17 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
                 if tk:
                     matched_kalshi_tickers.add(tk)
 
-    # Synthetic-event FL enrichment — fetch logo + fixtures per
-    # team for every _kalshi_h2h_only event, in parallel, then
-    # attach HOME_IMAGES/AWAY_IMAGES and override START_TIME with
-    # the matched FL fixture when one matches by opponent + date.
-    # ── TEMPORARY DEBUG: log call-site state regardless of gate ──
-    logger.warning(
-        f"DEBUG v2 call site: unpaired_tournaments_count="
-        f"{len(unpaired_tournaments) if unpaired_tournaments else 0} "
-        f"sport_id={sport_id} will_call="
-        f"{bool(unpaired_tournaments)}"
-    )
+    # Synthetic-event FL enrichment — populate HOME_IMAGES /
+    # AWAY_IMAGES on every _kalshi_h2h_only event from FL search +
+    # fixtures, in parallel.
     if unpaired_tournaments:
         try:
             await _enrich_synthetic_events_with_fl_data(
                 unpaired_tournaments, sport_id,
                 paired_tournaments=out_tournaments,
             )
-        except Exception as _enrich_err:
-            # ── TEMPORARY DEBUG: surface the swallowed exception ──
-            import traceback
-            logger.warning(
-                f"DEBUG v2 enrich SWALLOWED EXCEPTION: "
-                f"{type(_enrich_err).__name__}: {_enrich_err}\n"
-                f"{traceback.format_exc()}"
-            )
-            # ── /TEMPORARY DEBUG ──
+        except Exception:
+            pass  # never let enrichment break the response
 
     # Outrights count toward matched_kalshi_count
     for t in outright_tournaments:
@@ -11274,31 +11046,17 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
                     if tk:
                         matched_kalshi_tickers.add(tk)
 
-    # Synthetic-event FL enrichment — fetch logo + fixtures per
-    # team for every _kalshi_h2h_only event, in parallel, attach
-    # HOME_IMAGES/AWAY_IMAGES, override START_TIME with the
-    # matched FL fixture's authoritative kickoff when found.
-    # ── TEMPORARY DEBUG: log call-site state regardless of gate ──
-    logger.warning(
-        f"DEBUG v3 call site: unpaired_tournaments_count="
-        f"{len(unpaired_tournaments) if unpaired_tournaments else 0} "
-        f"sport_id={sport_id} will_call="
-        f"{bool(unpaired_tournaments)}"
-    )
+    # Synthetic-event FL enrichment — populate HOME_IMAGES /
+    # AWAY_IMAGES on every _kalshi_h2h_only event from FL search +
+    # fixtures, in parallel.
     if unpaired_tournaments:
         try:
             await _enrich_synthetic_events_with_fl_data(
                 unpaired_tournaments, sport_id,
                 paired_tournaments=out_tournaments,
             )
-        except Exception as _enrich_err:
-            # ── TEMPORARY DEBUG: surface the swallowed exception ──
-            import traceback
-            logger.warning(
-                f"DEBUG v3 enrich SWALLOWED EXCEPTION: "
-                f"{type(_enrich_err).__name__}: {_enrich_err}\n"
-                f"{traceback.format_exc()}"
-            )
+        except Exception:
+            pass  # never let enrichment break the response
 
     # ── Synthetic-event cosmetic enrichment ──────────────────────
     # Synthetic Kalshi-only events from _v2_route_unpaired have
