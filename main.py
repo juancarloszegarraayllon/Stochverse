@@ -1444,6 +1444,18 @@ _FL_TEAM_HINTS: dict = {}
 # real-world club's imagery so the collision is benign.
 _TEAM_LOGO_CACHE: dict = {}
 
+# Persistent FL team-data cache. Keyed by `(normalized_team_name,
+# sport_id)` → `{"data": {"logo_url": ..., "fixtures": [...]}, "ts": epoch}`.
+# Returned by `_fetch_fl_team_data` and consumed by
+# `_v2_synth_unpaired_event` to populate synthetic Kalshi-only events
+# with both team logos AND authoritative kickoff times matched
+# against FL's upcoming-fixtures list.
+#
+# 1-hour TTL — fixtures change rarely (kickoff reschedules, new
+# matches added) so an hour balances freshness vs RapidAPI quota.
+_TEAM_FIXTURE_CACHE: dict = {}
+_TEAM_FIXTURE_CACHE_TTL_SEC = 3600
+
 # FlashLive capability map cache. Populated by /api/debug_fl_capabilities.
 # A full scan can spend ~150-300 RapidAPI calls so we hold the result
 # for a day. Pass ?refresh=1 to force a re-scan.
@@ -4603,165 +4615,6 @@ def refresh():
     global _cache
     _cache = {"data": None, "ts": 0}  # cache cleared on startup
     return {"ok": True}
-
-
-def _extract_logo_from_fl_fixtures(fixtures_resp: dict,
-                                      team_id: str) -> Optional[str]:
-    """Walk an FL `/v1/teams/fixtures` response and return the first
-    image URL belonging to `team_id`.
-
-    Strategy:
-      Pass 1 — find an event where the matching side
-        (HOME_PARTICIPANT_TEAM_ID == team_id, or AWAY) has IMAGES.
-        Returns that side's first image.
-      Pass 2 — fallback if no participant-id match: any event's
-        first image. Less precise but better than nothing.
-    """
-    if not isinstance(fixtures_resp, dict):
-        return None
-    data = fixtures_resp.get("DATA") or []
-    # Pass 1: precise match on participant team_id
-    for entry in data:
-        if not isinstance(entry, dict):
-            continue
-        for ev in (entry.get("EVENTS") or []):
-            if not isinstance(ev, dict):
-                continue
-            home_pid = (ev.get("HOME_PARTICIPANT_TEAM_ID")
-                        or ev.get("HOME_PARTICIPANT_IDS"))
-            away_pid = (ev.get("AWAY_PARTICIPANT_TEAM_ID")
-                        or ev.get("AWAY_PARTICIPANT_IDS"))
-            home_imgs = ev.get("HOME_IMAGES") or []
-            away_imgs = ev.get("AWAY_IMAGES") or []
-            # Scalar match
-            if home_pid == team_id and home_imgs:
-                return home_imgs[0]
-            if away_pid == team_id and away_imgs:
-                return away_imgs[0]
-            # List match (FL ships participant_ids as list sometimes)
-            if isinstance(home_pid, list) and team_id in home_pid and home_imgs:
-                return home_imgs[0]
-            if isinstance(away_pid, list) and team_id in away_pid and away_imgs:
-                return away_imgs[0]
-    # Pass 2: any image as fallback
-    for entry in data:
-        if not isinstance(entry, dict):
-            continue
-        for ev in (entry.get("EVENTS") or []):
-            if not isinstance(ev, dict):
-                continue
-            home_imgs = ev.get("HOME_IMAGES") or []
-            if home_imgs:
-                return home_imgs[0]
-            away_imgs = ev.get("AWAY_IMAGES") or []
-            if away_imgs:
-                return away_imgs[0]
-    return None
-
-
-@app.get("/api/fl/team-logo")
-async def fl_team_logo(team_name: str, sport_id: int = 1):
-    """Look up a team's logo URL from FL's search + fixtures APIs.
-
-    Two-step flow:
-      1. /v1/search/multi-search → resolve team_name to a team_id
-         (uses the existing `_resolve_team_id` helper which also
-         memoizes team_id resolutions across deploys).
-      2. /v1/teams/fixtures → walk fixtures, return the first
-         image URL for the side matching team_id.
-
-    Caches the result in `_TEAM_LOGO_CACHE` keyed by
-    `_normalize_team_name(team_name)`. Subsequent calls — and
-    `_lookup_team_images_by_name`'s tier-2 / tier-4 cache reads —
-    benefit from the warmed cache without re-hitting FL.
-
-    Note: user spec referenced `/v1/teams/search` but FL's
-    OpenAPI confirms the search endpoint is
-    `/v1/search/multi-search`. `_resolve_team_id` (already in
-    flashlive_feed) wraps it with sport-aware preference and
-    persistent team_id caching.
-
-    Response:
-      { "team_name": str,        # echoed
-        "team_id":   str|None,   # resolved (when found)
-        "logo_url":  str|None,
-        "source":    "cache" | "fl" | "fl_no_team" | "fl_no_image" }
-    """
-    if not team_name or not team_name.strip():
-        return {"error": "team_name required"}
-    if not 1 <= sport_id <= 42:
-        return {"error": "sport_id must be between 1 and 42"}
-
-    try:
-        from kalshi_registry_seed import _normalize_team_name
-        norm = _normalize_team_name(team_name)
-    except Exception:
-        norm = ""
-
-    # Tier 0 — return cache hit immediately (no FL roundtrip)
-    if norm and norm in _TEAM_LOGO_CACHE:
-        cached = _TEAM_LOGO_CACHE[norm]
-        return {
-            "team_name": team_name,
-            "logo_url":  cached[0] if cached else None,
-            "source":    "cache",
-        }
-
-    # Step 1 — resolve team_id via FL search
-    from flashlive_feed import _resolve_team_id, _fl_get
-    try:
-        team_id = await _resolve_team_id(team_name, str(sport_id))
-    except Exception as e:
-        return {
-            "team_name": team_name,
-            "logo_url":  None,
-            "source":    "error",
-            "error":     f"FL search failed: {type(e).__name__}: {e}",
-        }
-    if not team_id:
-        return {
-            "team_name": team_name,
-            "team_id":   None,
-            "logo_url":  None,
-            "source":    "fl_no_team",
-        }
-
-    # Step 2 — fetch fixtures, extract logo
-    try:
-        fixtures_resp = await _fl_get("/v1/teams/fixtures", {
-            "locale":   "en_INT",
-            "sport_id": sport_id,
-            "team_id":  team_id,
-        })
-    except Exception as e:
-        return {
-            "team_name": team_name,
-            "team_id":   team_id,
-            "logo_url":  None,
-            "source":    "error",
-            "error":     f"FL fixtures failed: {type(e).__name__}: {e}",
-        }
-    logo_url = _extract_logo_from_fl_fixtures(fixtures_resp or {}, team_id)
-    if not logo_url:
-        return {
-            "team_name": team_name,
-            "team_id":   team_id,
-            "logo_url":  None,
-            "source":    "fl_no_image",
-        }
-
-    # Cache and return — also feeds _lookup_team_images_by_name
-    # (tier 2 exact + tier 4 partial both consult _TEAM_LOGO_CACHE).
-    if norm:
-        _TEAM_LOGO_CACHE[norm] = [logo_url]
-
-    return {
-        "team_name": team_name,
-        "team_id":   team_id,
-        "logo_url":  logo_url,
-        "source":    "fl",
-    }
-
 
 @app.get("/api/ws_status")
 def ws_status():
@@ -10184,6 +10037,264 @@ def _lookup_team_images_by_name(target_name: str,
     return []
 
 
+def _parse_fl_fixtures_response(resp: dict, team_id: str) -> list:
+    """Walk an FL `/v1/teams/fixtures` response into a flat list of
+    {start_time, home, away, tournament}. Used by `_fetch_fl_team_data`.
+    """
+    if not isinstance(resp, dict):
+        return []
+    out = []
+    for entry in (resp.get("DATA") or []):
+        if not isinstance(entry, dict):
+            continue
+        tournament_name = entry.get("NAME") or ""
+        for ev in (entry.get("EVENTS") or []):
+            if not isinstance(ev, dict):
+                continue
+            ts = ev.get("START_TIME") or ev.get("START_UTIME") or 0
+            try:
+                ts = int(ts)
+            except (TypeError, ValueError):
+                ts = 0
+            out.append({
+                "start_time": ts,
+                "home":       ev.get("HOME_NAME") or "",
+                "away":       ev.get("AWAY_NAME") or "",
+                "tournament": tournament_name,
+            })
+    return out
+
+
+def _extract_logo_from_fl_fixtures(resp: dict, team_id: str) -> Optional[str]:
+    """Walk an FL `/v1/teams/fixtures` response and return the first
+    image URL belonging to `team_id`. Prefers the side whose
+    PARTICIPANT_TEAM_ID matches; falls back to any first image.
+    """
+    if not isinstance(resp, dict):
+        return None
+    data = resp.get("DATA") or []
+    # Pass 1: precise match on participant team_id
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        for ev in (entry.get("EVENTS") or []):
+            if not isinstance(ev, dict):
+                continue
+            home_pid = (ev.get("HOME_PARTICIPANT_TEAM_ID")
+                        or ev.get("HOME_PARTICIPANT_IDS"))
+            away_pid = (ev.get("AWAY_PARTICIPANT_TEAM_ID")
+                        or ev.get("AWAY_PARTICIPANT_IDS"))
+            home_imgs = ev.get("HOME_IMAGES") or []
+            away_imgs = ev.get("AWAY_IMAGES") or []
+            if home_pid == team_id and home_imgs:
+                return home_imgs[0]
+            if away_pid == team_id and away_imgs:
+                return away_imgs[0]
+            if isinstance(home_pid, list) and team_id in home_pid and home_imgs:
+                return home_imgs[0]
+            if isinstance(away_pid, list) and team_id in away_pid and away_imgs:
+                return away_imgs[0]
+    # Pass 2: fall back to any image
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        for ev in (entry.get("EVENTS") or []):
+            if not isinstance(ev, dict):
+                continue
+            if ev.get("HOME_IMAGES"):
+                return ev["HOME_IMAGES"][0]
+            if ev.get("AWAY_IMAGES"):
+                return ev["AWAY_IMAGES"][0]
+    return None
+
+
+async def _fetch_fl_team_data(team_name: str, sport_id: int) -> dict:
+    """Fetch a team's FL data — logo URL + upcoming fixtures.
+
+    Two-step FL flow:
+      1. /v1/search/multi-search (via existing `_resolve_team_id` —
+         memoized team_id resolution with sport-aware preference)
+      2. /v1/teams/fixtures?team_id={...} → walk fixtures, extract
+         logo (first IMAGES belonging to team_id) and parsed
+         fixture list.
+
+    Cached for `_TEAM_FIXTURE_CACHE_TTL_SEC` (1 hour) per
+    `(normalized_name, sport_id)`. Cache hits skip both FL roundtrips.
+
+    Returns:
+      {
+        "logo_url": str | None,
+        "fixtures": [
+          {"start_time": int, "home": str, "away": str,
+           "tournament": str},
+          ...
+        ]
+      }
+
+    Empty `{"logo_url": None, "fixtures": []}` when team can't be
+    resolved or fixtures call fails — same shape, safe to consume.
+    """
+    if not team_name:
+        return {"logo_url": None, "fixtures": []}
+    if not 1 <= sport_id <= 42:
+        return {"logo_url": None, "fixtures": []}
+    try:
+        from kalshi_registry_seed import _normalize_team_name
+        norm = _normalize_team_name(team_name)
+    except Exception:
+        norm = ""
+
+    # Cache check
+    cache_key = (norm, sport_id)
+    cached = _TEAM_FIXTURE_CACHE.get(cache_key)
+    if cached and (time.time() - cached.get("ts", 0)) < _TEAM_FIXTURE_CACHE_TTL_SEC:
+        return cached["data"]
+
+    from flashlive_feed import _resolve_team_id, _fl_get
+    try:
+        team_id = await _resolve_team_id(team_name, str(sport_id))
+    except Exception:
+        team_id = ""
+    if not team_id:
+        empty = {"logo_url": None, "fixtures": []}
+        # Cache the miss too — short-circuits repeat lookups for
+        # teams FL doesn't know about (frequent for Kalshi-only
+        # tournaments). Same TTL.
+        _TEAM_FIXTURE_CACHE[cache_key] = {"data": empty, "ts": time.time()}
+        return empty
+
+    try:
+        resp = await _fl_get("/v1/teams/fixtures", {
+            "locale":   "en_INT",
+            "sport_id": sport_id,
+            "team_id":  team_id,
+        })
+    except Exception:
+        resp = None
+    resp = resp or {}
+
+    logo_url = _extract_logo_from_fl_fixtures(resp, team_id)
+    fixtures = _parse_fl_fixtures_response(resp, team_id)
+    data = {"logo_url": logo_url, "fixtures": fixtures}
+
+    _TEAM_FIXTURE_CACHE[cache_key] = {"data": data, "ts": time.time()}
+    # Also feed the existing logo cache so tier-2 / tier-4 lookups
+    # in `_lookup_team_images_by_name` benefit immediately.
+    if norm and logo_url:
+        _TEAM_LOGO_CACHE[norm] = [logo_url]
+    return data
+
+
+def _match_fixture_for_synth_event(fixtures: list,
+                                     opponent_name: str,
+                                     target_kickoff_ts: int = 0,
+                                     fuzz_sec: int = 24 * 3600) -> Optional[int]:
+    """Find a fixture in `fixtures` (each {start_time, home, away,
+    tournament}) where one side matches `opponent_name` (normalized
+    substring containment) AND `start_time` is within ±fuzz_sec of
+    `target_kickoff_ts`. Returns the matching fixture's `start_time`
+    or None.
+
+    `target_kickoff_ts` is the Kalshi-estimated kickoff (from
+    `_kickoff_dt`). Kalshi's estimate can be off by hours when
+    derived via DURATION subtraction, so a wide fuzz (default 24h)
+    catches the right fixture without false positives across days.
+
+    `target_kickoff_ts=0` disables the time check — match purely
+    on opponent name (use when the synth event has no kickoff
+    estimate yet).
+    """
+    if not opponent_name or not fixtures:
+        return None
+    try:
+        from kalshi_registry_seed import _normalize_team_name
+    except Exception:
+        return None
+    op_n = _normalize_team_name(opponent_name)
+    if not op_n or len(op_n) < 3:
+        return None
+    for fx in fixtures:
+        for side_field in ("home", "away"):
+            side_name = fx.get(side_field) or ""
+            side_n = _normalize_team_name(side_name)
+            if not side_n or len(side_n) < 3:
+                continue
+            if op_n == side_n or op_n in side_n or side_n in op_n:
+                ts = fx.get("start_time") or 0
+                if not target_kickoff_ts:
+                    return ts
+                if ts and abs(ts - target_kickoff_ts) <= fuzz_sec:
+                    return ts
+    return None
+
+
+async def _enrich_synthetic_events_with_fl_data(
+        unpaired_tournaments: list, sport_id: int) -> None:
+    """For every `_kalshi_h2h_only` event in `unpaired_tournaments`,
+    fetch FL team data for HOME_NAME and AWAY_NAME (in parallel via
+    `asyncio.gather`), then:
+      - Populate HOME_IMAGES / AWAY_IMAGES from the returned
+        logo URLs (when present).
+      - Match the Kalshi-estimated START_TIME against the home
+        team's fixtures by opponent name + date proximity. When a
+        match is found, override START_TIME with the FL fixture's
+        authoritative kickoff and mark `_kickoff_source` =
+        'fl_fixture_match'. When no match, leave START_TIME as-is
+        and mark `_kickoff_source` = 'kalshi_estimate'.
+
+    All FL roundtrips happen here in parallel, then mutate the
+    events in place. Safe to no-op when there are no synth events.
+    """
+    if not unpaired_tournaments or not 1 <= sport_id <= 42:
+        return
+    target_events = []
+    fetch_coros = []
+    for ut in unpaired_tournaments:
+        if not isinstance(ut, dict):
+            continue
+        for ev in (ut.get("events") or []):
+            if not isinstance(ev, dict) or not ev.get("_kalshi_h2h_only"):
+                continue
+            target_events.append(ev)
+            home = (ev.get("HOME_NAME") or "").strip()
+            away = (ev.get("AWAY_NAME") or "").strip()
+            fetch_coros.append(_fetch_fl_team_data(home, sport_id)
+                               if home else
+                               asyncio.sleep(0, result={"logo_url": None, "fixtures": []}))
+            fetch_coros.append(_fetch_fl_team_data(away, sport_id)
+                               if away else
+                               asyncio.sleep(0, result={"logo_url": None, "fixtures": []}))
+    if not target_events:
+        return
+    results = await asyncio.gather(*fetch_coros, return_exceptions=True)
+    for i, ev in enumerate(target_events):
+        home_data = results[i * 2]
+        away_data = results[i * 2 + 1]
+        if not isinstance(home_data, dict):
+            home_data = {"logo_url": None, "fixtures": []}
+        if not isinstance(away_data, dict):
+            away_data = {"logo_url": None, "fixtures": []}
+        # Logos
+        if home_data.get("logo_url") and not ev.get("HOME_IMAGES"):
+            ev["HOME_IMAGES"] = [home_data["logo_url"]]
+        if away_data.get("logo_url") and not ev.get("AWAY_IMAGES"):
+            ev["AWAY_IMAGES"] = [away_data["logo_url"]]
+        # Kickoff override via opponent+date match against home's
+        # fixtures (away's fixtures would yield the same fixture).
+        target_ts = ev.get("START_TIME") or 0
+        opponent = ev.get("AWAY_NAME") or ""
+        matched_ts = _match_fixture_for_synth_event(
+            home_data.get("fixtures") or [], opponent, target_ts,
+        )
+        if matched_ts:
+            ev["START_TIME"] = matched_ts
+            ev["_kickoff_source"] = "fl_fixture_match"
+        else:
+            # Keep existing START_TIME (the Kalshi estimate). Tag
+            # source for observability.
+            ev["_kickoff_source"] = "kalshi_estimate"
+
+
 def _v2_synth_unpaired_event(records: list, sport: str,
                               paired_tournaments: Optional[list] = None) -> dict:
     """Build a synthetic FL-shape event for a Kalshi-only fixture.
@@ -10533,6 +10644,18 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
                 if tk:
                     matched_kalshi_tickers.add(tk)
 
+    # Synthetic-event FL enrichment — fetch logo + fixtures per
+    # team for every _kalshi_h2h_only event, in parallel, then
+    # attach HOME_IMAGES/AWAY_IMAGES and override START_TIME with
+    # the matched FL fixture when one matches by opponent + date.
+    if unpaired_tournaments:
+        try:
+            await _enrich_synthetic_events_with_fl_data(
+                unpaired_tournaments, sport_id,
+            )
+        except Exception:
+            pass  # never let enrichment break the response
+
     # Outrights count toward matched_kalshi_count
     for t in outright_tournaments:
         for ev in t.get("events") or []:
@@ -10552,75 +10675,6 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
 
 
 # ── /sports v3 — registry-based pairing (Phase C2c-c2) ────────────
-
-# TEMPORARY KILL-SWITCH — when True, /sports skips ALL Kalshi
-# processing (pairing, synthetic events, outrights, cache lookup)
-# and serves FL events only. Each event ships with `kalshi: None`
-# so the frontend renders FL-only cards.
-#
-# Per user request as a momentary intervention. To revert: flip
-# to False (or delete this block + the `_sports_feed_fl_only`
-# helper + the early-exit in sports_feed dispatch).
-_SPORTS_FL_ONLY = True
-
-
-async def _sports_feed_fl_only(sport_id: int, timezone: int,
-                                 indent_days: int):
-    """FL-only feed handler. Mirrors the response shape of v3 so the
-    frontend renders cleanly, but bypasses every Kalshi pathway —
-    no cache fetch, no pairing, no synthetic events, no outrights.
-
-    Each FL event gets `kalshi: None`. Tournaments preserve FL's
-    shape (TOURNAMENT_STAGE_ID / NAME / COUNTRY_NAME / events).
-    """
-    from flashlive_feed import _fl_get
-
-    if not 1 <= sport_id <= 42:
-        return {"error": "sport_id must be between 1 and 42"}
-    if not -12 <= timezone <= 12:
-        return {"error": "timezone must be between -12 and 12"}
-    if not -60 <= indent_days <= 60:
-        return {"error": "indent_days must be between -60 and 60"}
-
-    fl_data = None
-    if -7 <= indent_days <= 7:
-        try:
-            fl_data = await _fl_get("/v1/events/list", {
-                "sport_id": sport_id, "timezone": timezone,
-                "indent_days": indent_days,
-            })
-        except Exception:
-            fl_data = None
-    fl_data = fl_data or {"DATA": []}
-
-    tournaments = []
-    for t in (fl_data.get("DATA") or []):
-        if not isinstance(t, dict):
-            continue
-        events = []
-        for ev in (t.get("EVENTS") or []):
-            if not isinstance(ev, dict):
-                continue
-            ev_out = dict(ev)
-            ev_out["kalshi"] = None
-            events.append(ev_out)
-        tournaments.append({
-            "TOURNAMENT_STAGE_ID": t.get("TOURNAMENT_STAGE_ID"),
-            "NAME":                t.get("NAME"),
-            "NAME_PART_1":         t.get("NAME_PART_1"),
-            "NAME_PART_2":         t.get("NAME_PART_2"),
-            "COUNTRY_NAME":        t.get("COUNTRY_NAME"),
-            "events":              events,
-        })
-
-    return {
-        "fl_sport_id":          sport_id,
-        "kalshi_sport":         "",
-        "tournaments":          tournaments,
-        "matched_kalshi_count": 0,
-        "source":               "flashlive_only",
-    }
-
 
 async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
     """Registry-based feed handler. Replaces v2's kalshi_join chain
@@ -10806,6 +10860,18 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
                     if tk:
                         matched_kalshi_tickers.add(tk)
 
+    # Synthetic-event FL enrichment — fetch logo + fixtures per
+    # team for every _kalshi_h2h_only event, in parallel, attach
+    # HOME_IMAGES/AWAY_IMAGES, override START_TIME with the
+    # matched FL fixture's authoritative kickoff when found.
+    if unpaired_tournaments:
+        try:
+            await _enrich_synthetic_events_with_fl_data(
+                unpaired_tournaments, sport_id,
+            )
+        except Exception:
+            pass
+
     # ── Synthetic-event cosmetic enrichment ──────────────────────
     # Synthetic Kalshi-only events from _v2_route_unpaired have
     # START_TIME=None and no team images, so they look bare in COL 2
@@ -10915,17 +10981,6 @@ async def sports_feed(sport_id: int, timezone: int = 0,
     data (prices, orderbook) comes via the existing
     /api/event/{ticker} family on demand when COL 3 opens.
     """
-    # ── TEMPORARY: FL-only mode ────────────────────────────────
-    # Per user request — bypass all Kalshi processing and serve
-    # FL events only. No pairing, no synthetic events, no
-    # outrights, no Kalshi cache lookup. Each event ships with
-    # `kalshi: None` so the frontend renders FL-only cards.
-    #
-    # To revert: delete this block + `_SPORTS_FL_ONLY` constant +
-    # `_sports_feed_fl_only()` helper. Single git revert.
-    if _SPORTS_FL_ONLY:
-        return await _sports_feed_fl_only(sport_id, timezone, indent_days)
-    # ── /TEMPORARY ─────────────────────────────────────────────
     if v == 2:
         return await sports_feed_v2(sport_id, timezone, indent_days)
     if v == 3:

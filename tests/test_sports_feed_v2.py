@@ -557,13 +557,7 @@ def test_v3_invalid_timezone_returns_error():
 def test_v3_route_dispatches_via_v_param():
     """`?v=3` query param on /api/sports/{sport_id}/feed should
     invoke sports_feed_v3, not v2 or v1. Quick sanity check on
-    the route-level dispatcher.
-
-    NOTE: temporarily monkeypatches `_SPORTS_FL_ONLY = False` so
-    the FL-only kill-switch (TEMPORARY user request) doesn't
-    intercept dispatch. Remove the patch once the kill-switch is
-    reverted.
-    """
+    the route-level dispatcher."""
     import main
     # Mock both v2 and v3 to record which got called.
     called = {"v2": False, "v3": False}
@@ -576,16 +570,15 @@ def test_v3_route_dispatches_via_v_param():
         called["v3"] = True
         return {"source": "flashlive+kalshi+v3"}
 
-    with patch.object(main, "_SPORTS_FL_ONLY", False):
-        with patch.object(main, "sports_feed_v2", side_effect=fake_v2):
-            with patch.object(main, "sports_feed_v3", side_effect=fake_v3):
-                # v=3 routes to v3
-                result = asyncio.run(main.sports_feed(
-                    sport_id=1, timezone=0, indent_days=0, v=3,
-                ))
-                assert called["v3"] is True
-                assert called["v2"] is False
-                assert result["source"] == "flashlive+kalshi+v3"
+    with patch.object(main, "sports_feed_v2", side_effect=fake_v2):
+        with patch.object(main, "sports_feed_v3", side_effect=fake_v3):
+            # v=3 routes to v3
+            result = asyncio.run(main.sports_feed(
+                sport_id=1, timezone=0, indent_days=0, v=3,
+            ))
+            assert called["v3"] is True
+            assert called["v2"] is False
+            assert result["source"] == "flashlive+kalshi+v3"
 
 
 def test_default_route_dispatches_to_v3():
@@ -594,10 +587,6 @@ def test_default_route_dispatches_to_v3():
     default (registry-based pairing). v2 and v1 remain accessible
     via explicit ?v=2 / ?v=1 query params for the safety-window /
     rollback paths.
-
-    NOTE: temporarily monkeypatches `_SPORTS_FL_ONLY = False` so
-    the FL-only kill-switch (TEMPORARY user request) doesn't
-    intercept dispatch.
     """
     import main
     called = {"v2": False, "v3": False}
@@ -610,43 +599,13 @@ def test_default_route_dispatches_to_v3():
         called["v3"] = True
         return {"source": "flashlive+kalshi+v3"}
 
-    with patch.object(main, "_SPORTS_FL_ONLY", False):
-        with patch.object(main, "sports_feed_v2", side_effect=fake_v2):
-            with patch.object(main, "sports_feed_v3", side_effect=fake_v3):
-                # No `v` argument → uses route default. After C2c-c2
-                # stage-2, that's v=3.
-                result = asyncio.run(main.sports_feed(
-                    sport_id=1, timezone=0, indent_days=0,
-                ))
-                assert called["v3"] is True
-                assert called["v2"] is False
-                assert result["source"] == "flashlive+kalshi+v3"
-
-
-def test_fl_only_kill_switch_intercepts_dispatch():
-    """TEMPORARY: when _SPORTS_FL_ONLY=True, dispatch is intercepted
-    by the FL-only helper before it reaches v2/v3. This test guards
-    against accidentally breaking the kill-switch while it's in
-    effect. Remove this test when the kill-switch is reverted.
-    """
-    import main
-    called = {"v3": False, "fl_only": False}
-
-    async def fake_v3(*args, **kwargs):
-        called["v3"] = True
-        return {}
-
-    async def fake_fl_only(*args, **kwargs):
-        called["fl_only"] = True
-        return {"source": "flashlive_only"}
-
-    with patch.object(main, "_SPORTS_FL_ONLY", True):
+    with patch.object(main, "sports_feed_v2", side_effect=fake_v2):
         with patch.object(main, "sports_feed_v3", side_effect=fake_v3):
-            with patch.object(main, "_sports_feed_fl_only",
-                                side_effect=fake_fl_only):
-                result = asyncio.run(main.sports_feed(
-                    sport_id=1, timezone=0, indent_days=0, v=3,
-                ))
-                assert called["fl_only"] is True
-                assert called["v3"] is False
-                assert result["source"] == "flashlive_only"
+            # No `v` argument → uses route default. After C2c-c2
+            # stage-2, that's v=3.
+            result = asyncio.run(main.sports_feed(
+                sport_id=1, timezone=0, indent_days=0,
+            ))
+            assert called["v3"] is True
+            assert called["v2"] is False
+            assert result["source"] == "flashlive+kalshi+v3"
