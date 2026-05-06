@@ -1144,15 +1144,38 @@ _KALSHI_KICKOFF_DURATION_BY_SPORT = {
 
 
 def _estimate_kickoff_from_kalshi_record(rec: dict, sport: str):
-    """Return estimated kickoff datetime (UTC-aware) for a Kalshi
-    record by reading the first market's `expected_expiration_time`
-    and subtracting `_KALSHI_KICKOFF_DURATION_BY_SPORT[sport]`.
+    """Return estimated kickoff datetime (UTC-aware) for a Kalshi record.
 
-    Returns None if the sport isn't in the duration table or
-    `expected_expiration_time` is missing/unparseable. Callers
-    should fall back to the cruder ticker_date + 18:00 UTC
-    estimate when this returns None.
+    Resolution order:
+      1. `rec["_kickoff_dt"]` — set by the cache builder
+         (main.py:1917-1932). The cache builder uses ESPN/SofaScore's
+         `scheduled_kickoff_ms` when a match is found (authoritative,
+         exact kickoff), and falls back to
+         `expected_expiration_time − sport-typical duration` when not.
+         This is the BEST available source — same field the homepage
+         /api/events response uses.
+      2. Local recompute of `expected_expiration_time − sport-typical
+         duration`. Used when `_kickoff_dt` is missing (edge case —
+         cache build hasn't seen the record yet, or the record came
+         from a path that doesn't go through the cache builder).
+
+    Returns None if neither source yields a usable timestamp.
+
+    TODO: `rec["_live_state"]["home_abbr"]` / `away_abbr` are also
+    available on cache records when ESPN/SofaScore matched the game.
+    Could improve synthetic event team identification vs the current
+    title-parsing approach in `_v2_synth_unpaired_event`. Separate PR.
     """
+    # Path 1: precomputed _kickoff_dt from cache builder (preferred —
+    # may already include ESPN/SofaScore authoritative override).
+    kdt_str = rec.get("_kickoff_dt")
+    if kdt_str:
+        kdt = safe_dt(kdt_str)
+        if kdt is not None:
+            return kdt
+    # Path 2: local recompute fallback (kept until _kickoff_dt
+    # coverage is confirmed sufficient in production — separate
+    # cleanup PR will retire this once that's verified).
     if sport not in _KALSHI_KICKOFF_DURATION_BY_SPORT:
         return None
     mkts = rec.get("markets")
