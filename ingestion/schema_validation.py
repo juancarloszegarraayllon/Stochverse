@@ -62,6 +62,31 @@ class FLTournamentValidator(BaseModel):
     EVENTS: list[dict] = Field(default_factory=list)
 
 
+# ── Kalshi ──────────────────────────────────────────────────────
+#
+# Minimum fields the Kalshi resolver module will need from the cache
+# records. The cache shape is what get_data() / _build_cache() in
+# main.py produces — a flat list where each row is one event with
+# its sub-markets bundled. Field names here match the Kalshi API's
+# /events response after main.py's enrichment passes.
+class KalshiMarketValidator(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    event_ticker: str = Field(min_length=1)
+    series_ticker: str | None = None
+    title: str | None = None
+    category: str | None = None
+    _sport: str | None = None
+    _soccer_comp: str | None = None
+    _kickoff_dt: str | None = None       # ISO 8601 string
+    expected_expiration_time: str | None = None
+    close_time: str | None = None
+    status: str | None = None
+    markets: list[dict] | None = None    # sub-market records
+    outcomes: list[dict] | None = None   # outcome rows from extract()
+
+
+
 # ── Boundary validator ──────────────────────────────────────────
 
 def validate_or_drift(
