@@ -2,6 +2,13 @@ __pycache__/
 .claude/settings.local.json
 .claude/auto-push.sh
 
+# Local environment overrides — never commit secrets.
+.env
+.env.local
+
+# Local dev volumes / runtime artifacts.
+postgres_data/
+
 # Frontend build dependencies. The build artifact static/dist/main.js
 # IS committed so Railway deploys without needing a Node toolchain;
 # only node_modules and TS build cache are ignored.
