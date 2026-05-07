@@ -10423,16 +10423,19 @@ def _normalize_team_name_for_dedup(name) -> str:
 def _build_paired_name_lookup(paired_tournaments: list) -> dict:
     """Build {frozenset({home_norm, away_norm}): paired_event} from
     the paired-side tournaments. Skips synthetic events (those have
-    `_kalshi_h2h_only=True`) and events that didn't pair to a Kalshi
-    record (no kalshi.event_ticker).
+    `_kalshi_h2h_only=True`).
+
+    Includes FL events even when they didn't pair to a Kalshi ticker
+    — a synth event with the same teams should still merge into the
+    FL event, attaching the Kalshi data to a card that otherwise
+    would have rendered without prices. Without this, the user sees
+    two cards: an FL-shaped card with no Kalshi block + a synth
+    Kalshi-only card sitting next to it.
     """
     lookup: dict = {}
     for t in paired_tournaments or []:
         for ev in t.get("events") or []:
             if ev.get("_kalshi_h2h_only"):
-                continue
-            k = ev.get("kalshi") or {}
-            if not k.get("event_ticker"):
                 continue
             home = _normalize_team_name_for_dedup(ev.get("HOME_NAME"))
             away = _normalize_team_name_for_dedup(ev.get("AWAY_NAME"))
