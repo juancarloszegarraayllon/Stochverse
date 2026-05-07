@@ -931,7 +931,16 @@ _FL_OBSERVE_PATHS = (
 
 
 async def _fl_get(path: str, params: dict = None):
-    """Shared GET helper for FlashLive API calls."""
+    """Shared GET helper for FlashLive API calls.
+
+    Phase 0 instrumentation: every call emits a `provider_api_call`
+    structured event via observability.provider_call_event with
+    provider/endpoint/status/latency/response_bytes. Schema-equivalent
+    to the future `provider_api_calls` table (architecture doc §6.3),
+    so Phase 1's Postgres migration can backfill from logs.
+    """
+    from observability import _CallTimer
+
     if not API_KEY or httpx is None:
         return None
     headers = {"x-rapidapi-key": API_KEY, "x-rapidapi-host": API_HOST}
@@ -942,32 +951,96 @@ async def _fl_get(path: str, params: dict = None):
     # fan-out + scheduled poll calls can't burst past Mega's cap.
     await _fl_throttle()
     observe = any(path.startswith(p) for p in _FL_OBSERVE_PATHS)
-    status = 0
-    size = 0
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            r = await client.get(f"{BASE_URL}{path}", headers=headers, params=params)
-            status = r.status_code
-            if status == 200:
-                body = r.json()
-                size = len(r.content)
-                if observe:
-                    # FL_OBS=1 lines aggregate easily via grep; downstream
-                    # tooling can build per-sport / per-league coverage
-                    # matrices for §9 Q1/Q6/Q7 without a separate probe.
-                    log.info(
-                        "FL_OBS=1 path=%s status=200 bytes=%d event_id=%s sport_id=%s",
-                        path, size, params.get("event_id", ""), params.get("sport_id", ""),
-                    )
-                return body
-        except Exception:
-            pass
-    if observe:
-        log.info(
-            "FL_OBS=1 path=%s status=%d bytes=0 event_id=%s sport_id=%s",
-            path, status, params.get("event_id", ""), params.get("sport_id", ""),
+
+    body = None
+    with _CallTimer(provider="fl", endpoint=path) as timer:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                r = await client.get(
+                    f"{BASE_URL}{path}", headers=headers, params=params,
+                )
+                timer.status = r.status_code
+                if r.status_code == 200:
+                    body = r.json()
+                    timer.response_bytes = len(r.content)
+            except Exception as exc:
+                timer.error = type(exc).__name__
+
+        if observe:
+            # Legacy FL_OBS=1 line preserved for tooling that already
+            # greps it. The structured `provider_api_call` event from
+            # _CallTimer is the canonical record going forward.
+            log.info(
+                "FL_OBS=1 path=%s status=%d bytes=%d event_id=%s sport_id=%s",
+                path, timer.status, timer.response_bytes,
+                params.get("event_id", ""), params.get("sport_id", ""),
+            )
+    return body
+
+
+# ── Request-path response cache ──────────────────────────────────
+# Phase 0 deliverable per SP Architecture v1.2 §11.1: the
+# /api/sports/{id}/feed handler in main.py polls /v1/events/list on
+# every request. With 5s frontend polling and N open tabs, this
+# scales linearly with users. A 30-second per-process TTL cache
+# decouples request rate from FL call rate without changing what
+# data the user sees (FL's /v1/events/list shifts in seconds, not
+# real-time; 30s staleness is well within the freshness window the
+# UI already tolerates for non-live state).
+#
+# Single FL endpoint cached: /v1/events/list. The background poller
+# (which writes to GAMES) calls _fl_get directly and is unaffected.
+# Live-score freshness is preserved because the poller bypasses this
+# cache entirely.
+
+_FL_GET_CACHE: dict = {}
+_FL_GET_CACHE_TTL_SEC = 30
+
+
+def _fl_cache_key(path: str, params: dict | None) -> tuple:
+    if not params:
+        return (path, ())
+    return (path, tuple(sorted(params.items())))
+
+
+async def _fl_get_cached(
+    path: str,
+    params: dict = None,
+    ttl: int = _FL_GET_CACHE_TTL_SEC,
+):
+    """TTL-cached wrapper around _fl_get for the request path.
+
+    Cache is per-process and per-(path, params). Failures (None
+    responses) are NOT cached, so a transient FL outage doesn't pin
+    a None for 30s. The next call retries.
+
+    Use this from request handlers where 30s staleness is acceptable.
+    Use _fl_get directly from background pollers where freshness
+    matters and the poller's own cadence is the source of truth.
+    """
+    from observability import provider_call_event
+
+    key = _fl_cache_key(path, params)
+    now = time.time()
+    cached = _FL_GET_CACHE.get(key)
+    if cached and now - cached[0] < ttl:
+        # Cache hit — emit a synthetic event so call-volume metrics
+        # reflect the actual FL load (zero) rather than the request
+        # rate. status=0 + cache_hit=True distinguishes this from a
+        # real call.
+        provider_call_event(
+            provider="fl",
+            endpoint=path,
+            status=0,
+            latency_ms=0,
+            response_bytes=0,
+            extra={"cache_hit": True},
         )
-    return None
+        return cached[1]
+    response = await _fl_get(path, params)
+    if response is not None:
+        _FL_GET_CACHE[key] = (now, response)
+    return response
 
 
 async def fetch_event_h2h(event_id: str):
