@@ -9166,6 +9166,184 @@ async def debug_unpaired_pairs(sport_id: int, indent_days: int = 0,
     }
 
 
+@app.get("/api/_debug/trace_ticker")
+async def debug_trace_ticker(ticker: str, sport_id: int = 1,
+                              indent_days: int = 0, timezone: int = 0):
+    """Walk a single Kalshi event_ticker through every stage of the
+    sports-feed pipeline and report which stage it survives or drops at.
+
+    Stages reported:
+      1. cache_present     — is the ticker in the Kalshi cache?
+      2. cache_sport       — what _sport did get_data() classify it as?
+      3. parse_identity    — does parse_ticker yield a valid Identity?
+      4. paired            — did seed_and_pair_via_registry pair it to
+                             an FL event? If yes, which FL event?
+      5. unpaired_bucket   — if not paired, did it land in a unique
+                             bucket via find_unpaired_buckets, or merge
+                             with another fixture?
+      6. target_date_pass  — does the bucket survive the target_date
+                             filter in _v2_route_unpaired?
+      7. final_card        — does the ticker reach the response, and
+                             under which tournament heading?
+
+    Usage:
+      /api/_debug/trace_ticker
+        ?ticker=KXCONMEBOLLIBGAME-26MAY07MIRLDU&sport_id=1
+    """
+    from flashlive_feed import _fl_get
+    from kalshi_join import find_unpaired_buckets, _canonical_fixture_key
+    from kalshi_identity import parse_ticker
+    from registry_pairing import seed_and_pair_via_registry
+    from datetime import date as _date, timedelta as _td
+
+    out: dict = {"ticker": ticker, "stages": {}}
+    if not ticker:
+        out["error"] = "ticker required"
+        return out
+
+    target_ticker = ticker.strip().upper()
+    out["normalized_ticker"] = target_ticker
+
+    # Stage 1+2: cache presence + sport classification
+    get_data()
+    cache_records = _cache.get("data_all") or _cache.get("data") or []
+    matching_records = [r for r in cache_records
+                          if (r.get("event_ticker") or "").upper()
+                          == target_ticker]
+    out["stages"]["cache_present"] = bool(matching_records)
+    out["stages"]["cache_record_count"] = len(matching_records)
+    if not matching_records:
+        out["stages"]["cache_sport"] = None
+        out["stages"]["sample_titles_for_series"] = []
+        # Surface any same-series tickers that ARE in cache so the user
+        # can tell whether the Kalshi feed itself omitted this match.
+        if "-" in target_ticker:
+            series_prefix = target_ticker.split("-", 1)[0]
+            similar = [
+                {
+                    "ticker": (r.get("event_ticker") or ""),
+                    "title":  r.get("title") or "",
+                    "_sport": r.get("_sport") or "",
+                }
+                for r in cache_records
+                if (r.get("event_ticker") or "").upper().startswith(
+                    series_prefix + "-"
+                )
+            ][:25]
+            out["same_series_in_cache"] = similar
+        out["verdict"] = "MISSING_FROM_KALSHI_CACHE"
+        return out
+
+    primary_record = matching_records[0]
+    sport = primary_record.get("_sport") or ""
+    out["stages"]["cache_sport"] = sport
+    out["stages"]["title"] = primary_record.get("title") or ""
+    out["stages"]["series_ticker"] = primary_record.get("series_ticker") or ""
+
+    # Stage 3: identity parse
+    ident = parse_ticker(
+        primary_record.get("event_ticker") or "",
+        primary_record.get("series_ticker") or "",
+        sport,
+    )
+    out["stages"]["parse_identity"] = {
+        "kind":        ident.kind,
+        "date":        ident.date.isoformat() if ident.date else None,
+        "time":        ident.time,
+        "abbr_block":  ident.abbr_block,
+        "series_base": ident.series_base,
+        "raw_suffix":  ident.raw_suffix,
+    }
+    if ident.kind != "per_fixture":
+        out["verdict"] = f"PARSED_AS_{ident.kind.upper()}_NOT_PER_FIXTURE"
+        return out
+
+    # Stage 4: pair via registry against current FL data
+    fl_data = None
+    if -7 <= indent_days <= 7:
+        try:
+            fl_data = await _fl_get("/v1/events/list", {
+                "sport_id":    sport_id,
+                "timezone":    timezone,
+                "indent_days": indent_days,
+            })
+        except Exception as exc:
+            out["stages"]["fl_fetch_error"] = repr(exc)
+    fl_data = fl_data or {"DATA": []}
+
+    sport_kalshi = [r for r in cache_records
+                      if (r.get("_sport") or "") == sport]
+    pairings_dict, _registry = seed_and_pair_via_registry(
+        sport, fl_data, sport_kalshi,
+    )
+    paired_to = None
+    for fl_event_id, ticker_list in pairings_dict.items():
+        if any((tk or "").upper() == target_ticker
+               for tk in (ticker_list or [])):
+            paired_to = {"fl_event_id": fl_event_id,
+                         "co_paired_tickers": list(ticker_list or [])}
+            break
+    out["stages"]["paired"] = paired_to is not None
+    out["stages"]["paired_detail"] = paired_to
+
+    if paired_to is not None:
+        # Find the FL event for context
+        for t in (fl_data.get("DATA") or []):
+            for ev in (t.get("EVENTS") or []):
+                if (ev.get("EVENT_ID") or "") == paired_to["fl_event_id"]:
+                    out["stages"]["paired_fl_event"] = {
+                        "tournament": t.get("NAME") or "",
+                        "home":       ev.get("HOME_NAME") or "",
+                        "away":       ev.get("AWAY_NAME") or "",
+                    }
+                    break
+        out["verdict"] = "PAIRED_TO_FL_EVENT"
+        return out
+
+    # Stage 5: unpaired bucketing
+    paired_tickers: set = set()
+    for tlist in pairings_dict.values():
+        for tk in (tlist or []):
+            if tk:
+                paired_tickers.add(tk)
+    unpaired_records = [r for r in sport_kalshi
+                          if (r.get("event_ticker") or "")
+                          not in paired_tickers]
+    buckets = find_unpaired_buckets(unpaired_records, sport)
+    my_key = _canonical_fixture_key(ident)
+    bucket_recs = buckets.get(my_key, [])
+    bucket_tickers = [r.get("event_ticker") or "" for r in bucket_recs]
+    out["stages"]["unpaired_bucket"] = {
+        "key":            [str(x) if x is not None else None
+                           for x in my_key],
+        "in_bucket":      target_ticker in [t.upper()
+                                              for t in bucket_tickers],
+        "bucket_size":    len(bucket_recs),
+        "co_bucketed":    bucket_tickers,
+    }
+    if target_ticker not in [t.upper() for t in bucket_tickers]:
+        out["verdict"] = "DROPPED_BEFORE_BUCKETING"
+        return out
+
+    # Stage 6: target_date filter (mirrors _v2_route_unpaired)
+    target_date = (_date.today() + _td(days=indent_days)
+                   if indent_days != 0 else _date.today())
+    fk_date = my_key[1] if len(my_key) > 1 else None
+    survives_date = (target_date is None or not fk_date
+                      or fk_date == target_date)
+    out["stages"]["target_date_pass"] = {
+        "survives":     survives_date,
+        "target_date":  target_date.isoformat() if target_date else None,
+        "fixture_date": fk_date.isoformat() if fk_date else None,
+    }
+    if not survives_date:
+        out["verdict"] = "FILTERED_BY_TARGET_DATE"
+        return out
+
+    out["verdict"] = "SHOULD_RENDER_AS_SYNTH_EVENT"
+    return out
+
+
 @app.get("/api/_debug/sports_inventory")
 async def debug_sports_inventory():
     """Sport-level inventory: every distinct _sport value in the
