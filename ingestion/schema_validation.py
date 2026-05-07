@@ -86,7 +86,6 @@ class KalshiMarketValidator(BaseModel):
     outcomes: list[dict] | None = None   # outcome rows from extract()
 
 
-
 # ── Boundary validator ──────────────────────────────────────────
 
 def validate_or_drift(
