@@ -883,6 +883,19 @@ function eventState(ev) {
 }
 
 function passesStateFilter(ev) {
+  // Synthetic Kalshi-only events (_kalshi_h2h_only=true) have no
+  // FL state to authoritatively drive eventState — STAGE_TYPE is
+  // hardcoded to SCHEDULED on the backend. Don't filter them by
+  // state at all; the date filter still pins them to the active
+  // day so they don't leak across the day picker. Without this
+  // bypass, the Live tab silently eats every synth card during
+  // its actual match window.
+  if (ev._kalshi_h2h_only) {
+    if (_onlyMatched && !(ev.kalshi && ev.kalshi.event_ticker)) {
+      return false;
+    }
+    return true;
+  }
   if (_activeStateFilter !== 'all' && eventState(ev) !== _activeStateFilter) {
     return false;
   }
