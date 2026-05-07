@@ -79,6 +79,19 @@ if _SENTRY_DSN:
     except Exception as e:
         logging.getLogger("stochverse").warning("sentry init failed: %s", e)
 
+# Phase 0 (architecture v1.2 §11.1): configure structlog before
+# any handler is registered so /api/_debug endpoints, ingestion
+# wrappers, and provider_api_call events all emit JSON to Railway's
+# log aggregator. Coexists with stdlib logging — does not replace
+# existing logger calls.
+try:
+    from observability import configure_structlog as _configure_structlog
+    _configure_structlog()
+except Exception as _exc:  # pragma: no cover — safe fallback
+    logging.getLogger("stochverse").warning(
+        "structlog configuration failed: %s", _exc,
+    )
+
 app = FastAPI(title="Stochverse API")
 
 # Static file mount for the frontend bundle (static/dist/main.js) and
@@ -10529,7 +10542,7 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
         _v2_build_kalshi_block (the same outcome/price extraction
         v2 uses).
     """
-    from flashlive_feed import _fl_get
+    from flashlive_feed import _fl_get_cached
     from kalshi_join import find_unpaired_buckets
     from registry_pairing import seed_and_pair_via_registry
 
@@ -10549,11 +10562,17 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
     outright_tournaments = (_collect_outrights_for_sport(sport, target_date)
                             if sport else [])
 
-    # Fetch FL events list (only when within FL's ±7 day window)
+    # Fetch FL events list (only when within FL's ±7 day window).
+    # Phase 0 (architecture v1.2 §11.1): this hot path is now backed
+    # by a 30-second per-process TTL cache so frontend polling at 5s
+    # per tab does not amplify FL load linearly with user count.
+    # _fl_get_cached emits a `provider_api_call` event with
+    # extra.cache_hit=True on hits so metrics still reflect request
+    # rate distinct from real FL call volume.
     fl_data = None
     if -7 <= indent_days <= 7:
         try:
-            fl_data = await _fl_get("/v1/events/list", {
+            fl_data = await _fl_get_cached("/v1/events/list", {
                 "sport_id": sport_id, "timezone": timezone,
                 "indent_days": indent_days,
             })
