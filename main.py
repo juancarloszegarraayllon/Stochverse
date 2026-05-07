@@ -10392,6 +10392,118 @@ async def sports_feed_v2(sport_id: int, timezone: int, indent_days: int):
     }
 
 
+# ── Synth-event response-level dedup (in-memory, no FL fetch) ────
+#
+# Kalshi ships sub-market series (KXUELGAME / KXUELTOTAL / KXUELBTTS / …)
+# that describe the same fixture but use slightly different abbr_blocks
+# in their tickers (e.g. KXUELGAME-26MAY07FREBRA vs
+# KXUELTOTAL-26MAY07SCFBRA — "FRE" vs "SCF" for Sport Club Freiburg).
+# The strict / alias_table / title_match tiers pair the tickers whose
+# abbr matches FL's SHORTNAME, but tickers using a different abbr
+# escape pairing and surface as separate synthetic Kalshi-only cards
+# next to the paired FL card → user sees Freiburg vs Braga twice on
+# /sports.
+#
+# This dedup pass runs AFTER pairing + bucketing and is purely in-
+# memory: walk synthetic events, and when (HOME_NAME, AWAY_NAME)
+# normalized matches a paired event in the same response, fold the
+# synth's kalshi.markets into the paired event's kalshi block and
+# drop the synth. Direction-blind on home/away. Idempotent: dedup
+# by event_ticker so a market is never double-added.
+#
+# No network calls. Worst case: a name collision between two
+# fixtures on different days could merge wrongly — extremely
+# unlikely because the frozenset key requires BOTH home AND away
+# names to match exactly.
+
+def _normalize_team_name_for_dedup(name) -> str:
+    return (name or "").strip().lower()
+
+
+def _build_paired_name_lookup(paired_tournaments: list) -> dict:
+    """Build {frozenset({home_norm, away_norm}): paired_event} from
+    the paired-side tournaments. Skips synthetic events (those have
+    `_kalshi_h2h_only=True`) and events that didn't pair to a Kalshi
+    record (no kalshi.event_ticker).
+    """
+    lookup: dict = {}
+    for t in paired_tournaments or []:
+        for ev in t.get("events") or []:
+            if ev.get("_kalshi_h2h_only"):
+                continue
+            k = ev.get("kalshi") or {}
+            if not k.get("event_ticker"):
+                continue
+            home = _normalize_team_name_for_dedup(ev.get("HOME_NAME"))
+            away = _normalize_team_name_for_dedup(ev.get("AWAY_NAME"))
+            if not home or not away:
+                continue
+            lookup[frozenset({home, away})] = ev
+    return lookup
+
+
+def _merge_synth_kalshi_into_paired(synth_ev: dict, paired_ev: dict) -> None:
+    """Merge synth_ev's kalshi.markets into paired_ev's kalshi.markets,
+    deduping by event_ticker. Preserves the paired event's
+    primary_prices / event_ticker / title — those describe the
+    headline GAME ticker and stay the source of truth.
+    """
+    synth_k = synth_ev.get("kalshi") or {}
+    if not synth_k:
+        return
+    paired_k = paired_ev.get("kalshi")
+    if not paired_k:
+        # paired event had no kalshi block at all — adopt synth's
+        # wholesale. Rare (would mean it paired but produced no block).
+        paired_ev["kalshi"] = synth_k
+        return
+    paired_markets = paired_k.get("markets") or []
+    seen_tickers = {(m.get("event_ticker") or "")
+                      for m in paired_markets}
+    for m in (synth_k.get("markets") or []):
+        tk = m.get("event_ticker") or ""
+        if tk and tk not in seen_tickers:
+            paired_markets.append(m)
+            seen_tickers.add(tk)
+    paired_k["markets"] = paired_markets
+    if "count" in paired_k:
+        paired_k["count"] = len(paired_markets)
+
+
+def _dedupe_synth_into_paired(paired_tournaments: list,
+                                unpaired_tournaments: list) -> list:
+    """In-place merge of synth events into paired events when their
+    home/away names match a paired event in the same response.
+    Returns the unpaired_tournaments list with merged synths removed
+    and empty tournaments pruned.
+    """
+    lookup = _build_paired_name_lookup(paired_tournaments)
+    if not lookup:
+        return unpaired_tournaments
+    pruned: list = []
+    for u_t in unpaired_tournaments or []:
+        retained: list = []
+        for ev in u_t.get("events") or []:
+            if not ev.get("_kalshi_h2h_only"):
+                retained.append(ev)
+                continue
+            home = _normalize_team_name_for_dedup(ev.get("HOME_NAME"))
+            away = _normalize_team_name_for_dedup(ev.get("AWAY_NAME"))
+            if not home or not away:
+                retained.append(ev)
+                continue
+            paired_ev = lookup.get(frozenset({home, away}))
+            if paired_ev is not None:
+                _merge_synth_kalshi_into_paired(ev, paired_ev)
+                # synth dropped (not appended)
+                continue
+            retained.append(ev)
+        u_t["events"] = retained
+        if retained:
+            pruned.append(u_t)
+    return pruned
+
+
 # ── /sports v3 — registry-based pairing (Phase C2c-c2) ────────────
 
 async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
@@ -10577,6 +10689,15 @@ async def sports_feed_v3(sport_id: int, timezone: int, indent_days: int):
                     tk = r.get("event_ticker") or ""
                     if tk:
                         matched_kalshi_tickers.add(tk)
+            # Response-level dedup: merge synth events into paired
+            # events whose home/away names match. Resolves the case
+            # where Kalshi sub-market series use a different abbr
+            # than the GAME series (e.g. KXUELGAME-FREBRA paired but
+            # KXUELTOTAL-SCFBRA escaped pairing). In-memory only —
+            # no FL fetches.
+            unpaired_tournaments = _dedupe_synth_into_paired(
+                out_tournaments, unpaired_tournaments,
+            )
 
     # ── Synthetic-event cosmetic enrichment ──────────────────────
     # Synthetic Kalshi-only events from _v2_route_unpaired have
