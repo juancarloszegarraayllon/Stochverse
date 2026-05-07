@@ -75,17 +75,10 @@ DATABASE_URL="postgresql://...neon.tech/...?sslmode=require" \
   python scripts/backfill_fl.py --days 7
 ```
 
-```bash
-DATABASE_URL="postgresql://...neon.tech/...?sslmode=require" \
-  python scripts/backfill_kalshi.py
-```
-
 Or via Makefile (uses local docker-compose Postgres):
 
 ```bash
 make backfill-fl
-make backfill-kalshi
-make backfill-all   # both, sequential
 ```
 
 ### What gets backfilled
@@ -93,7 +86,13 @@ make backfill-all   # both, sequential
 | Provider | Range covered | Notes |
 |---|---|---|
 | FL | ±7 days from today | FL `/v1/events/list` only serves ±7 days. Beyond that requires per-tournament historical queries (Phase 2 PR). |
-| Kalshi | Open + recently-closed events from `/events` endpoint | Kalshi ages closed events out after a retention window (varies by series). The ±30-day target in §11.2 is best-effort against whatever Kalshi still serves. |
+| Kalshi | n/a — see below | No standalone Kalshi backfill script. |
+
+#### Why no Kalshi backfill script
+
+Kalshi REST exposes only currently-active and recently-closed events via `/events`, and the live ingestion (`ingestion/kalshi.py`) already calls `paginate()` every 30s to pull both open and closed status. A standalone backfill would duplicate the live poller without adding range — Kalshi ages closed events out after a series-specific retention window, and there's no broad-spectrum historical endpoint we can hit through the existing SDK.
+
+When deeper historical Kalshi data is genuinely needed (Phase 2 resolver tuning, settlement audits), the right path is a per-ticker retrieval against Kalshi's `/markets/{ticker}` endpoint with a starting list of historical tickers (settlement CSVs or similar). That's separate engineering, deferred until the requirement is concrete.
 
 ### Verification
 
@@ -121,9 +120,8 @@ SELECT 'kalshi_markets', MIN(last_seen_at), MAX(last_seen_at) FROM sp.kalshi_mar
 ### Cost / time
 
 - FL backfill (±7 days × ~17 sports): ~3-5 minutes against Neon US-West.
-- Kalshi backfill: ~2-3 minutes (the legacy paginate is the slow step at 20-60s; ingestion pass after that is ~10-20s).
 
-Both scripts are network-bound on the provider API, not the database.
+The script is network-bound on the FL API, not the database.
 
 ## Future phases
 
