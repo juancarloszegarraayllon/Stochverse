@@ -49,6 +49,7 @@ async def start_all_ingestion() -> None:
     # during dev doesn't prevent the rest of the app from starting up.
     from . import fl
     from . import kalshi
+    from . import kalshi_ws
 
     tasks = [
         asyncio.create_task(
@@ -59,11 +60,10 @@ async def start_all_ingestion() -> None:
             supervise("kalshi", lambda: kalshi.run(async_session)),
             name="ingestion.kalshi",
         ),
-        # Phase 1D: Kalshi WebSocket consumer for active prices
-        # asyncio.create_task(
-        #     supervise("kalshi_ws", lambda: kalshi_ws.run(async_session)),
-        #     name="ingestion.kalshi_ws",
-        # ),
+        asyncio.create_task(
+            supervise("kalshi_ws", lambda: kalshi_ws.run(async_session)),
+            name="ingestion.kalshi_ws",
+        ),
     ]
 
     _log.info("ingestion.runner.started", task_count=len(tasks))
