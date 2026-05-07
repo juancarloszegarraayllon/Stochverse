@@ -9341,6 +9341,61 @@ async def debug_trace_ticker(ticker: str, sport_id: int = 1,
         return out
 
     out["verdict"] = "SHOULD_RENDER_AS_SYNTH_EVENT"
+
+    # Stage 7: actually run sports_feed_v3 and check the response
+    try:
+        feed = await sports_feed_v3(sport_id, timezone, indent_days)
+    except Exception as exc:
+        out["stages"]["feed_v3_error"] = repr(exc)
+        return out
+
+    found_in_feed = False
+    found_under_tournament = None
+    found_event_summary = None
+    for t in feed.get("tournaments") or []:
+        for ev in t.get("events") or []:
+            k = ev.get("kalshi") or {}
+            tickers_in_ev: list = []
+            evt_ticker = (k.get("event_ticker") or "").upper()
+            if evt_ticker:
+                tickers_in_ev.append(evt_ticker)
+            for sub in (k.get("sub_markets") or []):
+                st = (sub.get("event_ticker") or "").upper()
+                if st:
+                    tickers_in_ev.append(st)
+            for cat_key in ("totals", "spreads", "btts", "first_half"):
+                for sub in (k.get(cat_key) or []):
+                    st = (sub.get("event_ticker") or "").upper()
+                    if st:
+                        tickers_in_ev.append(st)
+            if target_ticker in tickers_in_ev:
+                found_in_feed = True
+                found_under_tournament = t.get("NAME") or ""
+                found_event_summary = {
+                    "event_id":  ev.get("EVENT_ID"),
+                    "home":      ev.get("HOME_NAME"),
+                    "away":      ev.get("AWAY_NAME"),
+                    "start_time": ev.get("START_TIME"),
+                    "stage_type": ev.get("STAGE_TYPE"),
+                    "kalshi_h2h_only": ev.get("_kalshi_h2h_only", False),
+                    "tickers_on_event": tickers_in_ev,
+                }
+                break
+        if found_in_feed:
+            break
+
+    out["stages"]["feed_v3_response"] = {
+        "found_in_response":  found_in_feed,
+        "under_tournament":   found_under_tournament,
+        "event_summary":      found_event_summary,
+        "tournament_count":   len(feed.get("tournaments") or []),
+        "tournament_names":   [t.get("NAME") or ""
+                                for t in (feed.get("tournaments") or [])],
+    }
+    if not found_in_feed:
+        out["verdict"] = "DROPPED_IN_FEED_V3_ASSEMBLY"
+    else:
+        out["verdict"] = "PRESENT_IN_FEED_V3_RESPONSE"
     return out
 
 
