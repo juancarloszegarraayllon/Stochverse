@@ -1,11 +1,15 @@
 """Ingestion entry point — boots all provider modules under supervision.
 
 Wired into main.py's startup_event. Each provider module is launched
-under the supervisor (architecture v1.3 §6.1) so a crash in one
+under the supervisor (architecture v1.4 §6.1) so a crash in one
 provider doesn't take down ingestion globally.
 
-Phase 1B: only FL. Phase 1C adds Kalshi REST. Phase 1D adds Kalshi
-WS. New providers slot in here as additional create_task calls.
+Phase 1B: FL. Phase 1C: Kalshi REST. Phase 1D was scoped (WS consumer)
+and then de-scoped — investigation found the legacy
+`kalshi_ws._price_flush_loop` already populates `public.prices` with
+both REST and WS sub-market price ticks, and `sp.*` is the entity
+layer, not the price-history layer. See architecture doc v1.4 §5.2
+for the system-of-record table.
 """
 from __future__ import annotations
 
@@ -49,7 +53,6 @@ async def start_all_ingestion() -> None:
     # during dev doesn't prevent the rest of the app from starting up.
     from . import fl
     from . import kalshi
-    from . import kalshi_ws
 
     tasks = [
         asyncio.create_task(
@@ -59,10 +62,6 @@ async def start_all_ingestion() -> None:
         asyncio.create_task(
             supervise("kalshi", lambda: kalshi.run(async_session)),
             name="ingestion.kalshi",
-        ),
-        asyncio.create_task(
-            supervise("kalshi_ws", lambda: kalshi_ws.run(async_session)),
-            name="ingestion.kalshi_ws",
         ),
     ]
 
