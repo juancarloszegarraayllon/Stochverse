@@ -857,24 +857,6 @@ function eventState(ev) {
   // STAGE if not present (older payloads). Anything starting
   // with HALF/SET/QUARTER/INNING/PERIOD/EXTRA is live.
   const t = (ev.STAGE_TYPE || '').toUpperCase();
-  // Synthetic Kalshi-only events have STAGE_TYPE hardcoded to
-  // SCHEDULED (no FL state to flip them LIVE/FINISHED). Without
-  // a time-derived override they'd be eaten by the Live filter
-  // as soon as the game clock starts. Use START_TIME relative to
-  // now: pre-kickoff = upcoming, within ~3h post-kickoff = live,
-  // past that = finished. ~3h covers soccer comfortably and is
-  // a permissive cap for other sports.
-  if (ev._kalshi_h2h_only && t === 'SCHEDULED') {
-    const ts = ev.START_TIME || ev.START_UTIME;
-    if (ts) {
-      const now = Date.now() / 1000;
-      const elapsed = now - ts;
-      if (elapsed < 0) return 'upcoming';
-      if (elapsed < 3 * 3600) return 'live';
-      return 'finished';
-    }
-    return 'upcoming';
-  }
   if (t === 'LIVE') return 'live';
   if (t === 'FINISHED') return 'finished';
   if (t === 'SCHEDULED') return 'upcoming';
@@ -883,6 +865,19 @@ function eventState(ev) {
 }
 
 function passesStateFilter(ev) {
+  // Synthetic Kalshi-only events (_kalshi_h2h_only=true) have no
+  // FL state to authoritatively drive eventState — STAGE_TYPE is
+  // hardcoded to SCHEDULED on the backend. Don't filter them by
+  // state at all; the date filter still pins them to the active
+  // day so they don't leak across the day picker. Without this
+  // bypass, the Live tab silently eats every synth card during
+  // its actual match window.
+  if (ev._kalshi_h2h_only) {
+    if (_onlyMatched && !(ev.kalshi && ev.kalshi.event_ticker)) {
+      return false;
+    }
+    return true;
+  }
   if (_activeStateFilter !== 'all' && eventState(ev) !== _activeStateFilter) {
     return false;
   }
