@@ -194,6 +194,18 @@ async def startup_event():
         asyncio.create_task(run_flashlive_feed())
     except Exception as e:
         logging.getLogger("stochverse").warning("failed to start flashlive feed: %s", e)
+    # Phase 1B: SP Architecture ingestion runner. Polls FL on the
+    # cadences in architecture doc §6.2, writes raw payloads to
+    # sp.fl_events. Singleton-enforced via Postgres advisory lock —
+    # safe with WEB_CONCURRENCY≥2. Skips silently if DATABASE_URL is
+    # not set (no Postgres = no ingestion = no behavior change).
+    try:
+        from ingestion import start_all_ingestion
+        asyncio.create_task(start_all_ingestion())
+    except Exception as e:
+        logging.getLogger("stochverse").warning(
+            "failed to start sp ingestion: %s", e,
+        )
     # Warm-start the series→stage and tournament-bracket caches from
     # cache_blobs. Fire-and-forget — the warm loop awaits both via
     # the shared event below before its initial pass, so we don't

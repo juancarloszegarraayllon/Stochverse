@@ -10,3 +10,4 @@ asyncpg
 alembic
 sentry-sdk[fastapi]
 structlog>=24.0
+pydantic>=2.0
