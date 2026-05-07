@@ -9,24 +9,31 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-# Make the project root importable so we can pull in sp_models.
+# Make the project root importable so we can pull in sp_models and
+# reuse db.py's URL normalization (Neon sslmode/channel_binding
+# handling, libpq → asyncpg param translation, etc.).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
-# Inject DATABASE_URL from the environment so the same env var that
-# powers the application also drives migrations. Normalize the scheme
-# the same way db.py does — Railway emits postgres:// and asyncpg
-# wants postgresql+asyncpg://.
-_db_url = os.environ.get("DATABASE_URL", "").strip()
-if _db_url:
-    if _db_url.startswith("postgres://"):
-        _db_url = _db_url.replace("postgres://", "postgresql+asyncpg://", 1)
-    elif _db_url.startswith("postgresql://") and "+asyncpg" not in _db_url:
-        _db_url = _db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    config.set_main_option("sqlalchemy.url", _db_url)
+# Single source of truth for DATABASE_URL handling: db.py already
+# parses the URL, strips unsupported query params, translates
+# sslmode to asyncpg's ssl kwarg, and auto-forces SSL for Neon /
+# Supabase hosts. Reuse it so alembic and the app connect identically.
+try:
+    from db import DATABASE_URL as _DB_URL, _connect_args as _DB_CONNECT_ARGS
+except Exception:
+    _DB_URL = os.environ.get("DATABASE_URL", "").strip()
+    _DB_CONNECT_ARGS = {}
+    if _DB_URL.startswith("postgres://"):
+        _DB_URL = _DB_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif _DB_URL.startswith("postgresql://") and "+asyncpg" not in _DB_URL:
+        _DB_URL = _DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+if _DB_URL:
+    config.set_main_option("sqlalchemy.url", _DB_URL)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -106,6 +113,7 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=_DB_CONNECT_ARGS,
     )
 
     async with connectable.connect() as connection:
