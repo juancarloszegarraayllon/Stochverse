@@ -42,7 +42,7 @@ from .base import (
     IngestionResult,
     new_run_id,
     try_acquire_advisory_lock,
-    upsert_provider_record,
+    upsert_provider_records_batch,
 )
 from .schema_validation import (
     FLEventValidator,
@@ -127,6 +127,12 @@ async def _ingest_pass(
             )
             continue
 
+        # Collect every event in this sport's payload into a batch,
+        # then UPSERT in one shot. Multi-row INSERT ... ON CONFLICT
+        # DO UPDATE is constant round-trip count regardless of N,
+        # so a sport with thousands of events takes the same wire
+        # time as a sport with dozens.
+        batch: list[dict] = []
         for tournament_raw in (payload.get("DATA") or []):
             # Validate tournament shape (logs drift; doesn't block
             # event processing — child events may still be valid).
@@ -160,30 +166,31 @@ async def _ingest_pass(
                     # skip records that can't be parsed; downstream
                     # alerting catches the rate.
 
-                try:
-                    classification = await upsert_provider_record(
-                        session,
-                        FLEvent,
-                        primary_key={"fl_event_id": event_id},
-                        fields={},  # raw_payload covers everything; no extracted fields at the FL ingestion layer
-                        raw=event_raw,
-                    )
-                    if classification == "inserted":
-                        result.inserted += 1
-                    elif classification == "updated":
-                        result.updated += 1
-                    else:
-                        result.unchanged += 1
-                except Exception as exc:
-                    result.failed += 1
-                    _log.warning(
-                        "ingestion.fl.upsert_failed",
-                        run_id=str(run_id),
-                        sport_id=sport_id,
-                        event_id=event_id,
-                        error_class=type(exc).__name__,
-                        error_msg=str(exc)[:300],
-                    )
+                batch.append({
+                    "pk":     {"fl_event_id": event_id},
+                    "fields": {},  # FL has no extracted fields at the ingestion layer
+                    "raw":    event_raw,
+                })
+
+        if batch:
+            try:
+                inserted, updated, unchanged = await upsert_provider_records_batch(
+                    session, FLEvent, batch,
+                )
+                result.inserted += inserted
+                result.updated += updated
+                result.unchanged += unchanged
+            except Exception as exc:
+                result.failed += len(batch)
+                _log.warning(
+                    "ingestion.fl.upsert_batch_failed",
+                    run_id=str(run_id),
+                    sport_id=sport_id,
+                    batch_size=len(batch),
+                    error_class=type(exc).__name__,
+                    error_msg=str(exc)[:300],
+                )
+
         # Commit per sport — bounds the transaction size and makes
         # partial progress durable when a sport fails mid-batch.
         await session.commit()
