@@ -88,7 +88,9 @@ def run_migrations_offline() -> None:
 
 def do_run_migrations(connection: Connection) -> None:
     # Make sure the sp schema exists before alembic tries to create
-    # its own version table inside it.
+    # its own version table inside it. The CREATE SCHEMA runs inside
+    # whatever transaction the outer caller has open — alembic's
+    # commit at the end picks it up.
     connection.exec_driver_sql(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
 
     context.configure(
@@ -97,6 +99,16 @@ def do_run_migrations(connection: Connection) -> None:
         include_schemas=True,
         include_object=include_object,
         version_table_schema=SCHEMA,
+        # Critical for async + asyncpg: we want alembic to own and
+        # commit the transaction itself rather than leaving it to the
+        # outer async context. Without this, the sync proxy inside
+        # run_sync completes its work, the SAVEPOINT commits, the
+        # async connection closes — and asyncpg silently rolls back
+        # because no COMMIT ever made it to the server. transaction_
+        # per_migration=True flips alembic to begin/commit per migration
+        # script, which we want anyway for safer partial-progress on
+        # multi-migration runs.
+        transaction_per_migration=True,
     )
 
     with context.begin_transaction():
@@ -104,11 +116,20 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    """In this scenario we need to create an Engine
-    and associate a connection with the context.
+    """Online migration runner for async drivers (asyncpg).
 
+    Connection lifecycle:
+      1. Open a transaction-managed connection via connectable.begin().
+         This is .begin(), NOT .connect(), so the transaction's commit
+         on clean __aexit__ is explicit and dispatched to the driver.
+      2. run_sync hands a sync proxy to do_run_migrations, which runs
+         CREATE SCHEMA + alembic's per-migration transactions.
+      3. On clean exit, the outer .begin() context commits — this is
+         what actually sends COMMIT to asyncpg. With .connect()'s
+         begin-once mode, the commit isn't reliably propagated across
+         the sync/async boundary inside run_sync, and DDL silently
+         rolls back at connection close. Documented gotcha.
     """
-
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
@@ -118,6 +139,12 @@ async def run_async_migrations() -> None:
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
+        # Belt-and-suspenders: explicitly commit the outer transaction
+        # so the CREATE SCHEMA (which runs before alembic's
+        # transaction_per_migration block) is guaranteed to land.
+        # Idempotent — alembic's own transaction management has
+        # already committed each migration script's DDL by this point.
+        await connection.commit()
 
     await connectable.dispose()
 
