@@ -56,6 +56,75 @@ Cache hits emit the same event with `status: 0` and `extra: {"cache_hit": true}`
 
 These events match the Phase 1 `provider_api_calls` table schema (architecture doc §6.3), so the Phase 1 migration can backfill historical call volume from these logs.
 
+## Phase 1E — Backfill scripts
+
+Phase 1E ships standalone scripts under `scripts/` that pump historical data through the same ingestion pipeline as live ingestion. Idempotent — safe to re-run.
+
+### When to run
+
+- After provisioning a fresh Postgres database (Phase 1A) — gives the resolver a corpus to tune against on day 1.
+- After a long ingestion outage — catches up missed days from FL.
+- During development against a fresh local docker-compose Postgres.
+
+### How to run
+
+Locally against a target Neon database:
+
+```bash
+DATABASE_URL="postgresql://...neon.tech/...?sslmode=require" \
+  python scripts/backfill_fl.py --days 7
+```
+
+```bash
+DATABASE_URL="postgresql://...neon.tech/...?sslmode=require" \
+  python scripts/backfill_kalshi.py
+```
+
+Or via Makefile (uses local docker-compose Postgres):
+
+```bash
+make backfill-fl
+make backfill-kalshi
+make backfill-all   # both, sequential
+```
+
+### What gets backfilled
+
+| Provider | Range covered | Notes |
+|---|---|---|
+| FL | ±7 days from today | FL `/v1/events/list` only serves ±7 days. Beyond that requires per-tournament historical queries (Phase 2 PR). |
+| Kalshi | Open + recently-closed events from `/events` endpoint | Kalshi ages closed events out after a retention window (varies by series). The ±30-day target in §11.2 is best-effort against whatever Kalshi still serves. |
+
+### Verification
+
+After backfill completes, sanity-check what landed:
+
+```sql
+-- FL: count + date range
+SELECT COUNT(*),
+       MIN((raw_payload->>'START_TIME')::int) AS earliest_unix,
+       MAX((raw_payload->>'START_TIME')::int) AS latest_unix
+FROM sp.fl_events;
+
+-- Kalshi: count by market_type, what's covered
+SELECT market_type, COUNT(*)
+FROM sp.kalshi_markets
+GROUP BY market_type
+ORDER BY 2 DESC;
+
+-- Both: how recent is the data
+SELECT 'fl_events' AS table, MIN(last_seen_at), MAX(last_seen_at) FROM sp.fl_events
+UNION ALL
+SELECT 'kalshi_markets', MIN(last_seen_at), MAX(last_seen_at) FROM sp.kalshi_markets;
+```
+
+### Cost / time
+
+- FL backfill (±7 days × ~17 sports): ~3-5 minutes against Neon US-West.
+- Kalshi backfill: ~2-3 minutes (the legacy paginate is the slow step at 20-60s; ingestion pass after that is ~10-20s).
+
+Both scripts are network-bound on the provider API, not the database.
+
 ## Future phases
 
 When Phase 1 ships, this file will be amended with:
