@@ -45,19 +45,24 @@ async def start_all_ingestion() -> None:
         )
         return
 
-    # Defer the FL import so a syntax error in fl.py during dev
-    # doesn't prevent the rest of the app from starting up.
+    # Defer the FL/Kalshi imports so a syntax error in one module
+    # during dev doesn't prevent the rest of the app from starting up.
     from . import fl
+    from . import kalshi
 
     tasks = [
         asyncio.create_task(
             supervise("fl", lambda: fl.run(async_session)),
             name="ingestion.fl",
         ),
-        # Phase 1C: Kalshi REST ingestion
+        asyncio.create_task(
+            supervise("kalshi", lambda: kalshi.run(async_session)),
+            name="ingestion.kalshi",
+        ),
+        # Phase 1D: Kalshi WebSocket consumer for active prices
         # asyncio.create_task(
-        #     supervise("kalshi", lambda: kalshi.run(async_session)),
-        #     name="ingestion.kalshi",
+        #     supervise("kalshi_ws", lambda: kalshi_ws.run(async_session)),
+        #     name="ingestion.kalshi_ws",
         # ),
     ]
 
