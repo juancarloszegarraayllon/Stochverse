@@ -37,7 +37,7 @@ from .base import (
     IngestionResult,
     new_run_id,
     try_acquire_advisory_lock,
-    upsert_provider_record,
+    upsert_provider_records_batch,
 )
 from .schema_validation import (
     KalshiMarketValidator,
@@ -116,7 +116,13 @@ async def _ingest_pass(session: AsyncSession) -> IngestionResult:
     snapshot the legacy v3 serving path uses. This is the staging
     point for Phase 1C; Phase 2's resolver will read from
     sp.kalshi_markets directly.
+
+    If the cache is empty (cold-start before any user has hit the
+    legacy poller), trigger get_data() on a thread so we don't
+    block the asyncio event loop, and retry once. After that, if
+    still empty, log and return — the next pass tries again.
     """
+    import asyncio
     import main as _main_mod
     run_id = new_run_id()
     result = IngestionResult()
@@ -124,6 +130,37 @@ async def _ingest_pass(session: AsyncSession) -> IngestionResult:
 
     cache = _main_mod._cache
     records = cache.get("data_all") or cache.get("data") or []
+    if not records:
+        # Cold-cache priming. Run the legacy fetcher in a thread so
+        # the event loop can keep handling other tasks (FL ingestion,
+        # serving, etc.) while Kalshi's slow REST pagination runs.
+        # Bound with a timeout so a hung Kalshi call can't pin us.
+        _log.info(
+            "ingestion.kalshi.cache_warming",
+            run_id=str(run_id),
+            note="legacy cache empty; triggering get_data() in executor",
+        )
+        loop = asyncio.get_event_loop()
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, _main_mod.get_data),
+                timeout=90.0,
+            )
+        except asyncio.TimeoutError:
+            _log.warning(
+                "ingestion.kalshi.cache_warm_timeout",
+                run_id=str(run_id),
+                note="get_data() did not complete within 90s; will retry next pass",
+            )
+        except Exception as exc:
+            _log.warning(
+                "ingestion.kalshi.cache_warm_failed",
+                run_id=str(run_id),
+                error_class=type(exc).__name__,
+                error_msg=str(exc)[:300],
+            )
+        records = cache.get("data_all") or cache.get("data") or []
+
     if not records:
         _log.info(
             "ingestion.kalshi.empty_cache",
@@ -133,12 +170,20 @@ async def _ingest_pass(session: AsyncSession) -> IngestionResult:
         result.duration_ms = int((time.monotonic() - started) * 1000)
         return result
 
+    # Build the batch — validate, extract resolver fields, append.
+    batch: list[dict] = []
+    seen_tickers: set = set()
     for record in records:
         if not isinstance(record, dict):
             continue
         ticker = (record.get("event_ticker") or "").strip()
-        if not ticker:
+        if not ticker or ticker in seen_tickers:
+            # Dedup on ticker — multi-row INSERT cannot have duplicate
+            # PK values in the VALUES clause (Postgres forbids it).
+            # Legacy cache occasionally has duplicates from sibling
+            # bundling; we keep the first occurrence.
             continue
+        seen_tickers.add(ticker)
 
         _, drift = validate_or_drift(
             provider="kalshi",
@@ -170,36 +215,39 @@ async def _ingest_pass(session: AsyncSession) -> IngestionResult:
                 "parsed_away_abbr": None,
             }
 
+        batch.append({
+            "pk":     {"ticker": ticker},
+            "fields": extracted,
+            "raw":    record,
+        })
+
+    # Multi-row UPSERT in chunks. Chunking keeps individual INSERT
+    # statement size bounded (Postgres handles huge VALUES lists but
+    # very large statements get parsed/planned slowly). 1000 rows per
+    # chunk is a comfortable middle ground.
+    CHUNK_SIZE = 1000
+    for i in range(0, len(batch), CHUNK_SIZE):
+        chunk = batch[i:i + CHUNK_SIZE]
         try:
-            classification = await upsert_provider_record(
-                session,
-                KalshiMarket,
-                primary_key={"ticker": ticker},
-                fields=extracted,
-                raw=record,
+            inserted, updated, unchanged = await upsert_provider_records_batch(
+                session, KalshiMarket, chunk,
             )
-            if classification == "inserted":
-                result.inserted += 1
-            elif classification == "updated":
-                result.updated += 1
-            else:
-                result.unchanged += 1
-            result.fetched += 1
+            result.inserted += inserted
+            result.updated += updated
+            result.unchanged += unchanged
+            result.fetched += len(chunk)
+            await session.commit()
         except Exception as exc:
-            result.failed += 1
+            result.failed += len(chunk)
+            await session.rollback()
             _log.warning(
-                "ingestion.kalshi.upsert_failed",
+                "ingestion.kalshi.upsert_batch_failed",
                 run_id=str(run_id),
-                ticker=ticker,
+                chunk_size=len(chunk),
+                chunk_index=i // CHUNK_SIZE,
                 error_class=type(exc).__name__,
                 error_msg=str(exc)[:300],
             )
-
-        # Commit every 500 records to bound transaction size.
-        if (result.inserted + result.updated + result.unchanged) % 500 == 0:
-            await session.commit()
-
-    await session.commit()
 
     result.duration_ms = int((time.monotonic() - started) * 1000)
     _log.info(

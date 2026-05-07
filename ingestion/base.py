@@ -99,40 +99,112 @@ async def upsert_provider_record(
     fields: dict[str, Any],
     raw: Any,
 ) -> str:
-    """Provider-table UPSERT with hash-based change detection.
+    """Single-record UPSERT — wrapper around upsert_provider_records_batch.
 
     Returns one of: 'inserted' | 'updated' | 'unchanged'.
 
-    Logic (architecture §6.3 idempotency):
-      - Compute hash of raw payload.
-      - INSERT ... ON CONFLICT (pk) DO UPDATE:
-        - last_seen_at always bumped to NOW()
-        - raw_payload + payload_hash + dependent fields updated only
-          when incoming hash differs from stored
-        - last_changed_at bumped only when hash changed
-      - Return classification so the caller can update counters.
-
-    The "change detection in SQL via CASE" pattern keeps the whole
-    check atomic — no read-then-write race.
+    Prefer the batch variant for ingestion paths; this exists for
+    callers that genuinely have one record at a time.
     """
-    h = payload_hash(raw)
+    inserted, updated, unchanged = await upsert_provider_records_batch(
+        session, table,
+        [{"pk": primary_key, "fields": fields, "raw": raw}],
+    )
+    if inserted:
+        return "inserted"
+    if updated:
+        return "updated"
+    return "unchanged"
 
-    values = {
-        **primary_key,
-        **fields,
-        "raw_payload": raw,
-        "payload_hash": h,
-    }
 
-    stmt = pg_insert(table.__table__).values(**values)
+async def upsert_provider_records_batch(
+    session: AsyncSession,
+    table,
+    records: list[dict[str, Any]],
+) -> tuple[int, int, int]:
+    """Multi-row UPSERT with hash-based change detection.
 
-    update_cols = {
+    Each record is shaped: ``{"pk": {col: val}, "fields": {col: val, ...}, "raw": {...}}``.
+    Returns ``(inserted_count, updated_count, unchanged_count)``.
+
+    Strategy (architecture §6.3 idempotency, optimized for batches):
+      1. Single SELECT to fetch existing payload_hash for every PK in
+         the batch. Round trip #1.
+      2. Per-record classification in Python: insert (no existing) /
+         update (hash differs) / unchanged (hash matches). Counter
+         accuracy comes from this comparison, not from RETURNING tricks.
+      3. Single multi-row INSERT ... ON CONFLICT DO UPDATE for the
+         entire batch. Postgres handles per-row conflict resolution.
+         Round trip #2. raw_payload + last_changed_at gated on hash
+         change via SQL CASE clauses; last_seen_at always bumps.
+
+    Round-trip count is constant (2) regardless of batch size — the
+    big win vs. per-record UPSERT which is N round trips. For Phase 1B
+    FL passes this drops 150-275s wall time to a few seconds.
+
+    Constraint: assumes a single-column primary key. All current
+    provider tables (fl_events.fl_event_id, kalshi_markets.ticker,
+    polymarket_markets.condition_id, oddsapi_events.oddsapi_id)
+    satisfy this.
+    """
+    if not records:
+        return (0, 0, 0)
+
+    # Single-column PK assumption — derived from first record's pk dict.
+    pk_keys = list(records[0]["pk"].keys())
+    if len(pk_keys) != 1:
+        raise ValueError(
+            "upsert_provider_records_batch supports single-column PKs only; "
+            f"got {pk_keys}"
+        )
+    pk_col = pk_keys[0]
+    pk_attr = getattr(table, pk_col)
+
+    # Step 1: fetch existing payload hashes for the batch's PKs.
+    pk_values = [r["pk"][pk_col] for r in records]
+    existing_rows = await session.execute(
+        select(pk_attr, table.payload_hash).where(pk_attr.in_(pk_values))
+    )
+    existing_hashes = {row[0]: row[1] for row in existing_rows.all()}
+
+    # Step 2: classify + build the multi-row VALUES list.
+    inserted_count = 0
+    updated_count = 0
+    unchanged_count = 0
+    rows: list[dict[str, Any]] = []
+
+    for r in records:
+        h = payload_hash(r["raw"])
+        pk_val = r["pk"][pk_col]
+        old_hash = existing_hashes.get(pk_val)
+
+        if old_hash is None:
+            inserted_count += 1
+        elif old_hash == h:
+            unchanged_count += 1
+        else:
+            updated_count += 1
+
+        row = {
+            **r["pk"],
+            **r["fields"],
+            "raw_payload": r["raw"],
+            "payload_hash": h,
+        }
+        rows.append(row)
+
+    if not rows:
+        return (0, 0, 0)
+
+    # Step 3: multi-row UPSERT.
+    stmt = pg_insert(table.__table__).values(rows)
+
+    # Build update_cols once (column references resolve via stmt.excluded).
+    update_cols: dict[str, Any] = {
         col: stmt.excluded[col]
-        for col in fields.keys()
+        for col in records[0]["fields"].keys()
     }
-    # last_seen_at always updated
     update_cols["last_seen_at"] = text("NOW()")
-    # raw_payload, payload_hash, last_changed_at gated on hash change
     update_cols["raw_payload"] = text(
         f"CASE WHEN {table.__tablename__}.payload_hash = excluded.payload_hash "
         f"THEN {table.__tablename__}.raw_payload ELSE excluded.raw_payload END"
@@ -143,34 +215,13 @@ async def upsert_provider_record(
         f"THEN {table.__tablename__}.last_changed_at ELSE NOW() END"
     )
 
-    pk_cols = list(primary_key.keys())
     stmt = stmt.on_conflict_do_update(
-        index_elements=pk_cols,
+        index_elements=[pk_col],
         set_=update_cols,
     )
-    # RETURNING xmax = 0 distinguishes insert (xmax=0) from update (xmax!=0).
-    # Postgres-specific but documented stable behavior.
-    stmt = stmt.returning(
-        text(f"(xmax = 0) AS inserted"),
-        text(f"(payload_hash = '{h}' AND xmax != 0) AS just_changed"),
-    )
+    await session.execute(stmt)
 
-    result = await session.execute(stmt)
-    row = result.one()
-    inserted = bool(row[0])
-    if inserted:
-        return "inserted"
-    # On update: did the hash change?
-    # We need to query back — the RETURNING hack above tells us the
-    # row's hash is the new one, but doesn't tell us whether it
-    # changed because of THIS upsert or was already this hash from
-    # a prior run. Cleaner: use a SELECT before the UPSERT to capture
-    # the old hash. For Phase 1B simplicity, infer from `just_changed`
-    # which we set true only when payload_hash matches the new value;
-    # if it does and xmax != 0, we just wrote it — so it changed.
-    # NOTE: this is a heuristic; precise tracking is a Phase 2 polish.
-    just_changed = bool(row[1])
-    return "updated" if just_changed else "unchanged"
+    return (inserted_count, updated_count, unchanged_count)
 
 
 # ── Postgres advisory lock for singleton enforcement ─────────────
