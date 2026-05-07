@@ -6,7 +6,7 @@
 # (e.g., a Neon branch for migration testing).
 export DATABASE_URL ?= postgresql+asyncpg://dev:dev@localhost:5432/sports_dev
 
-.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay
+.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl backfill-kalshi backfill-all
 
 help:
 	@echo "SP Architecture dev targets:"
@@ -24,6 +24,11 @@ help:
 	@echo "  make test-corpus  # pytest tests/corpus/  (regression suite)"
 	@echo "  make seed         # load curated test fixtures into dev DB"
 	@echo "  make replay       # replay last 24h of archived raw payloads"
+	@echo ""
+	@echo "  make backfill-fl       # FL backfill (±7 days)"
+	@echo "  make backfill-fl ARGS=\"--days 7\""
+	@echo "  make backfill-kalshi   # Kalshi backfill (open + closed events)"
+	@echo "  make backfill-all      # FL + Kalshi backfill, sequential"
 	@echo ""
 	@echo "DATABASE_URL = $(DATABASE_URL)"
 
@@ -73,3 +78,12 @@ replay:
 	else \
 		echo "scripts/replay_archive.py not yet present — Phase 1F deliverable"; \
 	fi
+
+backfill-fl:
+	python scripts/backfill_fl.py $(ARGS)
+
+backfill-kalshi:
+	python scripts/backfill_kalshi.py $(ARGS)
+
+backfill-all: backfill-fl backfill-kalshi
+	@echo "All backfills complete."
