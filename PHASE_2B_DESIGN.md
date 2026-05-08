@@ -613,6 +613,7 @@ nothing.
        run_id              uuid NOT NULL,
        resolver_version    text NOT NULL,
        provider            text NOT NULL,         -- 'fl' | 'kalshi'
+       run_mode            text NOT NULL,         -- 'standalone' | 'cron' | 'live'
        started_at          timestamptz NOT NULL,
        finished_at         timestamptz,
        records_scanned     integer NOT NULL DEFAULT 0,
@@ -625,9 +626,23 @@ nothing.
        extra               jsonb DEFAULT '{}'::jsonb
    );
    CREATE INDEX ON sp.resolver_runs (provider, started_at DESC);
+   CREATE INDEX ON sp.resolver_runs (run_mode, started_at DESC);
    ```
 
-   At day 7, the parallel-run report is one query against this table:
+   `run_mode` values:
+   - `'standalone'` — operator-invoked one-shot via
+     `python scripts/run_resolver_pass.py`. Used during development
+     and ad-hoc backfill.
+   - `'cron'` — scheduled invocation of the same script (daily at
+     02:00 UTC during the parallel-run period). Indistinguishable
+     from 'standalone' code-path-wise; the env or arg sets the tag
+     so day-7 reports can filter to just the cron-driven series.
+   - `'live'` — emitted by the Phase 2E runner once it folds the
+     matcher into the always-on ingestion lifecycle. Distinct mode
+     so post-2E activity doesn't conflate with parallel-run metrics.
+
+   At day 7, the parallel-run report is one query, **filtered to
+   parallel-run modes only**:
 
    ```sql
    SELECT
@@ -639,6 +654,7 @@ nothing.
      ROUND(100.0 * SUM(auto_applies) / NULLIF(SUM(records_scanned), 0), 2)   AS coverage_pct
    FROM sp.resolver_runs
    WHERE started_at > NOW() - INTERVAL '7 days'
+     AND run_mode IN ('standalone', 'cron')   -- exclude 'live' (post-2E)
    GROUP BY 1
    ORDER BY 1;
    ```
