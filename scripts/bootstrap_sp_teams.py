@@ -82,6 +82,38 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 INSERT_CHUNK_SIZE = 1000
 
 
+# Legacy entity sport names that don't match the canonical sp.sports
+# names. Mapped here at lookup time so 1,082 entities (310 Football +
+# 320 Rugby + others) aren't dropped due to naming drift between the
+# legacy data layer and the SP architecture's finite sport list.
+#
+# - "Football" → "American Football" (legacy used the bare term)
+# - "Rugby"    → "Rugby Union" (more common globally; if Rugby League
+#                teams need to be split out later, that's a per-team
+#                metadata fix, not a sport-mapping change)
+#
+# Sports legitimately not in the 17-sport list — Table Tennis,
+# Motorsport, Esports — stay in unmapped_sports for visibility but
+# are not aliased. Adding them is an architecture-level decision
+# (would update sp.sports + the FL/Kalshi sport prefix maps).
+LEGACY_SPORT_ALIASES: dict[str, str] = {
+    "Football": "American Football",
+    "Rugby":    "Rugby Union",
+}
+
+
+def _resolve_sport_id(legacy_sport: str | None, sport_id_by_name: dict) -> int | None:
+    """Look up sport_id from legacy entity.sport, applying alias map.
+
+    Returns None if the sport (after aliasing) doesn't exist in
+    sp.sports — caller increments unmapped_sports counter.
+    """
+    if not legacy_sport:
+        return None
+    canonical = LEGACY_SPORT_ALIASES.get(legacy_sport, legacy_sport)
+    return sport_id_by_name.get(canonical)
+
+
 async def main(dry_run: bool) -> int:
     from sqlalchemy import text
     from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -158,11 +190,28 @@ async def main(dry_run: bool) -> int:
         per_sport_existing: dict[str, int] = defaultdict(int)
         per_sport_skipped: dict[str, int] = defaultdict(int)
         unmapped_sports: dict[str, int] = defaultdict(int)
+        skipped_tennis_doubles = 0
 
         for ent in team_entities:
-            sport_id = sport_id_by_name.get(ent.sport)
+            sport_id = _resolve_sport_id(ent.sport, sport_id_by_name)
             if sport_id is None:
                 unmapped_sports[ent.sport] += 1
+                continue
+
+            # Tennis doubles partnerships — canonical_name like
+            # 'Player A / Player B'. These are per-tournament pairings
+            # that won't recur across tournaments and won't match
+            # against Kalshi tennis markets (which target singles).
+            # Filter them at bootstrap time so sp.team_aliases isn't
+            # polluted with pairing strings that the resolver would
+            # never resolve cleanly.
+            #
+            # Note: individual sports (tennis singles, golf, MMA,
+            # boxing) end up in sp.teams as "team-of-one" rows. Works,
+            # but is awkward — flagged for Phase 2C+ design as a
+            # potential sp.players table.
+            if ent.sport == "Tennis" and "/" in ent.canonical_name:
+                skipped_tennis_doubles += 1
                 continue
 
             normalized = normalize_name(ent.canonical_name)
@@ -199,6 +248,7 @@ async def main(dry_run: bool) -> int:
             inserted_per_sport=dict(per_sport_inserts),
             existing_per_sport=dict(per_sport_existing),
             skipped_per_sport=dict(per_sport_skipped),
+            skipped_tennis_doubles=skipped_tennis_doubles,
             unmapped_sports=dict(unmapped_sports),
         )
 
@@ -341,6 +391,10 @@ async def main(dry_run: bool) -> int:
         print(f"\n  Already present (skipped):")
         print(f"    teams already in sp.teams:       {sum(per_sport_existing.values()):>6}")
         print(f"    aliases already (legacy_bootstrap): {len(existing_aliases) - len(aliases_to_insert):>6}")
+        if skipped_tennis_doubles:
+            print(f"\n  Skipped — tennis doubles partnerships:    {skipped_tennis_doubles:>6}")
+            print(f"    (canonical_name contains '/'; per-tournament pairings,")
+            print(f"     don't match against Kalshi singles markets)")
         if unmapped_sports:
             print(f"\n  Skipped — unmapped sports in legacy data:")
             for sport, count in sorted(unmapped_sports.items()):
