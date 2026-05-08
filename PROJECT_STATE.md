@@ -105,6 +105,17 @@ reproducing.
 | 2F | Admin review-queue UI minimum: auth + list + approve/reject + audit | separate PR |
 | 2G | Diff tooling — compare new resolver decisions to legacy `kalshi_join` pairings via `/api/_debug/resolver_diff` | after 2E |
 
+### Deferred design questions — resolve in Phase 2C+ scoping
+
+- **Individual sports don't fit the team model.** Tennis singles, golf,
+  MMA, boxing entities currently land in `sp.teams` as "team-of-one"
+  rows. Works mechanically (resolver matches against alias rows
+  regardless), but is awkward — a player isn't a team. Surfaced
+  during the 2A.5 cross-sport audit. May warrant a separate
+  `sp.players` table with similar alias machinery in Phase 2C+
+  scoping. Don't attempt during Phase 2B — strict-tier matching
+  works as-is on the team-of-one shape.
+
 ### Open questions still — decide before 2B
 
 - **Hot-loop trigger.** Implement `LISTEN/NOTIFY` immediately in 2E,

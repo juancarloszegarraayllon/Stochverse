@@ -63,6 +63,78 @@ class TestNormalizationConsistency:
         assert normalize_name("  Real   Madrid  ") == "real madrid"
 
 
+class TestLegacySportAliases:
+    """Verifies the LEGACY_SPORT_ALIASES map handles the two name
+    drifts surfaced by the cross-sport audit (Football → American
+    Football, Rugby → Rugby Union). Sports legitimately not in the
+    17-sport list (Table Tennis, Motorsport, Esports) stay
+    unmapped — the alias map is not a place to add new sports."""
+
+    def test_alias_map_contents(self):
+        from scripts.bootstrap_sp_teams import LEGACY_SPORT_ALIASES
+        assert LEGACY_SPORT_ALIASES == {
+            "Football": "American Football",
+            "Rugby":    "Rugby Union",
+        }
+
+    def test_resolve_with_alias(self):
+        from scripts.bootstrap_sp_teams import _resolve_sport_id
+        sport_ids = {"American Football": 5, "Rugby Union": 11, "Soccer": 1}
+        # Legacy "Football" maps via alias → 5.
+        assert _resolve_sport_id("Football", sport_ids) == 5
+        # Legacy "Rugby" maps via alias → 11.
+        assert _resolve_sport_id("Rugby", sport_ids) == 11
+        # Direct hit (no alias needed).
+        assert _resolve_sport_id("Soccer", sport_ids) == 1
+
+    def test_resolve_unmapped_sport_returns_none(self):
+        from scripts.bootstrap_sp_teams import _resolve_sport_id
+        sport_ids = {"Soccer": 1}
+        # Sport legitimately not in 17-sport list — stays unmapped.
+        assert _resolve_sport_id("Table Tennis", sport_ids) is None
+        assert _resolve_sport_id("Motorsport", sport_ids) is None
+        assert _resolve_sport_id("Esports", sport_ids) is None
+        # Empty / None.
+        assert _resolve_sport_id(None, sport_ids) is None
+        assert _resolve_sport_id("", sport_ids) is None
+
+    def test_resolve_aliased_sport_still_unmapped_if_target_missing(self):
+        """If the alias's target sport isn't in sp.sports, the
+        resolver still returns None — it doesn't invent a sport_id."""
+        from scripts.bootstrap_sp_teams import _resolve_sport_id
+        # American Football missing from sport_ids despite alias from "Football"
+        sport_ids = {"Soccer": 1}
+        assert _resolve_sport_id("Football", sport_ids) is None
+
+
+class TestTennisDoublesFilter:
+    """Static-inspection guard for the Tennis-doubles skip rule.
+    Verifies the entity loop drops canonical_names containing '/'
+    when sport == 'Tennis'. Avoids polluting sp.team_aliases with
+    per-tournament pairing strings."""
+
+    def setup_method(self):
+        import inspect
+        import scripts.bootstrap_sp_teams
+        self.src = inspect.getsource(scripts.bootstrap_sp_teams)
+
+    def test_skip_logic_in_place(self):
+        # Look for the Tennis doubles skip block inside the entity loop.
+        assert 'ent.sport == "Tennis"' in self.src and \
+               '"/" in ent.canonical_name' in self.src, \
+               "Tennis-doubles filter missing"
+
+    def test_skip_counter_tracked(self):
+        assert "skipped_tennis_doubles" in self.src
+        # Surfaced in the stdout summary.
+        assert "tennis doubles" in self.src.lower()
+
+    def test_skip_counter_in_log_payload(self):
+        # The teams_classified structlog event should include the
+        # tennis-doubles count alongside other skip categories.
+        assert "skipped_tennis_doubles=skipped_tennis_doubles" in self.src
+
+
 class TestBulkIOPattern:
     """Static-inspection guards against regressing to per-row I/O.
 
