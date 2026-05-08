@@ -78,23 +78,111 @@ the UPDATE in step 2 lands in the same commit as the resolver_log row
 in step 3. No race window where a row is "linked but not logged" or
 "logged but not linked."
 
+#### `ensure_fixture` semantics — pinned to "DO NOTHING + re-fetch"
+
+The resolver MUST NOT modify fixture metadata (scores, state, venue,
+score_source, score_as_of, neutral_ground, behind_closed_doors,
+stage, tie_id) on conflict. Those fields are owned by score-aware
+ingestion paths or by future state-update paths; the resolver's only
+job is "ensure a fixture row exists for this team-pair + kickoff."
+
+Implementation:
+
+```python
+async def ensure_fixture(
+    session,
+    home_team_id, away_team_id,
+    kickoff_at, competition_id,
+) -> UUID:
+    """Ensure a sp.fixtures row exists for this match. Return its id.
+
+    Strict semantics:
+      - INSERT a new fixture if no existing row matches the resolver
+        lookup key (home_team_id, away_team_id, date(kickoff_at)).
+      - DO NOTHING on conflict — never overwrite metadata. Score,
+        state, venue, etc. are owned by ingestion paths or other
+        update flows, not the resolver.
+      - Returns the fixture_id (existing row's id on conflict; new
+        row's id on insert).
+
+    Two-step pattern: INSERT ... ON CONFLICT DO NOTHING RETURNING id,
+    then if RETURNING is empty (conflict path), SELECT to fetch the
+    existing row's id by the same lookup key.
+    """
+    stmt = pg_insert(Fixture.__table__).values(
+        id=uuid.uuid4(),
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+        competition_id=competition_id,
+        kickoff_at=kickoff_at,
+        # NOTE: state/score/venue/etc. NOT set here — DEFAULTs apply
+        # only on INSERT. On conflict path we never touch them.
+    ).on_conflict_do_nothing(
+        index_elements=["home_team_id", "away_team_id"],
+        # ... + a date(kickoff_at) constraint; see §5.4 index
+    ).returning(Fixture.__table__.c.id)
+
+    row = (await session.execute(stmt)).first()
+    if row is not None:
+        return row.id
+
+    # Conflict path: re-fetch existing row by the lookup key.
+    sel = select(Fixture.__table__.c.id).where(
+        Fixture.__table__.c.home_team_id == home_team_id,
+        Fixture.__table__.c.away_team_id == away_team_id,
+        # date(kickoff_at) match — drift logic was already applied
+        # by find_fixture before we got here, so this exact-match
+        # lookup is correct.
+    )
+    return (await session.execute(sel)).scalar_one()
+```
+
+Audit-friendly: `resolution_log.reason_detail` records whether the
+resolver's atomic transaction created a new fixture (insert path) or
+linked to an existing one (conflict path). Lets a post-2B audit count
+"fixtures created by the resolver" vs "fixtures created elsewhere."
+
 ### 2. Parallel-run success / failure criteria — locked numbers
 
-7-day observation window after 2B ships. The strict tier runs side-
-by-side with the legacy `kalshi_join.pair_via_registry`. Each day
-emits a diff report with these metrics:
+7-day observation window after 2B ships.
 
-| Metric | Computed as | Threshold to push threshold UP (auto-apply more conservative) | Threshold to push DOWN / expand staffing |
+**Per-provider FP comparator differs.** Kalshi has the legacy
+`kalshi_join.pair_via_registry` as an automatic comparator. FL was
+new in Phase 1B — there's no legacy auto-comparator. So we use two
+separate techniques: automated diff for Kalshi, human spot-check for
+FL.
+
+#### Kalshi metrics (automated, daily diff vs legacy)
+
+| Metric | Computed as | Threshold UP | Threshold DOWN / escalate |
 |---|---|---|---|
-| **False-positive rate** | (resolver auto-applied a fixture_id where legacy_kalshi_join paired to a different fixture) / (total resolver auto-applies) | **> 1.0%** for any 24h window → tighten kickoff drift to 15 min, re-evaluate | — |
-| **Review-queue load** | review_queue_inserts / day (will be 0 in 2B since strict-only doesn't route to review) | — | — (n/a in 2B; relevant from 2C onward) |
-| **Strict-tier coverage** | (strict-tier auto-applies) / (total provider records ingested per pass) | — | **< 60%** sustained → review extraction; possibly bootstrap more aliases or relax competition-match requirement |
-| **Latency: provider record → fixture_id link** | last_changed_at - resolution_log.decided_at | — | **p95 > 5 min** → switch from polling-loop to LISTEN/NOTIFY (2E.fix) |
-| **Resolver crash rate** | supervised task crash count / day | — | **> 5/day** → halt parallel-run; investigate before re-enabling |
+| **Kalshi false-positive rate** | (resolver auto-applied where legacy_kalshi_join paired differently) / (total resolver auto-applies on Kalshi) | **> 1.0%** for any 24h window → tighten kickoff drift to 15 min, re-evaluate | — |
+| **Kalshi strict-tier coverage** | (Kalshi strict-tier auto-applies) / (total Kalshi per_fixture records) | — | **< 60%** sustained → review extraction; possibly relax competition-match or bootstrap more aliases |
 
-These numbers go into 2B's PR description verbatim. At day 7 we
-read them off the dashboard and either lock the configuration or
-adjust per the table.
+#### FL metrics (operator spot-check, daily)
+
+| Metric | Method | Threshold |
+|---|---|---|
+| **FL spot-check error rate** | Operator picks 5 random FL strict-tier auto-applies per day from `sp.resolution_log WHERE provider='fl' AND reason_code='strict'`, manually verifies the chosen fixture matches the underlying real-world game (cross-reference with FL's web UI or another source). | **≥ 1 of 5** wrong on any day → halt FL parallel-run, investigate. **0 of 5 wrong** for 5 consecutive days → FL precision is acceptable; resume normal cadence. |
+| **FL strict-tier coverage** | Same as Kalshi — auto-applies / (total FL events ingested per pass). | **< 60%** sustained → review extraction. |
+
+The FL spot-check is documented as an operator runbook step, not
+a metric the resolver itself computes. ~5 minutes per day. Cross-
+provider corroboration (Phase 2D) will replace it with an automated
+signal once FL events can be matched against Kalshi events for the
+same fixture.
+
+#### Cross-provider metrics (apply to both)
+
+| Metric | Computed as | Threshold |
+|---|---|---|
+| **Provider→link latency p95** | resolution_log.decided_at - provider table's last_changed_at | **> 5 min** → switch from polling-loop to LISTEN/NOTIFY (2E.fix) |
+| **Resolver crash rate** | supervised task crash count / day | **> 5/day** → halt parallel-run; investigate before re-enabling |
+| **Review-queue load** | review_queue_inserts / day | n/a in 2B (strict-only never routes to review); relevant from 2C onward |
+
+These numbers go into 2B's PR description verbatim. At day 7 the
+Kalshi comparator + FL spot-check are read off and we either lock
+the configuration or adjust per the tables.
 
 ### 3. Admin UI auth pattern — locked
 
@@ -423,41 +511,176 @@ folds the matcher into the live runner.
 
 ---
 
-## Open questions for you to confirm
+## Implementation order — locked
 
-1. **Bootstrap as part of 2B PR, or separate 2A.5 PR shipped first?**
-   I lean: same PR. Bootstrap is dead code unless 2B is also live.
-   But if you want to run bootstrap in production and verify the
-   alias counts before 2B's matcher activates, separate PRs is the
-   safer order.
-2. **Should bootstrap include `public.markets`?** That table has
-   sub-market identity — `(event_id, ticker, label, entity_id)`.
-   For strict-tier matching we don't need it (the match is
-   event-level, not sub-market). But we may want it for Phase 2C
-   alias tier when matching sub-market candidates. Recommend:
-   defer to 2C; bootstrap only `public.entities` + `public.entity_aliases`
-   in 2B.
-3. **Cron / schedule for `run_resolver_pass.py` during parallel-run?**
-   I recommend: ad-hoc operator invocation initially, plus a daily
-   cron at 02:00 UTC that runs the diff against legacy and emits
-   the day's metrics. After 7 days, shift to 2E's live runner.
+**Two PRs, sequential.** 2A.5 ships first; 2B follows after 2A.5 is
+verified in production.
+
+### Phase 2A.5 — Bootstrap (ships first)
+
+Standalone PR. Verifiable in isolation.
+
+**Contents:**
+- Migration: seed `sp.sports` with the finite list (Soccer, Tennis,
+  Basketball, Hockey, American Football, Baseball, Handball,
+  Cricket, Volleyball, Rugby Union, Aussie Rules, Rugby League,
+  MMA, Boxing, Golf, Snooker, Darts), each with the per-sport
+  `auto_link_drift_minutes` from architecture §5.4.
+- `scripts/bootstrap_sp_teams.py` — one-time migration from
+  `public.entities` (entity_type='team') and `public.entity_aliases`
+  into `sp.teams` and `sp.team_aliases` with `source='legacy_bootstrap'`,
+  `confidence=0.95`. Idempotent. Logs counts of inserted/skipped per
+  table.
+- Tests against docker-compose Postgres with fixture data shaped
+  like the legacy tables.
+- DEPLOYMENT.md update: how to run the bootstrap, how to verify counts.
+- Makefile target: `make bootstrap-sp-teams`.
+
+**Operator action after merge:**
+1. `alembic upgrade head` → applies the sp.sports seed migration.
+2. `DATABASE_URL=<prod-Neon> python scripts/bootstrap_sp_teams.py`
+   → runs once. Outputs per-sport team counts and per-source alias
+   counts.
+3. Verify in psql:
+   ```sql
+   SELECT name, count(*) FILTER (WHERE t.id IS NOT NULL) AS teams,
+          count(a.id) AS aliases
+   FROM sp.sports s
+   LEFT JOIN sp.teams t ON t.sport_id = s.id
+   LEFT JOIN sp.team_aliases a ON a.team_id = t.id
+   GROUP BY 1 ORDER BY 1;
+   ```
+4. **Document the baseline counts in PROJECT_STATE.md** — those
+   become the "expected coverage" benchmark when 2B's parallel-run
+   begins.
+
+**Merge gate for 2A.5:** team counts and alias counts are non-zero
+and reasonable for each sport with active data. If any sport has
+zero teams (e.g., Snooker — we may not have legacy data for it),
+that sport will have 0% strict-tier coverage in 2B; document it
+and decide whether to seed manually or wait for the alias tier (2C).
+
+### Phase 2B — Matcher (ships after 2A.5 baseline is verified)
+
+Standalone PR. Implementation follows the design above:
+
+**Contents:**
+- `resolver/matcher.py` — `StrictMatcher` class
+- `resolver/fixtures.py` — `ensure_fixture` + `find_fixture` helpers
+- `resolver/aliases.py` — alias-table query helper
+- `resolver/competitions.py` — competition-hint resolver
+- `scripts/run_resolver_pass.py` — operator-invoked or cron-scheduled
+  one-shot pass over `fixture_id IS NULL` records
+- New `sp.resolver_runs` table (see Open question 3 below) for
+  storing daily diff metrics
+- Tests: unit (mocked sessions), integration (docker-compose), replay
+  (24h corpus diff vs legacy)
+- DEPLOYMENT.md update: how to run a parallel-run pass, how to
+  query the metrics
+
+### Why this order
+
+- Bootstrap is verifiable in isolation. Spot-check
+  `sp.teams`/`sp.team_aliases` row counts before any matcher code runs.
+- Establishes baseline alias coverage as a number before strict-tier
+  turns on. If coverage is unexpectedly low, we catch it before the
+  parallel-run goes uninformative.
+- Bootstrap isn't reversible the way code is — easier to debug in a
+  contained PR.
+
+The "dead code without 2B" objection isn't strong: bootstrap is a
+manual script, sits unused until invoked. Shipping it first costs
+nothing.
+
+## Open questions resolved
+
+1. ~~Bootstrap as part of 2B PR, or separate?~~ **Separate. 2A.5
+   ships first.** (Per Pushback 3.)
+2. ~~Should bootstrap include `public.markets`?~~ **Defer to 2C.**
+   Strict tier doesn't need sub-market identity; the match is
+   event-level. 2C's alias tier may want sub-market data for
+   matching sub-market candidates; bootstrap that table at that point.
+3. ~~Cron / schedule for `run_resolver_pass.py`?~~ **Ad-hoc operator
+   + daily cron, with metrics persisted to a queryable table.**
+
+   Specifically: `run_resolver_pass.py` runs daily at 02:00 UTC via
+   a one-shot script (operator-scheduled — see DEPLOYMENT.md).
+   Each pass produces a row in a new `sp.resolver_runs` table:
+
+   ```sql
+   CREATE TABLE sp.resolver_runs (
+       id                  bigserial PRIMARY KEY,
+       run_id              uuid NOT NULL,
+       resolver_version    text NOT NULL,
+       provider            text NOT NULL,         -- 'fl' | 'kalshi'
+       started_at          timestamptz NOT NULL,
+       finished_at         timestamptz,
+       records_scanned     integer NOT NULL DEFAULT 0,
+       auto_applies        integer NOT NULL DEFAULT 0,
+       no_match            integer NOT NULL DEFAULT 0,
+       crashes             integer NOT NULL DEFAULT 0,
+       legacy_diff_count   integer,               -- Kalshi only; NULL for FL
+       legacy_diff_details jsonb,                 -- which provider records differed
+       latency_p95_ms      integer,
+       extra               jsonb DEFAULT '{}'::jsonb
+   );
+   CREATE INDEX ON sp.resolver_runs (provider, started_at DESC);
+   ```
+
+   At day 7, the parallel-run report is one query against this table:
+
+   ```sql
+   SELECT
+     provider,
+     SUM(records_scanned)                                    AS scanned,
+     SUM(auto_applies)                                       AS auto_applies,
+     SUM(legacy_diff_count)                                  AS diffs,
+     ROUND(100.0 * SUM(legacy_diff_count) / NULLIF(SUM(auto_applies), 0), 2) AS fp_pct,
+     ROUND(100.0 * SUM(auto_applies) / NULLIF(SUM(records_scanned), 0), 2)   AS coverage_pct
+   FROM sp.resolver_runs
+   WHERE started_at > NOW() - INTERVAL '7 days'
+   GROUP BY 1
+   ORDER BY 1;
+   ```
+
+   No grepping Railway logs. Trends are SQL-queryable. Phase 2E's
+   live runner extends this same table with per-loop entries.
+
+   The `sp.resolver_runs` table goes in **2B's migration** (since it's
+   the resolver itself producing the rows), not 2A.5's.
 
 ---
 
-## Sign-off checklist
+## Sign-off checklist (revised)
 
-Reviewer (you): tick when answered:
+Reviewer (you): all confirmed in your endorsement. Recording for the
+record:
 
-- [ ] Atomic transaction pattern in §1 looks right.
-- [ ] Parallel-run criteria in §2 are the right thresholds.
-- [ ] Auth pattern for 2F locked per §3.
-- [ ] Question A answer — strict tier conditions, no team creation, 30 min drift, 0.98 confidence — accepted.
-- [ ] Question B answer — bootstrap from `public.entities` / `public.entity_aliases` with `source='legacy_bootstrap'` / `confidence=0.95` — accepted.
-- [ ] Implementation sketch (file layout, matcher shape, standalone-script wiring) — accepted.
-- [ ] Test plan — accepted.
-- [ ] Open question 1 — bootstrap as same PR vs separate.
-- [ ] Open question 2 — bootstrap `public.markets` deferred to 2C.
-- [ ] Open question 3 — cron pattern during parallel-run.
+- [x] Atomic transaction pattern in §1, **with `ensure_fixture` pinned
+      to DO-NOTHING-plus-re-fetch semantics** (Pushback 1 addressed).
+- [x] Parallel-run criteria in §2, **scoped per-provider**: Kalshi
+      uses automated diff vs legacy; FL uses operator spot-check
+      (5 random/day) until 2D's cross-provider corroboration replaces
+      it (Pushback 2 addressed).
+- [x] Auth pattern for 2F locked per §13.2.
+- [x] Question A — strict tier conditions, no team creation, 30 min
+      drift, 0.98 confidence.
+- [x] Question B — bootstrap from `public.entities` /
+      `public.entity_aliases` with `source='legacy_bootstrap'` /
+      `confidence=0.95`.
+- [x] **Implementation order: 2A.5 (bootstrap) ships first, then 2B
+      (matcher) after baseline is verified in production**
+      (Pushback 3 addressed).
+- [x] Test plan — accepted.
+- [x] `public.markets` bootstrap deferred to 2C.
+- [x] `run_resolver_pass.py` daily-cron with metrics persisted to
+      new `sp.resolver_runs` table (queryable; no Railway log
+      grep at day 7).
 
-Once all ticks: implementation begins as a single PR matching this
-design.
+Implementation order:
+1. **2A.5 PR** — bootstrap script + sp.sports seed migration + tests
+   + DEPLOYMENT.md update. Ship, run in production, verify alias
+   counts, document baseline in PROJECT_STATE.md.
+2. **2B PR** — matcher + standalone runner + sp.resolver_runs
+   migration + parallel-run metrics query + tests. Ships after
+   2A.5 baseline is verified.
