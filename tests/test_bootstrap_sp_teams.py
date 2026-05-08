@@ -63,6 +63,81 @@ class TestNormalizationConsistency:
         assert normalize_name("  Real   Madrid  ") == "real madrid"
 
 
+class TestBulkIOPattern:
+    """Static-inspection guards against regressing to per-row I/O.
+
+    The original implementation issued one SELECT per legacy entity
+    + one INSERT per alias = ~80,000 round-trips at production scale.
+    Took 1-2 hours per run. The bulk-I/O rewrite collapses to ~80
+    round-trips total. These tests verify the rewrite stays bulk."""
+
+    def setup_method(self):
+        import inspect
+        import scripts.bootstrap_sp_teams
+        self.src = inspect.getsource(scripts.bootstrap_sp_teams)
+
+    def test_no_per_row_select_inside_entity_loop(self):
+        """The classification loop over team_entities must NOT call
+        session.execute with SELECT — that's per-row I/O. All
+        existing-team lookups must be against the in-memory dict
+        team_uuid_by_key.
+        """
+        # Find the per-entity loop body. Crude but effective: split
+        # on the loop header and check the body for forbidden patterns.
+        for_idx = self.src.find("for ent in team_entities:")
+        assert for_idx > 0, "team_entities loop must be present"
+
+        # Find the next top-level structure (a comment block or
+        # subsequent variable assignment) that ends the loop body.
+        loop_end_idx = self.src.find("# ── Step 4", for_idx)
+        assert loop_end_idx > for_idx, "expected Step 4 marker after entity loop"
+
+        loop_body = self.src[for_idx:loop_end_idx]
+        # No SELECT, no execute() inside this loop body.
+        assert "session.execute" not in loop_body, \
+            "Per-row session.execute() detected in entity loop — must be in-memory"
+        assert "SELECT" not in loop_body.upper() or \
+               "SELECT" not in loop_body, \
+               "Per-row SELECT detected in entity loop"
+
+    def test_no_per_row_insert_inside_alias_loop(self):
+        """Same check for the alias classification loop — must NOT
+        issue per-row INSERTs."""
+        for_idx = self.src.find("for a in aliases:")
+        assert for_idx > 0, "aliases loop must be present"
+
+        loop_end_idx = self.src.find("# ── Step 5", for_idx)
+        assert loop_end_idx > for_idx, "expected Step 5 marker after alias loop"
+
+        loop_body = self.src[for_idx:loop_end_idx]
+        assert "session.execute" not in loop_body, \
+            "Per-row session.execute() detected in alias loop — must be in-memory"
+
+    def test_bulk_load_via_two_select_queries(self):
+        """Verify the two upfront bulk SELECTs are present:
+          1. SELECT id, sport_id, normalized_name FROM sp.teams
+          2. SELECT alias_normalized FROM sp.team_aliases WHERE source='legacy_bootstrap'
+        """
+        assert "SELECT id, sport_id, normalized_name FROM sp.teams" in self.src, \
+            "Bulk-load of existing teams missing"
+        assert "FROM sp.team_aliases" in self.src and \
+               "source = 'legacy_bootstrap'" in self.src, \
+               "Bulk-load of legacy_bootstrap aliases missing"
+
+    def test_bulk_insert_via_pg_insert_values_list(self):
+        """Verify the rewrite uses pg_insert(...).values(<list>)
+        for batched INSERTs rather than executing one stmt per row."""
+        # The values() call inside the chunk loop must take the
+        # `chunk` list, not a single-row dict.
+        assert "pg_insert(Team.__table__).values(chunk)" in self.src
+        assert "pg_insert(TeamAlias.__table__).values(chunk)" in self.src
+
+    def test_chunk_size_documented(self):
+        assert "INSERT_CHUNK_SIZE" in self.src
+        # Default is 1000 per design.
+        assert "1000" in self.src
+
+
 # ── Integration tests (skipped unless SP_INTEGRATION_DB is set) ──
 
 pytestmark_integration = pytest.mark.skipif(
