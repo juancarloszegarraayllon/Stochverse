@@ -143,14 +143,46 @@ async def main(
         # ── Step 4: fetch unresolved provider records ──────────
         if provider == "kalshi":
             extractor = KalshiResolverModule()
+            # sp.kalshi_markets holds every Kalshi market we've ever
+            # ingested, including non-sports categories (Elections,
+            # Politics, Crypto, Entertainment, Economics, ...). Those
+            # markets carry no FixtureSignal — the resolver will
+            # increment signal_extraction_skipped and never produce
+            # useful output for them. They also dominate
+            # ORDER BY last_seen_at DESC because they're traded more
+            # frequently. Without this filter, --limit 100 returns
+            # ~99% non-sports records and produces zero matcher
+            # data for review.
+            #
+            # The filter is intentionally permissive:
+            #  - (raw_payload->>'_is_sport')::boolean = true catches
+            #    the canonical sport classification set by
+            #    main.py's get_data() pass.
+            #  - OR raw_payload->>'category' = 'Sports' is the
+            #    second-pass catch for rows where _is_sport wasn't
+            #    set (data-quality variance: ~1.5% of sport rows in
+            #    the prod corpus as of 2026-05-08).
+            #
+            # DO NOT remove this filter without an alternative gate
+            # — the runner would otherwise burn its --limit budget
+            # on records it can't possibly match.
             sql = (
                 "SELECT ticker AS pk, raw_payload "
                 "FROM sp.kalshi_markets "
                 "WHERE fixture_id IS NULL "
+                "  AND ( "
+                "    (raw_payload->>'_is_sport')::boolean = true "
+                "    OR raw_payload->>'category' = 'Sports' "
+                "  ) "
                 "ORDER BY last_seen_at DESC"
             )
         else:  # provider == 'fl'
             extractor = FLResolverModule()
+            # FL ingestion (ingestion/fl.py) fetches events only for
+            # the sport_ids in DEFAULT_FL_SPORT_IDS, so every row in
+            # sp.fl_events is sport-shaped by construction — no
+            # category filter needed here. If ingestion ever broadens
+            # to non-sport endpoints, mirror the Kalshi filter shape.
             sql = (
                 "SELECT fl_event_id AS pk, raw_payload "
                 "FROM sp.fl_events "

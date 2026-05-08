@@ -770,6 +770,24 @@ class TestStaticInvariants:
         miss_idx = self.src.find("chunk_miss += 1", strict_idx)
         assert 0 < miss_idx < log_idx
 
+    def test_kalshi_query_filters_to_sports_records(self):
+        """Kalshi ingestion stores every category (Elections, Politics,
+        Crypto, etc.). Those records can't yield a FixtureSignal and
+        dominate ORDER BY last_seen_at DESC — without this filter,
+        --limit 100 returns ~99% non-sports and produces zero matcher
+        data. Static check that both filter branches are present.
+        """
+        # The whole if provider == "kalshi": block is the right scope
+        # to scan; pin to it so a future FL filter doesn't accidentally
+        # satisfy this guard.
+        kalshi_idx = self.src.find('if provider == "kalshi":')
+        else_idx = self.src.find("else:  # provider == 'fl'", kalshi_idx)
+        assert 0 < kalshi_idx < else_idx
+        kalshi_block = self.src[kalshi_idx:else_idx]
+        assert "FROM sp.kalshi_markets" in kalshi_block
+        assert "(raw_payload->>'_is_sport')::boolean = true" in kalshi_block
+        assert "raw_payload->>'category' = 'Sports'" in kalshi_block
+
     def test_signal_extraction_skipped_counter(self):
         """The runner must count records where extract_signal returned
         None so the records_scanned breakdown reconciles. Counter is
