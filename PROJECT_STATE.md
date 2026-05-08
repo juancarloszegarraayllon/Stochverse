@@ -8,7 +8,47 @@ next session. Treat it as the project's running journal.
 
 ## Session — 2026-05-08 (afternoon onwards)
 
+### Production incident — transaction leak in db.py
+
+**Reported:** four connections leaked over ~35 minutes (pids 645, 647,
+649, 32493). `idle in transaction` state. Manually killed by operator;
+the same pattern reappeared within 5 minutes.
+
+**Root cause:** two anti-patterns in `db.py`:
+1. `db.upsert_entities` and `db.sync_events_to_db` wrap a slow loop
+   over thousands of records in a single `async with session.begin()`
+   block. With Neon's ~75ms round-trip, transactions stay open for
+   5-30+ minutes. Cancellation or asyncpg state issues mid-loop leave
+   the connection idle-in-transaction.
+2. `db.sync_events_to_db` creates its own engine per call but only
+   disposes it on the success path (the except branch's dispose call
+   itself can fail silently). Cancelled calls leak 2 pool connections
+   per occurrence until process exit.
+
+**Fix shipped (this session):**
+- `idle_in_transaction_session_timeout=60000` and `statement_timeout=60000`
+  added to engine `connect_args.server_settings` — Postgres self-kills
+  stuck transactions / queries even if app code is buggy.
+- `lock_timeout=30000` added to defend against deadlocks.
+- `application_name='stochverse-web'` added so leaks surface clearly
+  in `pg_stat_activity` triage queries.
+- `db.upsert_entities` refactored: chunk teams into batches of 100,
+  one transaction per chunk. Per-chunk failures isolated; subsequent
+  chunks proceed.
+- `db.sync_events_to_db` refactored: chunk records into batches of 50,
+  one transaction per chunk. `try/finally` around `_engine.dispose()`
+  so cancellation paths can't leak the engine.
+- 10 unit tests verify chunking math + failure isolation + static-
+  inspection guards against regressing to the mega-transaction pattern.
+
+**Bootstrap (Phase 2A.5) was paused while this incident was active.**
+Resume after the fix is deployed and the leak pattern stops
+reproducing.
+
 ### What landed
+
+- **Transaction leak fix in `db.py`** (this commit). 10 new tests; all
+  60 existing tests still pass.
 
 - **Phase 2A.5 — Bootstrap.** New `scripts/bootstrap_sp_teams.py` +
   Alembic migration `d8e717ed79dd` (seeds `sp.sports` with 17-sport
