@@ -32,6 +32,9 @@ from .aliases import AliasResolver
 from .fixtures import ensure_fixture, find_fixture
 from .matcher import StrictMatcher, RESOLVER_VERSION as STRICT_MATCHER_VERSION
 
+# Phase 2A.6 additions:
+from .competitions import CompetitionResolver
+
 __all__ = [
     "FixtureSignal",
     "TeamCandidate",
@@ -46,4 +49,6 @@ __all__ = [
     "find_fixture",
     "StrictMatcher",
     "STRICT_MATCHER_VERSION",
+    # Phase 2A.6
+    "CompetitionResolver",
 ]

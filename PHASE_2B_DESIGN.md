@@ -1,8 +1,73 @@
 # Phase 2B Design — Strict-tier Resolver
 
-Status: design doc, awaiting review. Implementation begins only after sign-off.
+Status: implemented. Phase 2B (PR #82) shipped the matcher; Phase 2A.6
+(addendum below) shipped the competition gate before the first
+parallel-run pass.
 
 Reference: SP Architecture v1.4 §7 (Resolution Layer) and §13.2 (locked decisions).
+
+---
+
+## Phase 2A.6 addendum — Competition gate (added 2026-05-08)
+
+Phase 2B's initial implementation was competition-blind: the matcher
+read `signal.competition_hint` only into `reason_detail` for logging
+and never resolved it. With `sp.fixtures.competition_id` becoming
+nullable in migration `bdf12a30e49b`, the strict tier had silently
+degraded into "competition-blind" rather than the design's intended
+sport-only fallback. Caught before the first parallel-run pass.
+
+**2A.6 ships, in order, before parallel-run starts:**
+
+1. `scripts/bootstrap_sp_competitions.py` — seeds `sp.competitions`
+   from distinct `(sport, series_base)` tuples in `sp.kalshi_markets`,
+   keyed by `kalshi_identity.strip_known_suffix(series_ticker)`.
+   Each row gets `kalshi_series_bases=[base]`. Idempotent on the
+   union of all `kalshi_series_bases` arrays already seeded.
+2. `resolver/competitions.py` — `CompetitionResolver` bulk-load +
+   `(provider, hint) → (competition_id, kind)` lookup. Returns one
+   of `'explicit'`, `'no_hint'`, `'unresolvable'`.
+3. `resolver/matcher.py` — Phase 2A.6 competition gate (per provider):
+   - **Kalshi `'explicit'`**: pass competition_id through to
+     `find_fixture` (equal-or-NULL filter) and `ensure_fixture`
+     (write on create).
+   - **Kalshi `'no_hint'`**: sport-only fallback ALLOWED, logged as
+     `kalshi_no_hint_sport_only: true`.
+   - **Kalshi `'unresolvable'`**: strict tier FAILS (`fail_reason=
+     'kalshi_competition_unresolvable'`). Bypassing this would
+     silently link to the wrong fixture — re-run the bootstrap
+     against fresh Kalshi data instead.
+   - **FL**: transitional sport-only path. FL competitions can't be
+     cleanly seeded until Phase 2C (raw_payload doesn't carry
+     tournament-level sport_id), so every successful FL strict
+     match stamps `fl_transitional_sport_only: true` for trivial
+     day-7 audit + 2C reconciliation queries.
+4. `resolver/kalshi.py` — `competition_hint` is now `series_ticker`
+   (the canonical Kalshi-side identifier). `_soccer_comp` (human
+   display) is preserved on `raw_signals['soccer_comp']` only.
+
+`RESOLVER_VERSION` bumped from `strict@2b.0` → `strict@2a.6` so
+historical decisions identify which gate produced them.
+
+`find_fixture` filter is intentionally `(competition_id = filter
+OR competition_id IS NULL)`: avoids forking one logical fixture
+into two when FL (NULL comp) creates a fixture before Kalshi (with
+explicit comp) arrives. `find_fixture` returns
+`(fixture_id, fixture_competition_id)` so the matcher can audit
+the filter outcome; the flags below make the Phase 2C reconciliation
+trivially queryable.
+
+**Audit flags on `resolution_log.reason_detail` (Phase 2A.6):**
+
+- `linked_to_null_comp_fixture: true` + `null_comp_fixture_pending_backfill: <uuid>`
+  — Kalshi explicit-comp signal linked to a NULL-comp fixture.
+  Phase 2C backfill query: one line off `resolution_log`.
+- `fl_transitional_path: matched_null_comp_fixture` (typical case)
+- `fl_transitional_path: matched_existing_comp_fixture` (Kalshi
+  created the fixture earlier with explicit comp; FL is now joining
+  sport-only — comp asymmetry to verify in 2C)
+- `fl_transitional_path: created_null_comp_fixture` (FL was first;
+  new row created with NULL comp, awaits 2C)
 
 ---
 

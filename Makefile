@@ -6,7 +6,7 @@
 # (e.g., a Neon branch for migration testing).
 export DATABASE_URL ?= postgresql+asyncpg://dev:dev@localhost:5432/sports_dev
 
-.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams resolver-pass-kalshi resolver-pass-fl
+.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions resolver-pass-kalshi resolver-pass-fl
 
 help:
 	@echo "SP Architecture dev targets:"
@@ -29,6 +29,8 @@ help:
 	@echo "  make backfill-fl ARGS=\"--days 7\""
 	@echo "  make bootstrap-sp-teams        # one-time legacy → sp.* migration (Phase 2A.5)"
 	@echo "  make bootstrap-sp-teams ARGS=\"--dry-run\""
+	@echo "  make bootstrap-sp-competitions # seed sp.competitions from Kalshi (Phase 2A.6)"
+	@echo "  make bootstrap-sp-competitions ARGS=\"--dry-run\""
 	@echo "  make resolver-pass-kalshi      # Phase 2B strict matcher pass over sp.kalshi_markets"
 	@echo "  make resolver-pass-fl          # same for sp.fl_events"
 	@echo "  make resolver-pass-kalshi ARGS=\"--limit 100 --run-mode cron\""
@@ -87,6 +89,9 @@ backfill-fl:
 
 bootstrap-sp-teams:
 	python scripts/bootstrap_sp_teams.py $(ARGS)
+
+bootstrap-sp-competitions:
+	python scripts/bootstrap_sp_competitions.py $(ARGS)
 
 resolver-pass-kalshi:
 	python scripts/run_resolver_pass.py --provider kalshi $(ARGS)

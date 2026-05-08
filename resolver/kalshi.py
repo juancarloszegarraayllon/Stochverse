@@ -85,11 +85,14 @@ class KalshiResolverModule:
 
         kickoff_at, kickoff_confidence = self._kickoff(raw_record, ident)
 
-        competition_hint = (
-            raw_record.get("_soccer_comp")
-            or series_ticker
-            or None
-        )
+        # competition_hint: use series_ticker (the stable Kalshi-side
+        # competition identifier). bootstrap_sp_competitions seeds
+        # sp.competitions.kalshi_series_bases keyed off series_base
+        # (= strip_known_suffix(series_ticker)), and CompetitionResolver
+        # applies the same strip on lookup. _soccer_comp ("Champions
+        # League" etc.) is human display text and is preserved in
+        # raw_signals for diagnostics, not for matching.
+        competition_hint = series_ticker or None
 
         return FixtureSignal(
             provider=self.provider,
@@ -107,6 +110,7 @@ class KalshiResolverModule:
                 "raw_suffix":    ident.raw_suffix,
                 "title":         raw_record.get("title"),
                 "category":      raw_record.get("category"),
+                "soccer_comp":   raw_record.get("_soccer_comp"),
             },
         )
 

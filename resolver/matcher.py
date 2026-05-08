@@ -6,7 +6,29 @@ strict-tier auto-apply:
   1. kickoff_confidence >= 0.85
   2. Both teams resolve via exact alias hit (sp.team_aliases)
   3. Kickoff drift <= 30 minutes (vs candidate fixture's kickoff_at)
-  4. Competition match — explicit hint mapping OR sport-only fallback
+  4. Competition match — see Phase 2A.6 below for current per-provider
+     policy.
+
+Phase 2A.6 competition gate (per provider):
+  - Kalshi:
+      * hint resolves to a known competition_id → require it; pass
+        through to find_fixture (NULL-or-equal filter) and to
+        ensure_fixture (write the column on create).
+      * hint absent → sport-only fallback ALLOWED, logged as
+        `kalshi_no_hint_sport_only: true`. Most Kalshi records carry
+        a series_ticker so this is rare in practice.
+      * hint present but unresolvable → strict tier FAILS
+        (`fail_reason='kalshi_competition_unresolvable'`). Re-running
+        bootstrap_sp_competitions.py against fresh Kalshi data fixes
+        this; bypassing it would silently link to wrong fixtures.
+  - FL:
+      * Transitional. sp.fl_events.raw_payload doesn't currently
+        carry tournament-level sport_id, so FL competitions can't be
+        cleanly seeded until Phase 2C. The matcher therefore
+        sport-only-falls-back for ALL FL signals and stamps every
+        successful match with `fl_transitional_sport_only: true` in
+        reason_detail. Day-7 audit + 2C re-resolution pass can
+        easily query for these.
 
 On hit: confidence 0.98, reason_code='strict'. The runner writes
 fixture_id to the provider record, appends to sp.resolution_log,
@@ -31,21 +53,23 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .aliases import AliasResolver
+from .competitions import CompetitionResolver
 from .fixtures import ensure_fixture, find_fixture
 from .types import FixtureSignal, MatchResult, ReasonCode
 
 
 # Stable resolver version. Bump on semantic logic change so historical
 # resolution_log entries identify the algorithm at decision time.
-RESOLVER_VERSION = "strict@2b.0"
+RESOLVER_VERSION = "strict@2a.6"
 
 
 class StrictMatcher:
     """Strict-tier central matcher.
 
-    Stateless aside from the AliasResolver + sport_id lookup table
-    passed at construction. Each match() call does at most:
-      - Pure-Python alias resolution (microseconds)
+    Stateless aside from the AliasResolver + CompetitionResolver +
+    sport_id lookup table passed at construction. Each match() call
+    does at most:
+      - Pure-Python alias + competition resolution (microseconds)
       - One SELECT to find_fixture (DB round-trip)
       - One INSERT or one SELECT in ensure_fixture (DB round-trip)
     Total per match: <=2 round-trips. Bulk runners can wrap many
@@ -60,13 +84,22 @@ class StrictMatcher:
         self,
         aliases: AliasResolver,
         sport_id_by_code_or_name: dict[str, int],
+        competitions: Optional[CompetitionResolver] = None,
     ) -> None:
         """sport_id_by_code_or_name maps both lowercase code
         ('soccer', 'tennis') AND legacy name ('Soccer', 'Tennis')
         to the same sp.sports.id. Built at runner startup from
-        sp.sports + LEGACY_SPORT_ALIASES."""
+        sp.sports + LEGACY_SPORT_ALIASES.
+
+        `competitions` is the CompetitionResolver. Optional only so
+        existing unit tests (mocked DB, no competitions table) keep
+        working — production runners always pass one. When None, the
+        matcher behaves as if every signal had `competition_hint=None`
+        (sport-only fallback for Kalshi + FL transitional path).
+        """
         self.aliases = aliases
         self.sport_id_by_code_or_name = sport_id_by_code_or_name
+        self.competitions = competitions
 
     async def match(
         self,
@@ -80,6 +113,8 @@ class StrictMatcher:
             "provider_record_id": signal.provider_record_id,
             "sport":              signal.sport,
         }
+        if signal.competition_hint is not None:
+            reason_detail["competition_hint"] = signal.competition_hint
 
         # ── Gate 1: kickoff confidence ─────────────────────────
         if signal.kickoff_confidence < self.MIN_KICKOFF_CONFIDENCE:
@@ -144,13 +179,29 @@ class StrictMatcher:
         reason_detail["home_team_id"] = str(home_id)
         reason_detail["away_team_id"] = str(away_id)
 
+        # ── Gate 4: competition gate (per-provider policy) ─────
+        competition_id_filter, gate_failure = self._competition_gate(
+            signal=signal,
+            reason_detail=reason_detail,
+        )
+        if gate_failure is not None:
+            reason_detail["fail_reason"] = gate_failure
+            return MatchResult(
+                fixture_id=None,
+                confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH,
+                reason_detail=reason_detail,
+                resolver_version=RESOLVER_VERSION,
+            )
+
         # ── Find or create fixture ─────────────────────────────
-        fixture_id = await find_fixture(
+        fixture_id, fixture_comp_id = await find_fixture(
             session,
             home_team_id=home_id,
             away_team_id=away_id,
             kickoff_at=signal.kickoff_at,
             drift_sec=self.KICKOFF_DRIFT_SEC,
+            competition_id=competition_id_filter,
         )
         created_new = False
         if fixture_id is None:
@@ -158,29 +209,46 @@ class StrictMatcher:
             # ambiguous (Kalshi abbr_block direction-blind, FL
             # missing). If swapped finds a hit, log the orientation
             # flip in reason_detail so reviewers can verify.
-            swapped_id = await find_fixture(
+            swapped_id, swapped_comp_id = await find_fixture(
                 session,
                 home_team_id=away_id,
                 away_team_id=home_id,
                 kickoff_at=signal.kickoff_at,
                 drift_sec=self.KICKOFF_DRIFT_SEC,
+                competition_id=competition_id_filter,
             )
             if swapped_id is not None:
                 fixture_id = swapped_id
+                fixture_comp_id = swapped_comp_id
                 reason_detail["orientation_flipped"] = True
             else:
                 # No existing fixture in either orientation. Create
-                # one in the signal's orientation. competition_id is
-                # NULL until Phase 2C seeds sp.competitions —
-                # sport-only fallback per design doc Question A.
+                # one in the signal's orientation, stamping
+                # competition_id when the gate produced one.
                 fixture_id, created_new = await ensure_fixture(
                     session,
                     home_team_id=home_id,
                     away_team_id=away_id,
                     kickoff_at=signal.kickoff_at,
-                    competition_id=None,
+                    competition_id=competition_id_filter,
                 )
+                # Newly inserted row carries whatever competition_id
+                # we passed (may be None). ensure_fixture's conflict
+                # path returns an existing row whose comp_id we don't
+                # know without an extra read; treat that case as None
+                # for audit purposes — the post-2C reconciliation
+                # query already lives off resolution_log.
+                fixture_comp_id = competition_id_filter if created_new else None
                 reason_detail["created_new_fixture"] = created_new
+
+        self._annotate_competition_path(
+            reason_detail=reason_detail,
+            provider=signal.provider,
+            resolved_competition_id=competition_id_filter,
+            fixture_id=fixture_id,
+            fixture_competition_id=fixture_comp_id,
+            created_new=created_new,
+        )
 
         return MatchResult(
             fixture_id=fixture_id,
@@ -189,6 +257,126 @@ class StrictMatcher:
             reason_detail=reason_detail,
             resolver_version=RESOLVER_VERSION,
         )
+
+    def _competition_gate(
+        self,
+        *,
+        signal: FixtureSignal,
+        reason_detail: dict,
+    ) -> tuple[Optional[uuid.UUID], Optional[str]]:
+        """Apply the per-provider competition policy.
+
+        Returns (competition_id_filter, gate_failure_reason).
+          - On success, gate_failure_reason is None and
+            competition_id_filter is the uuid (may be None when
+            sport-only fallback is allowed).
+          - On failure, gate_failure_reason is a fail_reason string
+            and the matcher returns NO_MATCH.
+
+        Mutates reason_detail in-place to record the gate's decision.
+        """
+        provider = signal.provider
+
+        # FL: transitional sport-only path until Phase 2C. Always
+        # stamp the audit flag on success so day-7 review can trivially
+        # filter for these and so the 2C re-resolution pass knows where
+        # to redo the competition assignment.
+        if provider == "fl":
+            reason_detail["fl_transitional_sport_only"] = True
+            return None, None
+
+        # Kalshi: full gate.
+        if provider == "kalshi":
+            if self.competitions is None:
+                # No CompetitionResolver wired — degrade to sport-only
+                # for Kalshi too, but log the fact so misconfigured
+                # runners stand out in resolution_log.
+                reason_detail["competitions_index_unavailable"] = True
+                return None, None
+            cid, kind = self.competitions.resolve("kalshi", signal.competition_hint)
+            reason_detail["competition_resolution"] = kind
+            if kind == "explicit":
+                reason_detail["competition_id"] = str(cid)
+                return cid, None
+            if kind == "no_hint":
+                reason_detail["kalshi_no_hint_sport_only"] = True
+                return None, None
+            # kind == 'unresolvable' — hint was provided but unknown.
+            # Strict tier punts to avoid silently linking to the wrong
+            # fixture (e.g., Premier League Cup vs Premier League proper).
+            return None, "kalshi_competition_unresolvable"
+
+        # Other providers (polymarket, oddsapi) not yet wired through
+        # the matcher. Treat as sport-only fallback.
+        return None, None
+
+    @staticmethod
+    def _annotate_competition_path(
+        *,
+        reason_detail: dict,
+        provider: str,
+        resolved_competition_id: Optional[uuid.UUID],
+        fixture_id: Optional[uuid.UUID],
+        fixture_competition_id: Optional[uuid.UUID],
+        created_new: bool,
+    ) -> None:
+        """Stamp audit flags on reason_detail describing how the matched
+        fixture's competition_id relates to the signal's resolved one.
+
+        Two distinct concerns:
+
+        1) Kalshi explicit-comp signal links to a NULL-comp fixture.
+           That fixture was created during a competition-blind period
+           (FL transitional, Kalshi no_hint, or pre-2A.6 ingestion) and
+           must be backfilled in Phase 2C. Sets:
+             - linked_to_null_comp_fixture = True
+             - null_comp_fixture_pending_backfill = <fixture uuid>
+           Phase 2C's backfill becomes a one-line query off
+           resolution_log; without these flags it would be a manual
+           SQL audit later.
+
+        2) FL signals are sport-only-fallback in 2A.6 and need a
+           sub-flag distinguishing the three reachable paths:
+             - matched_null_comp_fixture     (typical 2A.6 case)
+             - matched_existing_comp_fixture (Kalshi created earlier
+                                              with explicit comp; FL
+                                              now joins sport-only —
+                                              comp asymmetry to revisit
+                                              in 2C)
+             - created_null_comp_fixture     (FL was first; new fixture
+                                              created with NULL comp,
+                                              awaits Phase 2C backfill)
+           Stamped in `fl_transitional_path` on top of the existing
+           `fl_transitional_sport_only=True` flag set during the gate.
+        """
+        # Concern 1: Kalshi linked-to-null backfill audit.
+        if (
+            provider == "kalshi"
+            and resolved_competition_id is not None
+            and fixture_id is not None
+            and fixture_competition_id is None
+            and not created_new
+        ):
+            reason_detail["linked_to_null_comp_fixture"] = True
+            reason_detail["null_comp_fixture_pending_backfill"] = str(fixture_id)
+
+        # Concern 2: FL transitional sub-path.
+        if provider == "fl":
+            if created_new:
+                # FL created the fixture; comp_id is whatever the gate
+                # produced (None for FL transitional), but call out the
+                # explicit "created" state for clarity in audit queries.
+                if fixture_competition_id is None:
+                    reason_detail["fl_transitional_path"] = "created_null_comp_fixture"
+                else:
+                    # Defensive: shouldn't happen in 2A.6 since the FL
+                    # gate always passes None as the filter, so
+                    # ensure_fixture creates with NULL.
+                    reason_detail["fl_transitional_path"] = "created_with_comp_fixture"
+            elif fixture_competition_id is None:
+                reason_detail["fl_transitional_path"] = "matched_null_comp_fixture"
+            else:
+                reason_detail["fl_transitional_path"] = "matched_existing_comp_fixture"
 
     def _resolve_sport_id(self, sport_label: str) -> Optional[int]:
         """Look up sport_id by either lowercase code ('soccer') or
