@@ -58,6 +58,25 @@ if _raw_url:
 else:
     DATABASE_URL = ""
 
+# ── Server-side defenses against transaction / connection leaks ──
+#
+# Postgres GUC parameters set per-connection via asyncpg's
+# server_settings. Defends production against the class of bugs
+# where application code holds a transaction open indefinitely
+# (cancellation, asyncpg state issues, slow loops inside
+# session.begin() blocks). Postgres self-kills offenders rather
+# than letting them stall the connection pool.
+#
+# These complement (don't replace) fixing the underlying loops to
+# chunk into shorter transactions. Even after refactor, these
+# remain as the floor that keeps a single bug from cascading into
+# pool exhaustion.
+_server_settings = _connect_args.setdefault("server_settings", {})
+_server_settings.setdefault("idle_in_transaction_session_timeout", "60000")  # 60s — kills BEGIN-but-no-activity
+_server_settings.setdefault("statement_timeout", "60000")                    # 60s — kills hung individual queries
+_server_settings.setdefault("lock_timeout", "30000")                         # 30s — kills waits for advisory/row locks
+_server_settings.setdefault("application_name", "stochverse-web")            # surfaces in pg_stat_activity for triage
+
 engine = None
 async_session = None
 
@@ -113,114 +132,168 @@ async def init_db():
 async def sync_events_to_db(records):
     """Upsert Kalshi events and their markets into the database.
 
-    Called after each get_data() cache rebuild (~every 30 min).
+    Called after each get_data() cache rebuild (~every 30 min) from a
+    background thread via asyncio.run(...). Creates its own engine
+    because the caller's event loop is distinct from the main
+    FastAPI loop — can't share the main loop's async_session.
+
     Uses PostgreSQL ON CONFLICT … DO UPDATE for idempotent upserts.
-    Creates its own engine since this runs in a background thread
-    with its own event loop (can't share the main loop's pool).
+
+    Transaction strategy: process records in fixed-size chunks. Each
+    chunk = one short-lived transaction. The original implementation
+    wrapped the entire loop (5000+ events × ~10 outcomes each) in a
+    single session.begin() block, holding one transaction open for
+    30+ minutes against Neon. Production transaction-leak incident
+    on 2026-05-08 traced to that pattern.
+
+    Engine lifecycle: try/finally ensures _engine.dispose() ALWAYS
+    runs, including on cancellation paths the previous version
+    missed. Without this, a cancelled call leaks 2 pool connections
+    until process exit.
     """
     if not DATABASE_URL:
         return
+
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+
+    # CHUNK_SIZE governs per-transaction scope. ~50 events × ~10
+    # outcomes each = ~500 round-trips per chunk = ~30s @ 60ms RT.
+    # Stays well under the engine-level statement_timeout (60s) and
+    # leaves headroom for occasional latency spikes.
+    CHUNK_SIZE = 50
+
+    _engine = None
     try:
-        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-        _engine = create_async_engine(DATABASE_URL, pool_size=2)
+        _engine = create_async_engine(
+            DATABASE_URL,
+            pool_size=2,
+            connect_args=_connect_args,  # inherits server_settings timeouts
+        )
         _session = async_sessionmaker(_engine, expire_on_commit=False)
         from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from sqlalchemy import select
         from models import Event, Market
         from datetime import datetime, timezone as tz
 
-        async with _session() as session:
-            async with session.begin():
-                ev_count = 0
-                mk_count = 0
-                for r in records:
-                    et = r.get("event_ticker", "")
-                    if not et:
-                        continue
+        def _parse_dt(val):
+            if not val:
+                return None
+            try:
+                from datetime import datetime as _dt
+                return _dt.fromisoformat(val)
+            except Exception:
+                return None
 
-                    # Parse datetime strings back to datetime objects
-                    def _parse_dt(val):
-                        if not val:
-                            return None
-                        try:
-                            from datetime import datetime as _dt
-                            return _dt.fromisoformat(val)
-                        except Exception:
-                            return None
+        ev_count = 0
+        mk_count = 0
+        chunks_committed = 0
+        chunks_failed = 0
 
-                    # Upsert event
-                    ev_vals = {
-                        "platform": "kalshi",
-                        "event_ticker": et,
-                        "series_ticker": r.get("series_ticker"),
-                        "title": r.get("title", "")[:500],
-                        "category": r.get("category"),
-                        "sport": r.get("_sport") or None,
-                        "subcat": r.get("_subcat") or None,
-                        "kickoff_dt": _parse_dt(r.get("_kickoff_dt")),
-                        "exp_dt": _parse_dt(r.get("_exp_dt")),
-                        "close_dt": _parse_dt(r.get("_close_dt")),
-                        "is_live": bool(r.get("_is_live")),
-                        "updated_at": datetime.now(tz.utc),
-                    }
-                    stmt = pg_insert(Event).values(**ev_vals)
-                    stmt = stmt.on_conflict_do_update(
-                        constraint="uq_platform_event",
-                        set_={
-                            "title": stmt.excluded.title,
-                            "category": stmt.excluded.category,
-                            "sport": stmt.excluded.sport,
-                            "subcat": stmt.excluded.subcat,
-                            "kickoff_dt": stmt.excluded.kickoff_dt,
-                            "exp_dt": stmt.excluded.exp_dt,
-                            "close_dt": stmt.excluded.close_dt,
-                            "is_live": stmt.excluded.is_live,
-                            "updated_at": stmt.excluded.updated_at,
-                        },
-                    )
-                    await session.execute(stmt)
-                    ev_count += 1
+        for chunk_start in range(0, len(records), CHUNK_SIZE):
+            chunk = records[chunk_start:chunk_start + CHUNK_SIZE]
+            chunk_ev = 0
+            chunk_mk = 0
+            try:
+                async with _session() as session:
+                    async with session.begin():
+                        for r in chunk:
+                            et = r.get("event_ticker", "")
+                            if not et:
+                                continue
 
-                    # Upsert markets (outcomes)
-                    for o in r.get("outcomes", []):
-                        mk_ticker = o.get("ticker", "")
-                        if not mk_ticker:
-                            continue
-                        mk_vals = {
-                            "ticker": mk_ticker,
-                            "label": o.get("label", "")[:200],
-                            "event_id": None,  # filled by subquery below
-                        }
-                        # Use a subquery to get the event_id from the
-                        # just-upserted event row. This avoids a
-                        # separate SELECT round-trip.
-                        from sqlalchemy import select, text
-                        subq = select(Event.id).where(
-                            Event.platform == "kalshi",
-                            Event.event_ticker == et,
-                        ).scalar_subquery()
-                        mk_stmt = pg_insert(Market).values(
-                            ticker=mk_ticker,
-                            label=o.get("label", "")[:200],
-                            event_id=subq,
-                        )
-                        mk_stmt = mk_stmt.on_conflict_do_update(
-                            index_elements=["ticker"],
-                            set_={
-                                "label": mk_stmt.excluded.label,
-                                "event_id": mk_stmt.excluded.event_id,
-                            },
-                        )
-                        await session.execute(mk_stmt)
-                        mk_count += 1
+                            # Upsert event
+                            ev_vals = {
+                                "platform": "kalshi",
+                                "event_ticker": et,
+                                "series_ticker": r.get("series_ticker"),
+                                "title": r.get("title", "")[:500],
+                                "category": r.get("category"),
+                                "sport": r.get("_sport") or None,
+                                "subcat": r.get("_subcat") or None,
+                                "kickoff_dt": _parse_dt(r.get("_kickoff_dt")),
+                                "exp_dt": _parse_dt(r.get("_exp_dt")),
+                                "close_dt": _parse_dt(r.get("_close_dt")),
+                                "is_live": bool(r.get("_is_live")),
+                                "updated_at": datetime.now(tz.utc),
+                            }
+                            stmt = pg_insert(Event).values(**ev_vals)
+                            stmt = stmt.on_conflict_do_update(
+                                constraint="uq_platform_event",
+                                set_={
+                                    "title": stmt.excluded.title,
+                                    "category": stmt.excluded.category,
+                                    "sport": stmt.excluded.sport,
+                                    "subcat": stmt.excluded.subcat,
+                                    "kickoff_dt": stmt.excluded.kickoff_dt,
+                                    "exp_dt": stmt.excluded.exp_dt,
+                                    "close_dt": stmt.excluded.close_dt,
+                                    "is_live": stmt.excluded.is_live,
+                                    "updated_at": stmt.excluded.updated_at,
+                                },
+                            )
+                            await session.execute(stmt)
+                            chunk_ev += 1
 
-        await _engine.dispose()
-        log.info("db sync: %d events, %d markets upserted", ev_count, mk_count)
+                            # Upsert markets (outcomes)
+                            for o in r.get("outcomes", []):
+                                mk_ticker = o.get("ticker", "")
+                                if not mk_ticker:
+                                    continue
+                                # Use a subquery to get the event_id from
+                                # the just-upserted event row. Avoids a
+                                # separate SELECT round-trip.
+                                subq = select(Event.id).where(
+                                    Event.platform == "kalshi",
+                                    Event.event_ticker == et,
+                                ).scalar_subquery()
+                                mk_stmt = pg_insert(Market).values(
+                                    ticker=mk_ticker,
+                                    label=o.get("label", "")[:200],
+                                    event_id=subq,
+                                )
+                                mk_stmt = mk_stmt.on_conflict_do_update(
+                                    index_elements=["ticker"],
+                                    set_={
+                                        "label": mk_stmt.excluded.label,
+                                        "event_id": mk_stmt.excluded.event_id,
+                                    },
+                                )
+                                await session.execute(mk_stmt)
+                                chunk_mk += 1
+                # Chunk committed via session.begin() __aexit__.
+                ev_count += chunk_ev
+                mk_count += chunk_mk
+                chunks_committed += 1
+            except Exception as e:
+                # Per-chunk failure does NOT abort the whole call.
+                # The chunk's writes have rolled back; subsequent
+                # chunks proceed.
+                chunks_failed += 1
+                log.warning(
+                    "sync_events_to_db: chunk %d failed (%d records), continuing: %s",
+                    chunk_start // CHUNK_SIZE, len(chunk), e,
+                )
+
+        log.info(
+            "db sync: %d events, %d markets upserted "
+            "(%d chunks ok, %d chunks failed)",
+            ev_count, mk_count, chunks_committed, chunks_failed,
+        )
     except Exception as e:
-        log.error("db sync failed: %s", e)
-        try:
-            await _engine.dispose()
-        except Exception:
-            pass
+        # Outermost catch — fires only if engine creation or imports
+        # failed. Per-chunk errors are caught above.
+        log.error("db sync setup failed: %s", e)
+    finally:
+        # ALWAYS dispose the engine, including on cancellation paths.
+        # The previous implementation only disposed on the success
+        # path (and an inner-try-except in the failure path that
+        # itself could fail) — leaked 2 pool connections per cancelled
+        # call until process exit.
+        if _engine is not None:
+            try:
+                await _engine.dispose()
+            except Exception as e:
+                log.warning("sync_events_to_db: engine.dispose() failed: %s", e)
 
 
 async def sync_scores_to_db(source, games):
@@ -475,6 +548,18 @@ async def upsert_entities(teams):
     Uses ON CONFLICT DO NOTHING for entities (keyed on canonical_name)
     and ON CONFLICT DO NOTHING for aliases (keyed on alias+source),
     so this is safe to call repeatedly with the same data.
+
+    Transaction strategy: process teams in fixed-size chunks. Each
+    chunk = one short-lived transaction. This bounds the lock
+    duration on entity_aliases so a slow inner loop cannot hold a
+    transaction open for 30+ minutes (production transaction-leak
+    incident on 2026-05-08 traced to this function — single mega-
+    transaction wrapping thousands of inserts).
+
+    On failure mid-chunk, the chunk's writes roll back via the
+    session.begin() context's __aexit__. Subsequent chunks proceed
+    normally — partial progress is preserved across chunks but
+    NEVER mid-chunk.
     """
     if not DATABASE_URL or async_session is None or not teams:
         return
@@ -483,59 +568,93 @@ async def upsert_entities(teams):
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         from sqlalchemy import select
 
+        # ENTITY_UPSERT_CHUNK governs the per-transaction scope.
+        # 100 teams × ~5 aliases each = ~600 round-trips per chunk,
+        # well under the 60s statement_timeout / idle_in_transaction
+        # ceiling on Neon. Tune downward if Neon latency ever spikes.
+        CHUNK_SIZE = 100
+
         new_entities = 0
         new_aliases = 0
+        chunks_committed = 0
+        chunks_failed = 0
 
-        async with async_session() as session:
-            async with session.begin():
-                for t in teams:
-                    canon = t.get("canonical_name", "")
-                    if not canon:
-                        continue
+        for chunk_start in range(0, len(teams), CHUNK_SIZE):
+            chunk = teams[chunk_start:chunk_start + CHUNK_SIZE]
+            chunk_entities = 0
+            chunk_aliases = 0
+            try:
+                async with async_session() as session:
+                    async with session.begin():
+                        for t in chunk:
+                            canon = t.get("canonical_name", "")
+                            if not canon:
+                                continue
 
-                    # Upsert entity (DO NOTHING on conflict — first
-                    # writer wins the canonical name).
-                    stmt = pg_insert(Entity).values(
-                        canonical_name=canon,
-                        entity_type=t.get("entity_type", "team"),
-                        sport=t.get("sport"),
-                        league=t.get("league"),
-                    ).on_conflict_do_nothing(
-                        index_elements=["canonical_name"],
-                    )
-                    result = await session.execute(stmt)
-                    if result.rowcount > 0:
-                        new_entities += 1
+                            # Upsert entity (DO NOTHING on conflict — first
+                            # writer wins the canonical name).
+                            stmt = pg_insert(Entity).values(
+                                canonical_name=canon,
+                                entity_type=t.get("entity_type", "team"),
+                                sport=t.get("sport"),
+                                league=t.get("league"),
+                            ).on_conflict_do_nothing(
+                                index_elements=["canonical_name"],
+                            )
+                            result = await session.execute(stmt)
+                            if result.rowcount > 0:
+                                chunk_entities += 1
 
-                    # Fetch the entity id (may have been created earlier).
-                    row = await session.execute(
-                        select(Entity.id).where(
-                            Entity.canonical_name == canon
-                        )
-                    )
-                    entity_id = row.scalar_one_or_none()
-                    if entity_id is None:
-                        continue
+                            # Fetch the entity id (may have been created earlier).
+                            row = await session.execute(
+                                select(Entity.id).where(
+                                    Entity.canonical_name == canon
+                                )
+                            )
+                            entity_id = row.scalar_one_or_none()
+                            if entity_id is None:
+                                continue
 
-                    # Upsert aliases
-                    for a in t.get("aliases", []):
-                        alias_stmt = pg_insert(EntityAlias).values(
-                            entity_id=entity_id,
-                            alias=a["alias"],
-                            source=a["source"],
-                            normalized=a["normalized"],
-                        ).on_conflict_do_nothing(
-                            constraint="uq_alias_source",
-                        )
-                        r = await session.execute(alias_stmt)
-                        if r.rowcount > 0:
-                            new_aliases += 1
+                            # Upsert aliases
+                            for a in t.get("aliases", []):
+                                alias_stmt = pg_insert(EntityAlias).values(
+                                    entity_id=entity_id,
+                                    alias=a["alias"],
+                                    source=a["source"],
+                                    normalized=a["normalized"],
+                                ).on_conflict_do_nothing(
+                                    constraint="uq_alias_source",
+                                )
+                                r = await session.execute(alias_stmt)
+                                if r.rowcount > 0:
+                                    chunk_aliases += 1
+                # Clean __aexit__ from session.begin() commits the chunk;
+                # async_session() __aexit__ closes the session & returns
+                # the connection to the pool.
+                new_entities += chunk_entities
+                new_aliases += chunk_aliases
+                chunks_committed += 1
+            except Exception as e:
+                # Per-chunk failure does NOT abort the whole call.
+                # The chunk's writes have rolled back via context-manager
+                # __aexit__; subsequent chunks proceed.
+                chunks_failed += 1
+                log.warning(
+                    "upsert_entities: chunk %d failed (%d teams), continuing: %s",
+                    chunk_start // CHUNK_SIZE, len(chunk), e,
+                )
 
-        if new_entities or new_aliases:
-            log.info("entity seed: %d new entities, %d new aliases",
-                     new_entities, new_aliases)
+        if new_entities or new_aliases or chunks_failed:
+            log.info(
+                "entity seed: %d new entities, %d new aliases "
+                "(%d chunks ok, %d chunks failed)",
+                new_entities, new_aliases, chunks_committed, chunks_failed,
+            )
     except Exception as e:
-        log.error("entity seed failed: %s", e)
+        # Outermost catch — only fires if the chunk loop itself can't
+        # start (e.g., import failure). Per-chunk errors are caught
+        # above and don't reach here.
+        log.error("entity seed setup failed: %s", e)
 
 
 # ── Entity-based sport classifier ─────────────────────────────────
