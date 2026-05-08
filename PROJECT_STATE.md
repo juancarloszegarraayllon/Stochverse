@@ -8,6 +8,101 @@ next session. Treat it as the project's running journal.
 
 ## Session — 2026-05-08 (afternoon onwards)
 
+### Phase 2A.5 — Bootstrap (✅ complete in production)
+
+Bootstrap ran 2026-05-08T15:33:43Z, completed in 41.9s.
+**24,400 teams + 30,442 aliases inserted, 0 chunks failed,
+no leaked transactions.**
+
+Per-sport baseline (the strict-tier coverage benchmark for Phase 2B):
+
+| Sport             | Teams  | Aliases |
+|-------------------|--------|---------|
+| Soccer            | 17,305 | 22,040  |
+| Tennis (singles)  |  3,452 |  3,843  |
+| Basketball        |  1,973 |  2,419  |
+| Rugby Union       |    320 |    359  |
+| American Football |    309 |    501  |
+| Baseball          |    272 |    397  |
+| Hockey            |    252 |    310  |
+| Darts             |    174 |    190  |
+| Cricket           |    107 |    139  |
+| MMA               |     95 |     98  |
+| Boxing            |     75 |     79  |
+| Aussie Rules      |     66 |     67  |
+| Golf              |      0 |      0  |
+| Handball          |      0 |      0  |
+| Rugby League      |      0 |      0  |
+| Snooker           |      0 |      0  |
+| Volleyball        |      0 |      0  |
+
+**5 sports have zero teams** (Golf, Handball, Rugby League, Snooker,
+Volleyball). Resolver's alias tier (Phase 2C) or human review
+queue (Phase 2F) will populate them organically when Kalshi/FL
+coverage starts.
+
+Skipped (intentional): 1,745 tennis doubles partnerships, 452
+entities in unmapped sports (Esports / Motorsport / Table Tennis).
+
+### Phase 2B — Strict matcher (this session)
+
+Per locked design in `PHASE_2B_DESIGN.md` (PR #77).
+
+**Migration `bdf12a30e49b`:**
+- Created `sp.resolver_runs` table with `provider` + `run_mode` columns.
+- Altered `sp.fixtures.competition_id` from NOT NULL to NULL —
+  enables sport-only fallback when `sp.competitions` is empty.
+
+**New modules:**
+- `resolver/aliases.py` — `AliasResolver` bulk-load + in-memory
+  `(alias_normalized, sport_id) → set of team_ids` index. Strict
+  tier punts on ambiguous aliases (>1 team_id per key).
+- `resolver/fixtures.py` — `find_fixture` (drift-windowed search) +
+  `ensure_fixture` (DO-NOTHING + re-fetch per design §1).
+  `ensure_fixture` returns `(fixture_id, created_new)` so insert-vs-
+  conflict path is recorded in `resolution_log.reason_detail`.
+- `resolver/matcher.py` — `StrictMatcher` with 4-condition gate
+  (kickoff_confidence ≥ 0.85, both teams alias-resolved unambiguously,
+  sport classified, kickoff drift ≤ 30min). Tries swapped
+  orientation when find_fixture misses (handles direction-blind
+  Kalshi abbr_block). 0.98 confidence on hit.
+- `scripts/run_resolver_pass.py` — standalone runner. Bulk-loads
+  aliases, walks unresolved provider records in 200-row chunks,
+  each chunk one transaction. Atomic per design §1: UPDATE
+  provider table's fixture_id + INSERT resolution_log in the same
+  `session.begin()` block. Writes one `sp.resolver_runs` row at
+  end with parallel-run metrics.
+- 22 unit tests + 1 integration stub.
+
+**Operator action sequence (parallel-run kickoff):**
+
+```bash
+git checkout main && git pull
+
+# Apply migration (creates sp.resolver_runs, alters sp.fixtures)
+DATABASE_URL=<prod-Neon> alembic upgrade head
+
+# Smoke-run on a small slice
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
+  --provider kalshi --limit 100
+
+# Full passes
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider kalshi
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider fl
+
+# Day-7 metrics query (filters out post-2E live activity):
+psql "$DATABASE_URL" <<'SQL'
+SELECT provider,
+       SUM(records_scanned)  AS scanned,
+       SUM(auto_applies)     AS auto_applies,
+       ROUND(100.0 * SUM(auto_applies) / NULLIF(SUM(records_scanned), 0), 2) AS coverage_pct
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '7 days'
+  AND run_mode IN ('standalone', 'cron')
+GROUP BY 1;
+SQL
+```
+
 ### Production incident — transaction leak in db.py
 
 **Reported:** four connections leaked over ~35 minutes (pids 645, 647,

@@ -208,6 +208,107 @@ coverage** threshold).
   bootstrapped alias that produces a false-positive can be
   identified and downweighted/removed without touching curated data.
 
+## Phase 2B — Strict-tier resolver parallel-run
+
+Phase 2A.5 baseline is in place. Phase 2B's standalone runner
+(`scripts/run_resolver_pass.py`) drives the parallel-run period
+defined in `PHASE_2B_DESIGN.md` §2.
+
+### Migration
+
+```bash
+DATABASE_URL=<prod-Neon> alembic upgrade head
+```
+
+Applies revision `bdf12a30e49b`:
+- Creates `sp.resolver_runs` (one row per pass; queryable metrics)
+- Alters `sp.fixtures.competition_id` to nullable
+
+### How to run
+
+```bash
+# Smoke-run on a small slice first
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
+    --provider kalshi --limit 100
+
+# Full passes
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider kalshi
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider fl
+
+# Cron-tagged pass (for the 02:00 UTC daily during parallel-run)
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
+    --provider kalshi --run-mode cron
+```
+
+Or via Makefile:
+
+```bash
+make resolver-pass-kalshi
+make resolver-pass-kalshi ARGS="--limit 100"
+make resolver-pass-fl
+```
+
+### What each run produces
+
+- For each provider record matched by the strict tier: an UPDATE
+  setting `fixture_id` on the provider table + an INSERT into
+  `sp.resolution_log` with confidence 0.98, `reason_code='strict'`,
+  and full `reason_detail` JSONB. Both writes happen in one
+  transaction per the leak-fix discipline.
+- For each match-attempt that misses any of the 4 gates: silent
+  skip (no `resolution_log` entry; the next tier handles it in
+  Phase 2C+).
+- One row per pass in `sp.resolver_runs` with `provider`,
+  `run_mode`, counters, latency p95.
+
+### Day-7 parallel-run report
+
+```sql
+SELECT provider,
+       SUM(records_scanned)                 AS scanned,
+       SUM(auto_applies)                    AS auto_applies,
+       SUM(no_match)                        AS no_match,
+       SUM(crashes)                         AS crashes,
+       SUM(legacy_diff_count)               AS kalshi_legacy_diffs,
+       ROUND(100.0 * SUM(auto_applies) / NULLIF(SUM(records_scanned), 0), 2) AS coverage_pct,
+       ROUND(100.0 * SUM(legacy_diff_count) / NULLIF(SUM(auto_applies), 0), 2) AS kalshi_fp_pct,
+       MAX(latency_p95_ms)                  AS worst_latency_p95_ms
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '7 days'
+  AND run_mode IN ('standalone', 'cron')   -- exclude post-2E live activity
+GROUP BY 1
+ORDER BY 1;
+```
+
+Thresholds from design doc §2:
+- Kalshi false-positive rate > 1.0% / 24h → tighten drift to 15 min
+- Coverage < 60% sustained → review extraction
+- Latency p95 > 5min → switch to LISTEN/NOTIFY (2E.fix)
+- Crashes > 5/day → halt parallel-run
+
+### FL spot-check (manual, not a query)
+
+`legacy_diff_count` is NULL for FL — there's no automatic comparator.
+Instead, pick 5 random FL strict-tier auto-applies per day and
+manually verify the chosen fixture matches the underlying real-world
+game:
+
+```sql
+SELECT decided_at, provider_record_id, fixture_id,
+       reason_detail->>'home_team_id' AS home,
+       reason_detail->>'away_team_id' AS away
+FROM sp.resolution_log
+WHERE provider = 'fl'
+  AND reason_code = 'strict'
+  AND decided_at > NOW() - INTERVAL '24 hours'
+ORDER BY random()
+LIMIT 5;
+```
+
+Cross-reference with FL's web UI. ≥1 of 5 wrong on any day halts
+FL parallel-run; 0 of 5 wrong for 5 consecutive days = FL precision
+acceptable.
+
 ## Future phases
 
 When Phase 1 ships, this file will be amended with:

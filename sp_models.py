@@ -222,7 +222,7 @@ class Fixture(SPBase):
 
     home_team_id = Column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.teams.id"), nullable=False)
     away_team_id = Column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.teams.id"), nullable=False)
-    competition_id = Column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.competitions.id"), nullable=False)
+    competition_id = Column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.competitions.id"), nullable=True)
 
     kickoff_at = Column(DateTime(timezone=True), nullable=False)
     stage = Column(Text)                                        # group/round/leg/playoff metadata
@@ -443,4 +443,37 @@ class ProviderApiCall(SPBase):
     __table_args__ = (
         Index("ix_provider_api_calls_provider_called", "provider", "called_at"),
         Index("ix_provider_api_calls_status", "status"),
+    )
+
+
+class ResolverRun(SPBase):
+    """Per-run audit row written by scripts/run_resolver_pass.py and
+    (Phase 2E onward) the live runner.
+
+    One row per pass. Provides queryable parallel-run metrics without
+    log-grepping. The run_mode column distinguishes parallel-run data
+    ('standalone' | 'cron') from post-Phase-2E live activity ('live'),
+    so day-7 reports can filter cleanly.
+    """
+    __tablename__ = "resolver_runs"
+
+    id                  = Column(BigInteger, primary_key=True, autoincrement=True)
+    run_id              = Column(UUID(as_uuid=True), nullable=False)
+    resolver_version    = Column(Text, nullable=False)
+    provider            = Column(Text, nullable=False)            # 'fl' | 'kalshi'
+    run_mode            = Column(Text, nullable=False)            # 'standalone' | 'cron' | 'live'
+    started_at          = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    finished_at         = Column(DateTime(timezone=True))
+    records_scanned     = Column(Integer, nullable=False, default=0)
+    auto_applies        = Column(Integer, nullable=False, default=0)
+    no_match            = Column(Integer, nullable=False, default=0)
+    crashes             = Column(Integer, nullable=False, default=0)
+    legacy_diff_count   = Column(Integer)                         # Kalshi only; NULL for FL
+    legacy_diff_details = Column(JSONB)
+    latency_p95_ms      = Column(Integer)
+    extra               = Column(JSONB, default=dict)
+
+    __table_args__ = (
+        Index("ix_resolver_runs_provider_started", "provider", "started_at"),
+        Index("ix_resolver_runs_run_mode_started", "run_mode", "started_at"),
     )
