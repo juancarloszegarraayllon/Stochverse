@@ -332,6 +332,79 @@ A material `matched_existing_comp_fixture` count means Kalshi-Kalshi-FL
 order is common in your data — fine, but flags real comp-asymmetry
 work for 2C.
 
+## Phase 2A.7 — sp.fl_events.sport_id (recover sport context per row)
+
+FL ingestion polls per-sport but pre-2A.7 didn't persist sport
+context anywhere — neither column nor `raw_payload` top-level. The
+resolver runner had no way to pass `sport=...` to
+`FLResolverModule.extract_signal`, so every FL signal hit the
+matcher's gate 2 (`sport_not_classified`) and got rejected. First
+production FL pass produced **0/19,753 auto-applies**.
+
+Phase 2A.7 fixes the architectural gap with a new column + ingestion
+update + thin backfill wrapper. No design doc changes — this is a
+data-shape fix discovered post-2B.
+
+### Migration
+
+```bash
+DATABASE_URL=<prod-Neon> alembic upgrade head
+```
+
+Applies revision `7c3f9b1a2e58`:
+- Adds `sp.fl_events.sport_id INTEGER REFERENCES sp.sports(id)` (nullable; backfilled by ingestion).
+- Creates partial index `ix_fl_events_sport_unresolved` on `(sport_id, last_seen_at DESC) WHERE fixture_id IS NULL` — supports the resolver runner's hot query.
+
+### Backfill
+
+```bash
+DATABASE_URL=<prod-Neon> python scripts/backfill_sp_fl_events_sport_id.py
+```
+
+Or:
+
+```bash
+make backfill-sp-fl-events-sport-id
+make backfill-sp-fl-events-sport-id ARGS="--skip-backfill"   # residual report only
+```
+
+Mechanics: re-runs the standard FL backfill (`scripts/backfill_fl.py`)
+for indent_days `-7..+7`. Phase 2A.7's ingestion change populates
+`sport_id` on every UPSERT, so existing rows in the FL ±7 day window
+get backfilled in one pass. The script reports pre/post NULL counts
+and per-sport coverage, plus a residual count for rows that stay
+NULL.
+
+Rows that legitimately stay `sport_id IS NULL`:
+- Events outside the FL ±7 day window (legacy historical rows; no
+  FL endpoint serves them today, so they drain naturally as old
+  fixtures roll off).
+- Events for FL sport_ids not in `FL_SPORT_ID_TO_SP_NAME`. The
+  ingestion logs `ingestion.fl.sport_id_unmapped` warnings naming
+  the unrecognized FL ids — add them to the map (or seed the
+  matching sp.sports row) and re-run.
+
+### Verification
+
+```sql
+-- Per-sport coverage on the new column.
+SELECT s.name AS sport, COUNT(fle.fl_event_id) AS rows
+FROM sp.fl_events fle
+INNER JOIN sp.sports s ON s.id = fle.sport_id
+GROUP BY 1 ORDER BY 2 DESC;
+
+-- Residual NULLs (expected: rows outside FL's ±7 day window).
+SELECT COUNT(*) FROM sp.fl_events WHERE sport_id IS NULL;
+```
+
+### What 2A.7 does NOT do
+
+- Does not change `raw_payload` content. Older rows still have
+  `SPORT_ID = null` inside their payloads — that field was never
+  populated by FL, and the resolver doesn't read it now anyway.
+- Does not unlock historical FL fixtures beyond the ±7 day window.
+  Out of scope until a per-tournament historical fetch is added.
+
 ## Phase 2B — Strict-tier resolver parallel-run
 
 Phase 2A.5 baseline is in place. Phase 2B's standalone runner

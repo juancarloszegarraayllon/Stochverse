@@ -178,16 +178,27 @@ async def main(
             )
         else:  # provider == 'fl'
             extractor = FLResolverModule()
-            # FL ingestion (ingestion/fl.py) fetches events only for
-            # the sport_ids in DEFAULT_FL_SPORT_IDS, so every row in
-            # sp.fl_events is sport-shaped by construction — no
-            # category filter needed here. If ingestion ever broadens
-            # to non-sport endpoints, mirror the Kalshi filter shape.
+            # Phase 2A.7: FL ingestion polls per-sport but didn't
+            # persist sport context until 2A.7 added sp.fl_events.sport_id.
+            # The runner JOINs sp.sports so the matcher can read the
+            # sport name and pass it to extract_signal — without this,
+            # every FL signal hit gate 2 (sport_not_classified) and
+            # got rejected (production smoke produced 0/19,753
+            # auto-applies before the column existed).
+            #
+            # `sport_id IS NOT NULL` filters out pre-2A.7 rows that
+            # haven't been re-touched by ingestion yet. They drain as
+            # `make backfill-fl` runs (covers ±7 day FL window) and
+            # the live ingestion poll re-UPSERTs them.
             sql = (
-                "SELECT fl_event_id AS pk, raw_payload "
-                "FROM sp.fl_events "
-                "WHERE fixture_id IS NULL "
-                "ORDER BY last_seen_at DESC"
+                "SELECT fle.fl_event_id AS pk, "
+                "       fle.raw_payload, "
+                "       s.name AS sport_name "
+                "FROM sp.fl_events fle "
+                "INNER JOIN sp.sports s ON s.id = fle.sport_id "
+                "WHERE fle.fixture_id IS NULL "
+                "  AND fle.sport_id IS NOT NULL "
+                "ORDER BY fle.last_seen_at DESC"
             )
         if limit:
             sql += f" LIMIT {int(limit)}"
@@ -215,7 +226,21 @@ async def main(
                         per_record_start = time.monotonic()
 
                         try:
-                            signal = extractor.extract_signal(row.raw_payload)
+                            # Phase 2A.7: FL extractor needs sport
+                            # passed in (raw_payload doesn't carry
+                            # SPORT_ID — see PROJECT_STATE.md). The
+                            # runner SQL JOINs sp.sports so row.sport_name
+                            # is the canonical name. Kalshi's
+                            # extract_signal reads _sport off raw_payload
+                            # itself; passing sport=None keeps that path
+                            # working.
+                            if provider == "fl":
+                                signal = extractor.extract_signal(
+                                    row.raw_payload,
+                                    sport=row.sport_name,
+                                )
+                            else:
+                                signal = extractor.extract_signal(row.raw_payload)
                         except Exception as e:
                             chunk_crashes += 1
                             log.warning(

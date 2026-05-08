@@ -270,19 +270,34 @@ class FLEvent(SPBase):
     fl_event_id = Column(Text, primary_key=True)
     fixture_id = Column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.fixtures.id"))
 
+    # Sport context recovered at ingestion time. FL's
+    # /v1/events/list is polled per-sport, so sport_id is in scope at
+    # write time; we just have to remember to write it. NULL on rows
+    # ingested before Phase 2A.7 — `make backfill-fl` repopulates
+    # them via the same UPSERT path on the next pass.
+    sport_id = Column(Integer, ForeignKey(f"{SCHEMA}.sports.id"), nullable=True)
+
     raw_payload = Column(JSONB, nullable=False)
 
     last_seen_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     last_changed_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
-    payload_hash = Column(String(64), nullable=False)           # sha256 of normalized JSON
+    payload_hash = Column(String(64), nullable=False)               # sha256 of normalized JSON
 
     fixture = relationship("Fixture")
+    sport = relationship("Sport")
 
     __table_args__ = (
         Index("ix_fl_events_fixture_id", "fixture_id"),
         Index("ix_fl_events_unresolved", "fixture_id",
               postgresql_where=Column("fixture_id").is_(None)),
         Index("ix_fl_events_last_seen", "last_seen_at"),
+        # Phase 2A.7: partial index for the resolver runner's hot
+        # query (sport-classified + unresolved).
+        Index(
+            "ix_fl_events_sport_unresolved",
+            "sport_id", "last_seen_at",
+            postgresql_where=Column("fixture_id").is_(None),
+        ),
     )
 
 

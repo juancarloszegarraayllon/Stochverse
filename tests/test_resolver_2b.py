@@ -770,6 +770,25 @@ class TestStaticInvariants:
         miss_idx = self.src.find("chunk_miss += 1", strict_idx)
         assert 0 < miss_idx < log_idx
 
+    def test_fl_query_joins_sports_and_filters_sport_id(self):
+        """Phase 2A.7: FL rows had no sport context until sp.fl_events.sport_id
+        was added. Without the JOIN + IS NOT NULL filter, every FL signal
+        hits gate 2 (sport_not_classified). Production smoke produced
+        0/19,753 auto-applies before this filter existed."""
+        # Pin to the FL branch.
+        fl_idx = self.src.find("else:  # provider == 'fl'")
+        assert fl_idx > 0
+        # The next ~1500 chars contain the FL SQL block.
+        fl_block = self.src[fl_idx:fl_idx + 1500]
+        assert "FROM sp.fl_events" in fl_block
+        assert "INNER JOIN sp.sports" in fl_block, (
+            "FL runner SQL must JOIN sp.sports so the matcher can read "
+            "the canonical sport name and pass it to extract_signal."
+        )
+        assert "fle.sport_id IS NOT NULL" in fl_block
+        # extract_signal call must pass sport=row.sport_name for FL.
+        assert 'sport=row.sport_name' in self.src
+
     def test_kalshi_query_filters_to_sports_records(self):
         """Kalshi ingestion stores every category (Elections, Politics,
         Crypto, etc.). Those records can't yield a FixtureSignal and

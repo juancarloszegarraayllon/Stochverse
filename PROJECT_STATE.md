@@ -205,6 +205,76 @@ carrying that flag to backfill explicit competition_ids.
    `(fixture_id, fixture_competition_id)` so the matcher can audit
    the equal-or-NULL filter outcome.
 
+### Phase 2A.7 — sp.fl_events.sport_id (this session, follow-up to 2B/2A.6)
+
+First production FL pass produced **0/19,753 auto-applies**. Diagnosed:
+`sp.fl_events` had no sport context preserved (no column, and
+`raw_payload.SPORT_ID` was always null), so the runner couldn't pass
+`sport=...` into `FLResolverModule.extract_signal`. Every FL signal
+hit the matcher's gate 2 (`sport_not_classified`).
+
+Earlier (PR #85) review claimed FL was "sport-shaped by construction"
+because `ingestion/fl.py` polls per-sport — that conflated "polled
+per-sport" with "preserved sport in storage." The poller had the
+sport_id in scope at write time but never wrote it.
+
+**Migration `7c3f9b1a2e58`:**
+- Adds `sp.fl_events.sport_id INTEGER REFERENCES sp.sports(id)` (nullable).
+- Partial index `ix_fl_events_sport_unresolved` on
+  `(sport_id, last_seen_at DESC) WHERE fixture_id IS NULL` —
+  supports the runner's hot query without bloating the full table.
+
+**Ingestion (`ingestion/fl.py`):**
+- New `FL_SPORT_ID_TO_SP_NAME` map (single source of truth, 17
+  entries matching `DEFAULT_FL_SPORT_IDS`). Decoupled from
+  `main.py._KALSHI_SPORT_BY_FL_ID` which is older + has several
+  conflicting IDs.
+- One bulk SELECT at pass start resolves `FL sport_id → sp.sports.id`.
+- Per-sport batch now passes `{"sport_id": sp_sport_id}` in fields,
+  so UPSERT populates the column on insert AND backfills it on
+  conflict.
+- Unmapped FL sport_ids are skipped with `ingestion.fl.sport_id_unmapped`
+  warning rather than NULL-out the column on existing rows during
+  conflict resolution.
+
+**Runner (`scripts/run_resolver_pass.py`):**
+- FL SQL now `INNER JOIN sp.sports` and filters `sport_id IS NOT NULL`.
+- `extract_signal` is called with `sport=row.sport_name` for FL.
+- Kalshi path unchanged — `_sport` lives on `raw_payload` already.
+
+**Backfill:**
+- `scripts/backfill_sp_fl_events_sport_id.py` wraps the existing
+  `backfill_fl.py` and reports pre/post NULL counts + per-sport
+  coverage. Re-fetching the FL ±7 day window backfills sport_id on
+  every currently-fetchable row.
+- Rows outside the ±7 day window stay NULL until a future
+  per-tournament historical fetch lands. Documented; not in scope.
+
+**Tests (+7 new):**
+- `TestFLSportIdMap` (2): every DEFAULT_FL_SPORT_ID is mapped; every
+  mapped name aligns with the canonical sp.sports seed.
+- `TestIngestionWritesSportId` (3): static guards that batch fields
+  include `sport_id`, pre-pass bulk-loads sp.sports, and unmapped
+  ids are skipped with warning.
+- `test_fl_query_joins_sports_and_filters_sport_id` (1): static
+  guard on the runner SQL JOIN + filter + extract_signal call shape.
+- 1 existing FL-test class kept (TestFLEventValidator etc.).
+
+**Operator action sequence (2A.7 → re-run smoke):**
+
+```bash
+git checkout main && git pull
+DATABASE_URL=<prod-Neon> alembic upgrade head            # apply 7c3f9b1a2e58
+
+# Backfill existing rows (re-fetch FL ±7 days; populates sport_id).
+DATABASE_URL=<prod-Neon> python scripts/backfill_sp_fl_events_sport_id.py
+
+# Re-run smoke. Expected: real auto-applies + meaningful no_match
+# fail_reason distribution. Compare against the 0/19,753 baseline.
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
+    --provider fl --limit 100
+```
+
 ### Production incident — transaction leak in db.py
 
 **Reported:** four connections leaked over ~35 minutes (pids 645, 647,

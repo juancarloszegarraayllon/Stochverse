@@ -315,3 +315,75 @@ class TestBatchUpsertClassification:
             loop.close()
         assert result == (0, 0, 0)
         mock_session.execute.assert_not_called()
+
+
+# ── Phase 2A.7: FL sport_id mapping + ingestion wiring ─────────
+
+
+class TestFLSportIdMap:
+    """Phase 2A.7: FL numeric sport_id → sp.sports.name translation
+    must cover every entry in DEFAULT_FL_SPORT_IDS, and every value
+    must match the canonical sp.sports.name spelling.
+    """
+
+    def test_every_default_sport_id_is_mapped(self):
+        from ingestion.fl import DEFAULT_FL_SPORT_IDS, FL_SPORT_ID_TO_SP_NAME
+        unmapped = [s for s in DEFAULT_FL_SPORT_IDS if s not in FL_SPORT_ID_TO_SP_NAME]
+        assert not unmapped, (
+            f"DEFAULT_FL_SPORT_IDS includes {unmapped} but FL_SPORT_ID_TO_SP_NAME "
+            f"doesn't translate them — ingestion would skip those sports with a "
+            f"sport_id_unmapped warning."
+        )
+
+    def test_map_values_align_with_sp_sports_seed(self):
+        """The values in FL_SPORT_ID_TO_SP_NAME must exactly match the
+        canonical names seeded in sp.sports (migration d8e717ed79dd).
+        Keep this list in sync with the seed migration."""
+        from ingestion.fl import FL_SPORT_ID_TO_SP_NAME
+        # The 17-sport canonical list per architecture v1.4 §5.4.
+        # Mirrors migration d8e717ed79dd_seed_sp_sports.py.
+        canonical_sp_names = {
+            "Soccer", "Tennis", "Basketball", "Hockey", "American Football",
+            "Baseball", "Handball", "Cricket", "Volleyball", "Rugby Union",
+            "Aussie Rules", "Rugby League", "MMA", "Boxing", "Golf",
+            "Snooker", "Darts",
+        }
+        for fl_id, sp_name in FL_SPORT_ID_TO_SP_NAME.items():
+            assert sp_name in canonical_sp_names, (
+                f"FL_SPORT_ID_TO_SP_NAME[{fl_id}] = {sp_name!r} but that name "
+                f"isn't in the sp.sports seed — ingestion would skip with "
+                f"sport_id_unmapped."
+            )
+
+
+class TestIngestionWritesSportId:
+    """Phase 2A.7: the per-sport batch in _ingest_pass must include
+    `sport_id` in its `fields` dict so the UPSERT populates the column.
+    Static-source guard against regression."""
+
+    def setup_method(self):
+        import inspect
+        import ingestion.fl
+        self.src = inspect.getsource(ingestion.fl)
+
+    def test_batch_includes_sport_id_field(self):
+        # Find the batch.append( call inside _ingest_pass.
+        idx = self.src.find("batch.append({")
+        assert idx > 0
+        # The next ~600 chars should include the sport_id field.
+        block = self.src[idx:idx + 600]
+        assert "\"sport_id\"" in block, (
+            "ingestion.fl._ingest_pass batch must include sport_id in fields "
+            "so the UPSERT populates sp.fl_events.sport_id."
+        )
+
+    def test_pre_pass_resolves_sp_sport_id_lookup(self):
+        # The function should bulk-load sp.sports → id map up-front.
+        assert "SELECT id, name FROM sp.sports" in self.src
+        assert "sp_sport_id_by_fl_id" in self.src
+
+    def test_unmapped_sports_are_skipped_with_warning(self):
+        # Sports without an sp.sports entry must NOT be polled (would
+        # NULL-out sport_id on existing rows during UPSERT).
+        assert "sport_id_unmapped" in self.src
+        assert "skipped_unmapped" in self.src
