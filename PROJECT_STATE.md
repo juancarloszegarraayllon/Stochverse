@@ -10,6 +10,27 @@ next session. Treat it as the project's running journal.
 
 ### What landed
 
+- **Phase 2A.5 — Bootstrap.** New `scripts/bootstrap_sp_teams.py` +
+  Alembic migration `d8e717ed79dd` (seeds `sp.sports` with 17-sport
+  finite list, each with per-sport drift threshold from §5.4). One-
+  time legacy → SP migration: pulls `public.entities` (team-typed)
+  into `sp.teams`, `public.entity_aliases` into `sp.team_aliases`
+  with `source='legacy_bootstrap'`, `confidence=0.95`. Idempotent
+  via `(alias_normalized, source)` unique constraint. Has `--dry-run`
+  flag for safe operator preview. Makefile target `bootstrap-sp-teams`,
+  DEPLOYMENT.md runbook.
+  - **Operator action required after merge:** apply migration,
+    `--dry-run` first, then run for real, **document per-sport
+    coverage counts in this file** (replaces "open question:
+    Phase 2B baseline").
+
+- **Phase 2B design doc** locked at `PHASE_2B_DESIGN.md` (PR #77).
+  Three pushbacks addressed: ensure_fixture pinned to DO-NOTHING +
+  re-fetch; parallel-run criteria split per-provider (Kalshi auto
+  diff, FL operator spot-check); bootstrap as separate 2A.5 PR.
+  `sp.resolver_runs` schema includes `provider` + `run_mode` for
+  filtering parallel-run vs live-runner data.
+
 - **Phase 2A — Resolver scaffolding.** New `resolver/` package with the
   contract types and per-provider extraction logic. No DB writes,
   no matching, no resolution_log — pure foundation for 2B+.

@@ -123,6 +123,91 @@ SELECT 'kalshi_markets', MIN(last_seen_at), MAX(last_seen_at) FROM sp.kalshi_mar
 
 The script is network-bound on the FL API, not the database.
 
+## Phase 2A.5 — Bootstrap sp.teams + sp.team_aliases from legacy
+
+One-time migration that seeds the SP entity layer's team data from
+`public.entities` (entity_type='team') and `public.entity_aliases`.
+Pre-seeds the alias table so Phase 2B's strict-tier resolver has
+data to match against on day 1, instead of cold-starting from zero
+coverage.
+
+### When to run
+
+Once, after the seed_sp_sports migration is applied. Before Phase 2B
+ships its matcher. The bootstrap is idempotent — re-running is safe
+but produces no new rows after the first successful run.
+
+### How to run
+
+Locally against production Neon:
+
+```bash
+# Verify migrations are at head — the seed_sp_sports migration must
+# have applied. Required revision: d8e717ed79dd or later.
+DATABASE_URL="<prod-Neon>" alembic current
+
+# Dry-run first — reads everything, writes nothing, logs counts.
+DATABASE_URL="<prod-Neon>" python scripts/bootstrap_sp_teams.py --dry-run
+
+# If the dry-run counts look reasonable (per-sport teams >= legacy
+# entity counts), run for real:
+DATABASE_URL="<prod-Neon>" python scripts/bootstrap_sp_teams.py
+```
+
+Or via Makefile (uses local docker-compose Postgres):
+
+```bash
+make bootstrap-sp-teams
+make bootstrap-sp-teams ARGS="--dry-run"
+```
+
+### Verification
+
+After running, check the per-sport coverage:
+
+```sql
+SELECT
+  s.name,
+  COUNT(DISTINCT t.id)            AS teams,
+  COUNT(a.id)                     AS aliases,
+  COUNT(DISTINCT a.team_id)       AS teams_with_at_least_one_alias
+FROM sp.sports s
+LEFT JOIN sp.teams t        ON t.sport_id = s.id
+LEFT JOIN sp.team_aliases a ON a.team_id = t.id AND a.source = 'legacy_bootstrap'
+GROUP BY 1
+ORDER BY 1;
+```
+
+Expected: most active sports (Soccer, Basketball, Hockey, Baseball,
+Tennis, Football) should show non-zero teams + aliases. Sports with
+no legacy data (Snooker, Darts, etc. — depends on your historical
+ingestion coverage) may show zero; that's not a bootstrap failure,
+it's a fact about the legacy data.
+
+### Document the baseline
+
+After bootstrap completes, copy the per-sport counts table into
+`PROJECT_STATE.md`. Phase 2B's parallel-run will reference this
+baseline when assessing whether strict-tier coverage is healthy
+(architecture v1.4 §13 / Phase 2B design doc §2 — the **<60%
+coverage** threshold).
+
+### Limitations / known scoping
+
+- Bootstrap migrates `public.entities` (team-typed) and
+  `public.entity_aliases`. Player and league entities are not
+  migrated — out of scope for the resolver's matching surface.
+- `public.markets` (sub-market identity) is **not** bootstrapped;
+  that's deferred to Phase 2C alias-tier work.
+- `country_code` on `sp.teams` is left NULL — legacy schema doesn't
+  carry it. Population is a future concern (Phase 4 if/when needed
+  for OddsAPI integration).
+- Bootstrapped aliases get `source='legacy_bootstrap'` and
+  `confidence=0.95`. The 0.05 gap from 1.0 distinguishes them from
+  human-curated aliases (added later via the review queue), so a
+  bootstrapped alias that produces a false-positive can be
+  identified and downweighted/removed without touching curated data.
+
 ## Future phases
 
 When Phase 1 ships, this file will be amended with:
