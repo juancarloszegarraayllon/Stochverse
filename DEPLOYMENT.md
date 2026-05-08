@@ -379,11 +379,21 @@ make resolver-pass-fl
   `sp.resolution_log` with confidence 0.98, `reason_code='strict'`,
   and full `reason_detail` JSONB. Both writes happen in one
   transaction per the leak-fix discipline.
-- For each match-attempt that misses any of the 4 gates: silent
-  skip (no `resolution_log` entry; the next tier handles it in
-  Phase 2C+).
+- For each match-attempt that misses any of the 4 gates: an INSERT
+  into `sp.resolution_log` with `fixture_id IS NULL`, `confidence=0`,
+  `reason_code='no_match'`, and the full `reason_detail` JSONB
+  capturing which gate rejected the signal. Provider record's
+  `fixture_id` stays NULL. Day-7 review queries
+  `reason_detail->>'fail_reason'` against this log.
+- For provider records the extractor can't produce a FixtureSignal
+  from (Kalshi outright/series/tournament shapes — no per-fixture
+  semantics): no `resolution_log` row (no signal → no reason_detail
+  to log). Tracked in the run-level
+  `extra->>'signal_extraction_skipped'` counter so the
+  records_scanned breakdown reconciles.
 - One row per pass in `sp.resolver_runs` with `provider`,
-  `run_mode`, counters, latency p95.
+  `run_mode`, counters, latency p95, and
+  `extra.signal_extraction_skipped`.
 
 ### Day-7 parallel-run report
 
@@ -392,6 +402,7 @@ SELECT provider,
        SUM(records_scanned)                 AS scanned,
        SUM(auto_applies)                    AS auto_applies,
        SUM(no_match)                        AS no_match,
+       SUM((extra->>'signal_extraction_skipped')::int) AS extract_skipped,
        SUM(crashes)                         AS crashes,
        SUM(legacy_diff_count)               AS kalshi_legacy_diffs,
        ROUND(100.0 * SUM(auto_applies) / NULLIF(SUM(records_scanned), 0), 2) AS coverage_pct,
@@ -409,6 +420,40 @@ Thresholds from design doc §2:
 - Coverage < 60% sustained → review extraction
 - Latency p95 > 5min → switch to LISTEN/NOTIFY (2E.fix)
 - Crashes > 5/day → halt parallel-run
+
+### Why isn't strict tier matching? — fail_reason audit
+
+Every no_match decision is logged with the gate that rejected it.
+Use this as the first stop when coverage looks low:
+
+```sql
+SELECT provider,
+       reason_detail->>'fail_reason' AS fail_reason,
+       COUNT(*)                      AS n,
+       ROUND(100.0 * COUNT(*) /
+             SUM(COUNT(*)) OVER (PARTITION BY provider), 1) AS pct_of_provider
+FROM sp.resolution_log
+WHERE reason_code = 'no_match'
+  AND decided_at > NOW() - INTERVAL '24 hours'
+GROUP BY 1, 2
+ORDER BY 1, 3 DESC;
+```
+
+Common values + remediation:
+- `alias_resolution_incomplete` — team didn't normalize to a seeded
+  alias. Check `reason_detail->>'home_resolved'` /
+  `away_resolved` to see which side. Phase 2C alias tier will
+  recover most of these.
+- `kalshi_competition_unresolvable` — `series_ticker` strips to a
+  base not in `sp.competitions.kalshi_series_bases`. Re-run
+  `bootstrap_sp_competitions.py` against the latest Kalshi data.
+- `sport_not_classified` — `_sport` field empty/unknown on the
+  raw payload. Ingestion-side classification problem, not resolver.
+- `kickoff_at_missing` / `kickoff_confidence_below_threshold` —
+  payload lacked an explicit kickoff timestamp; ticker fallback
+  gave 0.6 confidence. Strict tier requires ≥0.85.
+- `home_and_away_same_team` — alias data bug; both sides resolved
+  to the same `team_id`. Manual triage on the specific alias.
 
 ### FL spot-check (manual, not a query)
 

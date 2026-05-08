@@ -744,6 +744,44 @@ class TestStaticInvariants:
         # parallel-run from live-runner data).
         assert "run_mode=run_mode" in self.src
 
+    def test_resolution_log_written_on_no_match_too(self):
+        """Per design doc §1 + smoke-run feedback: every match decision
+        (auto-apply AND no_match) must INSERT a resolution_log row so
+        day-7 review can query reason_detail->>'fail_reason'. The
+        session.add(ResolutionLog ...) call must NOT live inside the
+        `if result.reason_code == ReasonCode.STRICT:` branch — it has
+        to run on both branches."""
+        # Locate the strict-branch test.
+        strict_idx = self.src.find("if result.reason_code == ReasonCode.STRICT:")
+        assert strict_idx > 0
+        # Locate the next session.add(ResolutionLog( call.
+        log_idx = self.src.find("session.add(ResolutionLog(", strict_idx)
+        assert log_idx > 0
+        # Locate the `else:` that opens the no_match branch — must
+        # appear BEFORE the ResolutionLog INSERT so the INSERT is at
+        # the post-if/else level (runs on every decision).
+        else_idx = self.src.find("else:", strict_idx)
+        assert 0 < else_idx < log_idx, (
+            "session.add(ResolutionLog(...) must run on both auto-apply "
+            "and no_match branches; currently it lives inside one branch."
+        )
+        # And the chunk_miss increment must precede the log INSERT
+        # (no_match still counts), confirming we still tally misses.
+        miss_idx = self.src.find("chunk_miss += 1", strict_idx)
+        assert 0 < miss_idx < log_idx
+
+    def test_signal_extraction_skipped_counter(self):
+        """The runner must count records where extract_signal returned
+        None so the records_scanned breakdown reconciles. Counter is
+        surfaced in stdout, the structured complete log, and
+        sp.resolver_runs.extra JSONB."""
+        assert "signal_extraction_skipped = 0" in self.src
+        assert "chunk_skipped += 1" in self.src
+        # Surfaced in the per-run extra JSONB.
+        assert "\"signal_extraction_skipped\": signal_extraction_skipped" in self.src
+        # Surfaced in the stdout summary.
+        assert "signal_extraction_skipped:" in self.src
+
 
 # ── Integration test stub (gated on SP_INTEGRATION_DB) ───────────
 

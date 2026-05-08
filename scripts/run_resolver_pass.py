@@ -10,11 +10,23 @@ Per-pass behavior:
   2. Bulk-load sp.sports name/code → id table.
   3. Bulk-fetch unresolved provider records (fixture_id IS NULL)
      for the chosen provider.
-  4. For each record: extract_signal → match → if hit, atomic
-     transaction (UPDATE fixture_id, INSERT resolution_log).
+  4. For each record:
+       - extract_signal. If returns None (e.g. Kalshi outright /
+         series / tournament), increment signal_extraction_skipped
+         and skip — no FixtureSignal means no reason_detail to log.
+       - match.
+       - On STRICT (auto-apply): UPDATE fixture_id on the provider
+         record AND INSERT resolution_log row in the same
+         transaction (atomic per design doc §1).
+       - On NO_MATCH: INSERT resolution_log row capturing
+         reason_detail (which gate rejected, alias resolution
+         status, competition gate decision, etc.). Provider
+         record's fixture_id stays NULL. No UPDATE.
   5. Commit per chunk (default 200 records / chunk) per the leak-fix
      discipline in db.py.
-  6. At end: write one row to sp.resolver_runs with metrics.
+  6. At end: write one row to sp.resolver_runs with metrics, including
+     signal_extraction_skipped in `extra` JSONB so the
+     records_scanned breakdown reconciles.
 
 Usage:
 
@@ -95,6 +107,8 @@ async def main(
     auto_applies = 0
     no_match = 0
     crashes = 0
+    signal_extraction_skipped = 0     # Phase 2A.6: extract_signal returned None
+                                      # (e.g., Kalshi outright/series — not per-fixture)
     latencies_ms: list[int] = []
 
     async with async_session() as bootstrap_session:
@@ -158,6 +172,7 @@ async def main(
         chunk = unresolved_rows[chunk_start:chunk_start + CHUNK_SIZE]
         chunk_auto = 0
         chunk_miss = 0
+        chunk_skipped = 0
         chunk_crashes = 0
 
         try:
@@ -182,9 +197,15 @@ async def main(
                             continue
 
                         if signal is None:
-                            # Provider record can't be resolved (e.g.
-                            # Kalshi outright). Don't write
-                            # resolution_log — nothing to log.
+                            # Provider record can't be resolved by the
+                            # strict tier (e.g., Kalshi outright,
+                            # tournament, or series — not per-fixture).
+                            # No FixtureSignal means no reason_detail
+                            # to log; track in the run-level counter so
+                            # day-7 reports can attribute the gap
+                            # between records_scanned and (auto + miss
+                            # + crashes).
+                            chunk_skipped += 1
                             continue
 
                         try:
@@ -201,10 +222,12 @@ async def main(
                             )
                             continue
 
+                        # Auto-apply path: link provider record to
+                        # fixture in this transaction. Atomic with the
+                        # ResolutionLog row written below — per design
+                        # doc §1, link UPDATE and log INSERT must
+                        # commit or roll back together.
                         if result.reason_code == ReasonCode.STRICT:
-                            # Auto-apply: link provider record to fixture
-                            # AND append resolution_log row in this same
-                            # transaction (atomic per design doc §1).
                             await session.execute(text(
                                 f"UPDATE sp.{ 'kalshi_markets' if provider == 'kalshi' else 'fl_events' } "
                                 f"SET fixture_id = :fixture_id "
@@ -213,28 +236,37 @@ async def main(
                                 fixture_id=result.fixture_id,
                                 pk=row.pk,
                             ))
-                            session.add(ResolutionLog(
-                                run_id=run_id,
-                                provider=provider,
-                                provider_record_id=row.pk,
-                                fixture_id=result.fixture_id,
-                                confidence=result.confidence,
-                                reason_code=result.reason_code.value,
-                                reason_detail=result.reason_detail,
-                                resolver_version=result.resolver_version,
-                            ))
                             chunk_auto += 1
                         else:
-                            # no_match — no DB write. The record stays
-                            # fixture_id IS NULL for the next pass /
-                            # next tier.
+                            # no_match — record stays fixture_id IS
+                            # NULL for the next pass / next tier. We
+                            # still log the decision below so day-7
+                            # review can query reason_detail->>'fail_reason'.
                             chunk_miss += 1
+
+                        # Log every match decision (auto-apply AND
+                        # no_match). reason_detail captures which gate
+                        # rejected the signal, the resolved sport_id /
+                        # team_ids, the competition gate decision,
+                        # etc. — the substrate the day-7 review queries
+                        # operate on.
+                        session.add(ResolutionLog(
+                            run_id=run_id,
+                            provider=provider,
+                            provider_record_id=row.pk,
+                            fixture_id=result.fixture_id,
+                            confidence=result.confidence,
+                            reason_code=result.reason_code.value,
+                            reason_detail=result.reason_detail,
+                            resolver_version=result.resolver_version,
+                        ))
 
                         latencies_ms.append(int((time.monotonic() - per_record_start) * 1000))
 
             # Chunk committed via session.begin() __aexit__.
             auto_applies += chunk_auto
             no_match += chunk_miss
+            signal_extraction_skipped += chunk_skipped
             crashes += chunk_crashes
         except Exception as e:
             crashes += len(chunk)
@@ -276,6 +308,14 @@ async def main(
                     extra={
                         "limit": limit,
                         "chunk_size": CHUNK_SIZE,
+                        # Counter for records the extractor skipped
+                        # (returned None — e.g., Kalshi outright /
+                        # series / tournament). Lives in extra rather
+                        # than a top-level column to avoid a migration
+                        # for what is effectively an audit metric;
+                        # day-7 query pulls it via
+                        # extra->>'signal_extraction_skipped'.
+                        "signal_extraction_skipped": signal_extraction_skipped,
                     },
                 ))
     except Exception as e:
@@ -295,19 +335,24 @@ async def main(
         records_scanned=records_scanned,
         auto_applies=auto_applies,
         no_match=no_match,
+        signal_extraction_skipped=signal_extraction_skipped,
         crashes=crashes,
         latency_p95_ms=latency_p95,
     )
 
     print(f"\nResolver pass complete in {elapsed_sec:.1f}s:")
-    print(f"  provider:        {provider}")
-    print(f"  run_mode:        {run_mode}")
-    print(f"  records_scanned: {records_scanned:>6}")
-    print(f"  auto_applies:    {auto_applies:>6}  ({100*auto_applies/(records_scanned or 1):.1f}%)")
-    print(f"  no_match:        {no_match:>6}  ({100*no_match/(records_scanned or 1):.1f}%)")
-    print(f"  crashes:         {crashes:>6}")
+    print(f"  provider:                   {provider}")
+    print(f"  run_mode:                   {run_mode}")
+    print(f"  records_scanned:            {records_scanned:>6}")
+    print(f"  auto_applies:               {auto_applies:>6}  ({100*auto_applies/(records_scanned or 1):.1f}%)")
+    print(f"  no_match:                   {no_match:>6}  ({100*no_match/(records_scanned or 1):.1f}%)")
+    print(f"  signal_extraction_skipped:  {signal_extraction_skipped:>6}  ({100*signal_extraction_skipped/(records_scanned or 1):.1f}%)")
+    print(f"  crashes:                    {crashes:>6}")
+    accounted = auto_applies + no_match + signal_extraction_skipped + crashes
+    if accounted != records_scanned:
+        print(f"  WARNING unaccounted gap:    {records_scanned - accounted:>6}")
     if latency_p95 is not None:
-        print(f"  latency p95:     {latency_p95}ms")
+        print(f"  latency p95:                {latency_p95}ms")
     print(f"\n  metrics written to sp.resolver_runs (run_id={run_id})")
     return 0
 
