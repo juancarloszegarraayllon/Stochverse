@@ -135,6 +135,38 @@ async def _ingest_pass(
     result = IngestionResult()
     started = time.monotonic()
 
+    # Phase 2A.7 hotfix: resolve FL sport_id → sp.sports.id via this
+    # function's own session. Previously the lookup was built in
+    # `run()` and referenced from here as a free variable — a scope
+    # bug that NameError'd on every pass and stopped sport_id from
+    # ever being persisted (production sp.fl_events.sport_id stayed
+    # 100% NULL after PR #86 merged).
+    #
+    # Cost: one bulk SELECT (17-row sp.sports table) per pass. Cheap;
+    # also self-correcting if sp.sports gains rows mid-process.
+    sport_ids_in = list(sport_ids)
+    name_rows = (await session.execute(
+        sa_text("SELECT id, name FROM sp.sports")
+    )).all()
+    sp_sports_id_by_name = {row.name: row.id for row in name_rows}
+
+    sp_sport_id_by_fl_id: dict[int, int] = {}
+    skipped_unmapped: list[int] = []
+    for fl_id in sport_ids_in:
+        sp_name = FL_SPORT_ID_TO_SP_NAME.get(fl_id)
+        sp_id = sp_sports_id_by_name.get(sp_name) if sp_name else None
+        if sp_id is None:
+            skipped_unmapped.append(fl_id)
+            continue
+        sp_sport_id_by_fl_id[fl_id] = sp_id
+    if skipped_unmapped:
+        _log.warning(
+            "ingestion.fl.sport_id_unmapped",
+            fl_sport_ids=skipped_unmapped,
+            hint="Add to FL_SPORT_ID_TO_SP_NAME or seed sp.sports.",
+        )
+    sport_ids = [s for s in sport_ids_in if s in sp_sport_id_by_fl_id]
+
     for sport_id in sport_ids:
         try:
             payload = await _fl_get(
@@ -303,38 +335,6 @@ async def run(
     function should not catch exceptions itself.
     """
     sport_ids = sport_ids or DEFAULT_FL_SPORT_IDS
-
-    # Phase 2A.7: resolve FL sport_id → sp.sports.id once, up front.
-    # One bulk SELECT; per-sport loop reads from the dict.
-    #
-    # If a caller-supplied FL sport_id can't be translated (not in
-    # FL_SPORT_ID_TO_SP_NAME, or maps to a sp.sports.name that's
-    # missing) we drop it from the iteration with a warning rather
-    # than poll it: writing sport_id=NULL across the batch would
-    # NULL-out the column on every existing row for that sport during
-    # UPSERT (the update_cols set is fixed by the first record's
-    # fields, so we can't selectively omit per-row).
-    name_rows = (await session.execute(
-        sa_text("SELECT id, name FROM sp.sports")
-    )).all()
-    sp_sports_id_by_name = {row.name: row.id for row in name_rows}
-
-    sp_sport_id_by_fl_id: dict[int, int] = {}
-    skipped_unmapped: list[int] = []
-    for fl_id in sport_ids:
-        sp_name = FL_SPORT_ID_TO_SP_NAME.get(fl_id)
-        sp_id = sp_sports_id_by_name.get(sp_name) if sp_name else None
-        if sp_id is None:
-            skipped_unmapped.append(fl_id)
-            continue
-        sp_sport_id_by_fl_id[fl_id] = sp_id
-    if skipped_unmapped:
-        _log.warning(
-            "ingestion.fl.sport_id_unmapped",
-            fl_sport_ids=skipped_unmapped,
-            hint="Add to FL_SPORT_ID_TO_SP_NAME or seed sp.sports.",
-        )
-    sport_ids = [s for s in sport_ids if s in sp_sport_id_by_fl_id]
 
     # The advisory lock is held for the lifetime of the session
     # below. Inside that session we don't actually issue writes —

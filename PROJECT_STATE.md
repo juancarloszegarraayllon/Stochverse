@@ -275,6 +275,72 @@ DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
     --provider fl --limit 100
 ```
 
+### Production incident — Phase 2A.7 NameError in `_ingest_pass`
+
+**Root cause:** The 2A.7 PR (#86) built `sp_sport_id_by_fl_id` inside
+`run()` and referenced it from `_ingest_pass` as a free variable.
+Python doesn't propagate locals across function boundaries, so every
+call from `_today_pre_game_loop` / `_week_loop` raised NameError.
+Bonus bug: `run()` itself called `session.execute(...)` before the
+`async with session_factory() as lock_session:` block opened —
+NameError on `session` would have crashed `run()` first.
+
+**Production effect:** From PR #86 deploy until the hotfix lands,
+**every FL ingestion poll silently failed.** Production
+`sp.fl_events.sport_id` stayed 100% NULL across all 19,759 rows
+despite `last_seen_at` updates (a separate code path keeps writing
+that). The supervisor caught the NameError and restarted `run()` in a
+tight loop — Railway logs should show one warning per supervisor
+restart cycle.
+
+**Why static guards missed it:** The 2A.7 PR's tests asserted that
+specific strings appeared in the source ("`sport_id`" in batch fields,
+"`SELECT id, name FROM sp.sports`" in the file). Those substrings did
+appear — just in the wrong function. A real call-path test would have
+NameError'd within seconds.
+
+**Fix shipped (this hotfix):**
+- Move the `sp_sport_id_by_fl_id` build into `_ingest_pass` so it has
+  the function's own session in scope. Cost: one extra 17-row SELECT
+  per pass (sp.sports). Self-correcting if sp.sports gains rows
+  mid-process. Drops the broken pre-pass code from `run()`.
+- 4 new integration tests (`TestIngestPassIntegration`):
+  * `test_ingest_pass_runs_without_name_error` — the smoking gun.
+    Mocks `flashlive_feed._fl_get` + `upsert_provider_records_batch`,
+    calls `_ingest_pass` end-to-end, asserts it completes.
+  * `test_ingest_pass_writes_sport_id_in_batch` — asserts each
+    record's `fields["sport_id"]` is the canonical sp.sports.id, not
+    None or the FL numeric id.
+  * `test_ingest_pass_skips_unmapped_fl_sport_id` — asserts unmapped
+    FL ids are filtered out of the iteration (don't get polled, don't
+    NULL-out existing rows).
+  * `test_run_does_not_name_error_at_startup` — exercises `run()`
+    against a mocked session_factory + advisory_lock returning False.
+    Pre-hotfix, this would NameError at the `session.execute` line.
+- Plus a static guard `test_lookup_is_built_inside_ingest_pass_not_run`
+  that asserts the construction lives inside `_ingest_pass`'s body,
+  not `run()`'s. Defends against re-introduction.
+
+**Deploy sequence:**
+```bash
+git checkout main && git pull           # after hotfix merge
+# Railway redeploys automatically.
+# Watch Railway logs: ingestion.fl.pass_complete (no errors expected).
+
+# Verify production writes start landing:
+psql "$DATABASE_URL" -c "
+  SELECT COUNT(*) FILTER (WHERE sport_id IS NOT NULL) AS with_sport,
+         COUNT(*) FILTER (WHERE sport_id IS NULL)     AS without_sport
+  FROM sp.fl_events
+  WHERE last_seen_at > NOW() - INTERVAL '15 minutes';"
+# Expected after one poll cycle (~60s for today loop, ~10min for
+# week loop): with_sport > 0 and rising.
+
+# Then backfill the existing rows:
+DATABASE_URL=<prod-Neon> python scripts/backfill_sp_fl_events_sport_id.py
+# Then re-run the FL smoke (--limit 100) to validate matcher behavior.
+```
+
 ### Production incident — transaction leak in db.py
 
 **Reported:** four connections leaked over ~35 minutes (pids 645, 647,
