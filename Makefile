@@ -6,7 +6,7 @@
 # (e.g., a Neon branch for migration testing).
 export DATABASE_URL ?= postgresql+asyncpg://dev:dev@localhost:5432/sports_dev
 
-.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl
+.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams
 
 help:
 	@echo "SP Architecture dev targets:"
@@ -27,6 +27,8 @@ help:
 	@echo ""
 	@echo "  make backfill-fl       # FL backfill (±7 days)"
 	@echo "  make backfill-fl ARGS=\"--days 7\""
+	@echo "  make bootstrap-sp-teams        # one-time legacy → sp.* migration (Phase 2A.5)"
+	@echo "  make bootstrap-sp-teams ARGS=\"--dry-run\""
 	@echo ""
 	@echo "DATABASE_URL = $(DATABASE_URL)"
 
@@ -79,3 +81,6 @@ replay:
 
 backfill-fl:
 	python scripts/backfill_fl.py $(ARGS)
+
+bootstrap-sp-teams:
+	python scripts/bootstrap_sp_teams.py $(ARGS)
