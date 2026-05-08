@@ -27,6 +27,11 @@ from .protocol import ResolverModule
 from .fl import FLResolverModule
 from .kalshi import KalshiResolverModule
 
+# Phase 2B additions:
+from .aliases import AliasResolver
+from .fixtures import ensure_fixture, find_fixture
+from .matcher import StrictMatcher, RESOLVER_VERSION as STRICT_MATCHER_VERSION
+
 __all__ = [
     "FixtureSignal",
     "TeamCandidate",
@@ -35,4 +40,10 @@ __all__ = [
     "ResolverModule",
     "FLResolverModule",
     "KalshiResolverModule",
+    # Phase 2B
+    "AliasResolver",
+    "ensure_fixture",
+    "find_fixture",
+    "StrictMatcher",
+    "STRICT_MATCHER_VERSION",
 ]
