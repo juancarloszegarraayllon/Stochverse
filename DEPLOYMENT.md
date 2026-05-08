@@ -395,6 +395,17 @@ make resolver-pass-fl
   `run_mode`, counters, latency p95, and
   `extra.signal_extraction_skipped`.
 
+The Kalshi runner SQL filters to sport-shaped rows
+(`(raw_payload->>'_is_sport')::boolean = true OR raw_payload->>'category' = 'Sports'`).
+`sp.kalshi_markets` stores every Kalshi category we ingest —
+Elections, Politics, Crypto, Entertainment, Economics, etc. — and
+those non-sport rows dominate `ORDER BY last_seen_at DESC` because
+they trade more actively. Without the filter, `--limit 100` produced
+~99% non-sport records and zero matcher data. The FL runner needs no
+equivalent filter: `ingestion/fl.py` only fetches the sport_ids in
+`DEFAULT_FL_SPORT_IDS`, so `sp.fl_events` is sport-shaped by
+construction.
+
 ### Day-7 parallel-run report
 
 ```sql
