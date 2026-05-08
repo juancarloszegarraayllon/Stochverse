@@ -6,6 +6,62 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-08 (afternoon onwards)
+
+### What landed
+
+- **Phase 2A — Resolver scaffolding.** New `resolver/` package with the
+  contract types and per-provider extraction logic. No DB writes,
+  no matching, no resolution_log — pure foundation for 2B+.
+  - `resolver/types.py` — `FixtureSignal`, `TeamCandidate`,
+    `MatchResult`, `ReasonCode` (Pydantic v2 + Enum).
+  - `resolver/protocol.py` — `ResolverModule` runtime-checkable
+    Protocol.
+  - `resolver/_normalize.py` — strict NFD-only name normalization
+    per architecture §9.2.
+  - `resolver/fl.py` — `FLResolverModule.extract_signal` reads FL's
+    raw_payload + tournament context, produces FixtureSignal with
+    fl_team_id / name / shortname candidates.
+  - `resolver/kalshi.py` — `KalshiResolverModule.extract_signal`
+    reads Kalshi cache record, runs `parse_ticker`, produces
+    FixtureSignal with title-parsed name candidates + abbr_block
+    direction-blind candidate.
+  - `tests/test_resolver_2a.py` — 31 unit tests covering
+    normalization, type validation, Protocol conformance, FL
+    extraction edge cases, Kalshi extraction edge cases (per_fixture
+    vs outright, kickoff fallbacks, sport_override, title parsing
+    `vs` / `at` / `@` separators).
+
+### Phase 2 sub-roadmap (decomposition)
+
+| Sub-phase | Scope | Status |
+|---|---|---|
+| **2A** | Resolver scaffolding: types, Protocol, extract_signal stubs | ✅ this session |
+| 2B | Strict tier — match against sp.fixtures via exact alias on both teams + kickoff ±30min + competition. Write to sp.resolution_log + sp.review_queue. UPSERT sp.fixtures. | next |
+| 2C | Confidence scoring + alias tier (per-sport drift threshold) | after 2B |
+| 2D | Time-anchored fuzzy + cross-provider corroboration | after 2C |
+| 2E | Three-loop resolver runner (hot via LISTEN/NOTIFY + 30s batch + 5–10min re-resolution) | after 2D |
+| 2F | Admin review-queue UI minimum: auth + list + approve/reject + audit | separate PR |
+| 2G | Diff tooling — compare new resolver decisions to legacy `kalshi_join` pairings via `/api/_debug/resolver_diff` | after 2E |
+
+### Open questions still — decide before 2B
+
+- **Hot-loop trigger.** Implement `LISTEN/NOTIFY` immediately in 2E,
+  or start with a 1s polling loop and add NOTIFY in a follow-up?
+  Recommendation: polling first (simpler, easier to debug);
+  `LISTEN/NOTIFY` in a 2E.fix PR once polling-based correctness is proven.
+- **Confidence threshold for auto-apply vs review-queue routing.**
+  Architecture default 0.85 — verify against real production data
+  during 2B's parallel-run period.
+- **Admin UI tech.** Architecture §7.5 says "auth, list view, detail
+  view, approve/reject, audit log." Phase 2F decision: render via
+  vanilla JS in `static/admin/` (consistent with current frontend
+  stack) or use FastAPI + Jinja2 server templates. Lean toward Jinja2
+  — server-rendered admin pages are easier to keep secure and
+  versionable than a SPA.
+
+---
+
 ## Session — 2026-05-07/08
 
 ### What landed (PRs merged, in order)
