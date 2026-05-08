@@ -195,7 +195,7 @@ class StrictMatcher:
             )
 
         # ── Find or create fixture ─────────────────────────────
-        fixture_id = await find_fixture(
+        fixture_id, fixture_comp_id = await find_fixture(
             session,
             home_team_id=home_id,
             away_team_id=away_id,
@@ -203,12 +203,13 @@ class StrictMatcher:
             drift_sec=self.KICKOFF_DRIFT_SEC,
             competition_id=competition_id_filter,
         )
+        created_new = False
         if fixture_id is None:
             # Try the swapped orientation in case extraction was
             # ambiguous (Kalshi abbr_block direction-blind, FL
             # missing). If swapped finds a hit, log the orientation
             # flip in reason_detail so reviewers can verify.
-            swapped_id = await find_fixture(
+            swapped_id, swapped_comp_id = await find_fixture(
                 session,
                 home_team_id=away_id,
                 away_team_id=home_id,
@@ -218,6 +219,7 @@ class StrictMatcher:
             )
             if swapped_id is not None:
                 fixture_id = swapped_id
+                fixture_comp_id = swapped_comp_id
                 reason_detail["orientation_flipped"] = True
             else:
                 # No existing fixture in either orientation. Create
@@ -230,7 +232,23 @@ class StrictMatcher:
                     kickoff_at=signal.kickoff_at,
                     competition_id=competition_id_filter,
                 )
+                # Newly inserted row carries whatever competition_id
+                # we passed (may be None). ensure_fixture's conflict
+                # path returns an existing row whose comp_id we don't
+                # know without an extra read; treat that case as None
+                # for audit purposes — the post-2C reconciliation
+                # query already lives off resolution_log.
+                fixture_comp_id = competition_id_filter if created_new else None
                 reason_detail["created_new_fixture"] = created_new
+
+        self._annotate_competition_path(
+            reason_detail=reason_detail,
+            provider=signal.provider,
+            resolved_competition_id=competition_id_filter,
+            fixture_id=fixture_id,
+            fixture_competition_id=fixture_comp_id,
+            created_new=created_new,
+        )
 
         return MatchResult(
             fixture_id=fixture_id,
@@ -291,6 +309,74 @@ class StrictMatcher:
         # Other providers (polymarket, oddsapi) not yet wired through
         # the matcher. Treat as sport-only fallback.
         return None, None
+
+    @staticmethod
+    def _annotate_competition_path(
+        *,
+        reason_detail: dict,
+        provider: str,
+        resolved_competition_id: Optional[uuid.UUID],
+        fixture_id: Optional[uuid.UUID],
+        fixture_competition_id: Optional[uuid.UUID],
+        created_new: bool,
+    ) -> None:
+        """Stamp audit flags on reason_detail describing how the matched
+        fixture's competition_id relates to the signal's resolved one.
+
+        Two distinct concerns:
+
+        1) Kalshi explicit-comp signal links to a NULL-comp fixture.
+           That fixture was created during a competition-blind period
+           (FL transitional, Kalshi no_hint, or pre-2A.6 ingestion) and
+           must be backfilled in Phase 2C. Sets:
+             - linked_to_null_comp_fixture = True
+             - null_comp_fixture_pending_backfill = <fixture uuid>
+           Phase 2C's backfill becomes a one-line query off
+           resolution_log; without these flags it would be a manual
+           SQL audit later.
+
+        2) FL signals are sport-only-fallback in 2A.6 and need a
+           sub-flag distinguishing the three reachable paths:
+             - matched_null_comp_fixture     (typical 2A.6 case)
+             - matched_existing_comp_fixture (Kalshi created earlier
+                                              with explicit comp; FL
+                                              now joins sport-only —
+                                              comp asymmetry to revisit
+                                              in 2C)
+             - created_null_comp_fixture     (FL was first; new fixture
+                                              created with NULL comp,
+                                              awaits Phase 2C backfill)
+           Stamped in `fl_transitional_path` on top of the existing
+           `fl_transitional_sport_only=True` flag set during the gate.
+        """
+        # Concern 1: Kalshi linked-to-null backfill audit.
+        if (
+            provider == "kalshi"
+            and resolved_competition_id is not None
+            and fixture_id is not None
+            and fixture_competition_id is None
+            and not created_new
+        ):
+            reason_detail["linked_to_null_comp_fixture"] = True
+            reason_detail["null_comp_fixture_pending_backfill"] = str(fixture_id)
+
+        # Concern 2: FL transitional sub-path.
+        if provider == "fl":
+            if created_new:
+                # FL created the fixture; comp_id is whatever the gate
+                # produced (None for FL transitional), but call out the
+                # explicit "created" state for clarity in audit queries.
+                if fixture_competition_id is None:
+                    reason_detail["fl_transitional_path"] = "created_null_comp_fixture"
+                else:
+                    # Defensive: shouldn't happen in 2A.6 since the FL
+                    # gate always passes None as the filter, so
+                    # ensure_fixture creates with NULL.
+                    reason_detail["fl_transitional_path"] = "created_with_comp_fixture"
+            elif fixture_competition_id is None:
+                reason_detail["fl_transitional_path"] = "matched_null_comp_fixture"
+            else:
+                reason_detail["fl_transitional_path"] = "matched_existing_comp_fixture"
 
     def _resolve_sport_id(self, sport_label: str) -> Optional[int]:
         """Look up sport_id by either lowercase code ('soccer') or

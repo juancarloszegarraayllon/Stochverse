@@ -33,9 +33,14 @@ async def find_fixture(
     kickoff_at: datetime,
     drift_sec: int = 30 * 60,           # 30 min — strict tier default
     competition_id: Optional[uuid.UUID] = None,
-) -> Optional[uuid.UUID]:
-    """Return the id of an existing sp.fixtures row matching
-    (home_team_id, away_team_id, kickoff_at ± drift_sec), or None.
+) -> tuple[Optional[uuid.UUID], Optional[uuid.UUID]]:
+    """Return `(fixture_id, fixture_competition_id)` for an existing
+    sp.fixtures row matching the lookup, or `(None, None)`.
+
+    Phase 2A.6: returns competition_id alongside id so the matcher can
+    audit the equal-or-NULL filter outcome (a Kalshi explicit-comp
+    signal that links to a NULL-comp fixture is a transitional case
+    that needs flagging for the post-2C backfill).
 
     Resolves orientation deterministically: home_team_id is exactly
     matched as home; away_team_id as away. The matcher is responsible
@@ -49,9 +54,10 @@ async def find_fixture(
     competition_id (transitional, until Phase 2C). A Kalshi signal
     with explicit competition_id arriving on a fixture FL created
     earlier should still link rather than fork into a duplicate. The
-    matcher records `linked_to_null_comp_fixture: true` in
-    reason_detail when this happens, so the post-2C reconciliation
-    pass can backfill the column.
+    matcher records `linked_to_null_comp_fixture: true` and the
+    fixture id in `null_comp_fixture_pending_backfill` when this
+    happens, so the post-2C reconciliation pass can backfill the
+    column from `sp.resolution_log`.
 
     On multiple candidates (e.g., a doubleheader scheduled within
     the drift window with the same teams — extremely rare), returns
@@ -61,7 +67,7 @@ async def find_fixture(
     earliest = kickoff_at - drift
     latest = kickoff_at + drift
 
-    stmt = select(Fixture.id).where(
+    stmt = select(Fixture.id, Fixture.competition_id).where(
         Fixture.home_team_id == home_team_id,
         Fixture.away_team_id == away_team_id,
         Fixture.kickoff_at >= earliest,
@@ -80,7 +86,10 @@ async def find_fixture(
         )
     ).limit(1)
 
-    return (await session.execute(stmt)).scalar_one_or_none()
+    row = (await session.execute(stmt)).first()
+    if row is None:
+        return None, None
+    return row.id, row.competition_id
 
 
 async def ensure_fixture(

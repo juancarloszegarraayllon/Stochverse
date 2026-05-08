@@ -289,9 +289,48 @@ WHERE provider = 'fl'
 - A Kalshi explicit-comp signal arriving on a fixture FL created
   earlier with NULL competition_id will still LINK — `find_fixture`
   uses an equal-or-NULL filter precisely to avoid forking one
-  logical fixture into two during the 2A.6 → 2C transition. The
-  post-2C reconciliation pass can backfill NULL competition_ids by
-  re-running the matcher with the seeded FL competitions.
+  logical fixture into two during the 2A.6 → 2C transition. When
+  this happens the matcher stamps two flags on `resolution_log.reason_detail`:
+  ```
+  linked_to_null_comp_fixture: true
+  null_comp_fixture_pending_backfill: <fixture-uuid>
+  ```
+  Phase 2C's reconciliation query becomes a one-liner:
+  ```sql
+  SELECT (reason_detail->>'null_comp_fixture_pending_backfill')::uuid AS fixture_id,
+         (reason_detail->>'competition_id')::uuid                     AS expected_competition_id
+  FROM sp.resolution_log
+  WHERE reason_detail ? 'linked_to_null_comp_fixture'
+    AND decided_at > '<2A.6 deploy timestamp>';
+  ```
+
+### FL transitional sub-paths
+
+Every successful FL strict-tier match in 2A.6 stamps both
+`fl_transitional_sport_only=true` AND a `fl_transitional_path`
+sub-flag describing which of three reachable paths the match took:
+
+| `fl_transitional_path`            | Meaning                                                                                    |
+|-----------------------------------|--------------------------------------------------------------------------------------------|
+| `matched_null_comp_fixture`       | Typical 2A.6 case. Existing fixture had NULL competition_id; FL joined it sport-only.      |
+| `matched_existing_comp_fixture`   | Uncommon: fixture was previously created by Kalshi with explicit competition_id. FL is now joining sport-only. Phase 2C must verify FL's resolved comp aligns with what Kalshi wrote. |
+| `created_null_comp_fixture`       | FL was first to see this fixture; new row created with NULL competition_id. Awaits Phase 2C to set the column. |
+
+Day-7 audit:
+
+```sql
+SELECT reason_detail->>'fl_transitional_path' AS path, COUNT(*)
+FROM sp.resolution_log
+WHERE provider = 'fl'
+  AND reason_code = 'strict'
+  AND decided_at > NOW() - INTERVAL '24 hours'
+GROUP BY 1 ORDER BY 2 DESC;
+```
+
+Most should be `matched_null_comp_fixture` or `created_null_comp_fixture`.
+A material `matched_existing_comp_fixture` count means Kalshi-Kalshi-FL
+order is common in your data — fine, but flags real comp-asymmetry
+work for 2C.
 
 ## Phase 2B — Strict-tier resolver parallel-run
 

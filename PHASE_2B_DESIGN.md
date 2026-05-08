@@ -52,8 +52,22 @@ historical decisions identify which gate produced them.
 `find_fixture` filter is intentionally `(competition_id = filter
 OR competition_id IS NULL)`: avoids forking one logical fixture
 into two when FL (NULL comp) creates a fixture before Kalshi (with
-explicit comp) arrives. Post-2C reconciliation pass backfills the
-NULL columns.
+explicit comp) arrives. `find_fixture` returns
+`(fixture_id, fixture_competition_id)` so the matcher can audit
+the filter outcome; the flags below make the Phase 2C reconciliation
+trivially queryable.
+
+**Audit flags on `resolution_log.reason_detail` (Phase 2A.6):**
+
+- `linked_to_null_comp_fixture: true` + `null_comp_fixture_pending_backfill: <uuid>`
+  — Kalshi explicit-comp signal linked to a NULL-comp fixture.
+  Phase 2C backfill query: one line off `resolution_log`.
+- `fl_transitional_path: matched_null_comp_fixture` (typical case)
+- `fl_transitional_path: matched_existing_comp_fixture` (Kalshi
+  created the fixture earlier with explicit comp; FL is now joining
+  sport-only — comp asymmetry to verify in 2C)
+- `fl_transitional_path: created_null_comp_fixture` (FL was first;
+  new row created with NULL comp, awaits 2C)
 
 ---
 

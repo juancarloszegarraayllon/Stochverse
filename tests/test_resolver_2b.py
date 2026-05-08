@@ -106,6 +106,17 @@ class TestAliasResolver:
 
 # ── StrictMatcher gate logic (mocked DB) ─────────────────────────
 
+# find_fixture now returns (id, competition_id) via session.execute(...).first().
+# Helper builds a Result mock that returns a Row-shaped object on .first(),
+# while still answering .scalar_one_or_none() for the ensure_fixture INSERT path.
+def _find_result(fixture_id: uuid.UUID | None, comp_id: uuid.UUID | None = None) -> MagicMock:
+    if fixture_id is None:
+        return MagicMock(first=MagicMock(return_value=None))
+    return MagicMock(first=MagicMock(
+        return_value=MagicMock(id=fixture_id, competition_id=comp_id)
+    ))
+
+
 def _signal(
     sport: str = "Soccer",
     home_norm: str = "bayern munich",
@@ -177,8 +188,8 @@ class TestStrictMatcherGates:
         # Third execute = ensure_fixture INSERT; returns new id
         new_fixture_id = uuid.uuid4()
         results = [
-            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
-            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
+            _find_result(None),
+            _find_result(None),
             MagicMock(scalar_one_or_none=MagicMock(return_value=new_fixture_id)),
         ]
         session.execute.side_effect = results
@@ -221,8 +232,7 @@ class TestStrictMatcherGates:
         sig = _signal()
         session = MagicMock()
         # find_fixture in correct orientation returns existing.
-        result_obj = MagicMock(scalar_one_or_none=MagicMock(return_value=existing_fixture))
-        session.execute = AsyncMock(return_value=result_obj)
+        session.execute = AsyncMock(return_value=_find_result(existing_fixture))
         result = await m.match(session, sig)
         assert result.reason_code == ReasonCode.STRICT
         assert result.fixture_id == existing_fixture
@@ -242,11 +252,10 @@ class TestStrictMatcherGates:
         session = MagicMock()
         # First execute: find_fixture (home, away) returns None.
         # Second execute: find_fixture (away, home) returns existing.
-        results = [
-            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
-            MagicMock(scalar_one_or_none=MagicMock(return_value=existing_fixture)),
-        ]
-        session.execute = AsyncMock(side_effect=results)
+        session.execute = AsyncMock(side_effect=[
+            _find_result(None),
+            _find_result(existing_fixture),
+        ])
         result = await m.match(session, sig)
         assert result.reason_code == ReasonCode.STRICT
         assert result.fixture_id == existing_fixture
@@ -384,9 +393,7 @@ class TestMatcherCompetitionGate:
         sig = self._signal_kalshi(hint="KXUCLGAME")
         existing_fixture = uuid.uuid4()
         session = MagicMock()
-        session.execute = AsyncMock(return_value=MagicMock(
-            scalar_one_or_none=MagicMock(return_value=existing_fixture)
-        ))
+        session.execute = AsyncMock(return_value=_find_result(existing_fixture))
         result = await m.match(session, sig)
         assert result.reason_code == ReasonCode.STRICT
         assert result.fixture_id == existing_fixture
@@ -423,9 +430,7 @@ class TestMatcherCompetitionGate:
         sig = self._signal_kalshi(hint=None)
         existing_fixture = uuid.uuid4()
         session = MagicMock()
-        session.execute = AsyncMock(return_value=MagicMock(
-            scalar_one_or_none=MagicMock(return_value=existing_fixture)
-        ))
+        session.execute = AsyncMock(return_value=_find_result(existing_fixture))
         result = await m.match(session, sig)
         assert result.reason_code == ReasonCode.STRICT
         assert result.reason_detail["kalshi_no_hint_sport_only"] is True
@@ -444,12 +449,13 @@ class TestMatcherCompetitionGate:
         sig = self._signal_fl(hint="some-stage-id")  # would be unresolvable for kalshi
         existing_fixture = uuid.uuid4()
         session = MagicMock()
-        session.execute = AsyncMock(return_value=MagicMock(
-            scalar_one_or_none=MagicMock(return_value=existing_fixture)
-        ))
+        # Existing fixture has NULL competition_id — typical 2A.6 case.
+        session.execute = AsyncMock(return_value=_find_result(existing_fixture, comp_id=None))
         result = await m.match(session, sig)
         assert result.reason_code == ReasonCode.STRICT
         assert result.reason_detail["fl_transitional_sport_only"] is True
+        # Default 2A.6 sub-path: matched against a NULL-comp fixture.
+        assert result.reason_detail["fl_transitional_path"] == "matched_null_comp_fixture"
         # FL bypasses competition resolution entirely in 2A.6.
         assert "competition_resolution" not in result.reason_detail
         assert "competition_id" not in result.reason_detail
@@ -472,12 +478,200 @@ class TestMatcherCompetitionGate:
         sig = self._signal_kalshi(hint="KXUCLGAME")
         existing_fixture = uuid.uuid4()
         session = MagicMock()
-        session.execute = AsyncMock(return_value=MagicMock(
-            scalar_one_or_none=MagicMock(return_value=existing_fixture)
-        ))
+        session.execute = AsyncMock(return_value=_find_result(existing_fixture))
         result = await m.match(session, sig)
         assert result.reason_code == ReasonCode.STRICT
         assert result.reason_detail["competitions_index_unavailable"] is True
+
+
+# ── Phase 2A.6 audit flags (linked_to_null + fl_transitional_path) ─
+
+class TestCompetitionPathAuditFlags:
+    """Phase 2A.6 audit annotations on reason_detail.
+
+    Two concerns:
+      1. Kalshi explicit-comp signal links to a NULL-comp fixture →
+         linked_to_null_comp_fixture + null_comp_fixture_pending_backfill
+         (so Phase 2C's backfill is a one-line query).
+      2. FL transitional sub-paths (which of three FL paths the match
+         took) → fl_transitional_path on top of fl_transitional_sport_only.
+    """
+
+    def _matcher(self, *, alias_entries, kalshi_index=None):
+        ar = AliasResolver()
+        for alias, sport, tid in alias_entries:
+            ar._index[(alias, sport)].add(tid)
+        cr = CompetitionResolver()
+        cr._kalshi_base_index = dict(kalshi_index or {})
+        return StrictMatcher(
+            aliases=ar,
+            sport_id_by_code_or_name={"Soccer": 1, "soccer": 1},
+            competitions=cr,
+        )
+
+    def _kalshi_signal(self, *, hint=None):
+        return FixtureSignal(
+            provider="kalshi",
+            provider_record_id="KX-EVT-1",
+            sport="Soccer",
+            home_team_candidates=[TeamCandidate(
+                raw="Bayern", normalized="bayern munich", kind="name")],
+            away_team_candidates=[TeamCandidate(
+                raw="PSG", normalized="psg", kind="name")],
+            kickoff_at=datetime(2026, 5, 7, 19, tzinfo=timezone.utc),
+            kickoff_confidence=1.0,
+            competition_hint=hint,
+        )
+
+    def _fl_signal(self):
+        return FixtureSignal(
+            provider="fl",
+            provider_record_id="fl-1",
+            sport="Soccer",
+            home_team_candidates=[TeamCandidate(
+                raw="Bayern", normalized="bayern munich", kind="name")],
+            away_team_candidates=[TeamCandidate(
+                raw="PSG", normalized="psg", kind="name")],
+            kickoff_at=datetime(2026, 5, 7, 19, tzinfo=timezone.utc),
+            kickoff_confidence=1.0,
+        )
+
+    # ── Concern 1: Kalshi linked_to_null_comp_fixture ────────────
+
+    @pytest.mark.asyncio
+    async def test_kalshi_explicit_linking_to_null_comp_fixture_sets_backfill_flag(self):
+        """Kalshi signal with resolved competition_id matches a fixture
+        whose competition_id is NULL — fixture was created during a
+        competition-blind period (FL transitional, pre-2A.6, etc.) and
+        needs Phase 2C backfill."""
+        comp_id = uuid.uuid4()
+        home, away = uuid.uuid4(), uuid.uuid4()
+        m = self._matcher(
+            alias_entries=[
+                ("bayern munich", 1, home),
+                ("psg",           1, away),
+            ],
+            kalshi_index={"KXUCL": comp_id},
+        )
+        sig = self._kalshi_signal(hint="KXUCLGAME")
+        existing_fixture = uuid.uuid4()
+        session = MagicMock()
+        # Existing fixture has NULL competition_id — equal-or-NULL filter
+        # let it through.
+        session.execute = AsyncMock(return_value=_find_result(existing_fixture, comp_id=None))
+        result = await m.match(session, sig)
+        assert result.reason_code == ReasonCode.STRICT
+        assert result.fixture_id == existing_fixture
+        assert result.reason_detail["linked_to_null_comp_fixture"] is True
+        assert result.reason_detail["null_comp_fixture_pending_backfill"] == str(existing_fixture)
+
+    @pytest.mark.asyncio
+    async def test_kalshi_explicit_linking_to_matching_comp_fixture_no_flag(self):
+        """Kalshi signal with resolved comp matches a fixture with the
+        SAME competition_id — fully aligned, no audit flag needed."""
+        comp_id = uuid.uuid4()
+        home, away = uuid.uuid4(), uuid.uuid4()
+        m = self._matcher(
+            alias_entries=[
+                ("bayern munich", 1, home),
+                ("psg",           1, away),
+            ],
+            kalshi_index={"KXUCL": comp_id},
+        )
+        sig = self._kalshi_signal(hint="KXUCLGAME")
+        existing_fixture = uuid.uuid4()
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=_find_result(existing_fixture, comp_id=comp_id))
+        result = await m.match(session, sig)
+        assert result.reason_code == ReasonCode.STRICT
+        assert "linked_to_null_comp_fixture" not in result.reason_detail
+        assert "null_comp_fixture_pending_backfill" not in result.reason_detail
+
+    @pytest.mark.asyncio
+    async def test_kalshi_no_hint_does_not_set_linked_to_null_flag(self):
+        """Kalshi no-hint path has no resolved competition_id, so the
+        backfill flag doesn't apply — there's nothing to backfill TO."""
+        home, away = uuid.uuid4(), uuid.uuid4()
+        m = self._matcher(
+            alias_entries=[
+                ("bayern munich", 1, home),
+                ("psg",           1, away),
+            ],
+            kalshi_index={"KXEPL": uuid.uuid4()},
+        )
+        sig = self._kalshi_signal(hint=None)
+        existing_fixture = uuid.uuid4()
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=_find_result(existing_fixture, comp_id=None))
+        result = await m.match(session, sig)
+        assert result.reason_code == ReasonCode.STRICT
+        assert "linked_to_null_comp_fixture" not in result.reason_detail
+
+    # ── Concern 2: FL transitional sub-path ──────────────────────
+
+    @pytest.mark.asyncio
+    async def test_fl_path_matched_null_comp_fixture(self):
+        """Typical 2A.6 case: FL signal joins a fixture whose
+        competition_id is NULL (created earlier by another FL pass)."""
+        home, away = uuid.uuid4(), uuid.uuid4()
+        m = self._matcher(alias_entries=[
+            ("bayern munich", 1, home), ("psg", 1, away),
+        ])
+        sig = self._fl_signal()
+        existing = uuid.uuid4()
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=_find_result(existing, comp_id=None))
+        result = await m.match(session, sig)
+        assert result.reason_code == ReasonCode.STRICT
+        assert result.reason_detail["fl_transitional_sport_only"] is True
+        assert result.reason_detail["fl_transitional_path"] == "matched_null_comp_fixture"
+
+    @pytest.mark.asyncio
+    async def test_fl_path_matched_existing_comp_fixture(self):
+        """Uncommon 2A.6 case: Kalshi created the fixture earlier with
+        an explicit competition_id; FL is now joining sport-only. The
+        comp asymmetry is worth flagging — Phase 2C will need to verify
+        FL's resolved comp matches what Kalshi already wrote."""
+        comp_id = uuid.uuid4()
+        home, away = uuid.uuid4(), uuid.uuid4()
+        m = self._matcher(alias_entries=[
+            ("bayern munich", 1, home), ("psg", 1, away),
+        ])
+        sig = self._fl_signal()
+        existing = uuid.uuid4()
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=_find_result(existing, comp_id=comp_id))
+        result = await m.match(session, sig)
+        assert result.reason_code == ReasonCode.STRICT
+        assert result.reason_detail["fl_transitional_sport_only"] is True
+        assert result.reason_detail["fl_transitional_path"] == "matched_existing_comp_fixture"
+
+    @pytest.mark.asyncio
+    async def test_fl_path_created_null_comp_fixture(self):
+        """FL signal creates a new fixture (no existing match in either
+        orientation). competition_id is NULL because FL transitional path
+        passes None as the filter — flag the create case explicitly."""
+        home, away = uuid.uuid4(), uuid.uuid4()
+        m = self._matcher(alias_entries=[
+            ("bayern munich", 1, home), ("psg", 1, away),
+        ])
+        sig = self._fl_signal()
+        new_fixture = uuid.uuid4()
+        session = MagicMock()
+        # find_fixture (home, away): None
+        # find_fixture (away, home): None
+        # ensure_fixture INSERT: returns new_fixture
+        session.execute = AsyncMock(side_effect=[
+            _find_result(None),
+            _find_result(None),
+            MagicMock(scalar_one_or_none=MagicMock(return_value=new_fixture)),
+        ])
+        result = await m.match(session, sig)
+        assert result.reason_code == ReasonCode.STRICT
+        assert result.fixture_id == new_fixture
+        assert result.reason_detail["created_new_fixture"] is True
+        assert result.reason_detail["fl_transitional_sport_only"] is True
+        assert result.reason_detail["fl_transitional_path"] == "created_null_comp_fixture"
 
 
 # ── Runner CLI ───────────────────────────────────────────────────

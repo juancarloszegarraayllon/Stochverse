@@ -186,6 +186,25 @@ psql "$DATABASE_URL" -c "
 seed `fl_tournament_stage_ids` and re-run the matcher against rows
 carrying that flag to backfill explicit competition_ids.
 
+**Two audit refinements added pre-PR (per review feedback):**
+
+1. **Kalshi linked-to-NULL backfill flag.** When `find_fixture`'s
+   equal-or-NULL filter links a Kalshi explicit-comp signal to a
+   NULL-comp fixture, `reason_detail` now records
+   `linked_to_null_comp_fixture: true` AND
+   `null_comp_fixture_pending_backfill: <fixture-uuid>`. Phase 2C's
+   backfill query is now a one-liner against `resolution_log`
+   instead of a manual SQL audit.
+2. **FL transitional sub-paths.** Every successful FL match also
+   stamps `fl_transitional_path` with one of three values:
+   `matched_null_comp_fixture` (typical), `matched_existing_comp_fixture`
+   (Kalshi created it earlier with explicit comp — Phase 2C must
+   verify FL's resolved comp aligns), or `created_null_comp_fixture`
+   (FL was first; new row, awaits 2C to set the column). Required
+   `find_fixture` return shape change: now returns
+   `(fixture_id, fixture_competition_id)` so the matcher can audit
+   the equal-or-NULL filter outcome.
+
 ### Production incident — transaction leak in db.py
 
 **Reported:** four connections leaked over ~35 minutes (pids 645, 647,
