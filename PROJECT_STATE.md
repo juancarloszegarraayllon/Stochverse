@@ -103,6 +103,89 @@ GROUP BY 1;
 SQL
 ```
 
+### Phase 2A.6 — Competition seeding + matcher gate (this session, follow-up to 2B)
+
+Caught a defect during 2B post-merge review: the strict-tier matcher
+read `signal.competition_hint` only into `reason_detail` for logging;
+it never resolved or filtered by competition. Combined with
+`sp.fixtures.competition_id` becoming nullable in migration
+`bdf12a30e49b`, the strict tier had silently degraded into
+"competition-blind" rather than implementing the design's intended
+sport-only fallback. **Smoke-run was paused before the first pass.**
+
+Path B chosen (defer FL competitions to 2C, ship Kalshi competition
+gate now):
+
+**New modules:**
+- `scripts/bootstrap_sp_competitions.py` — Kalshi-only seed.
+  Bulk-loads existing `sp.competitions.kalshi_series_bases` into a
+  Python set, fetches DISTINCT `(_sport, series_ticker)` from
+  `sp.kalshi_markets`, applies `kalshi_identity.strip_known_suffix`
+  to derive `series_base`, queues new rows with
+  `kalshi_series_bases=[base]` and inserts in 1000-row chunks. Same
+  idempotency pattern as `bootstrap_sp_teams`.
+- `resolver/competitions.py` — `CompetitionResolver` with bulk-load +
+  in-memory `(provider, hint) → (competition_id, kind)` lookup. Kinds:
+  `'explicit'`, `'no_hint'`, `'unresolvable'`. For Kalshi tries hint
+  as-is then `strip_known_suffix(hint)` so callers can pass either
+  the full series_ticker or a stripped base.
+
+**Matcher changes (`resolver/matcher.py`):**
+- `RESOLVER_VERSION` bumped from `strict@2b.0` → `strict@2a.6`.
+- Constructor accepts optional `competitions: CompetitionResolver`.
+- New `_competition_gate` enforces per-provider policy:
+  * Kalshi `'explicit'` → use competition_id, filter `find_fixture`,
+    write on `ensure_fixture`.
+  * Kalshi `'no_hint'` → sport-only fallback, log
+    `kalshi_no_hint_sport_only: true`.
+  * Kalshi `'unresolvable'` → strict tier FAILS (`fail_reason=
+    'kalshi_competition_unresolvable'`).
+  * FL → transitional sport-only, every successful match logs
+    `fl_transitional_sport_only: true`.
+- `find_fixture` accepts optional `competition_id` filter; matches
+  on `(competition_id = filter OR competition_id IS NULL)` to avoid
+  forking one logical fixture into two when FL (no comp) created it
+  before Kalshi (with comp) arrives.
+
+**Other:**
+- `resolver/kalshi.py`: `competition_hint` now uses `series_ticker`
+  (the canonical Kalshi-side identifier). `_soccer_comp` ("Champions
+  League") is preserved on `raw_signals['soccer_comp']` for
+  diagnostics. Mirrors the bootstrap's seed key.
+- `resolver/__init__.py` exports `CompetitionResolver`.
+- `scripts/run_resolver_pass.py` loads a CompetitionResolver after
+  AliasResolver and passes it to `StrictMatcher`.
+- 13 new unit tests (CompetitionResolver coverage + matcher gate
+  per-provider behavior + degrade-without-index).
+- DEPLOYMENT.md adds a Phase 2A.6 runbook before the 2B section.
+
+**Operator action sequence updated:**
+
+```bash
+git checkout main && git pull
+# Migration was already applied for 2B (bdf12a30e49b at head).
+
+# 2A.6 step — seed competitions before the first parallel-run pass.
+DATABASE_URL=<prod-Neon> python scripts/bootstrap_sp_competitions.py --dry-run
+DATABASE_URL=<prod-Neon> python scripts/bootstrap_sp_competitions.py
+
+# Then proceed with 2B parallel-run as documented above.
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
+  --provider kalshi --limit 100  # smoke
+
+# Audit gate decisions during the run:
+psql "$DATABASE_URL" -c "
+  SELECT reason_detail->>'competition_resolution' AS resolution, COUNT(*)
+  FROM sp.resolution_log
+  WHERE provider='kalshi' AND decided_at > NOW() - INTERVAL '24 hours'
+  GROUP BY 1 ORDER BY 2 DESC"
+```
+
+**FL transitional path is queryable** via
+`reason_detail ? 'fl_transitional_sport_only'`. Phase 2C work will
+seed `fl_tournament_stage_ids` and re-run the matcher against rows
+carrying that flag to backfill explicit competition_ids.
+
 ### Production incident — transaction leak in db.py
 
 **Reported:** four connections leaked over ~35 minutes (pids 645, 647,

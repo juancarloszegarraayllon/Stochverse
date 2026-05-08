@@ -18,8 +18,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from resolver import (
-    AliasResolver, FixtureSignal, MatchResult, ReasonCode,
-    StrictMatcher, TeamCandidate,
+    AliasResolver, CompetitionResolver, FixtureSignal, MatchResult,
+    ReasonCode, StrictMatcher, TeamCandidate,
 )
 
 
@@ -251,6 +251,233 @@ class TestStrictMatcherGates:
         assert result.reason_code == ReasonCode.STRICT
         assert result.fixture_id == existing_fixture
         assert result.reason_detail["orientation_flipped"] is True
+
+
+# ── CompetitionResolver ──────────────────────────────────────────
+
+class TestCompetitionResolver:
+    def _build(self, *, kalshi: dict[str, uuid.UUID] | None = None,
+               fl: dict[str, uuid.UUID] | None = None) -> CompetitionResolver:
+        cr = CompetitionResolver()
+        cr._kalshi_base_index = dict(kalshi or {})
+        cr._fl_stage_index = dict(fl or {})
+        return cr
+
+    def test_resolve_kalshi_explicit_by_base(self):
+        cid = uuid.uuid4()
+        cr = self._build(kalshi={"KXEPL": cid})
+        out_id, kind = cr.resolve("kalshi", "KXEPL")
+        assert (out_id, kind) == (cid, "explicit")
+
+    def test_resolve_kalshi_explicit_strips_suffix(self):
+        # Hint comes in as a full series_ticker; strip_known_suffix
+        # gets us to KXEPL → resolves.
+        cid = uuid.uuid4()
+        cr = self._build(kalshi={"KXEPL": cid})
+        out_id, kind = cr.resolve("kalshi", "KXEPLGAME")
+        assert (out_id, kind) == (cid, "explicit")
+
+    def test_resolve_kalshi_no_hint(self):
+        cr = self._build(kalshi={"KXEPL": uuid.uuid4()})
+        for hint in (None, "", "   "):
+            out_id, kind = cr.resolve("kalshi", hint)
+            assert out_id is None
+            assert kind == "no_hint"
+
+    def test_resolve_kalshi_unresolvable(self):
+        cr = self._build(kalshi={"KXEPL": uuid.uuid4()})
+        out_id, kind = cr.resolve("kalshi", "KXNOSUCHGAME")
+        assert out_id is None
+        assert kind == "unresolvable"
+
+    def test_resolve_fl_explicit(self):
+        cid = uuid.uuid4()
+        cr = self._build(fl={"123": cid})
+        out_id, kind = cr.resolve("fl", "123")
+        assert (out_id, kind) == (cid, "explicit")
+
+    def test_resolve_fl_unresolvable(self):
+        cr = self._build(fl={"123": uuid.uuid4()})
+        out_id, kind = cr.resolve("fl", "999")
+        assert out_id is None
+        assert kind == "unresolvable"
+
+    def test_resolve_unknown_provider_is_no_hint(self):
+        cr = self._build(kalshi={"KXEPL": uuid.uuid4()})
+        out_id, kind = cr.resolve("polymarket", "anything")
+        assert out_id is None
+        assert kind == "no_hint"
+
+    def test_stats(self):
+        c1, c2 = uuid.uuid4(), uuid.uuid4()
+        cr = self._build(
+            kalshi={"KXEPL": c1, "KXUCL": c2},
+            fl={"abc": c1},
+        )
+        s = cr.stats()
+        assert s["kalshi_bases_indexed"] == 2
+        assert s["fl_stage_ids_indexed"] == 1
+        assert s["unique_competitions"] == 2
+
+
+# ── Matcher competition gate (Phase 2A.6) ────────────────────────
+
+class TestMatcherCompetitionGate:
+
+    def _matcher_with_competitions(
+        self,
+        *,
+        alias_entries,
+        kalshi_index: dict[str, uuid.UUID] | None = None,
+        sport_map=None,
+    ) -> StrictMatcher:
+        ar = AliasResolver()
+        for alias, sport, tid in alias_entries:
+            ar._index[(alias, sport)].add(tid)
+        cr = CompetitionResolver()
+        cr._kalshi_base_index = dict(kalshi_index or {})
+        return StrictMatcher(
+            aliases=ar,
+            sport_id_by_code_or_name=sport_map or {"Soccer": 1, "soccer": 1},
+            competitions=cr,
+        )
+
+    def _signal_kalshi(self, *, hint: str | None) -> FixtureSignal:
+        return FixtureSignal(
+            provider="kalshi",
+            provider_record_id="KX-EVT-1",
+            sport="Soccer",
+            home_team_candidates=[TeamCandidate(
+                raw="Bayern", normalized="bayern munich", kind="name")],
+            away_team_candidates=[TeamCandidate(
+                raw="PSG", normalized="psg", kind="name")],
+            kickoff_at=datetime(2026, 5, 7, 19, tzinfo=timezone.utc),
+            kickoff_confidence=1.0,
+            competition_hint=hint,
+        )
+
+    def _signal_fl(self, *, hint: str | None = None) -> FixtureSignal:
+        return FixtureSignal(
+            provider="fl",
+            provider_record_id="fl-1",
+            sport="Soccer",
+            home_team_candidates=[TeamCandidate(
+                raw="Bayern", normalized="bayern munich", kind="name")],
+            away_team_candidates=[TeamCandidate(
+                raw="PSG", normalized="psg", kind="name")],
+            kickoff_at=datetime(2026, 5, 7, 19, tzinfo=timezone.utc),
+            kickoff_confidence=1.0,
+            competition_hint=hint,
+        )
+
+    @pytest.mark.asyncio
+    async def test_kalshi_explicit_hint_passes_gate_and_filters_fixture(self):
+        comp_id = uuid.uuid4()
+        home, away = uuid.uuid4(), uuid.uuid4()
+        m = self._matcher_with_competitions(
+            alias_entries=[
+                ("bayern munich", 1, home),
+                ("psg",           1, away),
+            ],
+            kalshi_index={"KXUCL": comp_id},
+        )
+        sig = self._signal_kalshi(hint="KXUCLGAME")
+        existing_fixture = uuid.uuid4()
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(
+            scalar_one_or_none=MagicMock(return_value=existing_fixture)
+        ))
+        result = await m.match(session, sig)
+        assert result.reason_code == ReasonCode.STRICT
+        assert result.fixture_id == existing_fixture
+        assert result.reason_detail["competition_resolution"] == "explicit"
+        assert result.reason_detail["competition_id"] == str(comp_id)
+        # FL flag never set for Kalshi.
+        assert "fl_transitional_sport_only" not in result.reason_detail
+
+    @pytest.mark.asyncio
+    async def test_kalshi_unresolvable_hint_fails_strict(self):
+        m = self._matcher_with_competitions(
+            alias_entries=[
+                ("bayern munich", 1, uuid.uuid4()),
+                ("psg",           1, uuid.uuid4()),
+            ],
+            kalshi_index={"KXEPL": uuid.uuid4()},  # Champions League not seeded
+        )
+        sig = self._signal_kalshi(hint="KXUCLGAME")
+        result = await m.match(MagicMock(), sig)
+        assert result.reason_code == ReasonCode.NO_MATCH
+        assert result.reason_detail["fail_reason"] == "kalshi_competition_unresolvable"
+        assert result.reason_detail["competition_resolution"] == "unresolvable"
+
+    @pytest.mark.asyncio
+    async def test_kalshi_no_hint_falls_back_to_sport_only(self):
+        home, away = uuid.uuid4(), uuid.uuid4()
+        m = self._matcher_with_competitions(
+            alias_entries=[
+                ("bayern munich", 1, home),
+                ("psg",           1, away),
+            ],
+            kalshi_index={"KXEPL": uuid.uuid4()},
+        )
+        sig = self._signal_kalshi(hint=None)
+        existing_fixture = uuid.uuid4()
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(
+            scalar_one_or_none=MagicMock(return_value=existing_fixture)
+        ))
+        result = await m.match(session, sig)
+        assert result.reason_code == ReasonCode.STRICT
+        assert result.reason_detail["kalshi_no_hint_sport_only"] is True
+        assert result.reason_detail["competition_resolution"] == "no_hint"
+
+    @pytest.mark.asyncio
+    async def test_fl_always_logs_transitional_sport_only_on_success(self):
+        home, away = uuid.uuid4(), uuid.uuid4()
+        m = self._matcher_with_competitions(
+            alias_entries=[
+                ("bayern munich", 1, home),
+                ("psg",           1, away),
+            ],
+            kalshi_index={"KXEPL": uuid.uuid4()},
+        )
+        sig = self._signal_fl(hint="some-stage-id")  # would be unresolvable for kalshi
+        existing_fixture = uuid.uuid4()
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(
+            scalar_one_or_none=MagicMock(return_value=existing_fixture)
+        ))
+        result = await m.match(session, sig)
+        assert result.reason_code == ReasonCode.STRICT
+        assert result.reason_detail["fl_transitional_sport_only"] is True
+        # FL bypasses competition resolution entirely in 2A.6.
+        assert "competition_resolution" not in result.reason_detail
+        assert "competition_id" not in result.reason_detail
+
+    @pytest.mark.asyncio
+    async def test_matcher_without_competitions_index_degrades_gracefully(self):
+        """Pre-2A.6 unit tests construct StrictMatcher without a
+        CompetitionResolver. That path must keep working — Kalshi
+        with a hint should still match (sport-only) and log the
+        misconfiguration flag."""
+        home, away = uuid.uuid4(), uuid.uuid4()
+        ar = AliasResolver()
+        ar._index[("bayern munich", 1)].add(home)
+        ar._index[("psg", 1)].add(away)
+        m = StrictMatcher(
+            aliases=ar,
+            sport_id_by_code_or_name={"Soccer": 1, "soccer": 1},
+            competitions=None,
+        )
+        sig = self._signal_kalshi(hint="KXUCLGAME")
+        existing_fixture = uuid.uuid4()
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock(
+            scalar_one_or_none=MagicMock(return_value=existing_fixture)
+        ))
+        result = await m.match(session, sig)
+        assert result.reason_code == ReasonCode.STRICT
+        assert result.reason_detail["competitions_index_unavailable"] is True
 
 
 # ── Runner CLI ───────────────────────────────────────────────────

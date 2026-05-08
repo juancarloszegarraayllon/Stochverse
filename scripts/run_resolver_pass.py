@@ -70,8 +70,9 @@ async def main(
 
     from observability import get_logger
     from resolver import (
-        AliasResolver, FLResolverModule, KalshiResolverModule,
-        ReasonCode, STRICT_MATCHER_VERSION, StrictMatcher,
+        AliasResolver, CompetitionResolver, FLResolverModule,
+        KalshiResolverModule, ReasonCode, STRICT_MATCHER_VERSION,
+        StrictMatcher,
     )
     from sp_models import FLEvent, KalshiMarket, ResolutionLog, ResolverRun
 
@@ -114,10 +115,15 @@ async def main(
             sport_count=len(sport_rows),
         )
 
+        # ── Step 2.5: bulk-load sp.competitions ────────────────
+        competitions = await CompetitionResolver.load_all(bootstrap_session)
+        log.info("resolver.run_pass.competitions_loaded", **competitions.stats())
+
         # ── Step 3: build matcher ──────────────────────────────
         matcher = StrictMatcher(
             aliases=aliases,
             sport_id_by_code_or_name=sport_id_by_code_or_name,
+            competitions=competitions,
         )
 
         # ── Step 4: fetch unresolved provider records ──────────

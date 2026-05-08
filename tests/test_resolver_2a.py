@@ -315,7 +315,10 @@ class TestKalshiExtractSignal:
         assert sig.kickoff_at.hour == 15
         assert sig.kickoff_at.minute == 40
 
-    def test_competition_hint_prefers_soccer_comp(self):
+    def test_competition_hint_uses_series_ticker(self):
+        # Phase 2A.6: series_ticker is the canonical hint (matches the
+        # bootstrap_sp_competitions seed key). _soccer_comp is human
+        # display text and is preserved on raw_signals only.
         raw = {
             "event_ticker":  "KXUCLGAME-26MAY07BAYPSG",
             "series_ticker": "KXUCLGAME",
@@ -324,7 +327,8 @@ class TestKalshiExtractSignal:
             "_soccer_comp":  "Champions League",
         }
         sig = self.m.extract_signal(raw)
-        assert sig.competition_hint == "Champions League"
+        assert sig.competition_hint == "KXUCLGAME"
+        assert sig.raw_signals["soccer_comp"] == "Champions League"
 
     def test_competition_hint_falls_back_to_series(self):
         raw = {

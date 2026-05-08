@@ -208,6 +208,91 @@ coverage** threshold).
   bootstrapped alias that produces a false-positive can be
   identified and downweighted/removed without touching curated data.
 
+## Phase 2A.6 — Bootstrap sp.competitions (Kalshi only)
+
+Phase 2A.6 seeds `sp.competitions` from distinct (sport, series_base)
+tuples observed in `sp.kalshi_markets` so the strict-tier matcher's
+competition gate has data to resolve against. FL competitions are
+deferred to Phase 2C — `sp.fl_events.raw_payload` doesn't currently
+carry a tournament-level sport_id, so a clean FL seed needs an
+ingestion change first. Until then, FL signals take an explicit
+`fl_transitional_sport_only` path through the matcher (logged on
+every successful match).
+
+### When to run
+
+Once, after `bootstrap_sp_teams` has been applied and the Phase 2B
+migration is at head. Before running the first Phase 2B parallel-run
+pass — without this step the Kalshi side of the matcher would
+sport-only-fall-back on every record (silently degraded gate).
+
+### How to run
+
+```bash
+DATABASE_URL=<prod-Neon> python scripts/bootstrap_sp_competitions.py --dry-run
+DATABASE_URL=<prod-Neon> python scripts/bootstrap_sp_competitions.py
+```
+
+Or via Makefile:
+
+```bash
+make bootstrap-sp-competitions
+make bootstrap-sp-competitions ARGS="--dry-run"
+```
+
+Idempotent — a re-run is a no-op for any series_base already covered.
+
+### Verification
+
+```sql
+SELECT s.name              AS sport,
+       COUNT(c.id)         AS competitions,
+       SUM(jsonb_array_length(c.kalshi_series_bases)) AS kalshi_bases_indexed
+FROM sp.sports s
+LEFT JOIN sp.competitions c ON c.sport_id = s.id
+GROUP BY 1
+ORDER BY 1;
+```
+
+After Phase 2B parallel-run starts, audit the per-resolution
+competition decisions:
+
+```sql
+-- Kalshi distribution of competition gate outcomes
+SELECT reason_detail->>'competition_resolution' AS resolution,
+       COUNT(*) AS count
+FROM sp.resolution_log
+WHERE provider = 'kalshi'
+  AND decided_at > NOW() - INTERVAL '24 hours'
+GROUP BY 1
+ORDER BY 2 DESC;
+
+-- FL transitional-path coverage (will be 100% of FL strict matches
+-- until Phase 2C lands)
+SELECT COUNT(*) FILTER (WHERE reason_detail ? 'fl_transitional_sport_only') AS transitional,
+       COUNT(*)                                                              AS fl_strict_total
+FROM sp.resolution_log
+WHERE provider = 'fl'
+  AND reason_code = 'strict'
+  AND decided_at > NOW() - INTERVAL '24 hours';
+```
+
+### Limitations
+
+- canonical_name = series_base (e.g., `KXEPL`). Display polish
+  (mapping `KXEPL` → "Premier League") is a Phase 2C concern via
+  manual_review or a name-mapping pass.
+- FL `fl_tournament_stage_ids` array stays empty; CompetitionResolver
+  returns `unresolvable` for FL hints. The matcher routes around this
+  via the FL transitional path — no FL strict match is gated on
+  competition match in 2A.6.
+- A Kalshi explicit-comp signal arriving on a fixture FL created
+  earlier with NULL competition_id will still LINK — `find_fixture`
+  uses an equal-or-NULL filter precisely to avoid forking one
+  logical fixture into two during the 2A.6 → 2C transition. The
+  post-2C reconciliation pass can backfill NULL competition_ids by
+  re-running the matcher with the seeded FL competitions.
+
 ## Phase 2B — Strict-tier resolver parallel-run
 
 Phase 2A.5 baseline is in place. Phase 2B's standalone runner
