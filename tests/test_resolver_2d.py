@@ -35,7 +35,9 @@ from resolver import (
     FixtureSignal,
     MatchResult,
     ReasonCode,
+    TIERED_RESOLVER_VERSION,
     TeamCandidate,
+    TieredMatcher,
 )
 from resolver.alias_tier import (
     AUTO_APPLY_THRESHOLD,
@@ -474,6 +476,228 @@ class TestE3MultiInterpretationViaCandidateIndex:
             assert result.reason_detail["home_team_id"] == str(bautista_agut)
 
 
+# ── TieredMatcher 3-tier orchestration (Phase 2D.3) ────────────
+
+
+class _StubMatcher:
+    """Stand-in for any tier matcher in TieredMatcher tests.
+    Returns a pre-canned MatchResult and records whether it was
+    consulted (for assertions about short-circuit behavior)."""
+
+    def __init__(self, result: MatchResult) -> None:
+        self._result = result
+        self.called = False
+
+    async def match(self, session, signal) -> MatchResult:
+        self.called = True
+        return self._result
+
+
+class TestTieredMatcher3Tier:
+    """Phase 2D.3: TieredMatcher consults strict, then alias, then
+    fuzzy. Each tier short-circuits on success of the prior. Final
+    list length tells the runner which tiers were consulted (and
+    drives one resolution_log row per tier per design D.4).
+    """
+
+    @pytest.mark.asyncio
+    async def test_strict_hit_short_circuits_alias_and_fuzzy(self):
+        strict_hit = MatchResult(
+            fixture_id=_tid(), confidence=0.98,
+            reason_code=ReasonCode.STRICT, reason_detail={},
+            resolver_version="strict@2a.6",
+        )
+        alias = _StubMatcher(MatchResult(
+            fixture_id=None, confidence=0.0,
+            reason_code=ReasonCode.NO_MATCH, reason_detail={},
+            resolver_version="alias@2c.0",
+        ))
+        fuzzy = _StubMatcher(MatchResult(
+            fixture_id=None, confidence=0.0,
+            reason_code=ReasonCode.NO_MATCH, reason_detail={},
+            resolver_version=FUZZY_RESOLVER_VERSION,
+        ))
+        m = TieredMatcher(
+            strict=_StubMatcher(strict_hit),
+            alias=alias,
+            fuzzy=fuzzy,
+        )
+        results = await m.match(MagicMock(), _signal())
+        assert len(results) == 1
+        assert results[0].reason_code == ReasonCode.STRICT
+        assert not alias.called
+        assert not fuzzy.called
+
+    @pytest.mark.asyncio
+    async def test_alias_hit_short_circuits_fuzzy(self):
+        # Per design rev3: alias ALIAS auto-apply means fuzzy doesn't
+        # run. Two log rows (strict miss + alias hit), runner
+        # auto-applies on the alias result.
+        m = TieredMatcher(
+            strict=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH, reason_detail={},
+                resolver_version="strict@2a.6",
+            )),
+            alias=_StubMatcher(MatchResult(
+                fixture_id=_tid(), confidence=0.85,
+                reason_code=ReasonCode.ALIAS,
+                reason_detail={"home_team_id": "x", "away_team_id": "y"},
+                resolver_version="alias@2c.0",
+            )),
+            fuzzy=(fuzzy := _StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH, reason_detail={},
+                resolver_version=FUZZY_RESOLVER_VERSION,
+            ))),
+        )
+        results = await m.match(MagicMock(), _signal())
+        assert len(results) == 2
+        assert results[1].reason_code == ReasonCode.ALIAS
+        assert not fuzzy.called
+
+    @pytest.mark.asyncio
+    async def test_alias_review_queue_short_circuits_fuzzy(self):
+        # Per design rev3: alias REVIEW_QUEUE is a successful
+        # actionable result. Fuzzy's lower anchor (0.40 vs alias 0.50)
+        # cannot improve on it. Don't run fuzzy.
+        m = TieredMatcher(
+            strict=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH, reason_detail={},
+                resolver_version="strict@2a.6",
+            )),
+            alias=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.80,
+                reason_code=ReasonCode.REVIEW_QUEUE,
+                reason_detail={"home_collision": True},
+                resolver_version="alias@2c.0",
+            )),
+            fuzzy=(fuzzy := _StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH, reason_detail={},
+                resolver_version=FUZZY_RESOLVER_VERSION,
+            ))),
+        )
+        results = await m.match(MagicMock(), _signal())
+        assert len(results) == 2
+        assert results[1].reason_code == ReasonCode.REVIEW_QUEUE
+        assert not fuzzy.called
+
+    @pytest.mark.asyncio
+    async def test_alias_no_match_runs_fuzzy_and_returns_three_results(self):
+        # The 2D.3 smoking-gun: tennis-deferred records flow through
+        # to fuzzy, which then resolves them. Three rows in
+        # resolution_log per design D.4 carry-forward.
+        m = TieredMatcher(
+            strict=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH,
+                reason_detail={"fail_reason": "alias_resolution_incomplete"},
+                resolver_version="strict@2a.6",
+            )),
+            alias=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH,
+                reason_detail={"fail_reason": "deferred_to_2d"},
+                resolver_version="alias@2c.0",
+            )),
+            fuzzy=_StubMatcher(MatchResult(
+                fixture_id=_tid(), confidence=1.00,
+                reason_code=ReasonCode.FUZZY,
+                reason_detail={"home_team_id": "a", "away_team_id": "b"},
+                resolver_version=FUZZY_RESOLVER_VERSION,
+            )),
+        )
+        results = await m.match(MagicMock(), _signal())
+        assert len(results) == 3
+        assert results[0].reason_code == ReasonCode.NO_MATCH
+        assert results[0].resolver_version == "strict@2a.6"
+        assert results[1].reason_code == ReasonCode.NO_MATCH
+        assert results[1].resolver_version == "alias@2c.0"
+        assert results[2].reason_code == ReasonCode.FUZZY
+        assert results[2].resolver_version == FUZZY_RESOLVER_VERSION
+
+    @pytest.mark.asyncio
+    async def test_all_three_miss_returns_three_no_match_rows(self):
+        m = TieredMatcher(
+            strict=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH, reason_detail={},
+                resolver_version="strict@2a.6",
+            )),
+            alias=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH,
+                reason_detail={"fail_reason": "alias_no_team_resemblance"},
+                resolver_version="alias@2c.0",
+            )),
+            fuzzy=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH,
+                reason_detail={"fail_reason": "fuzzy_below_threshold"},
+                resolver_version=FUZZY_RESOLVER_VERSION,
+            )),
+        )
+        results = await m.match(MagicMock(), _signal())
+        assert len(results) == 3
+        assert all(r.reason_code == ReasonCode.NO_MATCH for r in results)
+
+    @pytest.mark.asyncio
+    async def test_fuzzy_review_queue_attribution(self):
+        # Fuzzy can also emit REVIEW_QUEUE (the headline 2D output per
+        # rev3 Option C1: ~150/cron tennis review queue records).
+        # Final result's resolver_version starts with "fuzzy" — runner
+        # uses this to attribute volume to fuzzy_review_queue counter
+        # rather than alias_review_queue.
+        m = TieredMatcher(
+            strict=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH, reason_detail={},
+                resolver_version="strict@2a.6",
+            )),
+            alias=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH,
+                reason_detail={"fail_reason": "deferred_to_2d"},
+                resolver_version="alias@2c.0",
+            )),
+            fuzzy=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.70,
+                reason_code=ReasonCode.REVIEW_QUEUE,
+                reason_detail={"home_team_id": "a", "away_team_id": "b"},
+                resolver_version=FUZZY_RESOLVER_VERSION,
+            )),
+        )
+        results = await m.match(MagicMock(), _signal())
+        assert len(results) == 3
+        final = results[-1]
+        assert final.reason_code == ReasonCode.REVIEW_QUEUE
+        assert final.resolver_version.startswith("fuzzy")
+
+    @pytest.mark.asyncio
+    async def test_back_compat_two_tier_when_fuzzy_omitted(self):
+        # Existing 2C test fixtures construct TieredMatcher(strict, alias)
+        # without a fuzzy argument. The orchestrator falls back to
+        # 2-tier behavior — never attempts to call self.fuzzy.match.
+        # This guards against accidental breakage of 2C-era callers.
+        m = TieredMatcher(
+            strict=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH, reason_detail={},
+                resolver_version="strict@2a.6",
+            )),
+            alias=_StubMatcher(MatchResult(
+                fixture_id=None, confidence=0.0,
+                reason_code=ReasonCode.NO_MATCH, reason_detail={},
+                resolver_version="alias@2c.0",
+            )),
+            # No fuzzy.
+        )
+        results = await m.match(MagicMock(), _signal())
+        assert len(results) == 2
+
+
 # ── Static guards (backstop only — primary surface is call-path) ─
 
 
@@ -536,4 +760,55 @@ class TestStaticGuards:
         assert FUZZY_DRIFT > ALIAS_DRIFT, (
             "Fuzzy tier must use a wider corroboration drift window than "
             "alias tier. Alias tier's exact-alias anchors don't need slack."
+        )
+
+    def test_tiered_resolver_version_bumped_to_2d(self):
+        # Phase 2D.3 bumps the orchestrator version stamp because
+        # TieredMatcher now consults a third tier. Older 2C run rows
+        # keep their tiered@2c.0 stamp; new runs get tiered@2d.0.
+        # Day-7 reports can split per-version metrics if needed.
+        assert TIERED_RESOLVER_VERSION == "tiered@2d.0", (
+            f"Expected tiered@2d.0 after 2D.3, got {TIERED_RESOLVER_VERSION!r}."
+        )
+
+    def test_runner_constructs_3tier_matcher(self):
+        # Backstop for the runner wiring: the production runner must
+        # build TieredMatcher with all three tiers. If a refactor
+        # accidentally drops the fuzzy argument, this catches it
+        # before a deploy that silently regresses to 2-tier behavior.
+        import pathlib
+        runner_src = pathlib.Path(
+            __file__
+        ).resolve().parent.parent.joinpath(
+            "scripts", "run_resolver_pass.py"
+        ).read_text()
+        assert "FuzzyTierMatcher(" in runner_src, (
+            "scripts/run_resolver_pass.py must construct a "
+            "FuzzyTierMatcher per Phase 2D.3."
+        )
+        # The kwargs-on-multiple-lines style is what the production
+        # runner uses; assert the fuzzy= keyword is wired into
+        # TieredMatcher (any whitespace shape).
+        assert "fuzzy=fuzzy_matcher" in runner_src, (
+            "scripts/run_resolver_pass.py must pass the fuzzy matcher "
+            "to TieredMatcher per Phase 2D.3."
+        )
+
+    def test_runner_writes_back_fuzzy_tier_source(self):
+        # Phase 2D.3 fuzzy auto-applies write back to sp.team_aliases
+        # with source='fuzzy_tier' (parallel to the alias-tier
+        # source='alias_tier' write-back). Static guard against
+        # accidentally reusing 'alias_tier' for fuzzy auto-applies,
+        # which would muddy day-7 attribution and the
+        # ON CONFLICT (alias_normalized, source) DO NOTHING uniqueness
+        # constraint.
+        import pathlib
+        runner_src = pathlib.Path(
+            __file__
+        ).resolve().parent.parent.joinpath(
+            "scripts", "run_resolver_pass.py"
+        ).read_text()
+        assert "'fuzzy_tier'" in runner_src, (
+            "scripts/run_resolver_pass.py must write back fuzzy "
+            "auto-applies with source='fuzzy_tier'."
         )

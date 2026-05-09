@@ -156,9 +156,9 @@ async def main(
     from observability import get_logger
     from resolver import (
         AliasResolver, AliasTierMatcher, CandidateIndex,
-        CompetitionResolver, FLResolverModule, KalshiResolverModule,
-        ReasonCode, STRICT_MATCHER_VERSION, StrictMatcher,
-        TIERED_RESOLVER_VERSION, TieredMatcher,
+        CompetitionResolver, FLResolverModule, FuzzyTierMatcher,
+        KalshiResolverModule, ReasonCode, STRICT_MATCHER_VERSION,
+        StrictMatcher, TIERED_RESOLVER_VERSION, TieredMatcher,
     )
     from sp_models import (
         FLEvent, KalshiMarket, ResolutionLog, ResolverRun,
@@ -186,12 +186,20 @@ async def main(
     crashes = 0
     signal_extraction_skipped = 0     # Phase 2A.6: extract_signal returned None
                                       # (e.g., Kalshi outright/series — not per-fixture)
-    # Phase 2C.3 per-tier breakdown — surfaced in sp.resolver_runs.extra
-    # so day-7 reports can split the auto_applies aggregate cleanly.
+    # Phase 2C.3 / 2D.3 per-tier breakdown — surfaced in
+    # sp.resolver_runs.extra so day-7 reports can split the
+    # auto_applies aggregate cleanly.
     strict_auto_applies = 0
     alias_auto_applies = 0
     alias_review_queue = 0
     alias_tennis_deferred = 0         # alias-tier early-exit on individual sports
+    # Phase 2D.3: fuzzy-tier counters. Per rev3 design (Option C1),
+    # review_queue is the headline output (~150/cron tennis), with
+    # auto_apply ~2-3/cron a small bonus. Tracked separately from the
+    # alias-tier counters so day-7 reports can attribute volume to
+    # the right tier.
+    fuzzy_auto_applies = 0
+    fuzzy_review_queue = 0
     latencies_ms: list[int] = []
 
     async with async_session() as bootstrap_session:
@@ -220,7 +228,7 @@ async def main(
         candidate_index = await CandidateIndex.load_all(bootstrap_session)
         log.info("resolver.run_pass.candidates_loaded", **candidate_index.stats())
 
-        # ── Step 3: build TieredMatcher (strict → alias) ───────
+        # ── Step 3: build TieredMatcher (strict → alias → fuzzy) ──
         strict_matcher = StrictMatcher(
             aliases=aliases,
             sport_id_by_code_or_name=sport_id_by_code_or_name,
@@ -230,7 +238,18 @@ async def main(
             candidates=candidate_index,
             sport_id_by_code_or_name=sport_id_by_code_or_name,
         )
-        matcher = TieredMatcher(strict=strict_matcher, alias=alias_matcher)
+        # Phase 2D.3: fuzzy tier reuses the same CandidateIndex and
+        # sport-id table — no extra bootstrap step needed. Per design
+        # rev3, fuzzy runs only when alias tier returns NO_MATCH.
+        fuzzy_matcher = FuzzyTierMatcher(
+            candidates=candidate_index,
+            sport_id_by_code_or_name=sport_id_by_code_or_name,
+        )
+        matcher = TieredMatcher(
+            strict=strict_matcher,
+            alias=alias_matcher,
+            fuzzy=fuzzy_matcher,
+        )
 
         # ── Step 4: fetch unresolved provider records ──────────
         if provider == "kalshi":
@@ -313,6 +332,12 @@ async def main(
         chunk_alias_auto = 0
         chunk_alias_review = 0
         chunk_alias_tennis_deferred = 0
+        # Phase 2D.3: per-chunk fuzzy tallies. Distinguished from
+        # alias counters via the FINAL tier_result.resolver_version
+        # (alias@2c.0 vs fuzzy@2d.0), not just the reason_code, since
+        # both tiers can emit ALIAS/REVIEW_QUEUE/NO_MATCH-shaped results.
+        chunk_fuzzy_auto = 0
+        chunk_fuzzy_review = 0
 
         try:
             async with async_session() as session:
@@ -471,10 +496,70 @@ async def main(
                                     ))
                             chunk_auto += 1
                             chunk_alias_auto += 1
+                        elif final.reason_code == ReasonCode.FUZZY:
+                            # Phase 2D.3 fuzzy-tier auto-apply path.
+                            # Same atomic shape as the alias path: UPDATE
+                            # provider table + INSERT sp.team_aliases
+                            # write-back as source='fuzzy_tier' so the
+                            # next strict-tier pass picks the alias up
+                            # at 0.98 confidence. Per design rev3 §"What
+                            # rev3 changes": no matcher behavioral
+                            # changes; this is pure infrastructure
+                            # wiring of the already-shipped 2D.2 matcher.
+                            await session.execute(text(
+                                f"UPDATE sp.{ 'kalshi_markets' if provider == 'kalshi' else 'fl_events' } "
+                                f"SET fixture_id = :fixture_id "
+                                f"WHERE { 'ticker' if provider == 'kalshi' else 'fl_event_id' } = :pk"
+                            ).bindparams(
+                                fixture_id=final.fixture_id,
+                                pk=row.pk,
+                            ))
+                            for side_label in ("home", "away"):
+                                team_id_str = final.reason_detail.get(
+                                    f"{side_label}_team_id"
+                                )
+                                provider_raw = (
+                                    signal.home_team_candidates[0].raw
+                                    if side_label == "home" and signal.home_team_candidates
+                                    else (
+                                        signal.away_team_candidates[0].raw
+                                        if side_label == "away" and signal.away_team_candidates
+                                        else None
+                                    )
+                                )
+                                if team_id_str and provider_raw:
+                                    await session.execute(text(
+                                        """
+                                        INSERT INTO sp.team_aliases
+                                          (id, team_id, alias, alias_normalized,
+                                           source, confidence, created_at)
+                                        VALUES
+                                          (gen_random_uuid(), :tid, :alias,
+                                           :alias_norm, 'fuzzy_tier', :conf, NOW())
+                                        ON CONFLICT (alias_normalized, source)
+                                          DO NOTHING
+                                        """
+                                    ).bindparams(
+                                        tid=uuid.UUID(team_id_str),
+                                        alias=provider_raw,
+                                        alias_norm=_normalize_for_alias(provider_raw),
+                                        conf=final.confidence,
+                                    ))
+                            chunk_auto += 1
+                            chunk_fuzzy_auto += 1
                         elif final.reason_code == ReasonCode.REVIEW_QUEUE:
-                            # 2C review-queue path. Insert one
+                            # 2C / 2D review-queue path. Insert one
                             # sp.review_queue row with the candidate
                             # team_ids. Provider.fixture_id stays NULL.
+                            #
+                            # Per-tier attribution: the alias tier and
+                            # fuzzy tier both emit REVIEW_QUEUE, but
+                            # they're tracked separately so day-7
+                            # reports can split the volume. Use the
+                            # resolver_version stamp on the final
+                            # MatchResult (alias@2c.0 vs fuzzy@2d.0)
+                            # since reason_code alone doesn't carry
+                            # the source tier.
                             session.add(ReviewQueue(
                                 provider=provider,
                                 provider_record_id=row.pk,
@@ -484,17 +569,31 @@ async def main(
                                 confidence=final.confidence,
                                 status="pending",
                             ))
-                            chunk_alias_review += 1
+                            if final.resolver_version.startswith("fuzzy"):
+                                chunk_fuzzy_review += 1
+                            else:
+                                chunk_alias_review += 1
                             # Don't count as miss — these are pending
                             # human approval.
                         else:
-                            # Both tiers said NO_MATCH. Record stays
-                            # fixture_id IS NULL for next pass / next
-                            # tier (Phase 2D fuzzy when it ships).
+                            # All consulted tiers said NO_MATCH. Record
+                            # stays fixture_id IS NULL — re-resolve
+                            # picks it up on the next cron pass per
+                            # Phase 2E mechanism (or stays unresolved
+                            # if it's genuinely unmatched).
                             chunk_miss += 1
-                            # Track tennis-deferred rows separately
-                            # so the day-7 query can attribute the
+                            # Track tennis-deferred rows separately so
+                            # the day-7 query can attribute the
                             # ~180/day Kalshi tennis no_match volume.
+                            # The deferred_to_2d marker is set by the
+                            # alias tier's tennis early-exit; in the
+                            # 3-tier orchestrator that record then
+                            # passes through fuzzy (which may also
+                            # emit NO_MATCH if the surname doesn't
+                            # match any candidate). The marker is
+                            # inspected on the FINAL result; if fuzzy
+                            # was consulted, its reason_detail
+                            # supersedes the alias-tier marker.
                             if final.reason_detail.get("fail_reason") == "deferred_to_2d":
                                 chunk_alias_tennis_deferred += 1
 
@@ -509,6 +608,8 @@ async def main(
             alias_auto_applies += chunk_alias_auto
             alias_review_queue += chunk_alias_review
             alias_tennis_deferred += chunk_alias_tennis_deferred
+            fuzzy_auto_applies += chunk_fuzzy_auto
+            fuzzy_review_queue += chunk_fuzzy_review
         except Exception as e:
             crashes += len(chunk)
             log.error(
@@ -554,11 +655,17 @@ async def main(
                         "limit": limit,
                         "chunk_size": CHUNK_SIZE,
                         "signal_extraction_skipped": signal_extraction_skipped,
-                        # Phase 2C.3 per-tier breakdown.
+                        # Phase 2C.3 / 2D.3 per-tier breakdown.
                         "strict_auto_applies":    strict_auto_applies,
                         "alias_auto_applies":     alias_auto_applies,
                         "alias_review_queue":     alias_review_queue,
                         "alias_tennis_deferred":  alias_tennis_deferred,
+                        # Phase 2D.3 (Option C1): fuzzy review queue
+                        # is the headline output (~150/cron tennis);
+                        # auto_apply ~2-3/cron is bonus. See
+                        # PHASE_2D_DESIGN.md rev3 for prediction.
+                        "fuzzy_auto_applies":     fuzzy_auto_applies,
+                        "fuzzy_review_queue":     fuzzy_review_queue,
                     },
                 ))
     except Exception as e:
@@ -585,8 +692,11 @@ async def main(
         alias_auto_applies=alias_auto_applies,
         alias_review_queue=alias_review_queue,
         alias_tennis_deferred=alias_tennis_deferred,
+        fuzzy_auto_applies=fuzzy_auto_applies,
+        fuzzy_review_queue=fuzzy_review_queue,
     )
 
+    total_review_queue = alias_review_queue + fuzzy_review_queue
     print(f"\nResolver pass complete in {elapsed_sec:.1f}s:")
     print(f"  provider:                   {provider}")
     print(f"  run_mode:                   {run_mode}")
@@ -594,12 +704,15 @@ async def main(
     print(f"  auto_applies (total):       {auto_applies:>6}  ({100*auto_applies/(records_scanned or 1):.1f}%)")
     print(f"    strict tier:              {strict_auto_applies:>6}")
     print(f"    alias  tier:              {alias_auto_applies:>6}")
-    print(f"  alias review_queue:         {alias_review_queue:>6}  ({100*alias_review_queue/(records_scanned or 1):.1f}%)")
+    print(f"    fuzzy  tier:              {fuzzy_auto_applies:>6}")
+    print(f"  review_queue (total):       {total_review_queue:>6}  ({100*total_review_queue/(records_scanned or 1):.1f}%)")
+    print(f"    alias  tier:              {alias_review_queue:>6}")
+    print(f"    fuzzy  tier:              {fuzzy_review_queue:>6}")
     print(f"  no_match:                   {no_match:>6}  ({100*no_match/(records_scanned or 1):.1f}%)")
     print(f"    of which tennis deferred: {alias_tennis_deferred:>6}")
     print(f"  signal_extraction_skipped:  {signal_extraction_skipped:>6}  ({100*signal_extraction_skipped/(records_scanned or 1):.1f}%)")
     print(f"  crashes:                    {crashes:>6}")
-    accounted = auto_applies + no_match + alias_review_queue + signal_extraction_skipped + crashes
+    accounted = auto_applies + no_match + total_review_queue + signal_extraction_skipped + crashes
     if accounted != records_scanned:
         print(f"  WARNING unaccounted gap:    {records_scanned - accounted:>6}")
     if latency_p95 is not None:

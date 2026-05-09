@@ -393,54 +393,80 @@ class StrictMatcher:
         return self.sport_id_by_code_or_name.get(sport_label.lower())
 
 
-# ── Phase 2C.3 — TieredMatcher (orchestrator) ────────────────────
+# ── Phase 2D.3 — TieredMatcher (orchestrator, 3-tier) ────────────
 
 
 # Run-level resolver version. Stamped onto sp.resolver_runs.resolver_version
 # (the run's orchestrator version). Per-tier MatchResult rows continue to
-# stamp their own per-tier version (strict@2a.6 / alias@2c.0).
-TIERED_RESOLVER_VERSION = "tiered@2c.0"
+# stamp their own per-tier version (strict@2a.6 / alias@2c.0 / fuzzy@2d.0).
+#
+# Phase 2D.3: bumped from tiered@2c.0 because the orchestrator now
+# consults a third tier on alias-tier NO_MATCH. Older 2C run rows keep
+# their tiered@2c.0 stamp; new runs get tiered@2d.0.
+TIERED_RESOLVER_VERSION = "tiered@2d.0"
 
 
 class TieredMatcher:
-    """Phase 2C orchestrator — strict tier first, alias tier on miss.
+    """Phase 2D.3 orchestrator — strict, then alias on strict miss,
+    then fuzzy on alias miss.
 
     Returns a list of MatchResult, one per tier consulted. The
     runner writes one resolution_log row per result (per design D.4
-    — "I tried and failed" is forensic data).
+    — "I tried and failed" is forensic data, carried forward to 3-tier).
 
-    - Strict tier hits (STRICT): list = [strict_result]; runner
-      auto-applies via the existing 2B path.
-    - Strict tier misses + alias hits (ALIAS): list =
-      [strict_result, alias_result]; runner writes both logs and
-      auto-applies on the alias result.
-    - Strict tier misses + alias review-queues: list =
-      [strict_result, alias_result]; runner writes both logs and
-      inserts review_queue row.
-    - Both miss: list = [strict_result, alias_result]; runner
-      writes both logs, no UPDATE.
+    - Strict tier hits (STRICT): list = [strict_result].
+    - Strict miss + alias hits (ALIAS) or alias review-queues
+      (REVIEW_QUEUE): list = [strict_result, alias_result]. Alias
+      review-queue is a successful actionable outcome — fuzzy does
+      not override. Runs at anchor 0.50 vs fuzzy's 0.40, so any 2C
+      review-queue match is already higher-confidence than fuzzy
+      could produce.
+    - Strict miss + alias miss (NO_MATCH): fuzzy tier runs. List =
+      [strict_result, alias_result, fuzzy_result]. Up to three rows
+      in resolution_log; final entry drives routing.
+
+    Fuzzy is the optional third tier: callers can omit it and the
+    orchestrator behaves as the 2C 2-tier matcher (back-compat for
+    test fixtures that don't construct a fuzzy matcher).
 
     The matcher itself writes nothing — atomic transaction
     discipline lives in the runner per Phase 2A.6 design §1.
     """
 
-    def __init__(self, strict, alias) -> None:
-        """`strict` and `alias` are pre-built matchers. Untyped
-        intentionally to avoid a circular import — the alias matcher
-        lives in resolver.alias_tier.matcher.AliasTierMatcher and
-        has its own .match(session, signal) coroutine.
+    def __init__(self, strict, alias, fuzzy=None) -> None:
+        """`strict`, `alias`, and (optional) `fuzzy` are pre-built
+        matchers. Untyped intentionally to avoid a circular import —
+        each tier matcher lives in its own subpackage and exposes a
+        .match(session, signal) coroutine.
+
+        Phase 2D.3: `fuzzy` defaults to None for back-compat. Existing
+        2C-era test fixtures and any caller that hasn't migrated yet
+        keep working as a 2-tier matcher. Production runner
+        (scripts/run_resolver_pass.py) constructs all three tiers.
         """
         self.strict = strict
         self.alias = alias
+        self.fuzzy = fuzzy
 
     async def match(self, session, signal):
-        """Returns list[MatchResult] — at most two entries (strict
-        + alias). Final entry drives runner routing.
+        """Returns list[MatchResult] — 1, 2, or 3 entries depending
+        on where resolution lands. Final entry drives runner routing.
         """
         from .types import ReasonCode
 
         strict_result = await self.strict.match(session, signal)
         if strict_result.reason_code == ReasonCode.STRICT:
             return [strict_result]
+
         alias_result = await self.alias.match(session, signal)
-        return [strict_result, alias_result]
+        if self.fuzzy is None:
+            return [strict_result, alias_result]
+
+        # Fuzzy runs only on alias NO_MATCH. ALIAS / REVIEW_QUEUE are
+        # already actionable; fuzzy's lower anchor (0.40 vs alias 0.50)
+        # cannot produce a higher-confidence result.
+        if alias_result.reason_code != ReasonCode.NO_MATCH:
+            return [strict_result, alias_result]
+
+        fuzzy_result = await self.fuzzy.match(session, signal)
+        return [strict_result, alias_result, fuzzy_result]
