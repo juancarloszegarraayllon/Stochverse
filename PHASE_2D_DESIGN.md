@@ -101,6 +101,36 @@ This is a one-line update to `AliasTierMatcher` documentation, not a logic chang
 
 ---
 
+## Order-of-operations and re-resolve
+
+Pushback 1 from rev1 review surfaced two operational questions that the original draft glossed over. Both need explicit answers in the doc.
+
+### Question E.1 — Cron schedule swap
+
+**Current ordering:** `resolver-cron-kalshi` at 02:00 UTC, `resolver-cron-fl` at 02:15 UTC. Locked in `railway.toml` since PR #88.
+
+**Problem at 2D rollout:** Kalshi tennis records depend on FL having already resolved the same fixture for cross-provider corroboration. Under the current 02:00/02:15 ordering, Kalshi runs FIRST — `find_fixture` against `sp.fixtures` misses because FL hasn't ingested the day's events yet. Result: Kalshi tennis records get `no_match(fuzzy_no_existing_fixture)` on the morning pass, then resolve on the NEXT day's pass after FL has run.
+
+**Recommendation: swap to FL 02:00 / Kalshi 02:15.** FL strict tier resolves ~78% of its corpus on first contact; running it first means Kalshi's 2D fuzzy lookups see freshly-resolved fixtures. Estimated impact: same-pass resolution for ~80% of tennis records that would otherwise lag a cycle.
+
+The swap is **independent of 2D ship timing** and can land as a small `railway.toml` PR ahead of 2D.1. Same shape as the original 2B parallel-run cron PR (#88).
+
+The 02:15 stagger should remain to avoid Neon connection pool contention during the bulk-load phase (15 min is enough for FL's ~165s pass + buffer).
+
+### Question E.2 — Pre-2E re-resolve mechanism
+
+**Currently:** the runner SQL filters by `fixture_id IS NULL` on the provider table — NOT by absence of a `resolution_log` row. A no_match record stays `fixture_id IS NULL`, gets selected on the next cron, runs through the full TieredMatcher again. The "re-resolve pass" already exists implicitly via per-cron retries.
+
+**Implication for 2D:** records that 2D no_match's today (e.g., because corroboration wasn't available) get RE-TRIED tomorrow. If FL has resolved the corresponding fixture in the interim, 2D corroboration fires on retry → auto-apply. **No code change needed for re-resolve.**
+
+**Cost: resolution_log accretion.** A record stuck in no_match for 14 days produces ~42 `resolution_log` rows (3 tiers × 14 days). At ~1KB per row this is small (~42KB per stuck record). Not a problem volume-wise but produces noise in audit queries. Day-7 review query already groups by `(provider, provider_record_id, decided_at::date)` so it's queryable; documented as known noise.
+
+**Phase 2E** addresses this properly with a continuous-loop runner that only re-resolves records when their underlying data changes. Pre-2E, the per-cron retry is sufficient.
+
+**Net effect for 2D's day-0 prediction:** records that don't auto-apply on day 1 due to missing corroboration will mostly resolve on day 2 (after FL has ingested + strict-tier-resolved the corresponding fixture). Steady-state auto-apply rate is higher than first-pass rate by maybe 10-20%. The day-0 numbers in §"Day-0 prediction" reflect first-pass; steady-state is in the upper half of the range.
+
+---
+
 ## Question A — Tennis pattern: structural initial expansion
 
 ### Answer (definitive): Initial expansion as an additional structural-equivalence rule.
@@ -163,6 +193,60 @@ Symmetric — works on both Kalshi-with-full-name vs FL-with-initial AND Kalshi-
 
 What about "Marin Cilic" vs "Cilic M. (Cro)" AND "Murray Andy" vs "Murray A. (Gbr)" — both have provider with "M" something. But each side has its own structural-normalize result; the initial expansion is per-side, not cross-side.
 
+### Spot-check handling intent (Pushback 2)
+
+Concrete cases the user named, with explicit per-case behavior so we know what the algorithm does on day 0.
+
+**Case 1 — `"M.K."` → `"Miomir Kecmanovic"` (compound initials).**
+
+Provider tokens after normalize: `["m", "k"]` (period stripped as punct). Both length 1. Personal-name structural detection per 2C: `personal_initial` rule fires (2 tokens, second is 1-2 chars), so surname=`"m"`, others=`("k",)`.
+
+That's wrong — "k" is the surname-initial and "m" is the given-name initial. The 2C structural rule was designed for "Last F." (surname-first), not "F.L." (initial-first).
+
+Candidate "Miomir Kecmanovic" → surname=`"kecmanovic"`. Provider surname=`"m"` doesn't match. **Anchor fails.**
+
+**2D handling:** stays no_match. Bidirectional surname-interpretation expansion is a meaningful enhancement but adds complexity to the personal-name normalizer for a rare case. Documented as a known limitation. Future extension: detect `2-token, both 1-char` pattern and try both `(surname=token[0], initial=token[1])` AND `(initial=token[0], surname=token[1])`. Defer to a 2D follow-up after observing day-7 frequency.
+
+**Case 2 — `"Carlos"` → `"Carlos Alcaraz Garfia"` (single-token provider, multi-token candidate).**
+
+Provider: single-token, surname=`"carlos"`, others=`()`. Candidate (after structural normalize): personal_multi, surname=`"garfia"`, others=`("carlos","alcaraz")`. **Surname mismatch.**
+
+Compound surname fallback (A.1) on the candidate side tries `"alcaraz garfia"`, then `"carlos alcaraz garfia"`. None match provider's "carlos".
+
+**2D handling:** stays no_match. Single-token provider names are structurally ambiguous (could be first name OR last name); auto-applying on first-name-as-surname is a false-positive vector. There would typically be many "Carlos" candidates in the pool — multi-match collision would force review queue even if we did try the inverse interpretation. Documented as a deliberate non-goal.
+
+**Case 3 — `"Bautista"` → `"Roberto Bautista Agut"` (middle name as primary; first omitted).**
+
+Provider: surname=`"bautista"`, others=`()`. Candidate default interpretation: surname=`"agut"`, others=`("roberto","bautista")`. **Surname mismatch on the default.**
+
+Compound fallback retries: `"bautista agut"` (still mismatch), then full tokens (mismatch).
+
+**This is the case that needs E.3 — multi-interpretation candidate surname index.** The candidate `"Roberto Bautista Agut"` should be indexed under MULTIPLE surname interpretations:
+- `surname="agut"` (default, last token)
+- `surname="bautista agut"` (compound)
+- `surname="bautista"` (middle-token-as-surname, common for Spanish/Portuguese-style compound names)
+
+With the multi-interpretation index, provider `"Bautista"` finds `"Roberto Bautista Agut"` via the `surname="bautista"` interpretation. Anchor passes. Initial expansion: empty remainders both sides → no contribution. Confidence = 0.40 (anchor) + 0.30 (corroboration if present) = 0.70 → review_queue boundary.
+
+**2D handling:** auto-apply only with corroboration; review_queue otherwise. This is correct — "Bautista" alone is genuinely ambiguous (could be Pablo Carreño Busta misread, etc.), and review queue is the safe routing.
+
+**Case 4 — `"Wang"` → multiple Wangs (cross-player surname collision).**
+
+Provider: surname=`"wang"`. Candidate pool has "Wang Q.", "Wang X.", "Wang Y." — all with surname=`"wang"`.
+
+**Multiple candidates anchor.** Per 2C-style collision detection (which 2D inherits): multiple candidates above threshold → collision → review_queue regardless of confidence.
+
+**2D handling:** review_queue with `colliding_team_ids` listing all matching Wangs. Reviewer in 2F picks the right one. Same as the 2C "Real Sociedad" case. Phase 2D will surface the volume of these collisions in the day-7 review — if specific surname-collision patterns dominate (e.g., Chinese tennis players consistently routed to review), that's input for a 2D follow-up similar to 2C.4 (senior-team disambiguation) — perhaps gender disambiguation via `country_code` + competition context.
+
+**Summary table of intent:**
+
+| Case | Provider | Candidate | Anchor | Initial expansion | Routing |
+|---|---|---|---|---|---|
+| 1 | "M.K."        | "Miomir Kecmanovic"      | fails (structural) | n/a       | no_match (limitation) |
+| 2 | "Carlos"      | "Carlos Alcaraz Garfia"  | fails (cross-surname) | n/a    | no_match (deliberate) |
+| 3 | "Bautista"    | "Roberto Bautista Agut"  | passes via E.3 multi-index | empty | review_queue (or auto with corroboration) |
+| 4 | "Wang"        | multiple "Wang X."       | passes for ALL    | n/a       | review_queue (collision) |
+
 ### A.1 — Compound surname fallback
 
 **Carry over from 2C design D.A.2 (deferred to 2D).** When the last-token-as-surname interpretation fails, retry with the last-two-tokens as a compound surname.
@@ -223,35 +307,46 @@ This doc proposes 2D specifically NOT bypass name resemblance entirely. There's 
 
 ## Question C — Confidence model + thresholds
 
-### Answer (definitive): Path-aware composable signals, higher anchor floor than 2C.
+### Answer (definitive): Path-aware composable signals, three-component max-1.00.
+
+Pushback 3 (rev1): the original draft had a `+0.10 kickoff_drift_tightness` term on the personal path. Same reasoning as the 2C Pushback 3 review applies — kickoff drift is hard-filtered at strict-tier gate 1, and adding sub-window-tightness bonus inside the filter is a magic number without supporting data. **Dropped.**
+
+Personal path now has three signals (matching team path's structure):
 
 ```
-Personal-name path (tennis recovery, post-A + A.1):
-  surname_anchor (binary, after compound-fallback retries):  +0.40
-  remainder_token_set_quality (linear, ≥0.85 threshold):     up to +0.20
-    OR
-  initial_expansion (binary, all short tokens prefix-match):  +0.30
-  cross_provider_corroboration (existing fixture):            +0.20
-  kickoff_drift_tightness (≤5 min):                           +0.10
+Personal-name path:
+  surname_anchor (binary, after compound-fallback retries):       +0.40
+  initial_expansion (binary, all short tokens prefix-match)
+    OR remainder_token_set_quality (linear, ≥0.85 threshold)
+    [take the max, no double-count]:                              up to +0.30
+  cross_provider_corroboration (existing fixture at this kickoff): +0.30
 
-Team-name path (no-anchor fallback, post-B):
-  fuzz_ratio_anchor (binary, ratio ≥0.85):                    +0.40
-  fuzz_ratio_quality (linear, 0.85→+0.10, 1.0→+0.30):         up to +0.30
-  cross_provider_corroboration (REQUIRED for auto-apply):     +0.30
-                                                               (without: max ~0.70)
+Team-name path:
+  fuzz_ratio_anchor (binary, ratio ≥0.85):                        +0.40
+  fuzz_ratio_quality (linear, 0.85→+0.10, 1.0→+0.30):             up to +0.30
+  cross_provider_corroboration (REQUIRED for auto-apply):         +0.30
 ```
 
-**Maximum personal-path with corroboration**: 0.40 + 0.30 (initial expansion) + 0.20 + 0.10 = **1.00**.
+**Both paths**: max with corroboration = 0.40 + 0.30 + 0.30 = **1.00**.
 
-**Maximum personal-path without corroboration**: 0.40 + 0.30 + 0.10 = **0.80** → review_queue.
+**Both paths**: max without corroboration = 0.40 + 0.30 = **0.70** → review-queue lower bound (exclusive of auto-apply at 0.85).
 
-**Maximum team-path with corroboration**: 0.40 + 0.30 + 0.30 = **1.00**.
+The corroboration weight is **higher in 2D than in 2C** (+0.30 vs +0.20 in 2C alias-tier). Reasoning:
+- The 2C alias tier's anchor (token-set ratio) is a stronger structural signal than 2D's anchors (initial expansion is binary, character-level ratio is statistically noisier than token-set). The corroboration weight has to carry more of the safety margin.
+- Symmetric across paths: same +0.30 for both personal and team. Avoids per-path magic numbers.
 
-**Maximum team-path without corroboration**: 0.40 + 0.30 = **0.70** → review_queue lower bound (exclusive of auto-apply).
+The personal-vs-team distinction is now WHICH anchor signal is used (initial-expansion-or-token-set vs character-level-ratio), not the WEIGHTING. Cleaner.
 
-The asymmetry between personal and team paths reflects the different signal strengths:
-- Personal path's surname anchor + initial expansion is structurally precise (low FP risk).
-- Team path's fuzzy character-level ratio is statistically noisier — corroboration carries more of the safety margin.
+### Routing (same as 2C)
+
+| Final confidence | Reason code     | DB writes |
+|------------------|-----------------|-----------|
+| ≥ 0.85           | `fuzzy`         | provider.fixture_id UPDATE + resolution_log INSERT + sp.team_aliases INSERT (write-back, source='fuzzy_tier') |
+| 0.70 – 0.84      | `review_queue`  | resolution_log + sp.review_queue |
+| Top-2 within 0.05 | forced review  | resolution_log + sp.review_queue (even if ≥ 0.85) |
+| < 0.70           | `no_match`     | resolution_log only |
+
+`source='fuzzy_tier'` distinguishes 2D-tier alias write-backs from 2C alias-tier write-backs. The next strict-tier pass picks both up at 0.98 confidence; the source distinction is for audit and 2F reviewer confidence calibration.
 
 ### Routing (same as 2C)
 
@@ -456,88 +551,164 @@ Before 2D.3 (matcher integration), run a script analogous to `scripts/dry_run_al
 
 ## Day-0 prediction (with stated uncertainty)
 
-**Tennis recovery (Gap 1):** structural pattern is well-understood; algorithm is deterministic.
-- Conservative: 70% of 555/run = ~390 records resolved per Kalshi cron, of which ~50% have corroboration (other side already resolved via FL strict) → ~195 auto_apply, ~195 review_queue.
-- Optimistic: 85% of 555/run = ~470 resolved, ~280 auto_apply, ~190 review_queue.
+Pushback 4 (rev1): original draft's math didn't reconcile. `555 × 0.70 × 0.50 = 194`; `555 × 0.85 × 0.50 = 236`. The 280 figure implied a corroboration rate higher than 50%. Rebuilt below with clean arithmetic.
 
-**Team-sport residuals (Gap 2):** much smaller volume; uncertain how many will fuzzy-anchor at all.
-- Conservative: ~20 / Kalshi cron, ~30 / FL cron → maybe 50 auto_apply per day across both providers, plus 50-100 review_queue.
-- Optimistic: ~50 / Kalshi cron, ~80 / FL cron → 200 auto_apply per day, plus 100-200 review_queue.
+Pushback 5 (rev1): the 50% corroboration assumption was a guess. **The 2C dry-run measured corroboration at 6 / 247 ≈ 2.4%** — a 20× gap from what 2D was assuming. This is the most material correction in rev1.
 
-**Total post-2D projection** (delta from 2C.3 baseline):
+### What's the actual corroboration rate?
 
-| Provider | 2C.3 baseline (cron) | Post-2D low      | Post-2D high      |
-|----------|----------------------|------------------|-------------------|
-| Kalshi   | ~388 auto-apply      | ~580             | ~660              |
-| FL       | (similar deltas)     | (+20-80)         | (+80-200)         |
-| Total /day | ~16,500            | ~17,000          | ~17,500           |
+The 2D corroboration LOOKUP is structurally identical to 2C's: `find_fixture(home_id, away_id, kickoff_at, drift_sec=30*60)` against `sp.fixtures`, then the swapped (away, home) orientation. Same drift window. **Same code path.** The rate should be the same as 2C's measurement — there's no reason 2D would find more corroboration than 2C did with the same lookup.
 
-Tennis review-queue volume rises by ~190-280/day for the 14-day post-2D window. The C.1 alert-threshold relaxation (1500) absorbs this.
+But the 2C measurement was specifically on tennis (the `deferred_to_2d` bucket). 2D's tennis recovery WILL hit a higher corroboration rate post-cron-swap, because:
+- Pre-cron-swap (current 02:00 Kalshi → 02:15 FL): FL hasn't run yet; Kalshi tennis lookups against `sp.fixtures` find no fixtures because no recent FL pass has created them. **Effective corroboration rate: ~2-5%.**
+- Post-cron-swap (FL 02:00 → Kalshi 02:15): FL has finished its pass 15 minutes earlier and strict-tier-resolved its tennis events. Kalshi looks at fresh `sp.fixtures` → corroboration rate jumps. **Estimated rate: 20-40%** (still bounded by how much of the FL tennis corpus actually has paired Kalshi records at the same kickoff).
 
-**Caveats on the prediction:**
-- Order-of-operations: Kalshi tennis records arriving BEFORE the corresponding FL pass will get `no_match(fuzzy_no_existing_fixture)` and pick up on the next pass. So per-pass auto-apply will be lower than steady-state.
-- Initial expansion compatibility for asian-name conventions has not been audited yet. If "Naomi Osaka" / "Osaka N." style records are common in production (likely for women's tennis), the algorithm handles them — but volumes are unknown.
-- The 555/run figure is from one Kalshi pass. FL tennis volumes are different (probably higher absolute count, but FL tennis already auto-applies via strict tier per the 2A.5 baseline).
+The 20-40% range is itself a guess. **The 2D.2.5 dry-run is the calibration gate** — if the dry-run shows a different rate, day-0 prediction adjusts accordingly. Phase 2D.3 doesn't ship until the 2D.2.5 numbers come in.
+
+### Recomputed numbers
+
+**Tennis recovery (Gap 1):**
+
+|                       | Records resolving (anchor passes) | Of those, with corroboration | Auto-apply | Review-queue |
+|-----------------------|------------------------------------|-------------------------------|------------|--------------|
+| Conservative          | 555 × 70% = 388                    | 20%                           | 78         | 311          |
+| Mid                   | 555 × 78% = 432                    | 30%                           | 130        | 302          |
+| Optimistic            | 555 × 85% = 471                    | 40%                           | 188        | 283          |
+
+**Team-sport residuals (Gap 2):** uncertain how many even anchor; volumes are small. Conservative range with corroboration-required-for-auto-apply:
+- Conservative: ~30 anchor, 25% corroboration → 8 auto-apply, 22 review.
+- Optimistic: ~150 anchor, 40% corroboration → 60 auto-apply, 90 review.
+
+**Total post-2D projection** (per Kalshi cron pass, delta from 2C.3 baseline):
+
+| Scenario      | Baseline (2C.3) | Tennis auto | Team auto | Tennis review | Team review | Post-2D auto |
+|---------------|-----------------|-------------|-----------|---------------|-------------|---------------|
+| Conservative  | ~388            | +78         | +8        | +311          | +22         | ~474          |
+| Mid           | ~388            | +130        | +30       | +302          | +50         | ~548          |
+| Optimistic    | ~388            | +188        | +60       | +283          | +90         | ~636          |
+
+Review-queue volume rises by ~330-370/day across providers. The 2C.1 alert-threshold relaxation (1,500) absorbs this with headroom.
+
+**Caveats:**
+
+1. **Pre-2D.2.5 dry-run: the corroboration rate is the largest unknown.** If the dry-run shows ~5% (closer to 2C's measurement), the auto-apply numbers drop to the conservative end of the table. If ~50% (above the mid-range), they could exceed the optimistic. **Don't lock 2D.3 until the dry-run confirms.**
+2. **Cron swap (E.1) is on the critical path.** Without the FL→Kalshi swap, day-0 corroboration rate stays at the ~5% pre-swap baseline. Recommend swapping in a small `railway.toml` PR before 2D.1.
+3. **Order-of-operations decay across passes (E.2).** Records that don't auto-apply on pass 1 due to missing corroboration mostly resolve on pass 2 (after FL has run). Steady-state auto-apply is higher than first-pass auto-apply by maybe 10-20%.
+4. **Initial-expansion compatibility for non-Western names** has not been audited. Asian conventions (Naomi Osaka / Osaka N.) work mechanically per the algorithm; volume of cases unknown.
+5. **555 records/run is from one Kalshi pass** measured immediately after PR #95 merged. The FL tennis no_match volume is different (FL tennis mostly auto-applies via strict tier). 2D's FL tennis recovery is incremental on top of FL's already-78% baseline.
 
 ---
 
 ## Open questions awaiting sign-off
 
-### A.1 — Compound surname fallback retry order
+Each question is tagged with the PR that's blocked on its resolution:
+**[2D.1]** = blocks 2D.1 (initials_compatible + compound-surname fallback)
+**[2D.2]** = blocks 2D.2 (FuzzyTierMatcher)
+**[2D.3]** = blocks 2D.3 (orchestrator + runner integration)
+**[dry-run]** = answered by 2D.2.5 dry-run output
+**[doc]** = documentation-only; no implementation effect
 
-Three retries proposed: (last token), (last two tokens), (second-to-last token). Should we exhaust ALL n suffix combinations? For 4-token names ("Lopez Garcia Sanz Mendez") that's 3 retries. Recommendation: stop at 3 retries (last 1, last 2, last 3 tokens). Beyond that = diminishing returns + cost of false positives.
+### A.1 — Compound surname fallback retry order **[2D.1]**
 
-### A.2 — Initial expansion case-sensitivity
+Three retries proposed: (last token), (last two tokens), (last three tokens). For 4-token names ("Lopez Garcia Sanz Mendez") that's 3 retries. **Recommendation:** stop at 3 retries. Beyond that = diminishing returns + FP risk.
+
+### A.2 — Initial expansion case-sensitivity **[doc]**
 
 The structural normalize lowercases; both sides hit the rule with same case. **No additional handling needed.** Documenting for clarity.
 
-### A.3 — Multi-initial cases ("J.J. Watt")
+### A.3 — Multi-initial cases ("J.J. Watt") **[2D.1]**
 
-`"j.j. watt"` after normalize = ["j", "j", "watt"]. P_short=["j","j"]. If candidate has ["jj", "watt"] (single bigram), C_short=["watt"] which doesn't apply, P_short=["j","j"] each prefix-checks "watt"? "watt".startswith("j") → ✗. Recommendation: this case stays in review queue. Real-world impact: rare. Document as a known limitation.
+`"j.j. watt"` after normalize = `["j", "j", "watt"]`. P_short=`["j","j"]` each prefix-checks the candidate's long tokens. If candidate is `["jj", "watt"]` (single bigram), only "watt" is in C_long; "watt".startswith("j") → ✗. **Recommendation:** stays in review queue / no_match. Real-world impact: rare. Documented as known limitation; 2D.1 tests assert it.
 
-### B.1 — Team-path fuzz.ratio threshold
+### B.1 — Team-path fuzz.ratio threshold **[2D.2]** **[dry-run]**
 
-0.85 chosen by analogy to alias-tier auto-apply. This is character-level Levenshtein-derived; the empirical FP rate at this threshold isn't known. **Recommendation:** ship at 0.85, watch the day-7 review for false positives, tighten to 0.90 if needed. Same calibration discipline as 2C threshold tuning.
+0.85 chosen by analogy to alias-tier auto-apply. Character-level Levenshtein-derived; empirical FP rate at this threshold isn't known. **Recommendation:** ship at 0.85, watch the day-7 review for false positives, tighten to 0.90 if needed. Same calibration discipline as 2C threshold tuning.
 
-### C.1 — Initial-expansion contribution magnitude
+### C.1 — Initial-expansion contribution magnitude **[2D.3]**
 
-`+0.30` chosen so personal-path-with-corroboration hits 1.00 exactly. Could be `+0.25` (more conservative — auto-apply requires both initial expansion AND corroboration AND tight kickoff). Could be `+0.35` (more permissive — auto-apply on initial expansion + corroboration alone, without kickoff tightness bonus).
+`+0.30` chosen so personal-path-with-corroboration hits 1.00 exactly. Could be `+0.25` (more conservative — auto-apply requires both initial expansion AND corroboration AND every other signal). Could be `+0.35` (more permissive).
 
-**Recommendation:** ship at +0.30 (the natural 0.40+0.30+0.20+0.10=1.00 decomposition). The day-7 review surfaces whether that's too aggressive. Adjusting one constant in subsequent PR is cheap.
+**Recommendation:** ship at +0.30 (the natural 0.40+0.30+0.30=1.00 decomposition post-Pushback-3 rev1). The day-7 review surfaces whether that's too aggressive.
 
-### C.2 — Personal-path token-set as alternative to initial expansion
+### C.2 — Personal-path token-set as alternative to initial expansion **[2D.3]**
 
-The model proposes initial expansion OR remainder token-set, not both. A perfect remainder token-set match (rare for tennis) gives +0.20 max; initial expansion gives +0.30. So initial expansion is preferred when both apply.
+The model proposes initial expansion OR remainder token-set, not both. **Recommendation:** take the max of the two. No double-counting.
 
-But what if both signals fire AND agree? E.g., "M Kecmanovic" / "M Kecmanovic" — initial AND remainder both match exactly. Recommendation: take the max of the two. No double-counting.
-
-### D.1 — Resolver version stamp
+### D.1 — Resolver version stamp **[2D.3]**
 
 `fuzzy@2d.0` for the matcher, `tiered@2d.0` for the orchestrator (since adding a tier is a semantic change to TieredMatcher). Per-decision rows on `resolution_log` keep tier-specific stamps; `sp.resolver_runs.resolver_version` becomes `tiered@2d.0`.
 
-### D.2 — Day-0 dry-run before 2D.3 ships
+### D.2 — Day-0 dry-run before 2D.3 ships **[dry-run]**
 
-Mirror the 2C.2.5 calibration discipline. **Recommendation:** ship `scripts/dry_run_fuzzy_tier.py` as Phase 2D.2.5 before 2D.3. Output is the threshold-tuning input; if the bucket distribution looks bad, we revisit 0.85 / 0.30 / 0.30 numbers before committing the matcher.
+Mirror the 2C.2.5 calibration discipline. **Recommendation:** ship `scripts/dry_run_fuzzy_tier.py` as Phase 2D.2.5 before 2D.3. The dry-run output answers Pushback 5 (corroboration rate) AND validates threshold choices BEFORE 2D.3 commits to them.
+
+### E.1 — Cron schedule swap (FL 02:00 / Kalshi 02:15) **[doc + railway.toml — separate PR]**
+
+Per Pushback 1 (rev1). Currently Kalshi runs first; under that ordering Kalshi tennis lookups find no fresh FL fixtures → corroboration rate ~2-5%. **Recommendation: swap.** Lands as a small `railway.toml` PR ahead of 2D.1; benefits 2C.3 too (alias-tier corroboration sees fresher fixtures). Independent of 2D ship timing.
+
+### E.2 — Pre-2E re-resolve mechanism **[doc]**
+
+Per Pushback 1 (rev1). The runner's existing `fixture_id IS NULL` filter naturally re-tries no_match records on every cron pass — no code change needed. Cost: `resolution_log` row accretion (~42 rows per stuck record over 14 days, ~42KB). Documented; deferred to Phase 2E for proper handling.
+
+### E.3 — Multi-interpretation candidate surname index **[2D.1]**
+
+Per Pushback 2 case 3 (the "Bautista" → "Roberto Bautista Agut" case). Candidate names index under MULTIPLE surname interpretations:
+- Default: last token (`"agut"`)
+- Compound: last-2-tokens (`"bautista agut"`)
+- Middle-as-surname: token[-2] alone (`"bautista"`)
+
+For 24,400 candidates × 3 interpretations = ~73,000 keys in `_by_sport_surname`. Memory ~10MB resident; fine.
+
+**Recommendation:** YES, expand the index. This is an addition to `CandidateIndex` in 2C — needs to ship in 2D.1 alongside the compound fallback. The provider-side fallback (A.1) and candidate-side interpretation (E.3) are complementary: E.3 ensures the candidate is reachable under multiple surname interpretations, A.1 lets the provider try multiple surname interpretations of its own input.
+
+### E.4 — Single-token provider name handling ("Carlos") **[2D.2]**
+
+Per Pushback 2 case 2. Single-token provider input is structurally ambiguous (could be first or last name). Trying both interpretations and taking the most-frequent canonical-name token would auto-apply on first-name-as-surname collisions in pools with many "Carlos" candidates.
+
+**Recommendation:** stay no_match for 2D. Document as deliberate non-goal. If day-7 review shows non-trivial single-token-provider volume, follow-up with a "surname-or-first-name index" enhancement.
+
+### E.5 — Corroboration window for 2D **[doc]**
+
+Same 30-min drift as 2C's strict tier and alias tier. Tightening to 5-min would reduce FALSE corroborations (kickoff-coincidence between unrelated games) but day-0 corroboration rate is already low; tightening makes it worse.
+
+**Recommendation:** keep 30-min drift, same as 2C.
 
 ---
 
 ## Sign-off checklist
 
-Before implementation begins:
+Before implementation begins. Tags: `[2D.1]` blocks 2D.1 ship; `[2D.2]` blocks 2D.2; `[2D.3]` blocks 2D.3; `[dry-run]` answered by 2D.2.5 dry-run; `[doc]` documentation-only.
 
-**Algorithm:**
-- [ ] **A** — Initial expansion algorithm (structural prefix-match for short tokens). Approved.
-- [ ] **A.1** — Compound surname fallback (3 retry levels). Approved.
-- [ ] **A.2** — Case-sensitivity is post-normalization (no extra handling). Approved.
-- [ ] **A.3** — Multi-initial cases stay in review queue. Approved as known limitation.
-- [ ] **B** — Team-path character-level fuzzy with corroboration-required-for-auto-apply. Approved.
-- [ ] **B.1** — fuzz.ratio threshold = 0.85. Approved or counter-proposed.
+**Algorithm — `[2D.1]` blockers:**
+- [ ] **A** — Initial expansion (structural prefix-match for short tokens). Approved.
+- [ ] **A.1** — Compound surname fallback, 3 retry levels (last 1, 2, 3 tokens). Approved.
+- [ ] **A.3** — Multi-initial cases ("J.J. Watt") stay no_match; documented limitation. Approved.
+- [ ] **E.3** — Multi-interpretation candidate surname index (default + compound + middle-as-surname). Approved.
 
-**Confidence model:**
-- [ ] **C** — Personal: 0.40 anchor + 0.30 initial-expansion (or 0.20 remainder ratio) + 0.20 corroboration + 0.10 kickoff-tight = 1.00 max.
-- [ ] **C** — Team: 0.40 anchor + 0.30 fuzz-quality + 0.30 corroboration = 1.00 max (no kickoff-tight bonus).
-- [ ] **C.1** — Initial-expansion contribution = +0.30. Approved or counter-proposed.
+**Algorithm — `[2D.2]` blockers:**
+- [ ] **B** — Team-path character-level fuzzy with corroboration-REQUIRED for auto-apply. Approved.
+- [ ] **B.1** — `fuzz.ratio()` threshold = 0.85. **[dry-run validates]** Approved (initial; tighten to 0.90 if FP rate exceeds threshold at day-7).
+- [ ] **E.4** — Single-token provider name ("Carlos") stays no_match in 2D. Approved as deliberate non-goal.
+
+**Algorithm — `[doc]` only:**
+- [ ] **A.2** — Case-sensitivity is post-normalization. Documented; no implementation effect. Approved.
+
+**Confidence model — `[2D.3]` blockers:**
+- [ ] **C** — Both paths: 0.40 anchor + 0.30 quality (max of initial-expansion-or-remainder for personal; linear for team) + 0.30 corroboration = 1.00 max. (Pushback 3 rev1: dropped +0.10 kickoff-tight bonus.)
+- [ ] **C.1** — Initial-expansion contribution = +0.30. **[dry-run validates]** Approved.
 - [ ] **C.2** — Initial expansion vs remainder: take max, no double-count. Approved.
+
+**Process — `[2D.3]` blocker:**
+- [ ] **D.1** — Per-tier stamp `fuzzy@2d.0`; orchestrator stamp `tiered@2d.0`. Approved.
+
+**Calibration — `[dry-run]`:**
+- [ ] **D.2** — Phase 2D.2.5 dry-run before 2D.3 ships. **Required.**
+- [ ] Pushback 5 corroboration rate validated by 2D.2.5 dry-run before locking thresholds. **Required.**
+
+**Operational — separate PRs:**
+- [ ] **E.1** — Cron schedule swap (FL 02:00 / Kalshi 02:15). Lands as a small `railway.toml` PR ahead of 2D.1; benefits 2C.3 too. Approved.
+- [ ] **E.2** — Pre-2E re-resolve uses existing `fixture_id IS NULL` filter; document `resolution_log` accretion as known issue. Approved.
+- [ ] **E.5** — Corroboration window stays at 30-min drift (same as 2C). Approved.
 
 **Schema:**
 - [ ] Schema-zero approach (no new tables, no new columns). Approved.
@@ -547,17 +718,14 @@ Before implementation begins:
 - [ ] No team / fixture creation in fuzzy tier. Approved.
 - [ ] No recovery of `signal_extraction_skipped` records. Approved.
 - [ ] No ratio-tuning for individual sports beyond initial expansion. Approved.
-
-**Process:**
-- [ ] **D.1** — Per-tier `RESOLVER_VERSION` (`fuzzy@2d.0`) + run-level `tiered@2d.0`. Approved.
-- [ ] **D.2** — Phase 2D.2.5 dry-run script before 2D.3 matcher. Approved.
 - [ ] Test plan: real call-path integration tests as primary surface, static guards as backstop. Approved.
 
 After sign-off, 2D ships in this order — each step is its own PR:
 
-1. **2D.1 — `initials_compatible` + compound-surname fallback (pure-Python).** Single-file additions to `resolver/fuzzy_tier/initial_expansion.py`. ~10 unit tests. No DB integration.
+0. **(Pre-2D.1) — Cron swap.** Tiny `railway.toml` PR per E.1. Benefits 2C.3 immediately; sets up 2D's corroboration-rate measurement.
+1. **2D.1 — `initials_compatible` + compound-surname fallback + multi-interpretation surname index (pure-Python).** Additions to `resolver/fuzzy_tier/initial_expansion.py` and `resolver/alias_tier/candidates.py`. ~15 unit tests. No DB integration.
 2. **2D.2 — `FuzzyTierMatcher`.** Composes 2D.1 + 2C `CandidateIndex` + cross-provider corroboration. ~15 real call-path tests with mocked DB session.
-3. **2D.2.5 — Dry-run script.** Calibration data from production (pattern matches 2C.2.5).
+3. **2D.2.5 — Dry-run script.** Calibration data from production (pattern matches 2C.2.5). **Threshold-locking gate** for 2D.3.
 4. **2D.3 — `TieredMatcher` extends to 3 tiers + runner integration.** Per-tier counters in `sp.resolver_runs.extra`. DEPLOYMENT.md updates.
 5. **2D.4 — Day-7 review.** Same cadence as 2B and 2C. Adjust thresholds if FP rate exceeds halt criteria.
 
