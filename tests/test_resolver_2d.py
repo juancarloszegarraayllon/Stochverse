@@ -507,3 +507,33 @@ class TestStaticGuards:
         from resolver.alias_tier import ALIAS_RESOLVER_VERSION
         assert FUZZY_RESOLVER_VERSION == "fuzzy@2d.0"
         assert FUZZY_RESOLVER_VERSION != ALIAS_RESOLVER_VERSION
+
+    def test_fuzzy_drift_window_widened_per_2d28(self):
+        # Phase 2D.2.8: fuzzy tier widens its drift window from 30 to
+        # 60 min. Strict tier and alias tier stay at 30 min.
+        # Calibration evidence in PR #103: Q3 lift 85% → 100% (+15pp)
+        # at ±60min vs ±30min, with kickoff offsets piling up at the
+        # 30-min filter edge (Q2 median/max both 30).
+        from resolver.fuzzy_tier.matcher import KICKOFF_DRIFT_SEC as FUZZY_DRIFT
+        from resolver.matcher import StrictMatcher
+        from resolver.alias_tier.matcher import KICKOFF_DRIFT_SEC as ALIAS_DRIFT
+
+        assert FUZZY_DRIFT == 60 * 60, (
+            f"Fuzzy tier drift expected 60 min (3600s), got {FUZZY_DRIFT}s. "
+            "Per Path B in design §E.8."
+        )
+        assert StrictMatcher.KICKOFF_DRIFT_SEC == 30 * 60
+        assert ALIAS_DRIFT == 30 * 60
+        # Per-tier guard: fuzzy must be strictly wider than strict.
+        # If a future change tightens fuzzy or widens strict, this
+        # asserts the design invariant before the calibration is lost.
+        assert FUZZY_DRIFT > StrictMatcher.KICKOFF_DRIFT_SEC, (
+            "Fuzzy tier must use a wider corroboration drift window than "
+            "strict tier (per design §E.8 Path B). Tighter strict-tier "
+            "drift protects against false positives where exact alias "
+            "anchors don't need slack."
+        )
+        assert FUZZY_DRIFT > ALIAS_DRIFT, (
+            "Fuzzy tier must use a wider corroboration drift window than "
+            "alias tier. Alias tier's exact-alias anchors don't need slack."
+        )

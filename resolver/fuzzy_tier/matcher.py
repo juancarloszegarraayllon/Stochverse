@@ -80,9 +80,27 @@ INITIAL_EXPANSION_BONUS = 0.30      # binary signal, not linearly scaled
 TEAM_FUZZ_RATIO_THRESHOLD = 0.85
 
 
-# Drift window for cross-provider corroboration. Same 30 min as
-# strict tier and 2C alias tier (per design E.5).
-KICKOFF_DRIFT_SEC = 30 * 60
+# Drift window for cross-provider corroboration.
+#
+# Phase 2D.2.8: widened to 60 min for the fuzzy tier ONLY. Strict tier
+# (resolver/matcher.py) and 2C alias tier (resolver/alias_tier/matcher.py)
+# stay at 30 min because their tighter anchor signals (exact alias hits)
+# don't need slack to meet the same-fixture bar.
+#
+# Calibration evidence (PR #103, scripts/investigate_corroboration_gap.sql):
+#   Q1 tournament overlap: 100%      → tournament gap ruled out
+#   Q2 kickoff alignment:  median 30, max 30 → pile-up at the 30-min edge,
+#                          confirming many same-fixture pairs sit at
+#                          31-60 min offsets and are silently rejected
+#   Q3 drift band lift:    85% at ±30min → 100% at ±60min (+15pp),
+#                          mean fixture count 9.37 → 17.90 (~2× candidates)
+#
+# Per Path B in design §E.8: widen drift_sec for fuzzy tier to recover the
+# corroboration headroom. Wider drift on the fuzzy tier is consistent with
+# its looser confidence model — anchor (0.40) + quality (0.30) +
+# corroboration (0.30) — where the corroboration signal is bonus, not
+# load-bearing, so a slightly wider candidate window is safe.
+KICKOFF_DRIFT_SEC = 60 * 60
 
 
 # Exact-match ratio for team-path collision tiebreaker.
