@@ -466,6 +466,48 @@ for Neon connections during the bulk-load phase.
 | `resolver-cron-kalshi` | `0 2 * * *`  | `python scripts/run_resolver_pass.py --provider kalshi --run-mode cron` |
 | `resolver-cron-fl`     | `15 2 * * *` | `python scripts/run_resolver_pass.py --provider fl --run-mode cron`     |
 
+#### One-time Railway setup (services don't auto-create)
+
+**Important:** Railway does **not** auto-provision services from
+`railway.toml`. The TOML only configures services that already exist
+in the project; missing services are silently ignored. The first
+deploy after this PR landed produced no cron runs because of this —
+the operator has to create each service in the dashboard once, then
+the TOML's `cronSchedule` and `startCommand` take over.
+
+Setup steps (do this once per Railway project):
+
+1. Open the Railway project dashboard.
+2. Click **+ New** → **Empty Service**. Name it exactly
+   `resolver-cron-kalshi` (the name must match the `[[services]]`
+   block in `railway.toml`).
+3. Connect it to the same GitHub repo + branch as the web service
+   (so it picks up the same code).
+4. Set the same environment variables the web service uses —
+   minimum: `DATABASE_URL`. Use the Railway **Shared Variables**
+   feature so all three services (web + both crons) read from one
+   source.
+5. Repeat for `resolver-cron-fl`.
+6. Trigger a redeploy on each. After the first deploy, Railway
+   reads `railway.toml`, sees the matching `[[services]]` block,
+   and applies `cronSchedule` + `startCommand`. Subsequent code
+   pushes update both crons without further dashboard work.
+
+Verify:
+- Each service's **Settings → Cron Schedule** field shows
+  `0 2 * * *` (kalshi) or `15 2 * * *` (fl).
+- Each service's **Settings → Start Command** matches the table
+  above.
+- The Railway deploy logs for each cron service show
+  `Resolver pass complete in Xs:` and the per-counter summary on
+  the next scheduled run.
+
+If a cron service runs but exits with `ERROR: DATABASE_URL not
+set`, the env var didn't propagate from Shared Variables — set
+`DATABASE_URL` directly on that service's **Variables** tab.
+
+#### Per-run signals
+
 Both passes write one row to `sp.resolver_runs` with
 `run_mode='cron'` so day-7 reports filter cleanly (excluding ad-hoc
 `standalone` runs and post-2E `live` activity).
