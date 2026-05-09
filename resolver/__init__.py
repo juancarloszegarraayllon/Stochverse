@@ -35,6 +35,14 @@ from .matcher import StrictMatcher, RESOLVER_VERSION as STRICT_MATCHER_VERSION
 # Phase 2A.6 additions:
 from .competitions import CompetitionResolver
 
+# Phase 2C additions:
+from .matcher import TieredMatcher, TIERED_RESOLVER_VERSION
+from .alias_tier import (
+    AliasTierMatcher,
+    ALIAS_RESOLVER_VERSION,
+    CandidateIndex,
+)
+
 __all__ = [
     "FixtureSignal",
     "TeamCandidate",
@@ -51,4 +59,10 @@ __all__ = [
     "STRICT_MATCHER_VERSION",
     # Phase 2A.6
     "CompetitionResolver",
+    # Phase 2C
+    "AliasTierMatcher",
+    "ALIAS_RESOLVER_VERSION",
+    "CandidateIndex",
+    "TieredMatcher",
+    "TIERED_RESOLVER_VERSION",
 ]

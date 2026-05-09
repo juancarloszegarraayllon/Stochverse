@@ -57,10 +57,17 @@ CORROBORATION_SCORE = 0.20       # cross-provider existing-fixture lookup (set b
 # At threshold → +0.20; at 1.0 → +0.30 (linear).
 PERSONAL_TOKEN_SET_THRESHOLD = 0.85
 
-# Team-name path: whole-string ratio must clear 0.92 to ANCHOR.
-# Higher than personal because no surname signal carries the safety
-# margin. At threshold → +0.20; at 1.0 → +0.30 (linear).
-TEAM_TOKEN_SET_THRESHOLD = 0.92
+# Team-name path: whole-string ratio must clear this to ANCHOR.
+# At threshold → +0.20; at 1.0 → +0.30 (linear).
+#
+# Lowered from 0.92 → 0.78 in Phase 2C.3 after the Phase 2C.2.7
+# soccer dry-run revealed that legitimate matches consistently
+# scored 0.80 (e.g., "Brighton" → "Brighton & Hove Albion") and
+# 0.92 was suppressing real recall. Cross-team-collision detection
+# (in AliasTierMatcher, not the scorer) protects against false
+# positives — multiple candidates above 0.78 force review-queue
+# routing.
+TEAM_TOKEN_SET_THRESHOLD = 0.78
 
 
 # ── Routing thresholds (consumed by 2C.3) ───────────────────────

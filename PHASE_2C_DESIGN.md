@@ -18,6 +18,72 @@ Phase 2C adds a second resolution tier — **alias tier** — that runs after Ph
 
 The alias tier is **deliberately structural, not statistical**. It exploits one strong observation: whenever the strict tier fails on `alias_resolution_incomplete`, the surname (or canonical-name root) is almost always the same on both sides — what differs is structural shape (initial vs full first name, parenthetical country codes, abbreviation conventions). A tier that anchors on surname + scores around it should recover most of the gap.
 
+### Phase 2C.2.5 / 2C.2.6 / 2C.2.7 dry-run findings (post-doc-rev1)
+
+**Tennis dry-run (PR #93).** 0 / 247 scored auto-applied without
+corroboration; 6 / 247 with corroboration. Root cause is structural,
+not threshold-tuning: Kalshi tennis records carry surname-only
+("Popyrin", "Mensik") while FL aliases use "Last F. (Country)" —
+token-set ratio on empty-vs-initials remainders is ~0, never
+crossing the 0.30 contribution ceiling. **Tennis (and individual
+sports generally) are deferred to Phase 2D**, which already covers
+the "no surname anchor" regime — extending it to "surname-anchor-
+but-non-overlapping-remainder" is the natural fit. **2C ships
+team-sport-only.** Personal-name path code (normalize.py +
+scorer.py) stays committed; Phase 2D wires it up.
+
+**Soccer dry-run (PRs #94 + 2C.2.7 re-run).** Pre-2C.2.6: 0 auto /
+446 review / 0 no_match / 135 anchor_failed. Post-2C.2.6: 0 auto /
+58 auto with corroboration / 248 review / 66 anchor_failed (267
+prop-bet contaminants caught upstream by the suffix filter). With
+corroboration: 58 auto / 388 review.
+
+**Two threshold revisions locked for 2C.3:**
+1. `TEAM_TOKEN_SET_THRESHOLD` lowered 0.92 → **0.78**. Real
+   matches consistently scored 0.80 (e.g., "Brighton" → "Brighton &
+   Hove Albion"); 0.92 was suppressing real recall.
+2. **Cross-team-collision detection** in `AliasTierMatcher` (not
+   the scorer): if multiple candidates score above threshold,
+   route to review_queue regardless of confidence. Exception:
+   **exact-match-wins** — if exactly one candidate scores 1.0
+   while others are above threshold, the 1.0 wins. Handles
+   "Manchester United" → United (exact) over City (near miss).
+
+**Revised day-0 prediction:**
+
+| Provider | Day-0 today | Post-2C low | Post-2C high |
+|----------|-------------|-------------|--------------|
+| Kalshi (team sports) | 36.5% strict | +5–10% alias | +5–10% alias |
+| Kalshi (all)         | 8.0%         | ~12%         | ~15%         |
+| FL                   | 78%          | 88%          | 93%          |
+| Total auto-applies   | 14,758       | ~16,500      | ~17,500      |
+
+Tennis stays at strict-tier-only (~180 Kalshi tennis no_match per
+day, all logged with `fail_reason='deferred_to_2d'`) until Phase 2D.
+
+### Phase 2C.4 (post-2C.3 day-7 review): Senior team disambiguation
+
+Detect "II", "Reserve", "U19", "U21", "B", "youth" qualifiers in
+candidate team names. When a Kalshi market matches both a senior
+and a reserve/youth team (subset-match cases like "Real Sociedad"
+matching both "Real Sociedad" and "Real Sociedad II" at 1.0), prefer
+senior auto-apply. Reduces review-queue volume on patterns like:
+
+- "Real Sociedad" → Real Sociedad (senior) over Real Sociedad II
+- "Club Brugge"   → Club Brugge (senior) over Club Brugge U19
+
+**Ships only AFTER 2C.3 day-7 review confirms which collision
+patterns are actually appearing in production.** Don't pre-build
+for theoretical collisions; build based on actual review-queue
+distribution. The 2C.3 PR's `colliding_home_team_ids` /
+`colliding_away_team_ids` audit fields surface the data needed to
+size 2C.4.
+
+Out of scope for 2C.4: cross-team disambiguation
+("Manchester United" vs "Manchester City") — those should genuinely
+go to review queue. 2C.4 only tackles senior-vs-reserve where the
+senior team is what Kalshi markets always reference.
+
 ---
 
 ## Day-0 baseline (the inputs to design 2C against)

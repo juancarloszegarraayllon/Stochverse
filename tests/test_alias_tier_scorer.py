@@ -67,10 +67,15 @@ class TestThresholdConstants:
         # Margin is small but positive.
         assert 0 < TOP_2_MARGIN <= 0.10
 
-    def test_team_threshold_higher_than_personal(self):
-        # Per design D.2: team-name path needs higher safety margin
-        # because no anchor.
-        assert TEAM_TOKEN_SET_THRESHOLD > PERSONAL_TOKEN_SET_THRESHOLD
+    def test_team_threshold_lower_than_personal_post_2c3(self):
+        # Phase 2C.3 lowered TEAM_TOKEN_SET_THRESHOLD from 0.92 to
+        # 0.78 after the soccer dry-run revealed legitimate matches
+        # consistently scored 0.80. Cross-team collision detection
+        # in AliasTierMatcher (not the scorer) protects against
+        # false positives — multiple candidates above 0.78 force
+        # review_queue. The scorer's job is just to compute the
+        # raw score.
+        assert TEAM_TOKEN_SET_THRESHOLD < PERSONAL_TOKEN_SET_THRESHOLD
 
 
 # ── Path 1: personal name ───────────────────────────────────────
@@ -259,34 +264,38 @@ class TestTeamAnchor:
     def test_localized_variant_passes(self):
         # "Bayern München" vs "Bayern Munich" — character diff.
         # After diacritic strip: "munchen" vs "munich". Tokens
-        # share "bayern" only. ratio ~89 → passes 0.92? actually 89 < 92.
+        # share "bayern" only. ratio ~89 → passes 0.78 (post-2C.3
+        # threshold). Pre-2C.3 (0.92 threshold) this was rejected;
+        # the dry-run showed the rejection was suppressing real
+        # recall.
         prov = _team("Bayern München")
         cand = _team("Bayern Munich")
         result = score_pair(
             provider_side=prov, candidate_team_id=_tid(),
             candidate_side=cand,
         )
-        # Sanity check: this case is actually below threshold (89 < 92).
-        # It would NOT auto-match through alias-tier — it'd need either
-        # a manually curated alias or Phase 2D fuzzy.
-        assert result.anchor_passed is False
-        assert "team_anchor_below_threshold" in result.breakdown
+        assert result.anchor_passed is True
 
-    def test_cross_team_collision_rejected(self):
-        # "Manchester United" vs "Manchester City" — shares one
-        # token ("manchester"). ratio ~81. Below 0.92 threshold.
+    def test_cross_team_near_miss_passes_anchor_post_2c3(self):
+        # "Manchester United" vs "Manchester City" — shares
+        # "manchester". ratio ~81. POST-2C.3 (threshold 0.78) this
+        # passes the SCORER's anchor check. Cross-team-rejection is
+        # NOT the scorer's job — AliasTierMatcher detects this case
+        # via cross-team-collision (multiple candidates above
+        # threshold for the same provider input → review queue).
         prov = _team("Manchester United")
         cand = _team("Manchester City")
         result = score_pair(
             provider_side=prov, candidate_team_id=_tid(),
             candidate_side=cand,
         )
-        assert result.anchor_passed is False
-        assert result.confidence == 0.0
+        assert result.anchor_passed is True
+        # Confidence is in review-queue range without corroboration.
+        assert REVIEW_QUEUE_THRESHOLD <= result.confidence < AUTO_APPLY_THRESHOLD
 
     def test_completely_different_teams_rejected(self):
         # "Real Madrid" vs "Atletico Madrid" — shares "madrid".
-        # ratio ~71. Way below threshold.
+        # ratio ~71. Below 0.78 threshold. Anchor fails.
         prov = _team("Real Madrid")
         cand = _team("Atletico Madrid")
         result = score_pair(
@@ -300,29 +309,6 @@ class TestTeamCorroboration:
     """Cross-provider corroboration on Path 2 — same +0.20 boost,
     same conditions."""
 
-    def test_team_threshold_match_with_corroboration_clears_review(self):
-        # "Atletico Tucuman" vs "Atletico" — ratio is 100
-        # (rapidfuzz token_set_ratio gives intersection-vs-each-side max).
-        # So even the threshold-only case is above 0.92; need to construct
-        # a case AT 0.92 deliberately.
-        # Construct via direct StructuredName instances.
-        prov = StructuredName(
-            raw="A B C D E", detection_path="team_qualified",
-            surname="", other_tokens=("a", "b", "c", "d", "e"),
-            is_personal=False,
-        )
-        cand = StructuredName(
-            raw="A B C D F", detection_path="team_qualified",
-            surname="", other_tokens=("a", "b", "c", "d", "f"),
-            is_personal=False,
-        )
-        # token_set_ratio ~ 80 — below 0.92, anchor fails.
-        result = score_pair(
-            provider_side=prov, candidate_team_id=_tid(),
-            candidate_side=cand,
-        )
-        assert result.anchor_passed is False
-
     def test_perfect_team_match_with_corroboration_hits_one(self):
         prov = _team("Real Madrid")
         cand = _team("Real Madrid")
@@ -333,12 +319,13 @@ class TestTeamCorroboration:
         )
         assert result.confidence == pytest.approx(1.00)
 
-    def test_team_corroboration_does_not_save_below_threshold(self):
-        # Below-threshold team match cannot be saved by corroboration —
-        # design doc Q B locks "tiebreaker for already-anchored
-        # candidates only". Anchor must pass first.
-        prov = _team("Manchester United")
-        cand = _team("Manchester City")
+    def test_below_threshold_anchor_fails_even_with_corroboration(self):
+        # Real Madrid vs Atletico Madrid — ratio ~71. Below 0.78
+        # threshold even after the 2C.3 lowering. Corroboration
+        # cannot save below-anchor cases (design doc Q B: tiebreaker
+        # for already-anchored candidates only).
+        prov = _team("Real Madrid")
+        cand = _team("Atletico Madrid")
         result = score_pair(
             provider_side=prov, candidate_team_id=_tid(),
             candidate_side=cand,
@@ -447,11 +434,12 @@ class TestLinearContribution:
 
     def test_team_at_threshold_yields_point_two(self):
         from resolver.alias_tier.scorer import _linear_contribution
-        assert _linear_contribution(0.92, threshold=0.92) == pytest.approx(0.20)
+        # Post-2C.3 threshold = 0.78.
+        assert _linear_contribution(0.78, threshold=0.78) == pytest.approx(0.20)
 
     def test_team_at_one_yields_point_three(self):
         from resolver.alias_tier.scorer import _linear_contribution
-        assert _linear_contribution(1.0, threshold=0.92) == pytest.approx(0.30)
+        assert _linear_contribution(1.0, threshold=0.78) == pytest.approx(0.30)
 
     def test_personal_midpoint(self):
         from resolver.alias_tier.scorer import _linear_contribution
