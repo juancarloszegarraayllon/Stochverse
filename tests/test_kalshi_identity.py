@@ -370,6 +370,61 @@ class TestOutrightSeriesPrefixes:
         assert i.kind != "per_fixture"
         assert i.kind != "per_leg"
 
+    # ── Phase 2C.1 — player-prop prefixes ──────────────────────
+    #
+    # Per-player-stat futures where the ticker shape mimics G1
+    # (date + abbr block) but the abbr_block is a player handle, not
+    # a home/away team pair. Pre-2C.1 these reached parse_ticker as
+    # kind='per_fixture' and polluted the alias-tier no_match audit
+    # with alias_resolution_incomplete that no alias data could
+    # ever resolve.
+
+    def test_mlb_total_bases_player_prop_is_outright(self):
+        """KXMLBTB-26APR15GLEYBER (Gleyber Torres total bases on
+        Apr 15) — player handle in the abbr position, not teams."""
+        i = parse_ticker(
+            "KXMLBTB-26APR15GLEYBER", "KXMLBTB", "Baseball",
+        )
+        assert i.kind == "outright"
+
+    def test_mlb_home_runs_player_prop_is_outright(self):
+        i = parse_ticker(
+            "KXMLBHR-26APR15JUDGE", "KXMLBHR", "Baseball",
+        )
+        assert i.kind == "outright"
+
+    def test_mlb_home_runs_and_runs_player_prop_is_outright(self):
+        """KXMLBHRR — distinct from KXMLBHR. Both must classify the
+        same way; the longer-prefix matches first per
+        _OUTRIGHT_SERIES_PREFIXES startswith semantics."""
+        i = parse_ticker(
+            "KXMLBHRR-26APR15OHTANI", "KXMLBHRR", "Baseball",
+        )
+        assert i.kind == "outright"
+
+    def test_nba_steals_player_prop_is_outright(self):
+        i = parse_ticker(
+            "KXNBASTL-26APR15LBJ", "KXNBASTL", "Basketball",
+        )
+        assert i.kind == "outright"
+
+    def test_player_prop_outrights_dont_appear_as_per_fixture(self):
+        """Sanity: none of the four prop prefixes should leak through
+        as per_fixture. Without the 2C.1 fix every one of these
+        would be a phantom Kalshi 'fixture' against an FL event with
+        the same date, dragging down strict-tier precision."""
+        for ticker, series in [
+            ("KXMLBTB-26APR15GLEYBER",  "KXMLBTB"),
+            ("KXMLBHR-26APR15JUDGE",    "KXMLBHR"),
+            ("KXMLBHRR-26APR15OHTANI",  "KXMLBHRR"),
+            ("KXNBASTL-26APR15LBJ",     "KXNBASTL"),
+        ]:
+            i = parse_ticker(ticker, series, "Baseball")
+            assert i.kind != "per_fixture", (
+                f"{ticker}: classified as per_fixture, should be outright"
+            )
+            assert i.kind != "per_leg"
+
     def test_normal_h2h_still_per_fixture(self):
         """Regression: don't accidentally mark normal h2h as outright."""
         i = parse_ticker(
