@@ -56,6 +56,71 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CHUNK_SIZE = 200
 
 
+# Halt-criteria thresholds from PHASE_2B_DESIGN.md §2. Wired into the
+# stdout summary at the end of every pass — operators (and the cron
+# review path) read these without having to query sp.resolver_runs.
+#
+# - CRASH_HARD_LIMIT comes from the design doc's "> 5/day" ceiling
+#   applied per-pass (a single pass producing >5 crashes is already
+#   hitting the daily threshold inside one window).
+# - COVERAGE_FLOOR is the design doc's < 60% sustained-coverage
+#   warning. Per-pass detection is best-effort: a single low pass
+#   isn't conclusive, so we WARN rather than error.
+# - LATENCY_P95_CEILING_MS is 5 minutes per the design doc's
+#   "switch to LISTEN/NOTIFY (2E.fix)" trigger.
+#
+# Kalshi false-positive rate (>1%/24h) is computed at day-7 review
+# time — needs the legacy_kalshi_join comparator + a 24h aggregation
+# window, neither of which lives in a single pass.
+CRASH_HARD_LIMIT = 5
+COVERAGE_FLOOR = 0.60
+LATENCY_P95_CEILING_MS = 5 * 60 * 1000
+
+
+def _evaluate_halt_criteria(
+    *,
+    records_scanned: int,
+    auto_applies: int,
+    crashes: int,
+    latency_p95_ms: int | None,
+) -> list[str]:
+    """Pure function — return human-readable WARNING strings for each
+    halt-criteria threshold this pass exceeded.
+
+    Empty list = pass is healthy. Logic split out from main() so it
+    can be exercised by real call-path tests (lesson from PR #87
+    NameError — static-source guards aren't enough).
+    """
+    warnings: list[str] = []
+
+    if crashes > CRASH_HARD_LIMIT:
+        warnings.append(
+            f"crashes={crashes} exceeds halt threshold {CRASH_HARD_LIMIT} per pass "
+            "(design doc §2: > 5/day → halt parallel-run; investigate before re-enabling)"
+        )
+
+    # Coverage check: only meaningful when the pass scanned a real
+    # corpus. Tiny smoke runs (--limit 5) are excluded — a single
+    # pass below the floor doesn't prove a sustained problem.
+    if records_scanned >= 100:
+        coverage = auto_applies / records_scanned
+        if coverage < COVERAGE_FLOOR:
+            warnings.append(
+                f"coverage={coverage:.1%} (auto_applies/records_scanned) is below "
+                f"the {COVERAGE_FLOOR:.0%} floor (design doc §2: < 60% sustained → "
+                "review extraction; possibly relax competition-match or bootstrap "
+                "more aliases)"
+            )
+
+    if latency_p95_ms is not None and latency_p95_ms > LATENCY_P95_CEILING_MS:
+        warnings.append(
+            f"latency p95={latency_p95_ms}ms exceeds {LATENCY_P95_CEILING_MS}ms ceiling "
+            "(design doc §2: > 5min → switch to LISTEN/NOTIFY for 2E.fix)"
+        )
+
+    return warnings
+
+
 async def main(
     provider: str,
     run_mode: str,
@@ -411,6 +476,30 @@ async def main(
     if latency_p95 is not None:
         print(f"  latency p95:                {latency_p95}ms")
     print(f"\n  metrics written to sp.resolver_runs (run_id={run_id})")
+
+    # ── Halt-criteria evaluation (PHASE_2B_DESIGN.md §2) ──────────
+    halt_warnings = _evaluate_halt_criteria(
+        records_scanned=records_scanned,
+        auto_applies=auto_applies,
+        crashes=crashes,
+        latency_p95_ms=latency_p95,
+    )
+    if halt_warnings:
+        # Surface to stdout for cron-log scrapers AND the structured
+        # log so observability tooling can alert. Use 'warning' level
+        # — operator decides whether to halt; the runner doesn't
+        # self-disable.
+        log.warning(
+            "resolver.run_pass.halt_criteria_exceeded",
+            run_id=str(run_id),
+            provider=provider,
+            run_mode=run_mode,
+            warnings=halt_warnings,
+        )
+        print()
+        print("  HALT CRITERIA EXCEEDED — review before next pass:")
+        for w in halt_warnings:
+            print(f"    - {w}")
     return 0
 
 

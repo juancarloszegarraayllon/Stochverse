@@ -1,0 +1,45 @@
+# Railway service config — Phase 2B parallel-run cron.
+#
+# Scheduled daily at 02:00 UTC per PHASE_2B_DESIGN.md §2 (the design
+# doc's locked cadence). Two services, staggered 15 minutes apart so
+# they don't compete for Neon connections — at peak each pass holds
+# one transaction at a time, but the bootstrap-load phase pulls
+# ~30k aliases into memory and we'd rather not double that
+# concurrently while parallel-run is still proving out.
+#
+# Both pass `--run-mode cron`. The runner rejects `--run-mode live`
+# (reserved for Phase 2E's continuous loop); cron is the only
+# scheduled mode 2B supports.
+#
+# Halt-criteria warnings are emitted to stdout AND the structured log
+# at the end of every pass — Railway's cron-log scrape catches both.
+# A non-zero exit code from the runner would trigger Railway's
+# normal failure alert; we deliberately keep exit 0 here so
+# transient halt-criteria warnings don't surface as deploy failures.
+# The operator reviews warnings via the day-7 query, not exit codes.
+#
+# Existing web service is unchanged — it picks up its config from
+# Railway's auto-detect (Python project, default start command).
+# This file adds resolver-cron-* services on top.
+
+[[services]]
+name = "resolver-cron-kalshi"
+
+[services.deploy]
+# Daily at 02:00 UTC. ~4k Kalshi sport-filtered records → ~30s wall
+# time at strict@2a.6 throughput; finishes well before the FL cron
+# starts at 02:15 UTC.
+cronSchedule = "0 2 * * *"
+startCommand = "python scripts/run_resolver_pass.py --provider kalshi --run-mode cron"
+restartPolicyType = "NEVER"
+
+[[services]]
+name = "resolver-cron-fl"
+
+[services.deploy]
+# Daily at 02:15 UTC. ~18k FL records → ~90s wall time. Staggered
+# 15 minutes after Kalshi to avoid Neon connection contention
+# during the bulk-load phase.
+cronSchedule = "15 2 * * *"
+startCommand = "python scripts/run_resolver_pass.py --provider fl --run-mode cron"
+restartPolicyType = "NEVER"
