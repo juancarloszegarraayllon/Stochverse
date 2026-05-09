@@ -1,5 +1,13 @@
 # Railway service config — Phase 2B parallel-run cron.
 #
+# IMPORTANT: Railway does NOT auto-create services from this file.
+# The two cron services below must be manually created in the
+# Railway dashboard with matching names (resolver-cron-kalshi and
+# resolver-cron-fl). Once created, Railway picks up cronSchedule +
+# startCommand from this file on each deploy. See DEPLOYMENT.md →
+# "One-time Railway setup (services don't auto-create)" for the
+# full provisioning runbook.
+#
 # Scheduled daily at 02:00 UTC per PHASE_2B_DESIGN.md §2 (the design
 # doc's locked cadence). Two services, staggered 15 minutes apart so
 # they don't compete for Neon connections — at peak each pass holds
