@@ -8,6 +8,14 @@
 # "One-time Railway setup (services don't auto-create)" for the
 # full provisioning runbook.
 #
+# ALSO: Railway reads this file only at service CREATION. Updates
+# to cronSchedule / startCommand DO NOT propagate to existing
+# services on subsequent deploys — the operator must manually edit
+# Settings → Cron Schedule / Start Command in the dashboard for
+# each service. See DEPLOYMENT.md → "Updating cronSchedule /
+# startCommand on existing services" for the dashboard-edit
+# runbook. (Discovered post-PR #97 swap; PR #98 documented it.)
+#
 # Scheduled daily at 02:00 UTC per PHASE_2B_DESIGN.md §2 (the design
 # doc's locked cadence). Two services, staggered 15 minutes apart so
 # they don't compete for Neon connections — at peak each pass holds

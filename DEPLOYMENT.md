@@ -680,8 +680,39 @@ Setup steps (do this once per Railway project):
 5. Repeat for `resolver-cron-fl`.
 6. Trigger a redeploy on each. After the first deploy, Railway
    reads `railway.toml`, sees the matching `[[services]]` block,
-   and applies `cronSchedule` + `startCommand`. Subsequent code
-   pushes update both crons without further dashboard work.
+   and applies `cronSchedule` + `startCommand` for the **initial
+   provisioning**. Subsequent code pushes redeploy the services
+   but **do NOT update `cronSchedule` or `startCommand`** — see
+   the "Updating cronSchedule / startCommand" note below.
+
+#### Updating cronSchedule / startCommand on existing services
+
+**Important:** Railway reads `railway.toml` only at service
+**creation** time, not on subsequent deploys. Code pushes that
+modify `cronSchedule` or `startCommand` will redeploy the
+services but **leave the existing schedule/command unchanged**.
+This is the same pattern as the manual service-creation step
+above — `railway.toml` is initial-provisioning config, not a
+declarative-state file Railway reconciles.
+
+To change a service's schedule or command after creation:
+
+1. Edit `railway.toml` in the repo (so future re-creations get
+   the right config + the file documents current state).
+2. **Manually edit the service in the dashboard:**
+   - Schedule: **Settings → Cron Schedule → Edit schedule** →
+     enter the new cron expression.
+   - Start command: **Settings → Start Command → Edit** → enter
+     the new command.
+3. Trigger a redeploy on the affected service to pick up the
+   new dashboard config.
+
+This caveat was discovered post-PR #97 (FL/Kalshi cron swap):
+`railway.toml` was updated correctly, the deploy succeeded, but
+neither service picked up the new `cronSchedule` until the
+operator manually edited each one's schedule in the dashboard.
+The DEPLOYMENT.md note in PR #97 was wrong; this section is the
+correction.
 
 Verify:
 - Each service's **Settings → Cron Schedule** field shows
