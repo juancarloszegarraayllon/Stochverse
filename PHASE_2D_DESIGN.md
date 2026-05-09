@@ -883,6 +883,22 @@ If a 60-min window lifts the rate to ≥20%, that's the fix — but it adds FP r
 
 **Recommendation:** operator runs Q1 and Q2 before locking 2D.3. Q3 is a follow-up if Q1 and Q2 confirm the data IS aligned and drift is the gap. **Don't lock 2D.3 thresholds until Q1 + Q2 results are in.** If FL has wildly different tennis coverage than Kalshi, no amount of matcher tuning fixes that — Phase 2D.5 would need to expand FL's `DEFAULT_FL_SPORT_IDS` or add Challenger/ITF tournaments.
 
+#### Investigation outcome — Path B selected (PR #103 → 2D.2.8)
+
+Operator ran the runbook against production. Results:
+
+| Query | Result | Interpretation |
+|---|---|---|
+| Q1 — tournament overlap | **100%** | Tournament gap ruled out (Path A invalidated). |
+| Q2 — kickoff alignment | median 30, max 30 — pile-up at the 30-min filter edge | Many same-fixture pairs sit at 31–60 min offsets and are silently rejected by `find_fixture`. |
+| Q3 — drift band lift | **85% at ±30min → 100% at ±60min (+15pp)**, mean fixture count 9.37 → 17.90 (~2× candidates) | Widening drift recovers most of the missing corroboration without unbounded FP risk (the 2× candidate growth is bounded). |
+
+**Decision: Path B — widen `KICKOFF_DRIFT_SEC` for the fuzzy tier ONLY (30 → 60 min).** Per-tier configurable; strict tier (`resolver/matcher.py`) and alias tier (`resolver/alias_tier/matcher.py`) keep their 30-min window because their tighter anchor signals (exact alias hits) don't need slack. Fuzzy tier's wider window matches its looser confidence model — corroboration is a 0.30 bonus, not load-bearing — so the extra candidate breadth is safe.
+
+**Shipped as 2D.2.8 (small calibration PR ahead of 2D.3),** mirroring the 2C.2.5 → 2C.2.7 → 2C.3 calibration discipline. After 2D.2.8 merges, operator re-runs `make dry-run-fuzzy-tier ARGS="--provider kalshi --sport-code tennis --limit 600 --show-examples 5"` and reports the new corroboration rate. The actual lift becomes the calibration source-of-record for 2D.3.
+
+**Forward-looking:** after 2D.3 ships, repeat the corroboration investigation against persisted 2D fuzzy-tier data (replaces the current team-sport proxy with tennis-specific numbers). Tracked as a 2D.4 review item.
+
 ---
 
 ## Sign-off checklist (rev2)
@@ -923,9 +939,10 @@ After rev2 sign-off, 2D ships in this revised order:
 2. **2D.2 — FuzzyTierMatcher** — already shipped (PR #100).
 3. **2D.2.5 — dry-run script** — already shipped (PR #101).
 4. **2D.2.6 (NEW per rev2 E.6) — Tennis-specific suffix list extension.** Small PR; same shape as 2C.2.6. Ships ahead of 2D.3 to clean up the `anchor_failed` bucket before measuring 2D.3's behavior.
-5. **2D.2.7 (NEW per rev2 E.8) — Corroboration investigation queries.** Operator runs Q1 + Q2 against production. Output goes into the 2D.3 PR description. If results indicate data alignment is the gap (vs threshold-tuning is the gap), 2D.3 design may need further revision before shipping.
-6. **2D.3 — TieredMatcher 3-tier extension + runner integration + A.rev2 patch.** Wires the matcher (already-shipped 2D.2) into the runner. Adds per-tier counters in `sp.resolver_runs.extra`. Includes the small patch to `_find_personal_match` per A.rev2. DEPLOYMENT.md updates document the Option C1 framing.
-7. **2D.4 — Day-7 review.** Same cadence as 2B and 2C. Adjust thresholds if FP rate exceeds halt criteria.
+5. **2D.2.7 (NEW per rev2 E.8) — Corroboration investigation queries.** Operator runs Q1 + Q2 against production. Output goes into the 2D.3 PR description. If results indicate data alignment is the gap (vs threshold-tuning is the gap), 2D.3 design may need further revision before shipping. **Shipped as PR #103.** Investigation outcome: Path B (kickoff misalignment) — see §E.8 outcome table above.
+6. **2D.2.8 (NEW per rev2 E.8 outcome) — Per-tier drift widening.** Sets `resolver/fuzzy_tier/matcher.py` `KICKOFF_DRIFT_SEC = 60 * 60`. Strict tier and alias tier stay at 30 min. Adds a static guard test asserting fuzzy_tier drift > strict tier drift. Operator re-runs `make dry-run-fuzzy-tier` after merge to measure actual corroboration lift; that number becomes the 2D.3 calibration source-of-record. Same shape as 2C.2.5 → 2C.2.7 → 2C.3.
+7. **2D.3 — TieredMatcher 3-tier extension + runner integration + A.rev2 patch.** Wires the matcher (already-shipped 2D.2) into the runner. Adds per-tier counters in `sp.resolver_runs.extra`. Includes the small patch to `_find_personal_match` per A.rev2. DEPLOYMENT.md updates document the Option C1 framing.
+8. **2D.4 — Day-7 review.** Same cadence as 2B and 2C. Adjust thresholds if FP rate exceeds halt criteria. Includes re-running the §E.8 corroboration investigation against persisted 2D fuzzy-tier data (replaces the team-sport proxy with tennis-specific numbers).
 
 ---
 
