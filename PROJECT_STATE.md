@@ -6,6 +6,124 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-09
+
+### Phase 2D.3 shipped + 2D.3.1 hotfix verified in production (✅)
+
+The 14-day post-2D.3 parallel-run window is now LIVE with all three
+tiers consulting per record (strict → alias → fuzzy → review/no_match).
+Orchestrator version stamp: `tiered@2d.0`. Per-tier resolver versions:
+`strict@2a.6`, `alias@2c.0`, `fuzzy@2d.0`.
+
+### What landed (PRs merged, in order)
+
+- **PR #102** — Phase 2D.2.6 tennis-specific prop suffix extension
+  (`Total Games`, `Set Winner`, `Match Winner`, `Tiebreak`). Cleaned
+  up the `anchor_failed` bucket before measuring 2D.3's behavior.
+- **PR #103** — Phase 2D.2.7 corroboration-gap investigation runbook
+  (`scripts/investigate_corroboration_gap.sql`). Operator runs Q1+Q2+Q3
+  to attribute the 1.5% measured corroboration to one of three paths
+  (tournament gap / kickoff misalignment / genuinely 1.5%).
+- **Investigation outcome** — Path B (kickoff misalignment) confirmed:
+  Q1 100% tournament overlap, Q2 median/max 30 (pile-up at filter
+  edge), Q3 85%→100% lift at ±60min (+15pp).
+- **PR #104** — Phase 2D.2.8 per-tier drift widening
+  (`KICKOFF_DRIFT_SEC = 60 * 60` for fuzzy tier; strict + alias keep
+  30 min). Static guard asserts fuzzy_tier drift > strict tier drift.
+  Dry-run re-run measured corroboration 1.5% → 2.7% (+1.2pp).
+- **PR #106** — PHASE_2D_DESIGN.md rev3 (doc-only). Locked Option C1
+  as primary 2D framing (review queue is the headline, ~150/cron;
+  auto_apply ~2-3/cron is bonus). Day-0 prediction final: ~10-11%
+  combined Kalshi auto-apply. Deferred A.rev2 to 2D.7 follow-up.
+- **PR #107** — Phase 2D.3 TieredMatcher 3-tier extension. Pure
+  infrastructure wiring of the already-shipped 2D.2 matcher into the
+  runner. Bumped `TIERED_RESOLVER_VERSION` to `tiered@2d.0`. Added
+  `fuzzy_auto_applies` and `fuzzy_review_queue` counters in
+  `sp.resolver_runs.extra`. `sp.team_aliases` write-back uses
+  `source='fuzzy_tier'`. Triple-tier resolution_log per design D.4.
+- **PR #108** — Phase 2D.3.1 hotfix. Two changes scoped tightly to the
+  619-crash regression that surfaced after 2D.3 went live:
+  1. **`ON CONFLICT (provider, provider_record_id) DO UPDATE WHERE
+     status='pending'`** on the `sp.review_queue` insert. The same
+     unresolved record (fixture_id IS NULL because review_queue is
+     pending operator approval) comes back to the resolver on every
+     cron pass; without ON CONFLICT, the second pass crashes on the
+     uniqueness constraint. WHERE clause protects operator-decided
+     rows from being overwritten.
+  2. **Per-record `async with session.begin():`** instead of
+     chunk-level. Prior chunk-level transaction caused IntegrityError
+     on one record to cascade `PendingRollbackError` to every
+     subsequent record in the chunk. Each record now commits or rolls
+     back independently.
+
+### Day-0 production numbers (run 545a0379-a9e9-4742-8304-ce741a9444fc)
+
+```
+records_scanned:      4,754
+auto_applies (total):    24
+  strict tier:           19
+  alias  tier:            2
+  fuzzy  tier:            3
+review_queue (total): 1,011
+  alias  tier:          741
+  fuzzy  tier:          270
+no_match:             1,623
+crashes:                  0
+runtime:           6m 36s
+```
+
+Phase 2D.3 fully operational. Three-tier matcher producing expected
+output shape. Tonight's scheduled crons (FL 02:00 UTC / Kalshi 02:15
+UTC) execute cleanly per the verified hotfix.
+
+### Tracked follow-ups (post-2D.4)
+
+- **2D.4 day-7 review** — same cadence as 2B and 2C. Decision point
+  for 2D.5 / 2D.6 / 2D.7 prioritization. Includes re-running the §E.8
+  corroboration investigation against persisted 2D fuzzy-tier data
+  (replaces the team-sport proxy with tennis-specific numbers).
+- **2D.5 / §E.9** — FL alias coverage expansion for the ~170
+  anchor_failed records/cron long-tail. Sample 200 anchor_failed
+  records, classify by failure mode (FL missing vs alias gap), expand
+  `DEFAULT_FL_SPORT_IDS` and/or seed `sp.team_aliases` for top-N
+  tennis players.
+- **2D.6 / §E.10** — Asian-name single/two-character surname handling
+  ("Hu", "Ng", "Li", "Choo"). Country-of-origin disambiguation layer
+  for surnames ≤ 2 chars where ≥ 3 candidates collide. Conservative
+  scope.
+- **2D.7 / §E.11** — A.rev2 per-candidate initial-expansion filter in
+  `_find_personal_match`. Discriminates "Junfeng Hu" from "Zhizhen Hu"
+  for multi-token providers. Deferred from 2D.3 because dry-run
+  showed the fuzzy auto_apply path is small leverage; current
+  cross-team collision detection routes these to review_queue
+  (operators handle the discrimination).
+
+### Open tech-debt issues (`tech-debt` label, see GitHub)
+
+- **Issue #105** — `test_unpaired_kalshi_only_fixture_appears` is
+  date-dependent; deselected from CI runs as a workaround. Fix:
+  freeze the test clock with `freezegun` or `time-machine`.
+- **Issue #109** — Resolver runtime: per-record `session.begin()`
+  adds ~83ms/record (~6m 36s for 4.7k records). Not urgent — sits
+  comfortably below the 15-min cron stagger window. Investigate if
+  any cron run exceeds 10 min, `records_scanned` exceeds 8k for 2+
+  consecutive cycles, or 2D.5 ships and adds more records.
+
+### Notes for the next session's first 5 minutes
+
+- Wait for 5-10 cron cycles to land before any 2D.4 day-7 review
+  work. Steady-state numbers matter, not a single-sample read.
+- The `tech-debt` label needs creating in the GitHub UI; once
+  created, apply to issues #105 and #109.
+- 2C.1 alert threshold of 1,500 review-queue rows still has headroom
+  with combined 2C+2D volume (~400-500/day). If review queue depth
+  grows past 1,500 sustained for >7 days, escalate per 2C.1 mechanism.
+- Operator capacity: ~67-83 min/day of review work at ~10 sec/record
+  for the combined 2C+2D queue. If the actual review pace lags,
+  revisit 2D.7 (A.rev2) prioritization to shave the auto-apply path.
+
+---
+
 ## Session — 2026-05-08 (afternoon onwards)
 
 ### Phase 2A.5 — Bootstrap (✅ complete in production)
