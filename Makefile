@@ -6,7 +6,7 @@
 # (e.g., a Neon branch for migration testing).
 export DATABASE_URL ?= postgresql+asyncpg://dev:dev@localhost:5432/sports_dev
 
-.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions backfill-sp-fl-events-sport-id resolver-pass-kalshi resolver-pass-fl dry-run-alias-tier
+.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions backfill-sp-fl-events-sport-id resolver-pass-kalshi resolver-pass-fl dry-run-alias-tier dry-run-fuzzy-tier
 
 help:
 	@echo "SP Architecture dev targets:"
@@ -39,6 +39,9 @@ help:
 	@echo ""
 	@echo "  make dry-run-alias-tier ARGS=\"--provider kalshi --sport-code tennis --limit 600\""
 	@echo "  # Phase 2C.2.5: read-only calibration of alias-tier thresholds"
+	@echo ""
+	@echo "  make dry-run-fuzzy-tier ARGS=\"--provider kalshi --sport-code tennis --limit 600\""
+	@echo "  # Phase 2D.2.5: read-only calibration of fuzzy-tier corroboration rate"
 	@echo ""
 	@echo "DATABASE_URL = $(DATABASE_URL)"
 
@@ -109,3 +112,6 @@ resolver-pass-fl:
 
 dry-run-alias-tier:
 	python scripts/dry_run_alias_tier.py $(ARGS)
+
+dry-run-fuzzy-tier:
+	python scripts/dry_run_fuzzy_tier.py $(ARGS)

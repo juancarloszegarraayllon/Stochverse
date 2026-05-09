@@ -463,6 +463,97 @@ options before 2C.3:
 
 The dry-run output is the data that picks among (a)/(b)/(c).
 
+## Phase 2D.2.5 — fuzzy-tier dry-run calibration
+
+Read-only calibration script. Runs `FuzzyTierMatcher` against
+production records (typically the `deferred_to_2d` tennis bucket
+that 2C.3 routes to no_match) and reports the predicted bucket
+distribution PLUS the empirical cross-provider corroboration rate.
+
+**No DB writes.** Reads `sp.team_aliases`, `sp.competitions`,
+`sp.teams`, `sp.fixtures` (for the matcher's corroboration check),
+and the provider tables. Resolver crons continue to run at
+`strict@2a.6` + `alias@2c.0` — the 3-tier orchestration is 2D.3.
+
+### Why this script exists
+
+PHASE_2D_DESIGN.md rev1 §C predicted a 20-40% post-cron-swap
+corroboration rate (Pushback 5). The 2C.2.5 dry-run measured 2.4%
+PRE-cron-swap. The 2D.2.5 dry-run validates the rate POST-cron-
+swap before 2D.3 commits to the threshold values that depend on
+it.
+
+If actual rate diverges:
+- **Below 20%**: day-0 prediction was optimistic. Before 2D.3,
+  consider (a) accepting smaller auto-apply gain, (b) bumping
+  `CORROBORATION_SCORE` to e.g. +0.40, or (c) lowering
+  `AUTO_APPLY_THRESHOLD`.
+- **Above 40%**: day-0 prediction was conservative. Auto-apply
+  gain is larger than predicted; threshold choices remain valid.
+- **Within 20-40%**: threshold choices validated; ship 2D.3.
+
+### How to run
+
+```bash
+DATABASE_URL=<prod-Neon> python scripts/dry_run_fuzzy_tier.py \
+    --provider kalshi --sport-code tennis --limit 600
+
+# With top-5 examples per bucket
+DATABASE_URL=<prod-Neon> python scripts/dry_run_fuzzy_tier.py \
+    --provider kalshi --sport-code tennis --limit 600 \
+    --show-examples 5
+
+# Team-sport residuals (Gap 2 from PHASE_2D_DESIGN.md)
+DATABASE_URL=<prod-Neon> python scripts/dry_run_fuzzy_tier.py \
+    --provider kalshi --sport-code soccer --limit 600
+```
+
+Or via Makefile:
+
+```bash
+make dry-run-fuzzy-tier ARGS="--provider kalshi --sport-code tennis --limit 600"
+```
+
+### What the report tells you
+
+Single pass through the matcher per record (corroboration check
+fires naturally via `find_fixture` against `sp.fixtures`).
+Counterfactual analysis subtracts `CORROBORATION_SCORE` from each
+auto-apply's confidence to determine which auto-applies depend on
+corroboration vs which would auto-apply anyway.
+
+**Key headline numbers:**
+- **Bucket distribution**: `auto_apply` / `review_queue` /
+  `no_match` / `anchor_failed` / `extraction_skipped`.
+- **Empirical corroboration rate**: % of anchored records where
+  `find_fixture` returned a hit.
+- **Counterfactual auto-apply analysis**: for each auto-apply
+  with corroboration, would it survive subtraction of
+  `CORROBORATION_SCORE` (0.30)? Records that would NOT auto-apply
+  without corroboration are "corroboration-dependent." For 2D's
+  current weights (0.40 anchor + 0.30 quality + 0.30 corr = 1.00
+  max), ALL fuzzy auto-applies are corroboration-dependent by
+  construction (anchor + quality maxes at 0.70 alone).
+- **Calibration warning**: explicit BELOW / ABOVE / WITHIN-range
+  message comparing empirical rate to design rev1's 20-40%.
+
+### Calibration decision input → 2D.3
+
+The dry-run output drives one of three paths:
+1. **Within 20-40%**: lock 2D.3 thresholds as-is, ship the matcher
+   integration + runner wiring.
+2. **Below 20%**: revisit confidence weights (likely bump
+   corroboration to +0.40) before 2D.3 ships. Possibly also lower
+   `TEAM_FUZZ_RATIO_THRESHOLD` from 0.85 to 0.78 to broaden anchor
+   coverage.
+3. **Above 40%**: ship 2D.3 with current weights; expect higher
+   auto-apply rate than predicted. Day-7 review monitors FP rate
+   to confirm the higher recall doesn't come at unacceptable
+   precision cost.
+
+Same calibration discipline as 2C.2.5 → 2C.2.7 where dry-run
+output drove the 0.92 → 0.78 threshold change.
+
 ## Phase 2C.3 — Alias tier (TieredMatcher: strict → alias → review)
 
 The 2B parallel-run cron (`resolver-cron-fl`, `resolver-cron-kalshi`)
