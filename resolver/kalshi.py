@@ -39,6 +39,71 @@ from .types import FixtureSignal, TeamCandidate
 RESOLVER_VERSION = "kalshi@2a.0"
 
 
+# Phase 2C.2.6 — prop-bet title suffixes.
+#
+# Kalshi sub-market tickers often have G1 ticker shape (date + abbr
+# block) AND parse_ticker classifies them per_fixture (the sub-market
+# suffix in KNOWN_SUFFIXES handles the ticker side), but the TITLE
+# carries the prop-bet identifier as the trailing segment after ": ".
+# Examples observed in the soccer dry-run (Phase 2C.2.5):
+#
+#   "Brighton: Spreads"
+#   "Wolfsburg: Spreads"
+#   "Seattle: Totals"
+#   "Portland: Totals"
+#   "Elche: Both Teams to Score"
+#
+# These are prop bets, not game markets — the alias tier should NOT
+# match them to fixtures; they polluted the soccer dry-run as
+# anchor_failed (clean filter target) or as 0.80-confidence
+# review_queue rows (partially-matched single-team props masquerading
+# as game markets).
+#
+# Two-layer defense, mirroring 2C.1:
+#   - extract_signal returns None for these (counted as
+#     signal_extraction_skipped — matcher never sees them).
+#   - The alias tier's anchor-failed counter remains a backstop
+#     audit signal: if a future prop-suffix slips through, it'll
+#     show up there.
+#
+# Extension pattern: when the post-2C.4 alias_no_team_resemblance
+# fail_reason audit shows new suffixes climbing, add them here.
+# Each addition needs a regression test in tests/test_resolver_2a.py.
+_KALSHI_PROP_TITLE_SUFFIXES: tuple[str, ...] = (
+    # User-named (PR feedback after 2C.2.5 dry-run):
+    "Total",
+    "Totals",
+    "Spread",
+    "Spreads",
+    "Game Spread",
+    "First Goalscorer",
+    "Both Teams to Score",
+    "Exact Match Score",
+)
+_KALSHI_PROP_TITLE_SUFFIXES_LOWER: frozenset[str] = frozenset(
+    s.lower() for s in _KALSHI_PROP_TITLE_SUFFIXES
+)
+
+
+def _is_prop_market_title(title: str) -> bool:
+    """True if the title's trailing ': <suffix>' segment matches a
+    known prop-bet identifier. Case-insensitive.
+
+    Match shape: rsplit on the LAST ": " — the prop suffix lives at
+    the title's tail. Handles:
+      "Brighton: Spreads"             → match
+      "Bayern Munich vs PSG"          → no colon → no match
+      "Group A: Round 1: Team vs Team"→ last segment is the game,
+                                        not a prop type → no match
+      "Brighton: Total"               → match (singular variant)
+      "Bayern Munich vs PSG: Spreads" → match (game-level prop)
+    """
+    if not title or ": " not in title:
+        return False
+    suffix = title.rsplit(": ", 1)[-1].strip().lower()
+    return suffix in _KALSHI_PROP_TITLE_SUFFIXES_LOWER
+
+
 class KalshiResolverModule:
     """ResolverModule for Kalshi provider records."""
 
@@ -78,8 +143,17 @@ class KalshiResolverModule:
         if ident.kind != "per_fixture":
             return None
 
+        # Phase 2C.2.6: prop-bet sub-market detection by title suffix.
+        # parse_ticker can classify "Brighton: Spreads"-shaped tickers
+        # as per_fixture because the abbr_block + date pattern looks
+        # like a game; the title is what reveals it's a prop. Filter
+        # here so the alias tier never sees these.
+        title = raw_record.get("title") or ""
+        if _is_prop_market_title(title):
+            return None
+
         home_candidates, away_candidates = self._team_candidates(
-            title=raw_record.get("title") or "",
+            title=title,
             abbr_block=ident.abbr_block or "",
         )
 
