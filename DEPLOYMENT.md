@@ -465,7 +465,7 @@ The dry-run output is the data that picks among (a)/(b)/(c).
 
 ## Phase 2C.3 — Alias tier (TieredMatcher: strict → alias → review)
 
-The 2B parallel-run cron (`resolver-cron-kalshi`, `resolver-cron-fl`)
+The 2B parallel-run cron (`resolver-cron-fl`, `resolver-cron-kalshi`)
 keeps the same 02:00 / 02:15 UTC schedule. After 2C.3 it runs
 `TieredMatcher` instead of bare `StrictMatcher` — same entry point,
 same DATABASE_URL, no Railway-side changes needed.
@@ -646,8 +646,15 @@ for Neon connections during the bulk-load phase.
 
 | Service              | Schedule (UTC) | Command |
 |----------------------|----------------|---------|
-| `resolver-cron-kalshi` | `0 2 * * *`  | `python scripts/run_resolver_pass.py --provider kalshi --run-mode cron` |
-| `resolver-cron-fl`     | `15 2 * * *` | `python scripts/run_resolver_pass.py --provider fl --run-mode cron`     |
+| `resolver-cron-fl`     | `0 2 * * *`  | `python scripts/run_resolver_pass.py --provider fl --run-mode cron`     |
+| `resolver-cron-kalshi` | `15 2 * * *` | `python scripts/run_resolver_pass.py --provider kalshi --run-mode cron` |
+
+**Provider order: FL first, Kalshi second.** The original PR #88
+ordering (Kalshi-first) was set on connection-budget grounds only;
+post-PR #98 swap preserves the 15-min stagger but runs FL first so
+Kalshi's 02:15 pass sees fresh `sp.fixtures` for cross-provider
+corroboration. Benefits 2C.3 alias-tier corroboration immediately
+and prepares ground for 2D's calibration measurement.
 
 #### One-time Railway setup (services don't auto-create)
 
@@ -678,7 +685,7 @@ Setup steps (do this once per Railway project):
 
 Verify:
 - Each service's **Settings → Cron Schedule** field shows
-  `0 2 * * *` (kalshi) or `15 2 * * *` (fl).
+  `0 2 * * *` (fl) or `15 2 * * *` (kalshi).
 - Each service's **Settings → Start Command** matches the table
   above.
 - The Railway deploy logs for each cron service show
