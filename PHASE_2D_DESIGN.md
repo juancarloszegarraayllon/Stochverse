@@ -1,8 +1,69 @@
 # Phase 2D Design — Fuzzy Tier (initial expansion + no-anchor fallback)
 
-Status: design doc, awaiting review. Implementation begins only after sign-off.
+Status: design doc rev2, awaiting review. Implementation begins only after sign-off.
 
-Reference: SP Architecture v1.4 §7 (Resolution Layer) and §13.2 (locked decisions). Builds on Phase 2C's alias tier (`PHASE_2C_DESIGN.md`) and the production day-0 data from PR #95 (2C.3 first cron pass).
+Reference: SP Architecture v1.4 §7 (Resolution Layer) and §13.2 (locked decisions). Builds on Phase 2C's alias tier (`PHASE_2C_DESIGN.md`) and the production day-0 data from PR #95 (2C.3 first cron pass) AND the Phase 2D.2.5 dry-run output (PR #101 first run).
+
+---
+
+## Rev2 calibration update — regime change
+
+**The Phase 2D.2.5 dry-run measured 1.5% cross-provider corroboration on tennis. Design rev1 assumed 20-40%. The 20× gap fundamentally invalidates rev1's framework.**
+
+Dry-run output (600 unresolved Kalshi tennis records, post-cron-swap):
+
+```
+Bucket distribution (matcher actual):
+  auto_apply:          2  (0.3%)
+  review_queue:      157  (26.2%)
+  no_match:           43  (7.2%)
+  anchor_failed:     165  (27.5%)
+
+Corroboration:    3 of 202 anchored = 1.5%
+```
+
+Why is the rate so low? Three hypotheses to investigate before locking rev2 (per **§Open question E.8** below):
+
+1. **Tournament overlap**: does FL ingest the same tennis tournaments Kalshi covers?
+2. **Kickoff timestamp alignment**: are start times within `find_fixture`'s 30-min drift window?
+3. **Drift window appropriateness**: is 30 min too narrow for tennis specifically?
+
+**The cron swap (E.1) was supposed to lift the rate from 2.4% (pre-swap measurement) to 20-40%. Instead it dropped to 1.5%.** The swap can't have caused the drop; the most likely explanation is that the original 2.4% sample was on a different mix of records (or measurement noise on a small denominator). Either way, the rev1 prediction was wrong.
+
+### Three rev2 options the user evaluated
+
+| Option | Description | Verdict |
+|---|---|---|
+| A | Bump corroboration to +0.40 | Rejected — corroboration only fires 1.5% of the time, so we'd still get ~10 auto-applies per 600 instead of 2. Marginally better, fundamentally limited. |
+| B | Lower `AUTO_APPLY_THRESHOLD` to 0.65 | Rejected — would auto-apply the 157 review_queue records but examples show high FP risk (`Cristian` first-name-not-surname; `Park` common surname; `Li` 1-char common surname). |
+| **C1** | **Reframe 2D as a review-queue tool, not auto-apply tool. Ship as-is; the 157 anchored-no-corroboration records become primary 2D output.** | **Selected.** |
+
+### What rev2 changes
+
+- **Confidence model**: unchanged from rev1 (locked at signed-off rev1 values). The 0.70-no-corr / 1.00-with-corr math stays the same; the *expectation* shifts from "tennis auto-apply" to "tennis review-queue with operator approval."
+- **Day-0 prediction**: revised down from 190-280 tennis auto-applies/cron to **~2-3 fuzzy auto-applies + ~150 fuzzy review-queue records per cron**.
+- **Three additional findings** (per §E.6, E.7, E.8 below):
+  - E.6: tennis-specific prop suffixes leaking into anchor_failed
+  - E.7: single-character surname problem (Asian naming conventions)
+  - E.8: corroboration-rate investigation queries (operator runs before locking 2D.3)
+- **Personal-path matching enhancement** (per Question A rev2): per-candidate initial-expansion filtering BEFORE collision detection. Discriminates "Junfeng Hu" from "Zhizhen Hu" via the initial-expansion check; doesn't help single-token providers like "Park" alone (still review_queue).
+
+### What rev2 explicitly DOES NOT do
+
+- Doesn't change the matcher API or scorer constants.
+- Doesn't bump corroboration weight (rejected Option A).
+- Doesn't lower auto-apply threshold (rejected Option B).
+- Doesn't add new tiers or change tier order.
+- Doesn't introduce schema changes.
+
+### Operational implications of Option C1
+
+Review-queue volume rises significantly:
+- 2C.3 alias-tier review queue: ~250-300 records/day across providers
+- 2D fuzzy-tier review queue: ~150-200 records/day (Kalshi tennis dominant)
+- **Combined: ~400-500 review-queue rows/day, ~2,800-3,500/week**
+
+The 2C.1 alert threshold was 1,500 for the 14-day post-2C.3 window. With 2D adding another spike, the operator's daily review capacity becomes the constraint. Reviewer UX matters — see §"Operational notes" below.
 
 ---
 
@@ -260,6 +321,59 @@ For "Carlos Alcaraz Garfia":
 Three interpretations tried in sequence; first that produces an anchor hit wins.
 
 This expands the personal-name candidate-search work but with a surname-anchor index by `(sport_id, surname)` (already built by 2C's `CandidateIndex` but unused), each retry is O(1) lookup — total cost negligible.
+
+### A.rev2 — Per-candidate initial-expansion filter BEFORE collision detection
+
+**Added in rev2.** The 2D.2 matcher's `_find_personal_match` currently routes any surname-collision (multiple candidates returned by `candidates_for_surname`) directly to review_queue. This loses information: when the provider's remainder uniquely identifies one of the colliding candidates via initial-expansion, that candidate should win over the others.
+
+**Concrete case (the user's "single-character surname problem", §E.7):**
+
+Candidates indexed under surname `"hu"`:
+- `"Hu Z. (Chn)"` — surname=`hu`, remainder=`("z",)`
+- `"Hu J. (Chn)"` — surname=`hu`, remainder=`("j",)`
+- `"Hu Y. (Chn)"` — surname=`hu`, remainder=`("y",)`
+
+Provider input `"Junfeng Hu"` → surname=`hu`, remainder=`("junfeng",)`. Lookup returns 3 candidates.
+
+Pre-rev2 behavior: 3 distinct team_ids → collision → review_queue.
+
+**Rev2 enhancement: filter candidates by initial-expansion compatibility.**
+- `initials_compatible(("junfeng",), ("z",))` → False
+- `initials_compatible(("junfeng",), ("j",))` → True (`"junfeng".startswith("j")`)
+- `initials_compatible(("junfeng",), ("y",))` → False
+
+After filter: exactly one compatible candidate (`Hu J.`). Anchor passes for that candidate; collision suppressed. Confidence math runs normally.
+
+**When the filter doesn't help (still review_queue):**
+- Provider `"Park"` alone (single-token, empty remainder): every candidate `Park K.`, `Park S.`, `Park J.` passes initial-expansion vacuously (P_short=`[]`, P_long=`[]`). Filter doesn't discriminate. → collision → review queue.
+- Provider `"Wang"` likewise. Genuinely ambiguous — review queue is correct.
+
+**Implementation in 2D.2 matcher** (re-edits 2D.2 code; small change to `_find_personal_match`):
+
+```python
+def _find_personal_match(self, provider_struct, sport_id):
+    raw_candidates = self.candidates.candidates_for_surname(...)
+    unique_by_team_id = dedupe_by_team_id(raw_candidates)
+
+    if len(unique_by_team_id) > 1:
+        # NEW (rev2): filter by initial-expansion compatibility BEFORE
+        # declaring collision. The provider's remainder may uniquely
+        # discriminate among same-surname candidates.
+        compatible = [
+            c for c in unique_by_team_id
+            if initials_compatible(provider_struct.other_tokens, c.structured.other_tokens)
+        ]
+        if len(compatible) == 1:
+            # Exactly one compatible — winner.
+            ... single-candidate path ...
+        # Multiple compatible OR zero compatible after filter:
+        # collision (same as before).
+        ... collision path ...
+```
+
+This is a 2D.2 amendment, not a separate PR. Ships in **2D.3** alongside the matcher integration (since 2D.2 is already merged, 2D.3 includes a follow-up patch to `_find_personal_match`).
+
+**Test plan adjustment:** add a new test `test_initial_expansion_filter_disambiguates_among_same_surname` to `test_resolver_2d.py` proving the "Junfeng Hu" case auto-resolves while "Park" stays in review_queue.
 
 ---
 
@@ -549,53 +663,57 @@ Before 2D.3 (matcher integration), run a script analogous to `scripts/dry_run_al
 
 ---
 
-## Day-0 prediction (with stated uncertainty)
+## Day-0 prediction (rev2 — Option C1 framework)
 
-Pushback 4 (rev1): original draft's math didn't reconcile. `555 × 0.70 × 0.50 = 194`; `555 × 0.85 × 0.50 = 236`. The 280 figure implied a corroboration rate higher than 50%. Rebuilt below with clean arithmetic.
+**Rev2 reframes 2D as a review-queue tool, not an auto-apply tool.** The 1.5% measured corroboration rate means the auto-apply path is essentially unused for tennis (corroboration is required for auto-apply per rev1's math, and corroboration almost never fires).
 
-Pushback 5 (rev1): the 50% corroboration assumption was a guess. **The 2C dry-run measured corroboration at 6 / 247 ≈ 2.4%** — a 20× gap from what 2D was assuming. This is the most material correction in rev1.
+### Recomputed numbers (per Kalshi cron pass, tennis)
 
-### What's the actual corroboration rate?
+Based on 2D.2.5 actual measurement (600-record sample):
 
-The 2D corroboration LOOKUP is structurally identical to 2C's: `find_fixture(home_id, away_id, kickoff_at, drift_sec=30*60)` against `sp.fixtures`, then the swapped (away, home) orientation. Same drift window. **Same code path.** The rate should be the same as 2C's measurement — there's no reason 2D would find more corroboration than 2C did with the same lookup.
+| Bucket | Per cron pass | % of input |
+|---|---|---|
+| anchor_failed | ~165 | 27.5% |
+| extraction_skipped | ~30 | 5% (rises to ~50 after E.6 suffix-list extension) |
+| no_match (below threshold) | ~43 | 7.2% |
+| **review_queue** | **~157** | **26.2%** |
+| auto_apply (corroboration-driven) | ~2 | 0.3% |
+| (other ~205 unaccounted in current dry-run sample — TBD) | | |
 
-But the 2C measurement was specifically on tennis (the `deferred_to_2d` bucket). 2D's tennis recovery WILL hit a higher corroboration rate post-cron-swap, because:
-- Pre-cron-swap (current 02:00 Kalshi → 02:15 FL): FL hasn't run yet; Kalshi tennis lookups against `sp.fixtures` find no fixtures because no recent FL pass has created them. **Effective corroboration rate: ~2-5%.**
-- Post-cron-swap (FL 02:00 → Kalshi 02:15): FL has finished its pass 15 minutes earlier and strict-tier-resolved its tennis events. Kalshi looks at fresh `sp.fixtures` → corroboration rate jumps. **Estimated rate: 20-40%** (still bounded by how much of the FL tennis corpus actually has paired Kalshi records at the same kickoff).
+**Headline: ~150 fuzzy review-queue records per Kalshi cron, ~2-3 fuzzy auto-applies.**
 
-The 20-40% range is itself a guess. **The 2D.2.5 dry-run is the calibration gate** — if the dry-run shows a different rate, day-0 prediction adjusts accordingly. Phase 2D.3 doesn't ship until the 2D.2.5 numbers come in.
+This is a major change from rev1's 78-188 tennis auto-apply prediction. The day-0 narrative for 2D shifts:
+- **Before rev2 (rev1 framing):** "2D recovers ~190 tennis auto-applies/day."
+- **After rev2 (Option C1):** "2D produces ~150 high-quality review-queue items/day. Operator approves them in seconds because the structural match (provider 'Kecmanovic' → candidate 'Kecmanovic M. (Srb)') is informative. Net effect: ~150 fixtures linked/day with review-queue confirmation, ~2 auto-apply links/day."
 
-### Recomputed numbers
+### Team-sport residuals (Gap 2)
 
-**Tennis recovery (Gap 1):**
+Unchanged from rev1 expectations — 2D.2.5 dry-run was tennis-only. Estimates:
+- Conservative: ~30 anchored, 25% corroboration → 8 auto-apply, 22 review.
+- Optimistic: ~150 anchored, 40% corroboration → 60 auto-apply, 90 review.
 
-|                       | Records resolving (anchor passes) | Of those, with corroboration | Auto-apply | Review-queue |
-|-----------------------|------------------------------------|-------------------------------|------------|--------------|
-| Conservative          | 555 × 70% = 388                    | 20%                           | 78         | 311          |
-| Mid                   | 555 × 78% = 432                    | 30%                           | 130        | 302          |
-| Optimistic            | 555 × 85% = 471                    | 40%                           | 188        | 283          |
+Recommend a separate 2D.2.5 dry-run on a team sport (per E.8 below) to validate before 2D.3.
 
-**Team-sport residuals (Gap 2):** uncertain how many even anchor; volumes are small. Conservative range with corroboration-required-for-auto-apply:
-- Conservative: ~30 anchor, 25% corroboration → 8 auto-apply, 22 review.
-- Optimistic: ~150 anchor, 40% corroboration → 60 auto-apply, 90 review.
+### Total post-2D projection (revised)
 
-**Total post-2D projection** (per Kalshi cron pass, delta from 2C.3 baseline):
+| Source | Baseline (2C.3) | Post-2D delta (auto) | Post-2D delta (review) |
+|---|---|---|---|
+| 2C alias-tier | ~388 auto / ~250 review | unchanged | unchanged |
+| 2D tennis | n/a (deferred) | +2-3 auto | +150 review |
+| 2D team-sport residual | n/a | +8-60 auto | +22-90 review |
+| **Total per Kalshi cron** | **~388 auto / ~250 review** | **~398-451 auto** | **~422-490 review** |
 
-| Scenario      | Baseline (2C.3) | Tennis auto | Team auto | Tennis review | Team review | Post-2D auto |
-|---------------|-----------------|-------------|-----------|---------------|-------------|---------------|
-| Conservative  | ~388            | +78         | +8        | +311          | +22         | ~474          |
-| Mid           | ~388            | +130        | +30       | +302          | +50         | ~548          |
-| Optimistic    | ~388            | +188        | +60       | +283          | +90         | ~636          |
+Review-queue volume nearly doubles. The 2C.1 alert threshold of 1,500 still has headroom (review_queue typically drains via reviewer approvals; the threshold catches stuck-pile pathology, not steady-state load).
 
-Review-queue volume rises by ~330-370/day across providers. The 2C.1 alert-threshold relaxation (1,500) absorbs this with headroom.
+### Operator capacity check
 
-**Caveats:**
+If review queue grows by ~150/day from 2D plus ~250/day from 2C = ~400/day total, operator review at ~10 sec/record = ~67 min/day of review work. That's an actual workload increase. The user should confirm operator availability before 2D.3 ships, or accept that review queue depth grows for the first ~2 weeks while operators work through the backlog.
 
-1. **Pre-2D.2.5 dry-run: the corroboration rate is the largest unknown.** If the dry-run shows ~5% (closer to 2C's measurement), the auto-apply numbers drop to the conservative end of the table. If ~50% (above the mid-range), they could exceed the optimistic. **Don't lock 2D.3 until the dry-run confirms.**
-2. **Cron swap (E.1) is on the critical path.** Without the FL→Kalshi swap, day-0 corroboration rate stays at the ~5% pre-swap baseline. Recommend swapping in a small `railway.toml` PR before 2D.1.
-3. **Order-of-operations decay across passes (E.2).** Records that don't auto-apply on pass 1 due to missing corroboration mostly resolve on pass 2 (after FL has run). Steady-state auto-apply is higher than first-pass auto-apply by maybe 10-20%.
-4. **Initial-expansion compatibility for non-Western names** has not been audited. Asian conventions (Naomi Osaka / Osaka N.) work mechanically per the algorithm; volume of cases unknown.
-5. **555 records/run is from one Kalshi pass** measured immediately after PR #95 merged. The FL tennis no_match volume is different (FL tennis mostly auto-applies via strict tier). 2D's FL tennis recovery is incremental on top of FL's already-78% baseline.
+### Caveats (rev2 — narrowed since the dry-run resolved most uncertainty)
+
+1. **The 1.5% corroboration rate is real but the cause is unknown.** Per E.8 below, three investigation queries should run before locking 2D.3. If the cause is fixable (e.g., wrong drift window for tennis, FL tournament gap), the rate could improve and auto-apply numbers go up.
+2. **Team-sport residuals haven't been dry-run'd.** Run `dry_run_fuzzy_tier.py --sport-code soccer --limit 600` before locking 2D.3 thresholds for the team path.
+3. **555 records/run figure is from one Kalshi tennis pass.** Steady-state may differ once 2D.3 is shipping. Per design rev1 §"E.2 re-resolve mechanism": records that don't resolve on day 1 retry on day 2.
 
 ---
 
@@ -673,61 +791,135 @@ Same 30-min drift as 2C's strict tier and alias tier. Tightening to 5-min would 
 
 **Recommendation:** keep 30-min drift, same as 2C.
 
+### E.6 — Tennis-specific prop suffixes leaking into anchor_failed **[separate PR — 2C.2.6 follow-up]**
+
+**Added in rev2.** The 2D.2.5 dry-run revealed records like `"Alexander Bublik: Total Games"` reaching `anchor_failed` instead of `extraction_skipped`. Tennis sub-market suffixes weren't in the 2C.2.6 suffix list (which targeted soccer/basketball patterns).
+
+**Tennis additions to `_KALSHI_PROP_TITLE_SUFFIXES`:**
+```python
+"Total Games"
+"Set Winner"
+"Match Winner"
+# Note: "Game Spread" already in the list (added in 2C.2.6 for soccer)
+```
+
+**Recommendation:** ship as a tiny follow-up PR (same shape as 2C.1, 2C.2.6) BEFORE 2D.3. Reduces fuzzy-tier load by catching ~10-20 records/cron upstream. Operator extends the list further when post-2D.4 audit shows new suffixes climbing in `anchor_failed` for `_KALSHI_PROP_TITLE_SUFFIXES` candidates.
+
+This is independent of 2D.3; can ship in parallel with the corroboration investigation (E.8).
+
+### E.7 — Single-character / common-surname problem **[2D.3 amendment]**
+
+**Added in rev2.** The 2D.2.5 dry-run highlighted Asian-naming-convention surnames that are short and common — `"Ng"`, `"Hu"`, `"Li"`, `"Choo"` (4-char). These produce many same-surname candidates in the index, leading to surname-collision → review_queue routing.
+
+The single-token provider case (e.g., provider sends just `"Park"`) is genuinely ambiguous and must stay in review queue.
+
+The multi-token case (e.g., `"Junfeng Hu"`) IS discriminable via initial-expansion. **Per A.rev2 above**, the per-candidate filter solves this: when the provider has a discriminating remainder, the matcher can pick the right candidate among same-surname colliders.
+
+**Recommendation:** ship the A.rev2 per-candidate initial-expansion filter as part of 2D.3. Re-run the 2D.2.5 dry-run after 2D.3 ships to measure the lift; if multi-token-discriminable cases were a significant slice of the 165 anchor_failed records, the lift will be visible in the next bucket distribution.
+
+### E.8 — Corroboration-rate investigation **[separate runbook — pre-2D.3]**
+
+**Added in rev2.** The 1.5% rate is unexplained. Three queries the operator runs against production before 2D.3 locks; the results inform whether to ship 2D.3 as-is or revise further.
+
+**Query 1 — Tournament overlap.** Does FL ingest the same tennis tournaments Kalshi covers?
+
+```sql
+-- Top 20 Kalshi tennis series_tickers (Kalshi's competition signal)
+SELECT series_ticker, COUNT(*)
+FROM sp.kalshi_markets
+WHERE raw_payload->>'_sport' = 'Tennis'
+  AND fixture_id IS NULL
+GROUP BY 1 ORDER BY 2 DESC LIMIT 20;
+
+-- Top 20 FL tennis tournaments (FL's competition signal)
+SELECT raw_payload->'tournament_stage'->>'NAME' AS tournament,
+       COUNT(*)
+FROM sp.fl_events
+WHERE sport_id = (SELECT id FROM sp.sports WHERE code = 'tennis')
+GROUP BY 1 ORDER BY 2 DESC LIMIT 20;
+```
+
+If the two lists are largely disjoint, FL doesn't have the fixtures Kalshi expects. Possible cause: FL's `DEFAULT_FL_SPORT_IDS=[2]` covers ATP/WTA but not Challenger/ITF tournaments that Kalshi may include.
+
+**Query 2 — Kickoff alignment.** For a known shared tennis fixture (find one manually first via title fuzzy-match), compare timestamps:
+
+```sql
+-- Sample some recent same-day Kalshi tennis records
+SELECT ticker, raw_payload->>'title' AS title,
+       raw_payload->>'_kickoff_dt' AS kickoff
+FROM sp.kalshi_markets
+WHERE raw_payload->>'_sport' = 'Tennis'
+  AND fixture_id IS NULL
+  AND last_seen_at > NOW() - INTERVAL '24 hours'
+ORDER BY last_seen_at DESC LIMIT 10;
+
+-- For one of those (with player surnames matching FL's), compare:
+SELECT 'kalshi' AS provider, raw_payload->>'_kickoff_dt' AS kickoff
+FROM sp.kalshi_markets WHERE ticker = '<paste_ticker_here>'
+UNION ALL
+SELECT 'fl', to_timestamp((raw_payload->>'START_TIME')::int)::text
+FROM sp.fl_events WHERE fl_event_id = '<paste_fl_id_here>';
+```
+
+If timestamps differ by more than 30 min, `find_fixture`'s drift window misses them.
+
+**Query 3 — Drift window appropriateness.** Tennis matches frequently get rescheduled by hours due to weather/preceding-match overruns. Recompute corroboration rate at a wider drift:
+
+```python
+# In a one-off Python script (not the dry-run script):
+from resolver.fixtures import find_fixture
+# For each anchored 2D candidate pair, try drift_sec=60*60 (1 hour)
+# instead of the default 30*60. Measure how many additional pairs
+# corroborate.
+```
+
+If a 60-min window lifts the rate to ≥20%, that's the fix — but it adds FP risk for tournaments that legitimately have multiple matches per hour. Trade-off needs measurement before locking.
+
+**Recommendation:** operator runs Q1 and Q2 before locking 2D.3. Q3 is a follow-up if Q1 and Q2 confirm the data IS aligned and drift is the gap. **Don't lock 2D.3 thresholds until Q1 + Q2 results are in.** If FL has wildly different tennis coverage than Kalshi, no amount of matcher tuning fixes that — Phase 2D.5 would need to expand FL's `DEFAULT_FL_SPORT_IDS` or add Challenger/ITF tournaments.
+
 ---
 
-## Sign-off checklist
+## Sign-off checklist (rev2)
 
-Before implementation begins. Tags: `[2D.1]` blocks 2D.1 ship; `[2D.2]` blocks 2D.2; `[2D.3]` blocks 2D.3; `[dry-run]` answered by 2D.2.5 dry-run; `[doc]` documentation-only.
+Status: rev1 items (cron swap E.1, 2D.1 primitives, 2D.2 matcher, 2D.2.5 dry-run) are SHIPPED. Remaining items below are rev2 additions or 2D.3-blockers gated on the rev2 calibration update.
 
-**Algorithm — `[2D.1]` blockers:**
-- [ ] **A** — Initial expansion (structural prefix-match for short tokens). Approved.
-- [ ] **A.1** — Compound surname fallback, 3 retry levels (last 1, 2, 3 tokens). Approved.
-- [ ] **A.3** — Multi-initial cases ("J.J. Watt") stay no_match; documented limitation. Approved.
-- [ ] **E.3** — Multi-interpretation candidate surname index (default + compound + middle-as-surname). Approved.
+**Rev2 framework lock:**
+- [ ] **Option C1** — 2D framed as a review-queue tool (per the dry-run output, ~150 review_queue / ~2 auto_apply per Kalshi cron). Approved or counter-proposed.
+- [ ] **Day-0 prediction revised** — ~150 fuzzy review-queue records/cron, ~2-3 fuzzy auto-applies/cron, ~67 min/day operator review work assuming ~10 sec/record. Approved or revisit.
 
-**Algorithm — `[2D.2]` blockers:**
-- [ ] **B** — Team-path character-level fuzzy with corroboration-REQUIRED for auto-apply. Approved.
-- [ ] **B.1** — `fuzz.ratio()` threshold = 0.85. **[dry-run validates]** Approved (initial; tighten to 0.90 if FP rate exceeds threshold at day-7).
-- [ ] **E.4** — Single-token provider name ("Carlos") stays no_match in 2D. Approved as deliberate non-goal.
+**Pre-2D.3 follow-up PRs (small, independent):**
+- [ ] **E.6** — Tennis-specific suffix list extension (`Total Games`, `Set Winner`, `Match Winner`). Tiny PR same shape as 2C.2.6. Ships ahead of 2D.3.
 
-**Algorithm — `[doc]` only:**
-- [ ] **A.2** — Case-sensitivity is post-normalization. Documented; no implementation effect. Approved.
+**Pre-2D.3 investigation:**
+- [ ] **E.8** — Operator runs Q1 (tournament overlap) + Q2 (kickoff alignment) before locking 2D.3. If FL has wildly different tennis coverage than Kalshi, that's a Phase 2D.5 scope concern (`DEFAULT_FL_SPORT_IDS` expansion to Challenger/ITF) not a 2D.3 threshold-tuning concern. Q3 (drift window) only if Q1+Q2 confirm data IS aligned.
 
-**Confidence model — `[2D.3]` blockers:**
-- [ ] **C** — Both paths: 0.40 anchor + 0.30 quality (max of initial-expansion-or-remainder for personal; linear for team) + 0.30 corroboration = 1.00 max. (Pushback 3 rev1: dropped +0.10 kickoff-tight bonus.)
-- [ ] **C.1** — Initial-expansion contribution = +0.30. **[dry-run validates]** Approved.
-- [ ] **C.2** — Initial expansion vs remainder: take max, no double-count. Approved.
+**2D.3 blockers (added in rev2):**
+- [ ] **A.rev2** — Per-candidate initial-expansion filter BEFORE collision detection. Applies to `_find_personal_match`. Discriminates "Junfeng Hu" from "Zhizhen Hu"; doesn't help single-token "Park". One small patch to 2D.2 code; tests added in 2D.3 PR.
+- [ ] **E.7** — Single-character / common-surname problem mitigated by A.rev2 for multi-token providers. Single-token providers stay in review_queue (as before). Documented as known limitation; no further action in 2D.
 
-**Process — `[2D.3]` blocker:**
-- [ ] **D.1** — Per-tier stamp `fuzzy@2d.0`; orchestrator stamp `tiered@2d.0`. Approved.
-
-**Calibration — `[dry-run]`:**
-- [ ] **D.2** — Phase 2D.2.5 dry-run before 2D.3 ships. **Required.**
-- [ ] Pushback 5 corroboration rate validated by 2D.2.5 dry-run before locking thresholds. **Required.**
-
-**Operational — separate PRs:**
-- [ ] **E.1** — Cron schedule swap (FL 02:00 / Kalshi 02:15). Lands as a small `railway.toml` PR ahead of 2D.1; benefits 2C.3 too. Approved.
-- [ ] **E.2** — Pre-2E re-resolve uses existing `fixture_id IS NULL` filter; document `resolution_log` accretion as known issue. Approved.
-- [ ] **E.5** — Corroboration window stays at 30-min drift (same as 2C). Approved.
+**Items already approved in rev1 (carry forward):**
+- A, A.1, A.3, B, B.1, C, C.1, C.2, D.1, D.2, E.1 (shipped), E.2, E.3 (shipped in 2D.1), E.4, E.5
 
 **Schema:**
 - [ ] Schema-zero approach (no new tables, no new columns). Approved.
 
-**Negative space:**
+**Negative space (rev1 carry-forward):**
 - [ ] Pure kickoff-coincidence matching stays out of bounds. Approved.
 - [ ] No team / fixture creation in fuzzy tier. Approved.
 - [ ] No recovery of `signal_extraction_skipped` records. Approved.
 - [ ] No ratio-tuning for individual sports beyond initial expansion. Approved.
 - [ ] Test plan: real call-path integration tests as primary surface, static guards as backstop. Approved.
 
-After sign-off, 2D ships in this order — each step is its own PR:
+After rev2 sign-off, 2D ships in this revised order:
 
-0. **(Pre-2D.1) — Cron swap.** Tiny `railway.toml` PR per E.1. Benefits 2C.3 immediately; sets up 2D's corroboration-rate measurement.
-1. **2D.1 — `initials_compatible` + compound-surname fallback + multi-interpretation surname index (pure-Python).** Additions to `resolver/fuzzy_tier/initial_expansion.py` and `resolver/alias_tier/candidates.py`. ~15 unit tests. No DB integration.
-2. **2D.2 — `FuzzyTierMatcher`.** Composes 2D.1 + 2C `CandidateIndex` + cross-provider corroboration. ~15 real call-path tests with mocked DB session.
-3. **2D.2.5 — Dry-run script.** Calibration data from production (pattern matches 2C.2.5). **Threshold-locking gate** for 2D.3.
-4. **2D.3 — `TieredMatcher` extends to 3 tiers + runner integration.** Per-tier counters in `sp.resolver_runs.extra`. DEPLOYMENT.md updates.
-5. **2D.4 — Day-7 review.** Same cadence as 2B and 2C. Adjust thresholds if FP rate exceeds halt criteria.
+0. **E.1 cron swap** — already shipped (PR #97).
+1. **2D.1 — pure-Python primitives** — already shipped (PR #99).
+2. **2D.2 — FuzzyTierMatcher** — already shipped (PR #100).
+3. **2D.2.5 — dry-run script** — already shipped (PR #101).
+4. **2D.2.6 (NEW per rev2 E.6) — Tennis-specific suffix list extension.** Small PR; same shape as 2C.2.6. Ships ahead of 2D.3 to clean up the `anchor_failed` bucket before measuring 2D.3's behavior.
+5. **2D.2.7 (NEW per rev2 E.8) — Corroboration investigation queries.** Operator runs Q1 + Q2 against production. Output goes into the 2D.3 PR description. If results indicate data alignment is the gap (vs threshold-tuning is the gap), 2D.3 design may need further revision before shipping.
+6. **2D.3 — TieredMatcher 3-tier extension + runner integration + A.rev2 patch.** Wires the matcher (already-shipped 2D.2) into the runner. Adds per-tier counters in `sp.resolver_runs.extra`. Includes the small patch to `_find_personal_match` per A.rev2. DEPLOYMENT.md updates document the Option C1 framing.
+7. **2D.4 — Day-7 review.** Same cadence as 2B and 2C. Adjust thresholds if FP rate exceeds halt criteria.
 
 ---
 
