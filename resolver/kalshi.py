@@ -79,6 +79,14 @@ _KALSHI_PROP_TITLE_SUFFIXES: tuple[str, ...] = (
     "First Goalscorer",
     "Both Teams to Score",
     "Exact Match Score",
+    # Tennis-specific (Phase 2D.2.6 — added after 2D.2.5 dry-run
+    # showed records like "Alexander Bublik: Total Games" reaching
+    # anchor_failed instead of extraction_skipped). "Game Spread"
+    # was already in the list from 2C.2.6 (soccer); reused here.
+    "Total Games",
+    "Set Winner",
+    "Match Winner",
+    "Tiebreak",
 )
 _KALSHI_PROP_TITLE_SUFFIXES_LOWER: frozenset[str] = frozenset(
     s.lower() for s in _KALSHI_PROP_TITLE_SUFFIXES

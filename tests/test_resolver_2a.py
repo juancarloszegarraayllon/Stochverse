@@ -401,6 +401,73 @@ class TestKalshiExtractSignal:
         }
         assert self.m.extract_signal(raw) is None
 
+    # ── Phase 2D.2.6 — tennis-specific suffixes ────────────────
+    #
+    # Added after the 2D.2.5 dry-run showed records like "Alexander
+    # Bublik: Total Games" reaching anchor_failed instead of
+    # extraction_skipped. Same upstream-filter pattern as 2C.2.6.
+
+    def test_prop_suffix_total_games_returns_none(self):
+        # The named example from the 2D.2.5 dry-run output.
+        raw = {
+            "event_ticker":  "KXATPTOTALGAMES-26MAY09BUBLIK",
+            "series_ticker": "KXATPTOTALGAMES",
+            "title":         "Alexander Bublik: Total Games",
+            "_sport":        "Tennis",
+            "_kickoff_dt":   "2026-05-09T13:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_prop_suffix_set_winner_returns_none(self):
+        # Tennis sub-market identifying which player wins a specific set.
+        raw = {
+            "event_ticker":  "KXATPSETWIN-26MAY09KECMRUBL",
+            "series_ticker": "KXATPSETWIN",
+            "title":         "Andrey Rublev: Set Winner",
+            "_sport":        "Tennis",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_prop_suffix_match_winner_returns_none(self):
+        raw = {
+            "event_ticker":  "KXATPMATCHWIN-26MAY09KECMRUBL",
+            "series_ticker": "KXATPMATCHWIN",
+            "title":         "Miomir Kecmanovic: Match Winner",
+            "_sport":        "Tennis",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_prop_suffix_tiebreak_returns_none(self):
+        # "Tiebreak" markets bet on whether a specific set goes
+        # to a tiebreak. Per-player prop, not a game-level market.
+        raw = {
+            "event_ticker":  "KXATPTIEBREAK-26MAY09KECMRUBL",
+            "series_ticker": "KXATPTIEBREAK",
+            "title":         "Miomir Kecmanovic: Tiebreak",
+            "_sport":        "Tennis",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_tennis_match_real_game_still_produces_signal(self):
+        # Regression: a real tennis game ticker (no prop suffix in
+        # title) must still produce a signal — the alias tier (and
+        # post-2D.3, the fuzzy tier) processes it normally.
+        raw = {
+            "event_ticker":  "KXATPMATCH-26MAY09KECMRUBL",
+            "series_ticker": "KXATPMATCH",
+            "title":         "Miomir Kecmanovic vs Andrey Rublev",
+            "_sport":        "Tennis",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        sig = self.m.extract_signal(raw)
+        assert sig is not None
+        # Title parsed: "Miomir Kecmanovic" home, "Andrey Rublev" away
+        home_names = [c.normalized for c in sig.home_team_candidates if c.kind == "name"]
+        assert "miomir kecmanovic" in home_names
+
     # ── Regression: real game titles still produce signals ─────
 
     def test_no_colon_title_still_produces_signal(self):
