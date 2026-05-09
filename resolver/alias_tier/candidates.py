@@ -105,7 +105,49 @@ class CandidateIndex:
             )
             by_sport[row.sport_id].append(ct)
             if structured.is_personal and structured.surname:
-                by_sport_surname[(row.sport_id, structured.surname)].append(ct)
+                # Phase 2D.1 (E.3): index under multiple plausible
+                # surname interpretations so a candidate like
+                # "Roberto Bautista Agut" is reachable when the
+                # provider sends "Bautista" — not just "Agut" (the
+                # default last-token interpretation).
+                #
+                # candidate_surname_interpretations enumerates up to
+                # 3 plausible assignments per design A.1 (3-retry
+                # ceiling): default last token, compound last-2,
+                # middle-as-surname for 3+-token names. The default
+                # matches the structured.surname value; including it
+                # explicitly keeps this code path consistent across
+                # 1/2/3+ token lengths.
+                from ..fuzzy_tier import candidate_surname_interpretations
+                # The structured.surname is built from the LAST
+                # token only (per personal_two_token / personal_multi
+                # detection). Reconstruct the original token list so
+                # interpretations sees the same input the structural
+                # detector saw.
+                #
+                # For personal_initial: tokens were
+                #   [surname, initial], so original = [surname, *others]
+                # For personal_two_token: original = [given, surname]
+                # For personal_multi: original = [*others, surname]
+                # For personal_single: original = [surname]
+                #
+                # The simplest reconstruction that's correct for
+                # every personal_* path: concatenate (others) +
+                # (surname). Skip personal_initial — for that path,
+                # surname is by structural convention the FIRST
+                # token, and the "compound" / "middle-as-surname"
+                # interpretations don't apply (single-token initial
+                # remainder). Keep just the default surname for
+                # personal_initial.
+                if structured.detection_path == "personal_initial":
+                    interpretations = (structured.surname,)
+                else:
+                    # personal_two_token / personal_multi / personal_single:
+                    # tokens are (others..., surname). Reconstruct.
+                    reconstructed = list(structured.other_tokens) + [structured.surname]
+                    interpretations = candidate_surname_interpretations(reconstructed)
+                for surname_key in interpretations:
+                    by_sport_surname[(row.sport_id, surname_key)].append(ct)
 
         self._by_sport = by_sport
         self._by_sport_surname = by_sport_surname
@@ -115,9 +157,15 @@ class CandidateIndex:
 
     def candidates_for_surname(self, sport_id: int, surname: str) -> list[CandidateTeam]:
         """Personal-name pre-filter. Returns candidates whose
-        structurally-normalized surname matches exactly. Phase 2D
-        uses this; Phase 2C.3 defers personal sports to 2D so
-        callers within 2C don't hit this path."""
+        structurally-normalized surname matches exactly OR via one
+        of the Phase 2D.1 multi-interpretation surname assignments
+        (default last-token, compound last-2, middle-as-surname).
+
+        Phase 2D.2 fuzzy matcher uses this; Phase 2C.3 defers
+        personal sports to 2D so callers within 2C don't hit this
+        path. The same candidate may appear under multiple surname
+        keys — caller is responsible for de-duplicating by
+        team_id when iterating across multiple keys."""
         return self._by_sport_surname.get((sport_id, surname), [])
 
     def __len__(self) -> int:
