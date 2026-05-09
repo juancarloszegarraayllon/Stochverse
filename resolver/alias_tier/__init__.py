@@ -12,6 +12,8 @@ Public surface:
         AUTO_APPLY_THRESHOLD, REVIEW_QUEUE_THRESHOLD, TOP_2_MARGIN,
     )
 """
+from .candidates import CandidateIndex, CandidateTeam
+from .matcher import AliasTierMatcher, RESOLVER_VERSION as ALIAS_RESOLVER_VERSION
 from .normalize import (
     INDIVIDUAL_SPORT_CODES,
     StructuredName,
@@ -48,4 +50,9 @@ __all__ = [
     "AUTO_APPLY_THRESHOLD",
     "REVIEW_QUEUE_THRESHOLD",
     "TOP_2_MARGIN",
+    # 2C.3 additions
+    "CandidateIndex",
+    "CandidateTeam",
+    "AliasTierMatcher",
+    "ALIAS_RESOLVER_VERSION",
 ]

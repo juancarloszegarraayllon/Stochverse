@@ -745,30 +745,32 @@ class TestStaticInvariants:
         assert "run_mode=run_mode" in self.src
 
     def test_resolution_log_written_on_no_match_too(self):
-        """Per design doc §1 + smoke-run feedback: every match decision
-        (auto-apply AND no_match) must INSERT a resolution_log row so
-        day-7 review can query reason_detail->>'fail_reason'. The
-        session.add(ResolutionLog ...) call must NOT live inside the
-        `if result.reason_code == ReasonCode.STRICT:` branch — it has
-        to run on both branches."""
-        # Locate the strict-branch test.
-        strict_idx = self.src.find("if result.reason_code == ReasonCode.STRICT:")
-        assert strict_idx > 0
-        # Locate the next session.add(ResolutionLog( call.
-        log_idx = self.src.find("session.add(ResolutionLog(", strict_idx)
-        assert log_idx > 0
-        # Locate the `else:` that opens the no_match branch — must
-        # appear BEFORE the ResolutionLog INSERT so the INSERT is at
-        # the post-if/else level (runs on every decision).
-        else_idx = self.src.find("else:", strict_idx)
-        assert 0 < else_idx < log_idx, (
-            "session.add(ResolutionLog(...) must run on both auto-apply "
-            "and no_match branches; currently it lives inside one branch."
+        """Per design doc §1 + Phase 2C.3 dual-tier-logging (D.4):
+        every match decision (auto-apply, alias hit, review-queue,
+        no_match) must INSERT a resolution_log row. After 2C.3 the
+        runner iterates `tier_results` and logs each in order — so
+        when alias rescues a record strict missed, BOTH rows land.
+
+        Static guard: the `for tier_result in tier_results:` loop
+        must contain `session.add(ResolutionLog(`, and that loop
+        must come BEFORE the routing if/elif/else block so logging
+        is unconditional."""
+        for_idx = self.src.find("for tier_result in tier_results:")
+        assert for_idx > 0, (
+            "Runner must iterate tier_results (Phase 2C.3 dual-tier "
+            "logging per design D.4)"
         )
-        # And the chunk_miss increment must precede the log INSERT
-        # (no_match still counts), confirming we still tally misses.
-        miss_idx = self.src.find("chunk_miss += 1", strict_idx)
-        assert 0 < miss_idx < log_idx
+        # The session.add(ResolutionLog(...)) call must be inside
+        # this loop (i.e., between for_idx and the next major block).
+        log_idx = self.src.find("session.add(ResolutionLog(", for_idx)
+        assert log_idx > 0
+        # And the routing must come AFTER the logging loop — so
+        # logging is unconditional.
+        routing_idx = self.src.find("final.reason_code", log_idx)
+        assert routing_idx > log_idx, (
+            "Runner routing must come AFTER the per-tier log loop "
+            "so logging is unconditional"
+        )
 
     def test_fl_query_joins_sports_and_filters_sport_id(self):
         """Phase 2A.7: FL rows had no sport context until sp.fl_events.sport_id

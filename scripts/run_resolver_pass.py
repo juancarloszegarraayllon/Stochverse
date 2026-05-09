@@ -56,6 +56,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CHUNK_SIZE = 200
 
 
+def _normalize_for_alias(raw: str) -> str:
+    """Same normalization the strict tier uses for alias lookups
+    (resolver._normalize.normalize_name). Imported lazily so the
+    runner stays import-light at module load."""
+    from resolver._normalize import normalize_name
+    return normalize_name(raw)
+
+
 # Halt-criteria thresholds from PHASE_2B_DESIGN.md §2. Wired into the
 # stdout summary at the end of every pass — operators (and the cron
 # review path) read these without having to query sp.resolver_runs.
@@ -147,11 +155,15 @@ async def main(
 
     from observability import get_logger
     from resolver import (
-        AliasResolver, CompetitionResolver, FLResolverModule,
-        KalshiResolverModule, ReasonCode, STRICT_MATCHER_VERSION,
-        StrictMatcher,
+        AliasResolver, AliasTierMatcher, CandidateIndex,
+        CompetitionResolver, FLResolverModule, KalshiResolverModule,
+        ReasonCode, STRICT_MATCHER_VERSION, StrictMatcher,
+        TIERED_RESOLVER_VERSION, TieredMatcher,
     )
-    from sp_models import FLEvent, KalshiMarket, ResolutionLog, ResolverRun
+    from sp_models import (
+        FLEvent, KalshiMarket, ResolutionLog, ResolverRun,
+        ReviewQueue, TeamAlias,
+    )
 
     log = get_logger("resolver.run_pass")
     started_at = time.monotonic()
@@ -169,11 +181,17 @@ async def main(
 
     # Counters for the eventual sp.resolver_runs row.
     records_scanned = 0
-    auto_applies = 0
-    no_match = 0
+    auto_applies = 0                  # strict-tier OR alias-tier auto-apply
+    no_match = 0                      # both tiers returned NO_MATCH
     crashes = 0
     signal_extraction_skipped = 0     # Phase 2A.6: extract_signal returned None
                                       # (e.g., Kalshi outright/series — not per-fixture)
+    # Phase 2C.3 per-tier breakdown — surfaced in sp.resolver_runs.extra
+    # so day-7 reports can split the auto_applies aggregate cleanly.
+    strict_auto_applies = 0
+    alias_auto_applies = 0
+    alias_review_queue = 0
+    alias_tennis_deferred = 0         # alias-tier early-exit on individual sports
     latencies_ms: list[int] = []
 
     async with async_session() as bootstrap_session:
@@ -198,12 +216,21 @@ async def main(
         competitions = await CompetitionResolver.load_all(bootstrap_session)
         log.info("resolver.run_pass.competitions_loaded", **competitions.stats())
 
-        # ── Step 3: build matcher ──────────────────────────────
-        matcher = StrictMatcher(
+        # ── Step 2.6: bulk-load sp.teams for alias-tier (Phase 2C.3) ──
+        candidate_index = await CandidateIndex.load_all(bootstrap_session)
+        log.info("resolver.run_pass.candidates_loaded", **candidate_index.stats())
+
+        # ── Step 3: build TieredMatcher (strict → alias) ───────
+        strict_matcher = StrictMatcher(
             aliases=aliases,
             sport_id_by_code_or_name=sport_id_by_code_or_name,
             competitions=competitions,
         )
+        alias_matcher = AliasTierMatcher(
+            candidates=candidate_index,
+            sport_id_by_code_or_name=sport_id_by_code_or_name,
+        )
+        matcher = TieredMatcher(strict=strict_matcher, alias=alias_matcher)
 
         # ── Step 4: fetch unresolved provider records ──────────
         if provider == "kalshi":
@@ -282,6 +309,10 @@ async def main(
         chunk_miss = 0
         chunk_skipped = 0
         chunk_crashes = 0
+        chunk_strict_auto = 0
+        chunk_alias_auto = 0
+        chunk_alias_review = 0
+        chunk_alias_tennis_deferred = 0
 
         try:
             async with async_session() as session:
@@ -331,7 +362,13 @@ async def main(
                             continue
 
                         try:
-                            result = await matcher.match(session, signal)
+                            # Phase 2C.3: TieredMatcher returns
+                            # list[MatchResult] — strict result first,
+                            # then alias result if strict missed. The
+                            # runner writes one resolution_log row per
+                            # tier consulted (per design D.4 — strict's
+                            # "I tried and failed" is forensic data).
+                            tier_results = await matcher.match(session, signal)
                         except Exception as e:
                             chunk_crashes += 1
                             log.warning(
@@ -344,44 +381,122 @@ async def main(
                             )
                             continue
 
-                        # Auto-apply path: link provider record to
-                        # fixture in this transaction. Atomic with the
-                        # ResolutionLog row written below — per design
-                        # doc §1, link UPDATE and log INSERT must
-                        # commit or roll back together.
-                        if result.reason_code == ReasonCode.STRICT:
+                        # Log every tier decision in order. Per design
+                        # D.4: strict's no_match + alias's hit BOTH
+                        # land in resolution_log when alias rescues a
+                        # record strict missed.
+                        for tier_result in tier_results:
+                            session.add(ResolutionLog(
+                                run_id=run_id,
+                                provider=provider,
+                                provider_record_id=row.pk,
+                                fixture_id=tier_result.fixture_id,
+                                confidence=tier_result.confidence,
+                                reason_code=tier_result.reason_code.value,
+                                reason_detail=tier_result.reason_detail,
+                                resolver_version=tier_result.resolver_version,
+                            ))
+
+                        # Final tier decision drives the routing.
+                        final = tier_results[-1]
+
+                        if final.reason_code == ReasonCode.STRICT:
+                            # 2B strict-tier auto-apply path.
                             await session.execute(text(
                                 f"UPDATE sp.{ 'kalshi_markets' if provider == 'kalshi' else 'fl_events' } "
                                 f"SET fixture_id = :fixture_id "
                                 f"WHERE { 'ticker' if provider == 'kalshi' else 'fl_event_id' } = :pk"
                             ).bindparams(
-                                fixture_id=result.fixture_id,
+                                fixture_id=final.fixture_id,
                                 pk=row.pk,
                             ))
                             chunk_auto += 1
+                            chunk_strict_auto += 1
+                        elif final.reason_code == ReasonCode.ALIAS:
+                            # 2C alias-tier auto-apply path. Atomic
+                            # with the resolution_log writes above:
+                            # UPDATE provider table + INSERT
+                            # sp.team_aliases (write-back, per design
+                            # §3 self-improving property).
+                            await session.execute(text(
+                                f"UPDATE sp.{ 'kalshi_markets' if provider == 'kalshi' else 'fl_events' } "
+                                f"SET fixture_id = :fixture_id "
+                                f"WHERE { 'ticker' if provider == 'kalshi' else 'fl_event_id' } = :pk"
+                            ).bindparams(
+                                fixture_id=final.fixture_id,
+                                pk=row.pk,
+                            ))
+                            # Write back BOTH sides to sp.team_aliases
+                            # so the next strict-tier pass picks them
+                            # up at 0.98 confidence. Use ON CONFLICT
+                            # DO NOTHING per D.5 — confidence is
+                            # provenance, not a per-match score.
+                            for side_label in ("home", "away"):
+                                team_id_str = final.reason_detail.get(
+                                    f"{side_label}_team_id"
+                                )
+                                provider_norm = final.reason_detail.get(
+                                    f"{side_label}_provider_normalized"
+                                )
+                                # The matcher records canonical/ratio
+                                # but not the raw provider string the
+                                # alias should preserve. Pull from
+                                # the original signal candidates.
+                                provider_raw = (
+                                    signal.home_team_candidates[0].raw
+                                    if side_label == "home" and signal.home_team_candidates
+                                    else (
+                                        signal.away_team_candidates[0].raw
+                                        if side_label == "away" and signal.away_team_candidates
+                                        else None
+                                    )
+                                )
+                                if team_id_str and provider_raw:
+                                    await session.execute(text(
+                                        """
+                                        INSERT INTO sp.team_aliases
+                                          (id, team_id, alias, alias_normalized,
+                                           source, confidence, created_at)
+                                        VALUES
+                                          (gen_random_uuid(), :tid, :alias,
+                                           :alias_norm, 'alias_tier', :conf, NOW())
+                                        ON CONFLICT (alias_normalized, source)
+                                          DO NOTHING
+                                        """
+                                    ).bindparams(
+                                        tid=uuid.UUID(team_id_str),
+                                        alias=provider_raw,
+                                        alias_norm=_normalize_for_alias(provider_raw),
+                                        conf=final.confidence,
+                                    ))
+                            chunk_auto += 1
+                            chunk_alias_auto += 1
+                        elif final.reason_code == ReasonCode.REVIEW_QUEUE:
+                            # 2C review-queue path. Insert one
+                            # sp.review_queue row with the candidate
+                            # team_ids. Provider.fixture_id stays NULL.
+                            session.add(ReviewQueue(
+                                provider=provider,
+                                provider_record_id=row.pk,
+                                candidate_fixtures=[
+                                    str(t) for t in final.candidate_fixtures
+                                ],
+                                confidence=final.confidence,
+                                status="pending",
+                            ))
+                            chunk_alias_review += 1
+                            # Don't count as miss — these are pending
+                            # human approval.
                         else:
-                            # no_match — record stays fixture_id IS
-                            # NULL for the next pass / next tier. We
-                            # still log the decision below so day-7
-                            # review can query reason_detail->>'fail_reason'.
+                            # Both tiers said NO_MATCH. Record stays
+                            # fixture_id IS NULL for next pass / next
+                            # tier (Phase 2D fuzzy when it ships).
                             chunk_miss += 1
-
-                        # Log every match decision (auto-apply AND
-                        # no_match). reason_detail captures which gate
-                        # rejected the signal, the resolved sport_id /
-                        # team_ids, the competition gate decision,
-                        # etc. — the substrate the day-7 review queries
-                        # operate on.
-                        session.add(ResolutionLog(
-                            run_id=run_id,
-                            provider=provider,
-                            provider_record_id=row.pk,
-                            fixture_id=result.fixture_id,
-                            confidence=result.confidence,
-                            reason_code=result.reason_code.value,
-                            reason_detail=result.reason_detail,
-                            resolver_version=result.resolver_version,
-                        ))
+                            # Track tennis-deferred rows separately
+                            # so the day-7 query can attribute the
+                            # ~180/day Kalshi tennis no_match volume.
+                            if final.reason_detail.get("fail_reason") == "deferred_to_2d":
+                                chunk_alias_tennis_deferred += 1
 
                         latencies_ms.append(int((time.monotonic() - per_record_start) * 1000))
 
@@ -390,6 +505,10 @@ async def main(
             no_match += chunk_miss
             signal_extraction_skipped += chunk_skipped
             crashes += chunk_crashes
+            strict_auto_applies += chunk_strict_auto
+            alias_auto_applies += chunk_alias_auto
+            alias_review_queue += chunk_alias_review
+            alias_tennis_deferred += chunk_alias_tennis_deferred
         except Exception as e:
             crashes += len(chunk)
             log.error(
@@ -417,7 +536,11 @@ async def main(
             async with session.begin():
                 session.add(ResolverRun(
                     run_id=run_id,
-                    resolver_version=STRICT_MATCHER_VERSION,
+                    # Phase 2C.3: stamp the orchestrator version on
+                    # the run row, not the strict-tier version. Per-
+                    # tier ResolutionLog rows continue to carry their
+                    # own per-tier version (strict@2a.6 / alias@2c.0).
+                    resolver_version=TIERED_RESOLVER_VERSION,
                     provider=provider,
                     run_mode=run_mode,
                     started_at=started_at_dt,
@@ -430,14 +553,12 @@ async def main(
                     extra={
                         "limit": limit,
                         "chunk_size": CHUNK_SIZE,
-                        # Counter for records the extractor skipped
-                        # (returned None — e.g., Kalshi outright /
-                        # series / tournament). Lives in extra rather
-                        # than a top-level column to avoid a migration
-                        # for what is effectively an audit metric;
-                        # day-7 query pulls it via
-                        # extra->>'signal_extraction_skipped'.
                         "signal_extraction_skipped": signal_extraction_skipped,
+                        # Phase 2C.3 per-tier breakdown.
+                        "strict_auto_applies":    strict_auto_applies,
+                        "alias_auto_applies":     alias_auto_applies,
+                        "alias_review_queue":     alias_review_queue,
+                        "alias_tennis_deferred":  alias_tennis_deferred,
                     },
                 ))
     except Exception as e:
@@ -460,17 +581,25 @@ async def main(
         signal_extraction_skipped=signal_extraction_skipped,
         crashes=crashes,
         latency_p95_ms=latency_p95,
+        strict_auto_applies=strict_auto_applies,
+        alias_auto_applies=alias_auto_applies,
+        alias_review_queue=alias_review_queue,
+        alias_tennis_deferred=alias_tennis_deferred,
     )
 
     print(f"\nResolver pass complete in {elapsed_sec:.1f}s:")
     print(f"  provider:                   {provider}")
     print(f"  run_mode:                   {run_mode}")
     print(f"  records_scanned:            {records_scanned:>6}")
-    print(f"  auto_applies:               {auto_applies:>6}  ({100*auto_applies/(records_scanned or 1):.1f}%)")
+    print(f"  auto_applies (total):       {auto_applies:>6}  ({100*auto_applies/(records_scanned or 1):.1f}%)")
+    print(f"    strict tier:              {strict_auto_applies:>6}")
+    print(f"    alias  tier:              {alias_auto_applies:>6}")
+    print(f"  alias review_queue:         {alias_review_queue:>6}  ({100*alias_review_queue/(records_scanned or 1):.1f}%)")
     print(f"  no_match:                   {no_match:>6}  ({100*no_match/(records_scanned or 1):.1f}%)")
+    print(f"    of which tennis deferred: {alias_tennis_deferred:>6}")
     print(f"  signal_extraction_skipped:  {signal_extraction_skipped:>6}  ({100*signal_extraction_skipped/(records_scanned or 1):.1f}%)")
     print(f"  crashes:                    {crashes:>6}")
-    accounted = auto_applies + no_match + signal_extraction_skipped + crashes
+    accounted = auto_applies + no_match + alias_review_queue + signal_extraction_skipped + crashes
     if accounted != records_scanned:
         print(f"  WARNING unaccounted gap:    {records_scanned - accounted:>6}")
     if latency_p95 is not None:

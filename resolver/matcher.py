@@ -391,3 +391,56 @@ class StrictMatcher:
             return self.sport_id_by_code_or_name[sport_label]
         # Lowercase code form.
         return self.sport_id_by_code_or_name.get(sport_label.lower())
+
+
+# ── Phase 2C.3 — TieredMatcher (orchestrator) ────────────────────
+
+
+# Run-level resolver version. Stamped onto sp.resolver_runs.resolver_version
+# (the run's orchestrator version). Per-tier MatchResult rows continue to
+# stamp their own per-tier version (strict@2a.6 / alias@2c.0).
+TIERED_RESOLVER_VERSION = "tiered@2c.0"
+
+
+class TieredMatcher:
+    """Phase 2C orchestrator — strict tier first, alias tier on miss.
+
+    Returns a list of MatchResult, one per tier consulted. The
+    runner writes one resolution_log row per result (per design D.4
+    — "I tried and failed" is forensic data).
+
+    - Strict tier hits (STRICT): list = [strict_result]; runner
+      auto-applies via the existing 2B path.
+    - Strict tier misses + alias hits (ALIAS): list =
+      [strict_result, alias_result]; runner writes both logs and
+      auto-applies on the alias result.
+    - Strict tier misses + alias review-queues: list =
+      [strict_result, alias_result]; runner writes both logs and
+      inserts review_queue row.
+    - Both miss: list = [strict_result, alias_result]; runner
+      writes both logs, no UPDATE.
+
+    The matcher itself writes nothing — atomic transaction
+    discipline lives in the runner per Phase 2A.6 design §1.
+    """
+
+    def __init__(self, strict, alias) -> None:
+        """`strict` and `alias` are pre-built matchers. Untyped
+        intentionally to avoid a circular import — the alias matcher
+        lives in resolver.alias_tier.matcher.AliasTierMatcher and
+        has its own .match(session, signal) coroutine.
+        """
+        self.strict = strict
+        self.alias = alias
+
+    async def match(self, session, signal):
+        """Returns list[MatchResult] — at most two entries (strict
+        + alias). Final entry drives runner routing.
+        """
+        from .types import ReasonCode
+
+        strict_result = await self.strict.match(session, signal)
+        if strict_result.reason_code == ReasonCode.STRICT:
+            return [strict_result]
+        alias_result = await self.alias.match(session, signal)
+        return [strict_result, alias_result]

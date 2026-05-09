@@ -463,6 +463,131 @@ options before 2C.3:
 
 The dry-run output is the data that picks among (a)/(b)/(c).
 
+## Phase 2C.3 — Alias tier (TieredMatcher: strict → alias → review)
+
+The 2B parallel-run cron (`resolver-cron-kalshi`, `resolver-cron-fl`)
+keeps the same 02:00 / 02:15 UTC schedule. After 2C.3 it runs
+`TieredMatcher` instead of bare `StrictMatcher` — same entry point,
+same DATABASE_URL, no Railway-side changes needed.
+
+### What changes per pass
+
+- **Strict tier** runs first (unchanged from 2B). On STRICT hit:
+  same auto-apply path as before (UPDATE provider.fixture_id +
+  INSERT resolution_log row stamped `strict@2a.6`).
+- **Alias tier** runs only when strict returns `NO_MATCH`. Tries
+  fuzzy team-name matching with cross-team-collision detection
+  and exact-match-wins. On ALIAS hit: UPDATE provider.fixture_id
+  + INSERT resolution_log row stamped `alias@2c.0` + INSERT new
+  `sp.team_aliases` row (`source='alias_tier'`, `confidence=<match score>`).
+- **Review queue**: when the alias tier detects a cross-team
+  collision (multiple candidates above 0.78 with no single 1.0
+  winner) OR confidence lands in 0.70–0.84, an `sp.review_queue`
+  row is inserted with the candidate team_ids. Phase 2F admin UI
+  is the consumer.
+- **Tennis (and individual sports generally)** early-exit with
+  `reason_code='no_match'`, `fail_reason='deferred_to_2d'`. ~180
+  Kalshi tennis records / day until Phase 2D ships.
+
+### Dual-tier logging (Phase 2C design D.4)
+
+When alias rescues a record strict missed, BOTH `resolution_log`
+rows are written in the same atomic transaction:
+
+- Row 1: strict's `no_match` (`resolver_version='strict@2a.6'`,
+  fail_reason='alias_resolution_incomplete'`)
+- Row 2: alias's hit (`resolver_version='alias@2c.0'`,
+  reason_code='alias'`)
+
+Strict's "I tried and failed" is forensic data — the day-7 review
+query joins the two via `(provider, provider_record_id)` to see
+the full per-record decision history.
+
+### sp.resolver_runs.extra additions
+
+The single `auto_applies` aggregate now decomposes into
+per-tier counters in `extra`:
+
+```json
+{
+  "limit": null,
+  "chunk_size": 200,
+  "signal_extraction_skipped": 286,
+  "strict_auto_applies":       312,
+  "alias_auto_applies":         68,
+  "alias_review_queue":        248,
+  "alias_tennis_deferred":     180
+}
+```
+
+`auto_applies` (top-level column) = `strict_auto_applies + alias_auto_applies`.
+
+### Day-7 query additions
+
+The full report is in `scripts/parallel_run_day7_report.sql`. The
+2C.3-relevant additions:
+
+```sql
+-- Per-tier auto-apply breakdown
+SELECT date_trunc('day', started_at)::date         AS day,
+       provider,
+       SUM((extra->>'strict_auto_applies')::int)   AS strict,
+       SUM((extra->>'alias_auto_applies')::int)    AS alias,
+       SUM((extra->>'alias_review_queue')::int)    AS review,
+       SUM((extra->>'alias_tennis_deferred')::int) AS tennis_deferred
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '7 days'
+  AND run_mode IN ('standalone', 'cron')
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- Senior-vs-reserve collision patterns (drives Phase 2C.4 sizing)
+SELECT reason_detail->>'home_canonical' AS canonical,
+       COUNT(*) AS collisions
+FROM sp.resolution_log
+WHERE provider IN ('kalshi', 'fl')
+  AND reason_code = 'review_queue'
+  AND (reason_detail->>'home_collision')::boolean = true
+  AND decided_at > NOW() - INTERVAL '7 days'
+GROUP BY 1
+ORDER BY 2 DESC
+LIMIT 50;
+```
+
+### Review-queue alert threshold (per design C.1)
+
+Architecture §7.5's `> 100` review-queue alert threshold is raised
+to **1,500 for the 14-day post-2C.3 window** to absorb the launch
+spike (predicted 400–1,200 review rows on day 1, draining over
+~2 weeks). Reverts to 100 on day 15 automatically unless extended
+via documented decision.
+
+### Operator action after merge
+
+```bash
+git checkout main && git pull
+# Railway redeploys the resolver-cron-* services automatically.
+
+# Verify the next 02:00 UTC pass produces alias-tier rows.
+psql "$DATABASE_URL" <<'SQL'
+SELECT provider,
+       SUM((extra->>'strict_auto_applies')::int) AS strict_auto,
+       SUM((extra->>'alias_auto_applies')::int)  AS alias_auto,
+       SUM((extra->>'alias_review_queue')::int)  AS review_q
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '24 hours'
+  AND run_mode = 'cron'
+GROUP BY 1;
+SQL
+```
+
+Day-7 review (after the parallel-run window): run the full
+`scripts/parallel_run_day7_report.sql` and read off the cross-
+provider summary (section 9) plus the per-tier breakdown.
+**Phase 2C.4 (senior-team disambiguation)** ships only after
+day-7 confirms which collision patterns are actually appearing in
+production — see PHASE_2C_DESIGN.md.
+
 ## Phase 2B — Strict-tier resolver parallel-run
 
 Phase 2A.5 baseline is in place. Phase 2B's standalone runner
