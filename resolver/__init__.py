@@ -43,6 +43,12 @@ from .alias_tier import (
     CandidateIndex,
 )
 
+# Phase 2D additions:
+from .fuzzy_tier import (
+    FuzzyTierMatcher,
+    FUZZY_RESOLVER_VERSION,
+)
+
 __all__ = [
     "FixtureSignal",
     "TeamCandidate",
@@ -65,4 +71,7 @@ __all__ = [
     "CandidateIndex",
     "TieredMatcher",
     "TIERED_RESOLVER_VERSION",
+    # Phase 2D
+    "FuzzyTierMatcher",
+    "FUZZY_RESOLVER_VERSION",
 ]
