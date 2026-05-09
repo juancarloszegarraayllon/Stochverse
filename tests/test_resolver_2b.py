@@ -819,6 +819,103 @@ class TestStaticInvariants:
         # Surfaced in the stdout summary.
         assert "signal_extraction_skipped:" in self.src
 
+    def test_halt_criteria_invoked_in_main(self):
+        """Phase 2B parallel-run cron: halt-criteria warnings must
+        actually be evaluated and surfaced from main() — a regression
+        of the PR #87 shape (logic exists but isn't called) is the
+        whole reason this test is here."""
+        # Function is defined.
+        assert "def _evaluate_halt_criteria(" in self.src
+        # And actually invoked from main.
+        assert "_evaluate_halt_criteria(" in self.src
+        # The invocation passes through the per-pass counters.
+        assert "halt_warnings = _evaluate_halt_criteria(" in self.src
+        # Warnings reach stdout AND structlog.
+        assert "HALT CRITERIA EXCEEDED" in self.src
+        assert "resolver.run_pass.halt_criteria_exceeded" in self.src
+
+
+# ── Phase 2B parallel-run halt-criteria — real call-path tests ──
+
+class TestEvaluateHaltCriteria:
+    """Pure function — exercise every branch directly. Lesson from
+    PR #87: static-source guards aren't enough; functions need real
+    call-path tests that verify behavior, not just presence."""
+
+    def _eval(self, **overrides):
+        from scripts.run_resolver_pass import _evaluate_halt_criteria
+        kwargs = {
+            "records_scanned": 1000,
+            "auto_applies":    700,
+            "crashes":         0,
+            "latency_p95_ms":  100,
+        }
+        kwargs.update(overrides)
+        return _evaluate_halt_criteria(**kwargs)
+
+    def test_healthy_pass_returns_no_warnings(self):
+        assert self._eval() == []
+
+    def test_crash_at_threshold_does_not_warn(self):
+        # Boundary: design doc says > 5/day → halt, so crashes == 5
+        # is still acceptable for a single pass.
+        assert self._eval(crashes=5) == []
+
+    def test_crash_above_threshold_warns(self):
+        warnings = self._eval(crashes=6)
+        assert len(warnings) == 1
+        assert "crashes=6" in warnings[0]
+        assert "halt" in warnings[0].lower()
+
+    def test_low_coverage_warns(self):
+        # 30% coverage on a 1000-record pass → below the 60% floor.
+        warnings = self._eval(records_scanned=1000, auto_applies=300)
+        assert len(warnings) == 1
+        assert "coverage" in warnings[0].lower()
+        assert "30.0%" in warnings[0]
+
+    def test_low_coverage_at_floor_does_not_warn(self):
+        # Exactly 60% → at floor, not below.
+        assert self._eval(records_scanned=1000, auto_applies=600) == []
+
+    def test_low_coverage_skipped_for_small_smoke_runs(self):
+        # < 100 records → too small to draw a sustained-coverage
+        # conclusion. A 5-record smoke with 0 auto-applies must NOT
+        # produce a coverage warning.
+        assert self._eval(records_scanned=5, auto_applies=0) == []
+
+    def test_latency_above_ceiling_warns(self):
+        # 5 min ceiling = 300_000 ms.
+        warnings = self._eval(latency_p95_ms=350_000)
+        assert len(warnings) == 1
+        assert "latency p95" in warnings[0]
+        assert "350000" in warnings[0]
+
+    def test_latency_at_ceiling_does_not_warn(self):
+        assert self._eval(latency_p95_ms=300_000) == []
+
+    def test_latency_none_does_not_warn(self):
+        # latency_p95_ms is None when no records were scanned —
+        # smoke runs against an empty corpus shouldn't false-positive.
+        assert self._eval(latency_p95_ms=None) == []
+
+    def test_multiple_thresholds_all_warn(self):
+        # Triple-strike: crashes high, coverage low, latency high.
+        # All three warnings must fire so the operator sees the full
+        # picture, not just the first threshold to trigger.
+        warnings = self._eval(
+            records_scanned=1000,
+            auto_applies=200,
+            crashes=10,
+            latency_p95_ms=600_000,
+        )
+        assert len(warnings) == 3
+        joined = " ".join(warnings).lower()
+        assert "crashes" in joined
+        assert "coverage" in joined
+        assert "latency" in joined
+
+
 
 # ── Integration test stub (gated on SP_INTEGRATION_DB) ───────────
 

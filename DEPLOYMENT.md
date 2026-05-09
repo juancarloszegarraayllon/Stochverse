@@ -421,30 +421,6 @@ Applies revision `bdf12a30e49b`:
 - Creates `sp.resolver_runs` (one row per pass; queryable metrics)
 - Alters `sp.fixtures.competition_id` to nullable
 
-### How to run
-
-```bash
-# Smoke-run on a small slice first
-DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
-    --provider kalshi --limit 100
-
-# Full passes
-DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider kalshi
-DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider fl
-
-# Cron-tagged pass (for the 02:00 UTC daily during parallel-run)
-DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
-    --provider kalshi --run-mode cron
-```
-
-Or via Makefile:
-
-```bash
-make resolver-pass-kalshi
-make resolver-pass-kalshi ARGS="--limit 100"
-make resolver-pass-fl
-```
-
 ### What each run produces
 
 - For each provider record matched by the strict tier: an UPDATE
@@ -479,31 +455,68 @@ equivalent filter: `ingestion/fl.py` only fetches the sport_ids in
 `DEFAULT_FL_SPORT_IDS`, so `sp.fl_events` is sport-shaped by
 construction.
 
+### Parallel-run cron schedule
+
+Daily at 02:00 UTC, two scheduled passes via Railway cron services
+(`railway.toml`). Staggered 15 minutes apart so they don't compete
+for Neon connections during the bulk-load phase.
+
+| Service              | Schedule (UTC) | Command |
+|----------------------|----------------|---------|
+| `resolver-cron-kalshi` | `0 2 * * *`  | `python scripts/run_resolver_pass.py --provider kalshi --run-mode cron` |
+| `resolver-cron-fl`     | `15 2 * * *` | `python scripts/run_resolver_pass.py --provider fl --run-mode cron`     |
+
+Both passes write one row to `sp.resolver_runs` with
+`run_mode='cron'` so day-7 reports filter cleanly (excluding ad-hoc
+`standalone` runs and post-2E `live` activity).
+
+Each cron run emits two halt-criteria signals:
+1. **Stdout WARNING block** at the end of the summary if any
+   threshold was exceeded — Railway's cron-log scrape catches it.
+2. **Structured log event** `resolver.run_pass.halt_criteria_exceeded`
+   for observability tooling.
+
+The runner deliberately exits 0 even when warnings fire — transient
+threshold spikes shouldn't surface as Railway deploy failures. The
+operator reviews via the day-7 query and the cron logs, not exit
+codes.
+
+### Halt criteria (per design doc §2)
+
+Wired into the per-pass evaluation in `_evaluate_halt_criteria()`:
+
+| Trigger                                       | Threshold       | Remediation |
+|-----------------------------------------------|-----------------|-------------|
+| Crashes in a single pass                      | `> 5`           | Halt parallel-run; investigate before re-enabling. Most likely cause: Neon connection issue or a matcher exception loop. |
+| Coverage (auto_applies / records_scanned)     | `< 60%` sustained | Review extraction; possibly relax competition-match or bootstrap more aliases. (Smoke runs `< 100` records skip this check.) |
+| Latency p95                                   | `> 5 min`       | Switch from polling to LISTEN/NOTIFY for Phase 2E.fix. |
+
+Two halt criteria from the design doc are evaluated at day-7 review
+time (not per-pass — they need cross-pass aggregation):
+
+| Trigger                                | Computed how | Remediation |
+|----------------------------------------|--------------|-------------|
+| Kalshi false-positive rate `> 1%/24h`  | Diff resolver auto-applies vs `legacy_kalshi_join.pair_via_registry`. Comparator wiring still pending — column `sp.resolver_runs.legacy_diff_count` exists but is NULL until the diff lands. | Tighten kickoff drift to 15 min. |
+| FL spot-check error rate `≥ 1 of 5`    | Operator picks 5 random FL strict auto-applies/day from `sp.resolution_log` and verifies against FL's web UI. ~5 min/day manual step. | Halt FL parallel-run, investigate. |
+
 ### Day-7 parallel-run report
 
-```sql
-SELECT provider,
-       SUM(records_scanned)                 AS scanned,
-       SUM(auto_applies)                    AS auto_applies,
-       SUM(no_match)                        AS no_match,
-       SUM((extra->>'signal_extraction_skipped')::int) AS extract_skipped,
-       SUM(crashes)                         AS crashes,
-       SUM(legacy_diff_count)               AS kalshi_legacy_diffs,
-       ROUND(100.0 * SUM(auto_applies) / NULLIF(SUM(records_scanned), 0), 2) AS coverage_pct,
-       ROUND(100.0 * SUM(legacy_diff_count) / NULLIF(SUM(auto_applies), 0), 2) AS kalshi_fp_pct,
-       MAX(latency_p95_ms)                  AS worst_latency_p95_ms
-FROM sp.resolver_runs
-WHERE started_at > NOW() - INTERVAL '7 days'
-  AND run_mode IN ('standalone', 'cron')   -- exclude post-2E live activity
-GROUP BY 1
-ORDER BY 1;
+Single SQL file with all the queries the day-7 review needs:
+
+```bash
+psql "$DATABASE_URL" -f scripts/parallel_run_day7_report.sql
 ```
 
-Thresholds from design doc §2:
-- Kalshi false-positive rate > 1.0% / 24h → tighten drift to 15 min
-- Coverage < 60% sustained → review extraction
-- Latency p95 > 5min → switch to LISTEN/NOTIFY (2E.fix)
-- Crashes > 5/day → halt parallel-run
+Runs nine sections (auto-apply rate per day, day-over-day trend,
+latency p95, crash count, fail_reason distribution last 24h + full
+7-day window, FL transitional sub-paths, Phase 2C backfill candidate
+count, cross-provider summary). All queries scope to
+`run_mode IN ('standalone', 'cron')` so they exclude post-2E live
+activity.
+
+Individual queries can be copy-pasted from the file for ad-hoc
+audits. The cross-provider summary (section 9) is the right place
+to start the day-7 review.
 
 ### Why isn't strict tier matching? — fail_reason audit
 
@@ -523,6 +536,8 @@ GROUP BY 1, 2
 ORDER BY 1, 3 DESC;
 ```
 
+(This is also section 5 of `parallel_run_day7_report.sql`.)
+
 Common values + remediation:
 - `alias_resolution_incomplete` — team didn't normalize to a seeded
   alias. Check `reason_detail->>'home_resolved'` /
@@ -539,12 +554,34 @@ Common values + remediation:
 - `home_and_away_same_team` — alias data bug; both sides resolved
   to the same `team_id`. Manual triage on the specific alias.
 
-### FL spot-check (manual, not a query)
+### Manual / ad-hoc parallel-run pass
 
-`legacy_diff_count` is NULL for FL — there's no automatic comparator.
-Instead, pick 5 random FL strict-tier auto-applies per day and
-manually verify the chosen fixture matches the underlying real-world
-game:
+Operators can trigger a pass between the daily 02:00 UTC slots
+without disturbing the cron series — `--run-mode standalone` is the
+default and the day-7 query includes both modes:
+
+```bash
+# Smoke first (skips the coverage halt-check at < 100 records).
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
+    --provider kalshi --limit 100
+
+# Full ad-hoc passes.
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider kalshi
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider fl
+```
+
+Or via Makefile against the local docker-compose Postgres:
+
+```bash
+make resolver-pass-kalshi
+make resolver-pass-kalshi ARGS="--limit 100"
+make resolver-pass-fl
+```
+
+### FL spot-check (operator runbook, daily)
+
+The "FL spot-check error rate" halt criterion above is a manual
+step. Pick 5 random FL strict-tier auto-applies per day:
 
 ```sql
 SELECT decided_at, provider_record_id, fixture_id,
@@ -558,9 +595,11 @@ ORDER BY random()
 LIMIT 5;
 ```
 
-Cross-reference with FL's web UI. ≥1 of 5 wrong on any day halts
-FL parallel-run; 0 of 5 wrong for 5 consecutive days = FL precision
-acceptable.
+Cross-reference each row's fixture against FL's web UI (or another
+source). ≥1 of 5 wrong on any day → halt FL parallel-run, investigate.
+0 of 5 wrong for 5 consecutive days → FL precision is acceptable;
+resume normal cadence. ~5 minutes/day. Replaced by automated
+cross-provider corroboration in Phase 2D.
 
 ## Future phases
 
