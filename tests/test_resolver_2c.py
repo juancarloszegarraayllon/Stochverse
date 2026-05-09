@@ -556,4 +556,10 @@ class TestStaticGuards:
         assert ALIAS_RESOLVER_VERSION == "alias@2c.0"
 
     def test_tiered_resolver_version_distinct_from_per_tier(self):
-        assert TIERED_RESOLVER_VERSION == "tiered@2c.0"
+        # The orchestrator version stamp must remain distinct from
+        # per-tier versions. Phase 2D.3 bumped it to tiered@2d.0;
+        # the spirit of this 2C-era guard (orchestrator stamp tracks
+        # the resolver topology, not any single tier) carries forward.
+        assert TIERED_RESOLVER_VERSION == "tiered@2d.0"
+        assert TIERED_RESOLVER_VERSION != "strict@2a.6"
+        assert TIERED_RESOLVER_VERSION != ALIAS_RESOLVER_VERSION

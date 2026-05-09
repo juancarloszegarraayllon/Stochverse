@@ -679,6 +679,190 @@ provider summary (section 9) plus the per-tier breakdown.
 day-7 confirms which collision patterns are actually appearing in
 production — see PHASE_2C_DESIGN.md.
 
+## Phase 2D.3 — Fuzzy tier (TieredMatcher: strict → alias → fuzzy → review/no_match)
+
+Phase 2D.3 wires the already-shipped fuzzy-tier matcher (PR #100,
+2D.2) into the runner orchestration. Same cron entry points
+(`resolver-cron-fl` 02:00 UTC, `resolver-cron-kalshi` 02:15 UTC),
+same DATABASE_URL — no Railway-side changes needed.
+
+### Framing — Option C1 locked (per PHASE_2D_DESIGN.md rev3)
+
+**The fuzzy tier is a review-queue tool, not an auto-apply tool.**
+The 2D.2.8 dry-run (PR #104) measured 2.7% cross-provider
+corroboration on tennis (was 1.5% pre-drift-widening). Auto-apply
+requires corroboration to clear the 0.85 threshold; corroboration
+fires rarely, so auto-apply is a small bonus rather than the
+headline. The headline is the ~150 review-queue records / Kalshi
+tennis cron — high-quality structurally-anchored pairs (e.g.,
+provider 'Khachanov' vs candidate 'Khachanov K. (Wrl)') that
+operators approve in seconds via the review-queue UI.
+
+Day-0 prediction (rev3 final, post-2D.2.8 dry-run):
+
+| Bucket                                    | Per Kalshi tennis cron |
+|-------------------------------------------|------------------------|
+| fuzzy auto_applies                        | ~2–3                   |
+| **fuzzy review_queue (headline output)**  | **~150**               |
+| fuzzy no_match (below threshold)          | ~34                    |
+| anchor_failed (long-tail names)           | ~171                   |
+| Combined Kalshi auto-apply rate post-2D.3 | **~10–11%**            |
+
+### What changes per pass
+
+- **Strict tier** unchanged from 2C.3.
+- **Alias tier** runs only when strict returns `NO_MATCH` —
+  unchanged.
+- **Fuzzy tier (NEW)** runs only when alias tier returns
+  `NO_MATCH`. ALIAS auto-apply and REVIEW_QUEUE outcomes from the
+  alias tier are already actionable; fuzzy's lower anchor floor
+  (0.40 vs alias 0.50) cannot improve on them, so the orchestrator
+  short-circuits.
+- **Tennis early-exit** flow: alias tier still emits
+  `fail_reason='deferred_to_2d'` for individual sports (unchanged).
+  In 2D.3 the orchestrator then passes that record to fuzzy, which
+  may resolve it (FUZZY auto-apply), route it to review (REVIEW_QUEUE),
+  or pass on it (NO_MATCH with a fuzzy-specific fail_reason).
+- **Fuzzy auto-apply path:** UPDATE `provider.fixture_id` + INSERT
+  `resolution_log` row stamped `fuzzy@2d.0` + INSERT
+  `sp.team_aliases` rows with `source='fuzzy_tier'` (parallel to
+  the alias-tier write-back; same `ON CONFLICT (alias_normalized,
+  source) DO NOTHING` shape).
+- **Fuzzy review queue:** insert `sp.review_queue` row with
+  candidate team_ids; `provider.fixture_id` stays NULL. Operator
+  approval via Phase 2F admin UI converts to a fixture link.
+
+### Triple-tier logging (Phase 2D.3 design D.4 carry-forward)
+
+When all three tiers are consulted (strict miss → alias miss →
+fuzzy decision), THREE `resolution_log` rows are written in the
+same atomic transaction:
+
+- Row 1: strict's `no_match` (`resolver_version='strict@2a.6'`).
+- Row 2: alias's `no_match` (`resolver_version='alias@2c.0'`,
+  `fail_reason='deferred_to_2d'` for tennis or
+  `'alias_no_team_resemblance'` for team sports).
+- Row 3: fuzzy's outcome (`resolver_version='fuzzy@2d.0'`,
+  `reason_code` ∈ {`fuzzy`, `review_queue`, `no_match`}).
+
+Per-record decision history is reconstructible by joining the
+three rows on `(provider, provider_record_id, run_id)`.
+
+### sp.resolver_runs.extra additions
+
+`auto_applies` (top-level column) now decomposes across three
+tiers:
+
+```json
+{
+  "limit": null,
+  "chunk_size": 200,
+  "signal_extraction_skipped": 286,
+  "strict_auto_applies":       312,
+  "alias_auto_applies":         68,
+  "alias_review_queue":        248,
+  "alias_tennis_deferred":      30,
+  "fuzzy_auto_applies":          3,
+  "fuzzy_review_queue":        148
+}
+```
+
+`auto_applies` (top-level) = `strict_auto_applies + alias_auto_applies + fuzzy_auto_applies`.
+
+`alias_tennis_deferred` drops post-2D.3 because most of those
+records now flow through to fuzzy and land in `fuzzy_review_queue`
+or `fuzzy_auto_applies`. The remaining count is records where
+fuzzy also emitted `NO_MATCH` with a `deferred_to_2d` marker
+(rare; happens when the matcher catches a record post-alias
+early-exit but before fuzzy sees it).
+
+The orchestrator version stamp on the run row bumps from
+`tiered@2c.0` to `tiered@2d.0`. Older 2C run rows keep their 2c.0
+stamp so the day-7 query can split per-version metrics if needed.
+
+### Day-7 query additions
+
+The full report lives in `scripts/parallel_run_day7_report.sql`.
+2D.3-relevant additions:
+
+```sql
+-- Per-tier auto-apply + review-queue breakdown (extends 2C.3 query)
+SELECT date_trunc('day', started_at)::date          AS day,
+       provider,
+       SUM((extra->>'strict_auto_applies')::int)    AS strict_auto,
+       SUM((extra->>'alias_auto_applies')::int)     AS alias_auto,
+       SUM((extra->>'alias_review_queue')::int)     AS alias_review,
+       SUM((extra->>'fuzzy_auto_applies')::int)     AS fuzzy_auto,
+       SUM((extra->>'fuzzy_review_queue')::int)     AS fuzzy_review,
+       SUM((extra->>'alias_tennis_deferred')::int)  AS tennis_deferred
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '7 days'
+  AND run_mode IN ('standalone', 'cron')
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- Per-tier resolution_log breakdown (3-tier vs 2-tier vs 1-tier records)
+SELECT provider,
+       COUNT(*) FILTER (WHERE row_count = 1) AS strict_only,
+       COUNT(*) FILTER (WHERE row_count = 2) AS strict_alias,
+       COUNT(*) FILTER (WHERE row_count = 3) AS strict_alias_fuzzy
+FROM (
+  SELECT provider, provider_record_id, run_id, COUNT(*) AS row_count
+  FROM sp.resolution_log
+  WHERE decided_at > NOW() - INTERVAL '7 days'
+  GROUP BY 1, 2, 3
+) per_record
+GROUP BY provider;
+
+-- Fuzzy-tier write-back to sp.team_aliases (compounds same way 2C.3 did)
+SELECT date_trunc('day', created_at)::date AS day,
+       source,
+       COUNT(*) AS new_aliases
+FROM sp.team_aliases
+WHERE created_at > NOW() - INTERVAL '7 days'
+  AND source IN ('alias_tier', 'fuzzy_tier')
+GROUP BY 1, 2
+ORDER BY 1, 2;
+```
+
+### Review-queue alert threshold
+
+The 1,500-row alert threshold from 2C.3 absorbs the 2D.3 spike;
+no further raise. Predicted 2D contribution: ~150 fuzzy
+review-queue rows/Kalshi tennis cron ≈ ~300-400/day combined with
+2C alias review queue (~250/day baseline). Total daily review
+load: ~400-500 rows. Operator capacity check: at ~10 sec/record,
+~67-83 min/day of review work. If review queue depth grows past
+1,500 sustained for >7 days, escalate per 2C.1 alert mechanism.
+
+### Operator action after merge
+
+```bash
+git checkout main && git pull
+# Railway redeploys the resolver-cron-* services automatically.
+
+# Verify the next 02:00 UTC pass produces fuzzy-tier rows.
+psql "$DATABASE_URL" <<'SQL'
+SELECT provider,
+       SUM((extra->>'strict_auto_applies')::int) AS strict_auto,
+       SUM((extra->>'alias_auto_applies')::int)  AS alias_auto,
+       SUM((extra->>'fuzzy_auto_applies')::int)  AS fuzzy_auto,
+       SUM((extra->>'alias_review_queue')::int)  AS alias_review,
+       SUM((extra->>'fuzzy_review_queue')::int)  AS fuzzy_review,
+       SUM((extra->>'alias_tennis_deferred')::int) AS tennis_def
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '24 hours'
+  AND run_mode = 'cron';
+SQL
+```
+
+Day-7 review (after the post-2D.3 parallel-run window): run the
+full `scripts/parallel_run_day7_report.sql` and read off the
+per-tier breakdown plus the new 3-tier-row count. **Phases 2D.5
+(FL alias coverage expansion), 2D.6 (Asian-name handling), and
+2D.7 (A.rev2 per-candidate filter)** are tracked as post-2D.4
+follow-ups — see PHASE_2D_DESIGN.md §E.9 / §E.10 / §E.11.
+
 ## Phase 2B — Strict-tier resolver parallel-run
 
 Phase 2A.5 baseline is in place. Phase 2B's standalone runner
