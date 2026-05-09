@@ -819,7 +819,13 @@ The multi-token case (e.g., `"Junfeng Hu"`) IS discriminable via initial-expansi
 
 ### E.8 — Corroboration-rate investigation **[separate runbook — pre-2D.3]**
 
-**Added in rev2.** The 1.5% rate is unexplained. Three queries the operator runs against production before 2D.3 locks; the results inform whether to ship 2D.3 as-is or revise further.
+**Added in rev2. Runbook shipped as `scripts/investigate_corroboration_gap.sql` in PR #103.** The 1.5% rate is unexplained. Three queries the operator runs against production before 2D.3 locks; the results inform whether to ship 2D.3 as-is or revise further.
+
+```bash
+psql "$DATABASE_URL" -f scripts/investigate_corroboration_gap.sql
+```
+
+The runbook includes the queries below plus an interpretation guide that maps Q1+Q2+Q3 outputs to one of three 2D.3 ship paths (Path A tournament gap / Path B kickoff misalignment / Path C genuinely 1.5%). Operators copy outputs into the 2D.3 PR description as the calibration source-of-record.
 
 **Query 1 — Tournament overlap.** Does FL ingest the same tennis tournaments Kalshi covers?
 

@@ -6,7 +6,7 @@
 # (e.g., a Neon branch for migration testing).
 export DATABASE_URL ?= postgresql+asyncpg://dev:dev@localhost:5432/sports_dev
 
-.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions backfill-sp-fl-events-sport-id resolver-pass-kalshi resolver-pass-fl dry-run-alias-tier dry-run-fuzzy-tier
+.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions backfill-sp-fl-events-sport-id resolver-pass-kalshi resolver-pass-fl dry-run-alias-tier dry-run-fuzzy-tier investigate-corroboration-gap
 
 help:
 	@echo "SP Architecture dev targets:"
@@ -42,6 +42,9 @@ help:
 	@echo ""
 	@echo "  make dry-run-fuzzy-tier ARGS=\"--provider kalshi --sport-code tennis --limit 600\""
 	@echo "  # Phase 2D.2.5: read-only calibration of fuzzy-tier corroboration rate"
+	@echo ""
+	@echo "  make investigate-corroboration-gap"
+	@echo "  # Phase 2D.2.7: E.8 investigation runbook (Q1 tournament overlap, Q2 kickoff alignment, Q3 drift window)"
 	@echo ""
 	@echo "DATABASE_URL = $(DATABASE_URL)"
 
@@ -115,3 +118,6 @@ dry-run-alias-tier:
 
 dry-run-fuzzy-tier:
 	python scripts/dry_run_fuzzy_tier.py $(ARGS)
+
+investigate-corroboration-gap:
+	psql "$$DATABASE_URL" -f scripts/investigate_corroboration_gap.sql
