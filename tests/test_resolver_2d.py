@@ -812,3 +812,72 @@ class TestStaticGuards:
             "scripts/run_resolver_pass.py must write back fuzzy "
             "auto-applies with source='fuzzy_tier'."
         )
+
+    def test_runner_review_queue_uses_on_conflict(self):
+        # Phase 2D.3.1 hotfix: the review_queue INSERT must use
+        # ON CONFLICT (provider, provider_record_id) so re-resolving
+        # a record that's already in review_queue from a prior cron
+        # doesn't IntegrityError on the duplicate key. WHERE
+        # status='pending' protects already-decided rows.
+        #
+        # Static guard against the regression that caused the
+        # 619-crash incident: session.add(ReviewQueue(...)) with no
+        # conflict handling.
+        import pathlib
+        runner_src = pathlib.Path(
+            __file__
+        ).resolve().parent.parent.joinpath(
+            "scripts", "run_resolver_pass.py"
+        ).read_text()
+        assert "INSERT INTO sp.review_queue" in runner_src, (
+            "scripts/run_resolver_pass.py must use a raw INSERT for "
+            "sp.review_queue (ON CONFLICT requires raw SQL)."
+        )
+        assert "ON CONFLICT (provider, provider_record_id)" in runner_src, (
+            "scripts/run_resolver_pass.py must handle conflicts on "
+            "the (provider, provider_record_id) uniqueness "
+            "constraint per Phase 2D.3.1 hotfix."
+        )
+        assert "sp.review_queue.status = 'pending'" in runner_src, (
+            "scripts/run_resolver_pass.py must guard the DO UPDATE "
+            "with WHERE status='pending' so operator-decided rows "
+            "(approved/rejected) aren't overwritten."
+        )
+        # The legacy ORM-style insert must be gone — if both shapes
+        # exist, the raw SQL is unreachable behind a flag or some
+        # records are still hitting the buggy path.
+        assert "session.add(ReviewQueue(" not in runner_src, (
+            "scripts/run_resolver_pass.py must NOT use "
+            "session.add(ReviewQueue(...)) — that's the pre-hotfix "
+            "shape that crashed on duplicate keys."
+        )
+
+    def test_runner_uses_per_record_transaction(self):
+        # Phase 2D.3.1 hotfix: the runner must open the transaction
+        # per record (inside the chunk-level for-loop), not per
+        # chunk. A chunk-level transaction caused IntegrityError
+        # cascades — one record's failure poisoned every subsequent
+        # record in the chunk via PendingRollbackError.
+        #
+        # Static guard against accidentally moving session.begin()
+        # back to a chunk boundary in a future refactor. The check
+        # is structural: scan the chunk-loop area for "for row in
+        # chunk" and "async with session.begin()" and verify the
+        # latter sits AFTER the former in source order, not before.
+        import pathlib
+        runner_src = pathlib.Path(
+            __file__
+        ).resolve().parent.parent.joinpath(
+            "scripts", "run_resolver_pass.py"
+        ).read_text()
+        for_loop_idx = runner_src.find("for row in chunk")
+        begin_idx = runner_src.find(
+            "async with session.begin()", for_loop_idx
+        )
+        assert for_loop_idx > 0, "for row in chunk loop missing"
+        assert begin_idx > for_loop_idx, (
+            "Phase 2D.3.1 hotfix: async with session.begin() must "
+            "be inside the per-record loop, not above it. A "
+            "chunk-level transaction cascades IntegrityError "
+            "across records."
+        )

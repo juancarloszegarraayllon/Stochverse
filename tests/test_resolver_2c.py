@@ -539,8 +539,16 @@ class TestStaticGuards:
         assert "ON CONFLICT (alias_normalized, source)" in self.runner_src
 
     def test_runner_inserts_review_queue_row_on_review(self):
-        assert "session.add(ReviewQueue(" in self.runner_src
-        assert "candidate_fixtures=" in self.runner_src
+        # Phase 2D.3.1 hotfix changed the shape from
+        # session.add(ReviewQueue(...)) to a raw INSERT ... ON CONFLICT
+        # so re-resolving an already-queued record doesn't crash on
+        # the (provider, provider_record_id) uniqueness constraint.
+        # Spirit of the test (runner writes a review_queue row when
+        # the final tier emits REVIEW_QUEUE) carries forward; the
+        # detailed ON CONFLICT shape is asserted in
+        # test_resolver_2d.py::TestStaticGuards::test_runner_review_queue_uses_on_conflict.
+        assert "INSERT INTO sp.review_queue" in self.runner_src
+        assert "candidate_fixtures" in self.runner_src
 
     def test_runner_iterates_tier_results(self):
         # D.4 dual-tier logging — every tier result writes a
