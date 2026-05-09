@@ -102,13 +102,11 @@ Alias tier in **review** (0.70–0.84) does NOT write back. Only an explicit rev
 
 ## Question A — Fuzzy matching algorithm
 
-### Answer (definitive): Surname-anchored token-set ratio on structurally normalized strings.
+### Answer (definitive): Two structural paths — personal-name surname-anchored, team-name whole-string token-set ratio.
 
-**Not** phonetic (Soundex / Metaphone / NYSIIS). Phonetic excels at spelling variants ("Catherine" / "Katherine") but the day-0 audit shows our gap is structural variance, not spelling — surnames are spelled identically across providers, the differences are word order, parentheticals, and initials. Phonetic on a surname like "Kecmanovic" gives no benefit.
+The original draft only specified the personal-name path. Pushback 1 surfaced that this leaves non-personal cases unspecified — `"São Paulo FC"` vs `"Sao Paulo"` and `"Bayern München"` vs `"Bayern Munich"` have no surname-vs-given-name structure. This revision splits the problem cleanly.
 
-**Not** pure character-level Levenshtein / Jaro-Winkler. `"Miomir Kecmanovic"` vs `"Kecmanovic M (Srb)"` has very different character lengths and ordering — Levenshtein scores it as low-similarity, missing the obvious match. Strings of unequal structure are precisely what character-level metrics handle worst.
-
-**The right tool is structural normalization plus token-set scoring**, with surname pinned as a required anchor. Algorithm:
+**Path 1 — Personal names** (sports where the "team" is one human: tennis, MMA, boxing, golf, snooker, darts).
 
 ```
 1. Pre-normalize each candidate string into a canonical form:
@@ -117,15 +115,16 @@ Alias tier in **review** (0.70–0.84) does NOT write back. Only an explicit rev
      c. Drop accents (existing _normalize.normalize_name)
      d. Lowercase
      e. Tokenize on whitespace
-     f. Detect surname pattern:
+     f. Detect surname structure:
           - If exactly 2 tokens AND second token is 1-2 chars + optional dot:
               "kecmanovic m" → surname="kecmanovic", initials=["m"]
           - Else if exactly 2 tokens, both > 2 chars:
               "miomir kecmanovic" → surname="kecmanovic" (last token), given_names=["miomir"]
+          - Else if 3+ tokens with no parenthetical:
+              last token is surname; rest are given names / qualifiers
           - Else: structural detection failed; fall through to whole-string match
-     g. Compute (surname, sorted-tuple-of-other-tokens) as the matching key
 
-2. Match Provider-side normalized form against sp.teams via:
+2. Match against sp.teams via:
      a. Exact (surname, other-tokens) match against any seeded canonical_name —
         index lookup, microseconds.
      b. If miss, exact surname match + token-set-ratio on other tokens
@@ -136,18 +135,64 @@ Alias tier in **review** (0.70–0.84) does NOT write back. Only an explicit rev
 
 3. Surname must match exactly (after accent strip + lowercase).
    No fuzzy-on-surname in 2C — that's Phase 2D fuzzy-tier territory.
-   Surname is the strongest signal we have; relaxing it costs more in
-   false positives than we gain in recall.
 ```
 
-**Why surname-anchor:**
-- Prevents the cross-team false-positive case ("Smith" → which Smith?). Cross-team surname collisions get caught by the disambiguation step (2.c → review queue), not silently auto-applied.
-- Handles the tennis pattern by structural decomposition — surname is the LAST token in `"Miomir Kecmanovic"` but the FIRST token in `"Kecmanovic M (Srb)"`. After step (1.f), both produce surname="kecmanovic". Initials get partial credit via token-set ratio.
-- Generalizes beyond tennis: long-tail teams whose canonical_name is the full team name (e.g. `"Atlético Tucumán"`) and whose provider-side variant drops the diacritic and city qualifier (`"Atletico Tucuman"`) end up with the same token sets.
+**Path 2 — Team names** (soccer, basketball, hockey, baseball, football, cricket, volleyball, handball, rugby, aussie rules).
+
+```
+1. Pre-normalize:
+     a. Drop accents (existing _normalize.normalize_name handles this)
+     b. Lowercase, strip punctuation, collapse whitespace
+        ("Atlético Tucumán" → "atletico tucuman")
+        ("São Paulo FC"     → "sao paulo fc")
+        ("Bayern München"   → "bayern munchen")
+     c. Tokenize on whitespace
+
+2. Match against sp.teams via:
+     a. Exact normalized-name match — strict tier already covers this.
+        If we reach Path 2 we know it missed.
+     b. Token-set ratio between Provider's token set and each
+        candidate team's normalized_name token set (within sport_id).
+        Threshold: ratio ≥ 0.92.
+     c. If multiple candidates pass, punt to review queue.
+
+3. Threshold (0.92) is HIGHER than the personal-name path (0.85)
+   because Path 2 has no anchor token — every match relies on
+   whole-string overlap, so we tolerate fewer differences before
+   crossing into false-positive territory.
+
+   Token-set ratio at 0.92 catches:
+     - Diacritic differences ("munchen" vs "munich") — actually
+       collapses to identity after step 1.a.
+     - Qualifier suffix dropped ("sao paulo fc" vs "sao paulo")
+     - Localized variant ("bayern munchen" vs "bayern munich")
+     - City qualifier added/removed ("atletico" vs "atletico tucuman")
+   But rejects:
+     - "real madrid" vs "atletico madrid" (~0.50)
+     - "manchester united" vs "manchester city" (~0.67)
+```
+
+**Path discrimination — sport-driven.**
+
+The two paths are selected by the signal's sport. The list of "personal" sport codes is hardcoded in `resolver/alias_tier/normalize.py`:
+
+```python
+INDIVIDUAL_SPORT_CODES: frozenset[str] = frozenset({
+    "tennis", "mma", "boxing", "golf", "snooker", "darts",
+})
+```
+
+Hardcoded rather than a `sp.sports.is_individual` column to keep schema-zero (per the Schema Changes section). The list rarely changes — adding a new sport is a 1-line edit + matching `sp.sports` seed entry.
+
+**Why structural detection is sport-driven, not autodetected:**
+
+A string like `"Real Madrid"` is two tokens, both > 2 chars. The personal-name path would (incorrectly) treat `"madrid"` as a surname. Sport context is the cleanest discriminator — soccer is in `_TEAM_SPORTS` (the complement of `INDIVIDUAL_SPORT_CODES`), so we route to Path 2 unambiguously.
+
+The handful of edge cases (e.g., women's tennis where some FL aliases are formatted as `"Williams S. (USA)"` while Kalshi uses `"Serena Williams"`) are handled by Path 1 because tennis is in the individual set.
 
 **Library choice: `rapidfuzz` (proposed dependency add).**
 - MIT license, ~2MB compiled C extension, well-maintained (active monthly releases).
-- Provides `rapidfuzz.fuzz.token_set_ratio` directly. We don't need the full library; importing `from rapidfuzz import fuzz` gives us a single function call.
+- Provides `rapidfuzz.fuzz.token_set_ratio` directly. We don't need the full library; importing `from rapidfuzz import fuzz` gives us the single function call used by both paths.
 - 100k-string scans complete in milliseconds; fits the in-memory pattern AliasResolver established.
 
 **Open question A.1:** Is adding `rapidfuzz` to `requirements.txt` acceptable? Alternative: hand-roll token_set_ratio in pure Python (~30 lines, slower but zero new deps). I lean toward `rapidfuzz` — name matching is operationally critical and the library is battle-tested, but flag it for sign-off.
@@ -175,13 +220,16 @@ The Rublev/Kecmanovic case: FL ran first → strict tier resolved Rublev A. and 
 
 | Signal                                         | Score  | Notes |
 |------------------------------------------------|--------|-------|
-| Both sides surname-anchored unambiguous        | +0.50  | Required floor — without this, alias tier returns no_match |
-| Token-set ratio on non-surname tokens (avg of both sides) | up to +0.30 | Linear scaling: 1.0 ratio → +0.30; 0.85 ratio → +0.20; below 0.85 → 0 |
+| Both sides anchor (surname for personal, exact-token-set match for team-name path) unambiguous        | +0.50  | Required floor — without this, alias tier returns no_match |
+| Token-set ratio on non-anchor tokens (avg of both sides) | up to +0.30 | Linear scaling: 1.0 ratio → +0.30; 0.85 ratio → +0.20; below 0.85 → 0 |
 | Cross-provider corroboration (existing fixture at this kickoff in exactly one orientation) | +0.20 | Strongest non-name signal we have in 2C |
-| Kickoff drift ≤ 5 min                          | +0.05  | Tighter than strict tier's 30 min — a tight drift on a fuzzy match is itself evidence |
 | Sport context matches (signal.sport == team.sport_id's sport) | required floor | Already enforced by AliasResolver.resolve(sport_id) |
 
-Sum is bounded at 1.00. A perfect alias-tier match (surnames anchor, tokens align, kickoff matches existing fixture) lands at 0.85 + 0.20 + 0.05 = **1.05 → clamped to 1.00**. We deliberately set the math so a "perfect" alias-tier match approaches strict-tier confidence — distinguished only by the absence of an exact alias hit.
+Maximum: 0.50 + 0.30 + 0.20 = **1.00 exactly**. No clamp needed.
+
+Why no kickoff-drift contribution: drift is already a hard filter at strict-tier gate 1 (`KICKOFF_DRIFT_SEC = 30 * 60`). A continuous-confidence boost for drifts inside that filter would be double-counting — every record reaching the alias tier has already passed the drift gate. The original draft's `+0.05` for drifts ≤ 5 min was a magic number without supporting data; dropped per Pushback 3.
+
+A "perfect" alias-tier match (anchor + perfect non-anchor tokens + cross-provider corroboration) hits 1.00 on the dot — equal to human-verified. That is intentional: when all three signals agree, we have stronger evidence than the strict tier does (strict needs only the anchor + alias hit), so capping at 0.98 would understate confidence. The final routing still distinguishes via reason_code: an alias-tier 1.00 lands as `reason_code='alias'`, a human-curated 1.00 as `reason_code='strict'` after the alias is written and the next strict-tier pass picks it up.
 
 **Important:** cross-provider corroboration in 2C is **only used as a tiebreaker for already-surname-anchored candidates**. It cannot promote a no-surname-match into a hit. The user's case still requires surname tokens to align across providers.
 
@@ -496,20 +544,67 @@ Strict tier writes competition_id when creating a fixture (Phase 2A.6). Alias ti
 
 Day-0 prediction: 400–1,200 review rows on day 1, draining over ~2 weeks of human review. Architecture §7.5 alert threshold is `> 100`. The 2C launch will cross that threshold.
 
-**Options:**
-- (a) Raise the alert threshold during the parallel-run window (transparent, documented)
-- (b) Lower the auto-apply threshold below 0.85 during parallel-run to drain into auto-applies (risky — increases FP rate)
-- (c) Accept the alert and triage manually (expensive operator time)
+**Resolution (per Pushback 2):**
 
-**Recommendation:** (a). Document a `parallel_run_active` boolean in DEPLOYMENT.md that the alert path checks, defaulting to True for 2 weeks post-2C-launch.
+> Architecture §7.5 alert threshold raised from 100 to 1,500 for the
+> 14-day post-2C window. Reverts to 100 on day 15 automatically
+> unless extended via documented decision.
+
+Reversible by default rather than requiring active reversion. Mechanism: a single `REVIEW_QUEUE_ALERT_THRESHOLD_OVERRIDE_UNTIL` constant (or env var) carrying the date. The alert path checks `NOW() < OVERRIDE_UNTIL` and uses 1,500; otherwise 100.
+
+Concretely, this gets implemented in 2C.4 as part of the runner / DEPLOYMENT.md update (the alert pathway itself isn't in code yet; the threshold is operator-tracked today). Adding code support gives us a calendar-driven auto-revert and a single line to extend if 14 days isn't enough.
+
+**Other options considered + rejected:**
+- (b) Lower the auto-apply threshold below 0.85 during parallel-run to drain into auto-applies. Rejected — increases FP rate during the highest-risk window.
+- (c) Accept the alert and triage manually. Rejected — expensive operator time, alert fatigue defeats the purpose.
 
 ### C.2 — Phase 2D scope cleanup
 
 Phase 2D was originally defined as "fuzzy + cross-provider corroboration" — but 2C now claims the corroboration-as-tiebreaker path. 2D should narrow to:
-- Pure name-similarity fuzzy when neither side surname-anchors (e.g. `"X Co Ltd"` vs `"X Football Club"` — surname token unclear)
-- Cross-provider corroboration WITHOUT surname anchor (the Rublev-but-no-surname-token-overlap case)
+- Pure name-similarity fuzzy when neither side anchors (e.g. `"X Co Ltd"` vs `"X Football Club"` — anchor token unclear)
+- Cross-provider corroboration WITHOUT anchor (the Rublev-but-no-surname-token-overlap case)
 
 **Recommendation:** Lock the narrowed 2D scope in this design doc's sign-off, update SPORTS_BROWSE_SESSION_NOTES (or wherever 2D was last described) on merge.
+
+### D.1 — Personal-vs-team path discrimination mechanism
+
+Pushback 1 surfaced this. Two implementations possible:
+- (a) Hardcoded `INDIVIDUAL_SPORT_CODES = frozenset({"tennis", "mma", "boxing", "golf", "snooker", "darts"})` in `resolver/alias_tier/normalize.py`.
+- (b) New `sp.sports.is_individual` boolean column + migration.
+
+**Recommendation:** (a). The list rarely changes — adding a new sport is a 1-line edit + matching `sp.sports` seed entry. Schema-zero stays intact. Tests assert every entry in the constant exists in `sp.sports.code` (cheap correctness guard against typos).
+
+### D.2 — Token-set-ratio threshold for the team-name path (Path 2)
+
+The 0.85 threshold is right for the personal-name path (anchor signal carries the disambiguation). The team-name path has no anchor — every match relies on whole-string overlap, so we tolerate fewer differences before crossing into false-positive territory.
+
+**Recommendation:** 0.92 for Path 2. Empirically catches diacritic differences ("munchen" vs "munich"), qualifier-suffix drops ("sao paulo fc" vs "sao paulo"), and city-qualifier additions, while rejecting genuine cross-team near-misses ("manchester united" vs "manchester city" ≈ 0.67). Tunable post-launch if day-7 spot-checks show false positives.
+
+### D.3 — Equal-or-NULL competition_id filter for the alias-tier corroboration lookup
+
+When alias tier looks up an existing fixture for cross-provider corroboration, should it filter by `competition_id` like strict tier does (Phase 2A.6)?
+
+**Recommendation:** YES — carry forward the same equal-or-NULL filter (`competition_id = filter OR competition_id IS NULL`) that strict tier uses. Same audit flags too: when alias-tier corroboration links a Kalshi explicit-comp signal to a NULL-comp fixture, write `linked_to_null_comp_fixture: true` + `null_comp_fixture_pending_backfill: <uuid>` to `reason_detail`. Phase 2C's reconciliation pass (which the audit flag was originally designed for) can then process alias-tier rows alongside strict-tier rows uniformly.
+
+### D.4 — RESOLVER_VERSION semantics after orchestration
+
+Today `RESOLVER_VERSION = "strict@2a.6"` is stamped on every `resolution_log` row by the strict-tier matcher. After 2C, a `TieredMatcher` wraps both the strict and alias tiers and the version stamp can mean different things at different decision points.
+
+**Recommendation:** Per-tier versioning. Strict-tier rows continue to stamp `strict@2a.6` (no semantic change to the strict tier in 2C). Alias-tier rows stamp `alias@2c.0`. A new top-level `tiered@2c.0` constant exists only for `sp.resolver_runs.resolver_version` (the run-level metadata; needed for "which orchestrator produced this run"). Replay queries can filter by tier-specific version cleanly.
+
+### D.5 — Alias write-back idempotency on re-runs
+
+When alias tier auto-applies, it writes a new `sp.team_aliases` row. Re-running the same provider record (e.g., after an interrupted pass) shouldn't double-write — the existing `(alias_normalized, source)` UNIQUE constraint with `ON CONFLICT DO NOTHING` handles this. But what if the same alias produces a *different* confidence on the later run (because more candidates exist now, e.g., after a sp.teams seed update)?
+
+**Recommendation:** `ON CONFLICT DO NOTHING`, no confidence update on re-write. Reasoning: the sp.team_aliases.confidence column is the alias's *provenance confidence* (how sure are we this string maps to this team) — once written it represents a frozen decision. If the same alias produces a different score later, that's a signal for the reviewer to look at, not for the resolver to silently overwrite. Audit visibility: the `resolution_log` row written for the re-run carries the new score in `reason_detail.alias_score_breakdown`, so the divergence is queryable without a column-update.
+
+### D.6 — Alias_no_team_resemblance always logs to resolution_log
+
+When alias tier rejects a record because no anchor was found at all (the player-prop case where both sides surname-resolve to nothing), should a `resolution_log` row be written?
+
+**Recommendation:** YES, log every match decision. Per Phase 2A.6 discipline (PR #84) — `reason_code='no_match'`, `fail_reason='alias_no_team_resemblance'`, full `reason_detail` capturing what we tried. Operators query for this fail_reason to identify upstream filter gaps (KXMLBTB-shaped tickers slipping past the outright-prefix list). Without the log row, we'd have no way to count these and act on them.
+
+The alternative (silently skip) was considered and rejected — silent skips are exactly the failure mode that produced PR #82 / #84 / #86 / #87. Every match attempt produces an auditable record.
 
 ---
 
@@ -517,20 +612,33 @@ Phase 2D was originally defined as "fuzzy + cross-provider corroboration" — bu
 
 Before implementation begins:
 
-- [ ] Algorithm choice — surname-anchor + token-set ratio + structural normalization. Approved or counter-proposed.
-- [ ] `rapidfuzz` dependency add. Approved or rejected (with hand-roll mandate).
-- [ ] Confidence thresholds 0.85 / 0.70 / 0.05-margin. Approved or counter-proposed numbers.
-- [ ] Cross-provider corroboration scoped to "tiebreaker for surname-anchored candidates only." Approved or expanded.
-- [ ] Schema-zero approach. Approved.
-- [ ] Negative-space list (player props, mention markets, outright winners, no auto-create teams). Approved or expanded.
-- [ ] Alias write-back to `sp.team_aliases` on auto-apply. Approved.
-- [ ] Review-queue alert threshold relaxation during 2-week parallel-run. Approved or alternative chosen.
-- [ ] Phase 2D narrowed scope confirmed.
-- [ ] Test plan: real call-path integration tests as the primary surface, static guards as backstop.
+**Algorithm + scope:**
+- [ ] **A** — Two-path algorithm (personal-name surname-anchor + team-name whole-string token-set). Threshold 0.85 personal / 0.92 team. Approved or counter-proposed.
+- [ ] **A.1** — `rapidfuzz` dependency add. Approved or rejected (with hand-roll mandate).
+- [ ] **A.2** — Multi-token surname strictness. Last-token-as-surname with compound-suffix fallback. Approved.
+- [ ] **B** — Cross-provider corroboration scoped to "tiebreaker for anchored candidates only." Approved or expanded.
+- [ ] **B.1** — Alias tier never calls `ensure_fixture` (links to existing or returns no_match). Approved.
+- [ ] **C** — Confidence model 0.50 + 0.30 + 0.20 = 1.00 exactly (no kickoff-drift term per Pushback 3). Thresholds 0.85 auto / 0.70-0.84 review / top-2-within-0.05 forced review. Approved or counter-proposed.
+- [ ] **C.1** — Review-queue alert threshold raised to 1,500 for 14-day post-2C window with auto-revert (per Pushback 2). Approved.
+- [ ] **C.2** — Phase 2D scope narrowed to "no anchor" cases. Approved.
 
-After sign-off, 2C ships in this order:
-1. **2C.1 — Player-prop prefix list extension.** One-line addition to `_OUTRIGHT_SERIES_PREFIXES`. Cleans up the upstream filter before the alias tier sees these tickers. Tiny PR.
-2. **2C.2 — Structural normalizer + scorer.** Pure-Python modules with full unit tests. No DB, no matcher integration yet.
-3. **2C.3 — AliasTierMatcher + TieredMatcher orchestration + alias write-back.** Integration tests with mocked DB.
-4. **2C.4 — Runner integration + sp.resolver_runs.extra counters + DEPLOYMENT.md.** Smoke against prod with `--limit 100`, then full pass.
+**Implementation details:**
+- [ ] **D.1** — Hardcoded `INDIVIDUAL_SPORT_CODES` constant; no schema column. Approved.
+- [ ] **D.2** — Path-2 (team-name) threshold = 0.92. Approved or counter-proposed.
+- [ ] **D.3** — Equal-or-NULL competition_id filter carried forward to alias-tier corroboration lookup. Audit flags reused. Approved.
+- [ ] **D.4** — Per-tier `RESOLVER_VERSION` (`strict@2a.6` + `alias@2c.0` + run-level `tiered@2c.0`). Approved.
+- [ ] **D.5** — `ON CONFLICT DO NOTHING` on alias write-back; no confidence update on re-run. Approved.
+- [ ] **D.6** — `alias_no_team_resemblance` always writes to `resolution_log`. Approved.
+
+**Process:**
+- [ ] Schema-zero approach. Approved.
+- [ ] Negative-space list (player props, mention markets, outright winners, no auto-create teams). Approved.
+- [ ] Test plan: real call-path integration tests as the primary surface, static guards as backstop. Approved.
+
+After sign-off, 2C ships in this order — each step is its own PR:
+
+1. **2C.1 — Player-prop prefix list extension.** Single-file diff in `kalshi_identity.py` adding the player-prop prefixes (`KXMLBTB`, `KXMLBHR`, `KXMLBHRR`, `KXNBASTL`, ...) to `_OUTRIGHT_SERIES_PREFIXES`. Cleans up the upstream filter before the alias tier sees these tickers. **Smallest possible PR. Same shape as the runner instrumentation PRs from yesterday — fix the upstream filter first, alias-tier work follows.** Test plan: extend `tests/test_kalshi_identity.py` with cases asserting each new prefix returns `kind='outright'`.
+2. **2C.2 — Structural normalizer + scorer.** Pure-Python modules with full unit tests. No DB, no matcher integration yet. Two paths (personal + team) tested independently. ~15-20 unit tests covering every detection branch + threshold boundary.
+3. **2C.3 — `AliasTierMatcher` + `TieredMatcher` orchestration + alias write-back.** Integration tests with mocked DB session — exercises the actual call path per the lesson from PR #87. Spot-check fixtures from the doc's test plan (Kecmanovic auto-applies, KXMLBTB rejects, long-tail team auto-applies, ambiguous surname routes to review, cross-provider corroboration uplifts).
+4. **2C.4 — Runner integration + `sp.resolver_runs.extra` counters + DEPLOYMENT.md + alert threshold override.** Smoke against prod with `--limit 100`, then full pass.
 5. **2C.5 — Day-7 review.** Same cadence as 2B. Adjust thresholds if FP rate exceeds halt criteria.
