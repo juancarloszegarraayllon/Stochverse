@@ -405,6 +405,64 @@ SELECT COUNT(*) FROM sp.fl_events WHERE sport_id IS NULL;
 - Does not unlock historical FL fixtures beyond the ±7 day window.
   Out of scope until a per-tournament historical fetch is added.
 
+## Phase 2C.2.5 — alias-tier dry-run calibration
+
+Read-only calibration script. Runs Phase 2C.2's `structurally_normalize`
++ fixture-level scorer pipeline against unresolved provider records
+and reports the predicted bucket distribution before the matcher
+in Phase 2C.3 commits to the threshold choice.
+
+**No DB writes.** Reads `sp.kalshi_markets` / `sp.fl_events`,
+`sp.teams`, and (optionally) `sp.fixtures` for the cross-provider
+corroboration pass. Resolver crons continue to run at strict@2a.6.
+
+### How to run
+
+```bash
+DATABASE_URL=<prod-Neon> python scripts/dry_run_alias_tier.py \
+    --provider kalshi --sport-code tennis --limit 600
+
+# Show top 5 examples per bucket
+DATABASE_URL=<prod-Neon> python scripts/dry_run_alias_tier.py \
+    --provider kalshi --sport-code tennis --limit 600 \
+    --show-examples 5
+
+# Faster — skip the with-corroboration pass (no sp.fixtures lookups)
+DATABASE_URL=<prod-Neon> python scripts/dry_run_alias_tier.py \
+    --provider kalshi --sport-code tennis --skip-corroboration
+```
+
+Or via Makefile:
+
+```bash
+make dry-run-alias-tier ARGS="--provider kalshi --sport-code tennis --limit 600"
+```
+
+### What the report tells you
+
+Two passes per record:
+1. **Without corroboration** — pure name match. Most pessimistic case.
+2. **With corroboration** — `find_fixture` lookup against
+   `sp.fixtures` adds +0.20 when the candidate (home_id, away_id)
+   pair has an existing fixture at the kickoff window.
+
+The delta between the two passes answers: how much of alias-tier
+auto-apply gain depends on cross-provider corroboration?
+
+Bucket distribution: `auto_apply` (≥ 0.85) / `review_queue`
+(0.70–0.84) / `no_match` (< 0.70) / `anchor_failed` (no surname
+match found) / `extraction_skipped` (extract_signal returned None).
+
+### Calibration decision input
+
+If `auto_apply` is much smaller than the design-doc prediction,
+options before 2C.3:
+- (a) Accept large day-0 review queue (drains via reviewer write-back which compounds).
+- (b) Lower personal-path auto-apply threshold from 0.85 (with stricter top-2 margin).
+- (c) Bump corroboration weight from +0.20 to +0.25.
+
+The dry-run output is the data that picks among (a)/(b)/(c).
+
 ## Phase 2B — Strict-tier resolver parallel-run
 
 Phase 2A.5 baseline is in place. Phase 2B's standalone runner
