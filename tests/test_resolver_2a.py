@@ -279,6 +279,156 @@ class TestKalshiExtractSignal:
         sig = self.m.extract_signal(raw)
         assert sig is None
 
+    # ── Phase 2C.2.6 — prop-bet title-suffix detection ─────────
+    #
+    # parse_ticker classifies these tickers as per_fixture (the
+    # KNOWN_SUFFIXES match the sub-market suffix on the series
+    # ticker), but the title's trailing ": <PropType>" segment
+    # reveals they're prop bets, not game markets. extract_signal
+    # must return None so the alias tier never sees them.
+
+    def test_prop_suffix_totals_returns_none(self):
+        raw = {
+            "event_ticker":  "KXEPLTOTAL-26MAY09BHA",
+            "series_ticker": "KXEPLTOTAL",
+            "title":         "Brighton: Totals",
+            "_sport":        "Soccer",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_prop_suffix_spreads_returns_none(self):
+        raw = {
+            "event_ticker":  "KXEPLSPREAD-26MAY09WOL",
+            "series_ticker": "KXEPLSPREAD",
+            "title":         "Wolfsburg: Spreads",
+            "_sport":        "Soccer",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_prop_suffix_first_goalscorer_returns_none(self):
+        raw = {
+            "event_ticker":  "KXEPLGSCORE-26MAY09BHA",
+            "series_ticker": "KXEPLGSCORE",
+            "title":         "Brighton: First Goalscorer",
+            "_sport":        "Soccer",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_prop_suffix_both_teams_to_score_returns_none(self):
+        raw = {
+            "event_ticker":  "KXEPLBTTS-26MAY09ELC",
+            "series_ticker": "KXEPLBTTS",
+            "title":         "Elche: Both Teams to Score",
+            "_sport":        "Soccer",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_prop_suffix_game_spread_returns_none(self):
+        raw = {
+            "event_ticker":  "KXEPLGSPREAD-26MAY09BHA",
+            "series_ticker": "KXEPLGSPREAD",
+            "title":         "Brighton: Game Spread",
+            "_sport":        "Soccer",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_prop_suffix_exact_match_score_returns_none(self):
+        raw = {
+            "event_ticker":  "KXEPLEMS-26MAY09BHA",
+            "series_ticker": "KXEPLEMS",
+            "title":         "Brighton: Exact Match Score",
+            "_sport":        "Soccer",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_prop_suffix_singular_total_also_filtered(self):
+        # Singular "Total" / "Spread" variants — listed in the
+        # initial set because both are observed in production.
+        raw = {
+            "event_ticker":  "KXMLBTOTAL-26MAY09NYY",
+            "series_ticker": "KXMLBTOTAL",
+            "title":         "New York Yankees: Total",
+            "_sport":        "Baseball",
+            "_kickoff_dt":   "2026-05-09T23:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    def test_prop_suffix_case_insensitive(self):
+        # "spreads" lowercase, "SPREADS" uppercase, "Spreads"
+        # title-case — all the same prop-bet identifier.
+        for variant in ("spreads", "SPREADS", "Spreads", "SpReAdS"):
+            raw = {
+                "event_ticker":  "KXEPLSPREAD-26MAY09BHA",
+                "series_ticker": "KXEPLSPREAD",
+                "title":         f"Brighton: {variant}",
+                "_sport":        "Soccer",
+                "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+            }
+            assert self.m.extract_signal(raw) is None, (
+                f"variant {variant!r} not filtered"
+            )
+
+    def test_prop_suffix_with_multiple_colons_uses_last_segment(self):
+        # "Group A: Round 1: Brighton vs Bournemouth" — last segment
+        # is the game, NOT a prop type. Must NOT be filtered.
+        raw = {
+            "event_ticker":  "KXEPLGAME-26MAY09BHABOU",
+            "series_ticker": "KXEPLGAME",
+            "title":         "Group A: Round 1: Brighton vs Bournemouth",
+            "_sport":        "Soccer",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        sig = self.m.extract_signal(raw)
+        assert sig is not None  # real game; should produce signal
+
+    def test_prop_suffix_game_level_prop_filtered(self):
+        # "Bayern Munich vs PSG: Spreads" — prop bet on a specific
+        # game. Last segment is "spreads" → filter. The game-level
+        # market would have its own GAME-suffix ticker; this is the
+        # spread-specific sub-market and shouldn't reach the matcher.
+        raw = {
+            "event_ticker":  "KXUCLSPREAD-26MAY07BAYPSG",
+            "series_ticker": "KXUCLSPREAD",
+            "title":         "Bayern Munich vs PSG: Spreads",
+            "_sport":        "Soccer",
+            "_kickoff_dt":   "2026-05-07T19:00:00+00:00",
+        }
+        assert self.m.extract_signal(raw) is None
+
+    # ── Regression: real game titles still produce signals ─────
+
+    def test_no_colon_title_still_produces_signal(self):
+        # The 2C.2.6 filter must not reject titles without ": ".
+        raw = {
+            "event_ticker":  "KXEPLGAME-26MAY09BHABOU",
+            "series_ticker": "KXEPLGAME",
+            "title":         "Brighton vs Bournemouth",
+            "_sport":        "Soccer",
+            "_kickoff_dt":   "2026-05-09T14:00:00+00:00",
+        }
+        sig = self.m.extract_signal(raw)
+        assert sig is not None
+
+    def test_non_prop_colon_title_still_produces_signal(self):
+        # ": <something>" where <something> isn't a prop suffix.
+        # e.g. "Champions League: Bayern vs PSG" — last segment is
+        # the game, not a prop type. Real game; signal expected.
+        raw = {
+            "event_ticker":  "KXUCLGAME-26MAY07BAYPSG",
+            "series_ticker": "KXUCLGAME",
+            "title":         "Champions League: Bayern Munich vs PSG",
+            "_sport":        "Soccer",
+            "_kickoff_dt":   "2026-05-07T19:00:00+00:00",
+        }
+        sig = self.m.extract_signal(raw)
+        assert sig is not None
+
     def test_missing_event_ticker_returns_none(self):
         sig = self.m.extract_signal({"title": "x", "_sport": "Soccer"})
         assert sig is None
