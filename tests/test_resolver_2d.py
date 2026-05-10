@@ -852,6 +852,94 @@ class TestStaticGuards:
             "shape that crashed on duplicate keys."
         )
 
+    def test_runner_review_queue_writes_2f0_columns(self):
+        # Phase 2F.0.5: the review_queue INSERT must populate the new
+        # reason_detail and provider_title columns added in 2F.0
+        # (PR #114). Without the runner write-side update, the 2F.1
+        # admin UI's denormalized read path falls back to NULL on
+        # every freshly-inserted row.
+        #
+        # Static guard scans for the column names in BOTH the INSERT
+        # column list AND the ON CONFLICT DO UPDATE clause (re-resolves
+        # of pending records refresh the snapshot per the design).
+        import pathlib
+        runner_src = pathlib.Path(
+            __file__
+        ).resolve().parent.parent.joinpath(
+            "scripts", "run_resolver_pass.py"
+        ).read_text()
+
+        # Locate the review_queue INSERT block (single occurrence per
+        # the prior test_runner_review_queue_uses_on_conflict guard).
+        insert_idx = runner_src.find("INSERT INTO sp.review_queue")
+        assert insert_idx > 0, "review_queue INSERT not found"
+        # Window the assertions to ~3000 chars after the INSERT —
+        # captures the VALUES list, ON CONFLICT clause, and bindparams.
+        block = runner_src[insert_idx:insert_idx + 3000]
+
+        # Column list (first appearance in the block, before VALUES).
+        for col in ("reason_detail", "provider_title"):
+            assert col in block, (
+                f"scripts/run_resolver_pass.py must write the {col!r} "
+                f"column on review_queue INSERT (Phase 2F.0.5)."
+            )
+
+        # ON CONFLICT DO UPDATE — both columns must refresh on
+        # re-resolve so pending records reflect the latest matcher
+        # decision (per design Q3).
+        assert "reason_detail      = EXCLUDED.reason_detail" in block, (
+            "scripts/run_resolver_pass.py must refresh reason_detail "
+            "in the ON CONFLICT DO UPDATE clause."
+        )
+        assert "provider_title     = EXCLUDED.provider_title" in block, (
+            "scripts/run_resolver_pass.py must refresh provider_title "
+            "in the ON CONFLICT DO UPDATE clause."
+        )
+
+        # Bindparams must include both new params.
+        assert "reason_detail=json.dumps(" in block, (
+            "scripts/run_resolver_pass.py must JSON-encode "
+            "final.reason_detail for the JSONB cast."
+        )
+        assert "title=provider_title" in block, (
+            "scripts/run_resolver_pass.py must bind the computed "
+            "provider_title to the :title param."
+        )
+
+    def test_runner_provider_title_is_provider_aware(self):
+        # Phase 2F.0.5: provider_title is computed differently per
+        # provider — Kalshi has raw_payload['title']; FL has
+        # HOME_NAME / AWAY_NAME and we synthesize "home vs away".
+        # If both providers fed the same code path, FL records would
+        # always store NULL (no 'title' field) and the operator UI
+        # would lose context for ~50% of inflow.
+        import pathlib
+        runner_src = pathlib.Path(
+            __file__
+        ).resolve().parent.parent.joinpath(
+            "scripts", "run_resolver_pass.py"
+        ).read_text()
+
+        # Find the provider_title computation block (just above the
+        # INSERT INTO sp.review_queue).
+        insert_idx = runner_src.find("INSERT INTO sp.review_queue")
+        assert insert_idx > 0
+        # Look back ~2000 chars from the INSERT for the computation.
+        prelude = runner_src[max(0, insert_idx - 2000):insert_idx]
+
+        # Kalshi path uses raw_payload['title'].
+        assert 'row.raw_payload.get("title")' in prelude, (
+            "Kalshi provider_title must be sourced from "
+            "raw_payload['title']."
+        )
+        # FL path uses HOME_NAME / AWAY_NAME synthesis.
+        assert 'row.raw_payload.get("HOME_NAME")' in prelude, (
+            "FL provider_title must synthesize from HOME_NAME."
+        )
+        assert 'row.raw_payload.get("AWAY_NAME")' in prelude, (
+            "FL provider_title must synthesize from AWAY_NAME."
+        )
+
     def test_runner_uses_per_record_transaction(self):
         # Phase 2D.3.1 hotfix: the runner must open the transaction
         # per record (inside the chunk-level for-loop), not per

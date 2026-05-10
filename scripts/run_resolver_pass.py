@@ -593,20 +593,56 @@ async def main(
                                 # alone (the operator's decision is the
                                 # source of truth, even if a re-resolve
                                 # would now produce a different score).
+                                #
+                                # Phase 2F.0.5: snapshot reason_detail
+                                # and provider_title at insert so the
+                                # 2F.1 admin UI reads a single table
+                                # per page (per design Q3 denormalize).
+                                # Both are also refreshed on
+                                # ON CONFLICT DO UPDATE so re-resolves
+                                # of pending records reflect the
+                                # latest matcher decision.
+                                #
+                                # provider_title shape:
+                                #   - kalshi: raw_payload['title']
+                                #     (e.g., "Bayern Munich vs PSG")
+                                #   - fl: synthesized from HOME_NAME
+                                #     and AWAY_NAME ("home vs away")
+                                # NULL when neither is available — the
+                                # column is nullable and the UI falls
+                                # back to a UI-time JOIN.
+                                if provider == "kalshi":
+                                    title_raw = row.raw_payload.get("title")
+                                    provider_title = (title_raw or "").strip() or None
+                                else:  # fl
+                                    home_name = (
+                                        row.raw_payload.get("HOME_NAME") or ""
+                                    ).strip()
+                                    away_name = (
+                                        row.raw_payload.get("AWAY_NAME") or ""
+                                    ).strip()
+                                    if home_name or away_name:
+                                        provider_title = f"{home_name} vs {away_name}".strip()
+                                    else:
+                                        provider_title = None
                                 await session.execute(text(
                                     """
                                     INSERT INTO sp.review_queue
                                       (id, provider, provider_record_id,
                                        candidate_fixtures, confidence,
+                                       reason_detail, provider_title,
                                        status, created_at)
                                     VALUES
                                       (gen_random_uuid(), :provider, :pk,
                                        CAST(:cands AS jsonb), :conf,
+                                       CAST(:reason_detail AS jsonb), :title,
                                        'pending', NOW())
                                     ON CONFLICT (provider, provider_record_id)
                                       DO UPDATE SET
                                         candidate_fixtures = EXCLUDED.candidate_fixtures,
-                                        confidence         = EXCLUDED.confidence
+                                        confidence         = EXCLUDED.confidence,
+                                        reason_detail      = EXCLUDED.reason_detail,
+                                        provider_title     = EXCLUDED.provider_title
                                       WHERE sp.review_queue.status = 'pending'
                                     """
                                 ).bindparams(
@@ -616,6 +652,8 @@ async def main(
                                         [str(t) for t in final.candidate_fixtures]
                                     ),
                                     conf=final.confidence,
+                                    reason_detail=json.dumps(final.reason_detail or {}),
+                                    title=provider_title,
                                 ))
                                 if final.resolver_version.startswith("fuzzy"):
                                     chunk_fuzzy_review += 1
