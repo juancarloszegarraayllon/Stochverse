@@ -1,8 +1,48 @@
 # Phase 2D.5 Design — FL Alias Coverage Expansion
 
-Status: design doc rev1, awaiting review. **Draft — design discussion before implementation.** Day-7 review (2D.4) gates 2D.5 prioritization, but the design lands in parallel so we move fast when day-7 data arrives.
+Status: design doc rev1.1, awaiting review. **Draft — design discussion before implementation; PARKED until Phase 2F is operational.** Day-7 review (2D.4) and 2F.1 production state both gate 2D.5 ship; the design lands in parallel so we move fast when both gates open.
 
 Reference: SP Architecture v1.4 §7 (Resolution Layer). Builds on Phase 2D's structural finding (`PHASE_2D_DESIGN.md` §E.8 outcome): **2D's corroboration ceiling is gated by upstream alias coverage.** `sp.fixtures` is populated by strict-tier resolution; if FL records didn't get strict-tier-resolved (FL-side alias gap), there's no fixture row to corroborate against. No 2D matcher tuning lifts past this. **2D.5 attacks the ceiling by expanding `sp.team_aliases` coverage on the FL side.**
+
+---
+
+## Relationship to Phase 2F (operator review-queue UI)
+
+Phase 2D.5 and Phase 2F (`PHASE_2F_DESIGN.md`, draft PR #112) are **complementary, not competing**:
+
+- **2F drains the queue.** Provides the operator UI to triage the ~1,000/day combined-cron review_queue inflow that's already accumulating (2,263 pending as of 2026-05-10 spot-check).
+- **2D.5 reduces inflow.** Adds the missing `sp.team_aliases` rows that turn ~170 anchor_failed records/cron into either auto_apply or actionable review_queue items — fewer records reach the bottom of the funnel.
+
+Both are needed for steady-state per the 2F throughput math: median estimate is ~240 records/day reviewed by one operator vs ~1,000/day inflow — a 4x deficit. **2F unlocks operator review BUT the inflow side has to come down for the queue to stabilize.**
+
+**Sequencing:** 2F.1 ships first. 2D.5 ships only after 2F is operational, because:
+
+1. Without 2F, the new aliases 2D.5 produces would just add records to a queue nobody can drain.
+2. 2F.1's day-7 measurement gives the actual operator throughput number, which calibrates how aggressively 2D.5 needs to reduce inflow.
+3. 2F.1's UI surface is the eventual home for the "anchor_failed → add alias" workflow if 2D.5.X graduates from the technical-operator CLI to a non-technical-operator surface (see §"Operator audience" below).
+
+This doc continues to scope the 2D.5 design surface independently so when 2F unblocks 2D.5, we move directly to 2D.5.0 implementation without a design-doc bottleneck. Same parallel-design-doc discipline as 2D rev3 (PR #106) → 2D.3 (PR #107).
+
+---
+
+## Operator audience
+
+2D.5.1 ships as a **CLI for technical operators** — same person who runs cron, can read SQL, and already operates Make targets. Concretely: the operator who ran `make resolver-pass-kalshi`, who reads PROJECT_STATE.md, who decided to ship the 2D.3.1 hotfix.
+
+**This is NOT the same operator as the eventual non-technical reviewer that 2F targets.** 2F's review-queue UI is for someone who needs zero terminal access — they log into a web page, click buttons, and never see a SQL query. The two audiences need different tooling:
+
+| Audience | Surface | Sophistication | Decision shape |
+|---|---|---|---|
+| **Technical operator** (2D.5.1 CLI) | Make targets, JSON-piped output, SQL when needed | High — comfortable with `--dry-run` flags, sport_id semantics, `sp.teams` schema | "Add this alias / create this team" |
+| **Non-technical reviewer** (2F UI) | Web browser, click buttons, no shell access | Low — never sees SQL or terminal | "Approve / reject candidate" |
+
+**Why 2D.5.1 starts as CLI and not as a 2F UI extension:**
+
+- The alias-addition workflow has more failure modes than approve/reject (sport-id mismatch, duplicate team creation, normalization edge cases). Surfacing it to non-technical reviewers risks bad data writes that are harder to audit than approve/reject decisions.
+- A CLI ships in days; a UI extension to 2F ships in weeks. Don't gate the alias-coverage work on UI development.
+- The CLI provides ground truth for what a future UI needs to surface. After 2D.5.1 ships and the launch-checklist measurement step lands, if the alias-addition rate is high enough that non-technical operators should help, that data informs a 2F.X design rev.
+
+**Implication for 2D.5.X path:** if measurement shows the technical-operator rate is the bottleneck (e.g., one technical operator clearing 50/day vs needing 200/day), the natural escalation is "add anchor_failed surface to 2F UI for non-technical operators" — NOT "make the CLI faster." That's a 2F.X scope item; tracked here as future work, not 2D.5.1 scope.
 
 ---
 
@@ -83,7 +123,9 @@ Selected: **C1 (ops-first, then automation).** Implementation plan reflects this
 
 ## Schema impact
 
-### Existing `sp.team_aliases` (no migration required for 2D.5.1)
+### Existing `sp.team_aliases` (no migration required on this table for 2D.5.1)
+
+**Note:** if Open Q1's recommendation (d) is approved, 2D.5.1 adds a separate `sp.team_creation_proposals` migration (one new table, no churn on `sp.team_aliases`). See Q1 for the schema sketch. The "schema-zero" framing below applies to `sp.team_aliases` specifically; the proposals table is additive and isolated.
 
 ```python
 class TeamAlias:
@@ -230,7 +272,7 @@ The classifier uses heuristics:
 
 **Operator runs once. Output drives 2D.5.1 prioritization (and possibly forces a re-scope if Cause-2 is small).** Same calibration discipline as 2D.2.5 dry-run.
 
-### 2D.5.1 — Operator alias-add CLI **[gated on 2D.5.0 + Open Q sign-off]**
+### 2D.5.1 — Operator alias-add CLI **[gated on 2D.5.0 + Open Q sign-off + 2F operational]**
 
 Three Make targets:
 
@@ -238,17 +280,23 @@ Three Make targets:
 - `team-search` — read-only sp.teams lookup.
 - `alias-add` — write to `sp.team_aliases` with `source='operator_2d5'`. Idempotent via ON CONFLICT.
 
-Optionally: `team-create` (gated on Open Q1).
+Plus `team-create-propose` / `team-create-confirm` if Open Q1 (d) is approved.
 
-Schema-zero. ~150-300 lines of Python. Tests: integration tests against the test DB (mocked sp.teams + sp.team_aliases tables); unit tests for the search query construction and the alias normalizer.
+`~150-300` lines of Python (CLI) + ~30-50 lines of migration if Q1(d) ships. Tests: integration tests against the test DB (mocked `sp.teams` + `sp.team_aliases` + (optionally) `sp.team_creation_proposals` tables); unit tests for the search query construction and the alias normalizer.
 
-### 2D.5.1.5 — Production measurement after 2D.5.1 ships
+**Launch checklist (5-step ship, replaces the prior 2D.5.1 + 2D.5.1.5 split):**
 
-Operator runs `alias-add` for ~50-100 records over 5-7 days. Day-7 query measures bucket-distribution shift. Results inform whether 2D.5.2 (automation) is high-payoff or marginal.
+1. **Ship the CLI** — code merged, CI green, Make targets functional in dev DB.
+2. **Tag-and-deploy** — production cron-host updated; operator confirms `make anchor-failed-report` returns rows.
+3. **Initial-batch operator pass** — operator adds 50-100 aliases over 5-7 days using the new CLI.
+4. **Measurement query** — day-7 SQL run measuring bucket-distribution shift in `sp.resolution_log` (anchor_failed → strict_auto_applies on the same `provider_record_id`s).
+5. **Decision point** — does the measured recovery match the median-scenario prediction? If yes, 2D.5.2 (FL roster bulk-seed) becomes the next target. If no, root-cause the gap (insufficient Cause-2 fraction? operator throughput too low? alias normalizer mismatch?) before 2D.5.2.
+
+The measurement step (4) is part of the launch — not a separate phase. 2D.5.1 isn't "shipped" until step 5 has been recorded in PROJECT_STATE.md.
 
 ### 2D.5.2 — FL roster bulk-seed **[separate design rev needed — TBD]**
 
-Designed AFTER 2D.5.1.5 measurement is in. Likely structure:
+Designed AFTER the 2D.5.1 launch checklist's measurement step (4) is recorded. Likely structure:
 
 - Iterate ATP/WTA tournaments via `/v1/teams/data` or `/v1/players/data` endpoints.
 - For each FL player, look up `sp.teams` by canonical name (with the same normalization the matcher uses).
@@ -304,13 +352,41 @@ When the operator wants to add an alias for a player NOT yet in `sp.teams`, does
 
 **Options:**
 
-- **(a)** **Include `team-create` in 2D.5.1.** Operator can both create the team AND add the alias in one workflow. Faster turnaround, fewer hand-offs. Requires the CLI to validate sport_id, country_code, normalized_name uniqueness.
+- **(a)** **Include direct `team-create` in 2D.5.1.** Operator runs `team-create` → row inserted into `sp.teams` immediately. Faster turnaround, fewer hand-offs. Risk: duplicate teams created when two operators (or the same operator across sessions) propose similar names ("Otshepo Saleshando" vs "Otshepo D. Saleshando" vs "O. Saleshando").
 - **(b)** **Defer team-create to 2D.5.2 or later.** 2D.5.1 only adds aliases against EXISTING teams. If a player isn't in `sp.teams`, the operator skips and we capture it as "unmatchable" until automation or a separate creation path lands.
 - **(c)** **Allow team-create only for players FL has but `sp.teams` doesn't.** Operator runs `team-create-from-fl --fl-event-id X --player-name Y`, which fetches FL's player metadata via `/v1/players/data` and seeds the `sp.teams` row from authoritative data.
+- **(d)** **`team-create` writes to a `sp.team_creation_proposals` staging table; a confirm step promotes to `sp.teams`.** Operator runs `team-create-propose --sport tennis --canonical "Otshepo Saleshando" --country BWA`. The CLI checks `sp.teams` for similar names (Levenshtein ≤ 3 on `normalized_name` within `sport_id`) and surfaces matches. Operator either:
+  - **Confirms a match:** the proposal closes; operator runs `alias-add` against the existing team_id.
+  - **Confirms "create new":** the proposal promotes to `sp.teams` (separate `team-create-confirm <proposal_id>` command), then `alias-add` runs against the new team_id.
 
-**Recommendation: (a)** for 2D.5.1. The scope of "operator working from anchor_failed reports" already implies they have full context; constraining them to existing teams creates friction without proportional safety. Risk mitigation comes from `--dry-run` default + JSON audit output, not from blocking the operation.
+  The proposals table is small (only contains in-flight proposals; auto-purged on confirm/reject). Schema sketch:
 
-(c) is interesting but couples 2D.5.1 to the FL roster work that belongs to 2D.5.2. Defer (c) as a 2D.5.2 enhancement.
+  ```sql
+  CREATE TABLE sp.team_creation_proposals (
+    id              UUID PRIMARY KEY,
+    sport_id        INT NOT NULL REFERENCES sp.sports(id),
+    canonical_name  TEXT NOT NULL,
+    normalized_name TEXT NOT NULL,
+    country_code    TEXT(3),
+    proposed_by     TEXT NOT NULL,
+    proposed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status          TEXT NOT NULL DEFAULT 'pending',  -- pending | confirmed | rejected | merged
+    similar_team_ids JSONB,                            -- snapshot at propose-time
+    resolved_team_id UUID REFERENCES sp.teams(id),    -- set if merged into an existing team
+    UNIQUE(sport_id, normalized_name, status)         -- prevents duplicate pending proposals
+  );
+  ```
+
+**Recommendation: (d)** for 2D.5.1. The duplicate-team risk in (a) is real and hard to undo: once two `sp.teams` rows exist for "Saleshando", merging them requires UPDATE-ing every `sp.team_aliases` and `sp.fixtures` reference. The proposal-table approach catches the duplicate at propose-time when it's cheap to reject.
+
+The cost is ~50 lines of CLI + a small migration. The proposal table also gives us a built-in audit trail of team-creation decisions, which the alias-only workflow doesn't get from the existing `sp.team_aliases` schema.
+
+(c) stays interesting as an enhancement: `team-create-propose --from-fl-event-id X` can pre-fill the proposal from FL's player metadata. Defer to 2D.5.2.
+
+**Schema impact summary:**
+
+- **2D.5.1 with recommendation (d):** schema is NO LONGER zero — adds `sp.team_creation_proposals` migration. Still small (one table, no FK churn outside the team_id column).
+- The earlier "schema-zero for 2D.5.1" claim in §"Schema impact" needs updating if (d) is approved. Audit columns on `sp.team_aliases` stay deferred to 2D.5.2 either way.
 
 ### Q2 — Source value for operator-added aliases **[2D.5.1]**
 
@@ -391,11 +467,12 @@ Today the runner picks up records `WHERE fixture_id IS NULL` on every cron. Newl
 - [ ] **2D.5.1 is CLI not admin UI.** Phase 2F admin UI work stays separate. Approved.
 
 **Schema:**
-- [ ] **Schema-zero for 2D.5.1.** No new columns; new `source` value only. Approved or counter-proposed.
+- [ ] **`sp.team_aliases` schema unchanged** (new `source='operator_2d5'` value only). Approved or counter-proposed.
+- [ ] **`sp.team_creation_proposals` table added** if Q1(d) is approved. Single small migration; isolated from `sp.team_aliases`. Approved or counter-proposed.
 - [ ] **Audit columns deferred to 2D.5.2 if needed.** Approved.
 
 **Open questions:**
-- [ ] **Q1** — Team creation in 2D.5.1: recommend (a) include `team-create` command. Approved or counter-proposed.
+- [ ] **Q1** — Team creation in 2D.5.1: recommend (d) `team-create-propose` → `sp.team_creation_proposals` staging table → `team-create-confirm` two-step flow. Approved or counter-proposed.
 - [ ] **Q2** — Source value: recommend `'operator_2d5'`. Approved or counter-proposed.
 - [ ] **Q3** — Operator surface: recommend (a) cron-log line. Approved or counter-proposed.
 - [ ] **Q4** — Confidence value: recommend (a) `1.0`. Approved or counter-proposed.
@@ -416,12 +493,11 @@ Today the runner picks up records `WHERE fixture_id IS NULL` on every cron. Newl
 
 After rev1 sign-off, 2D.5 ships in this order:
 
-0. **Day-7 review (2D.4)** — informs 2D.5.0 prioritization.
+0. **Phase 2F operational + 2D.4 day-7 review** — both gate 2D.5.0. 2F provides the queue-drain surface; 2D.4 informs 2D.5.0 prioritization.
 1. **2D.5.0** — anchor-failed classification script. Operator runs once, output drives prediction lock-in.
-2. **2D.5.1** — operator CLI. Schema-zero. Three Make targets (`anchor-failed-report`, `team-search`, `alias-add`) + optional `team-create` per Q1.
-3. **2D.5.1.5** — production measurement window after 2D.5.1 ships. Operator adds 50-100 aliases over 5-7 days; day-7 query measures bucket shift.
-4. **2D.5.2** — FL roster bulk-seed (separate design rev).
-5. **2D.5.3** — day-7 review of 2D.5 effectiveness.
+2. **2D.5.1** — operator CLI (5-step launch checklist; measurement step is part of the launch, not a separate phase). Three Make targets (`anchor-failed-report`, `team-search`, `alias-add`) + `team-create-propose` / `team-create-confirm` if Q1(d) approved.
+3. **2D.5.2** — FL roster bulk-seed (separate design rev).
+4. **2D.5.3** — day-7 review of 2D.5 effectiveness.
 
 ---
 
