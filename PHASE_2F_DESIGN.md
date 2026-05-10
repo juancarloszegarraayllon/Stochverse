@@ -1,6 +1,13 @@
 # Phase 2F Design — Operator Review-Queue UI
 
-Status: design doc rev1, awaiting review. **Draft — design discussion before implementation.** Pivot from 2D.5 (paused per the 2026-05-10 production spot-check finding): the review queue is structurally accumulating into an unactionable state because operators have no UI to triage it.
+Status: design doc rev1.1, awaiting sign-off. **Draft — design discussion before implementation.** Pivot from 2D.5 (paused per the 2026-05-10 production spot-check finding): the review queue is structurally accumulating into an unactionable state because operators have no UI to triage it.
+
+**Rev1.1 changes** (5 review pushbacks applied in one revision pass):
+- **Q4 revised** — re-queueable rejection now paired with a `rejection_count` guardrail (column added to 2F.0 migration; surfaced in 2F.1 UI; runner-side `>= 3` skip logic deferred to 2F.X).
+- **Q6 revised** — anchor_failed surface upgraded from "defer to 2F.X" to "include separate UI tab in 2F.1, fallback to 2F.2 with hard sequence commitment if scope tightens." Operators get visibility into ALL unresolvable records, not just review_queue-routed ones.
+- **Q5 expanded** — schema-migration path forward note added: `reviewed_by` Text, no audit table, single shared password are all forward-compatible with multi-operator (additive migrations only, no destructive changes).
+- **Q2 expanded** — password rotation requires Railway redeploy noted as known limitation; multi-operator (Q5) gets database-stored hashed passwords.
+- **2F.0 migration code expanded** to include `rejection_count` column alongside `reason_detail` and `provider_title`.
 
 Reference: SP Architecture v1.4 §7.5 (Review queue + admin surface). Builds on Phase 2C/2D resolver work — `sp.review_queue` is populated by alias-tier (`alias@2c.0`) and fuzzy-tier (`fuzzy@2d.0`) when their REVIEW_QUEUE branches fire. The matcher comment at `resolver/alias_tier/matcher.py:243-244` already references "the reviewer in 2F" — Phase 2F has been the planned dependency from the start; this design crystallizes it.
 
@@ -265,7 +272,7 @@ If any of these exceed budget, add denormalized columns or materialized views in
 - **No machine-learning suggestions.** The UI surfaces the matcher's existing scores; it doesn't add a separate "what would 2D.7's A.rev2 say?" predictive layer.
 - **No real-time updates.** Operator refresh shows new rows; no WebSocket / SSE push. Cron writes; UI reads. Polling refresh is fine.
 - **No public exposure.** Behind auth, intended for internal use only. No SEO, no public marketing pages.
-- **No revisiting approved/rejected records.** Once decided, the row is closed. If operators discover a wrong decision, the fix is via separate SQL (or an "unreview" feature added in 2F.X if the need emerges).
+- **No revisiting approved/rejected records IN 2F.1.** Once decided, the row stays decided in the UI. The runner's `WHERE status='pending'` guard from PR #108 keeps rejected rows out of the list view automatically. **2F.X adds an "unreject" button** gated by Q4's `rejection_count` guardrail (the column ships in 2F.0; the button + runner-side `rejection_count >= 3` skip logic ship in 2F.2 or 2F.3). For 2F.1, wrong decisions are corrected via separate SQL — same as today.
 
 ---
 
@@ -301,15 +308,27 @@ If 2F.1 day-7 shows operators clearing >800/day sustainably, the C1 framing work
 
 ### 2F.0 — Schema migration (small, fast, back-compatible)
 
-`alembic revision -m "add review_queue.reason_detail and provider_title"`
+`alembic revision -m "add review_queue.reason_detail, provider_title, rejection_count"`
 
 ```python
 def upgrade():
-    op.add_column("review_queue", sa.Column("reason_detail", JSONB(), nullable=True), schema="sp")
-    op.add_column("review_queue", sa.Column("provider_title", sa.Text(), nullable=True), schema="sp")
-    # Composite index for the filter combo: status + sport + confidence
-    # (sport will live in reason_detail for new rows; older filtering by
-    # provider_record_id JOIN to provider tables stays unchanged).
+    op.add_column(
+        "review_queue", sa.Column("reason_detail", JSONB(), nullable=True),
+        schema="sp",
+    )
+    op.add_column(
+        "review_queue", sa.Column("provider_title", sa.Text(), nullable=True),
+        schema="sp",
+    )
+    # Phase 2F Q4: rejection_count tracks cumulative reject clicks per
+    # record. 2F.1 surfaces it in the UI; 2F.X uses it as a runner-side
+    # threshold to skip burnout-cycle re-evaluation.
+    op.add_column(
+        "review_queue",
+        sa.Column("rejection_count", sa.Integer(), nullable=False, server_default="0"),
+        schema="sp",
+    )
+    # Composite index for the filter combo: status + confidence + created_at.
     op.create_index(
         "ix_review_queue_pending_confidence",
         "review_queue", ["status", sa.text("confidence DESC"), "created_at"],
@@ -318,7 +337,7 @@ def upgrade():
     )
 ```
 
-Existing rows: NULL on new columns. Runner (Phase 2C/2D) updates: write the new fields on the next REVIEW_QUEUE insert path. Schema-additive, no data migration needed.
+Existing rows: NULL on the JSONB / text columns; `rejection_count = 0` from the server default. Runner (Phase 2C/2D) updates: write the new fields on the next REVIEW_QUEUE insert path; the existing PR #108 ON CONFLICT DO UPDATE clause stays as-is for `candidate_fixtures` and `confidence`. Schema-additive, no data migration needed.
 
 ### 2F.0.5 — Runner write-side update
 
@@ -327,13 +346,16 @@ Update `scripts/run_resolver_pass.py` to populate `reason_detail` and `provider_
 ### 2F.1 — Minimal review UI
 
 - FastAPI router mounted at `/admin/`.
-- Routes: `GET /admin/login`, `POST /admin/login`, `GET /admin/logout`, `GET /admin/review-queue`, `GET /admin/review-queue/<id>`, `POST /admin/review-queue/<id>/approve`, `POST /admin/review-queue/<id>/reject`.
-- Jinja2 templates: `base.html`, `login.html`, `list.html`, `detail.html`.
+- Routes (review_queue surface): `GET /admin/login`, `POST /admin/login`, `GET /admin/logout`, `GET /admin/review-queue`, `GET /admin/review-queue/<id>`, `POST /admin/review-queue/<id>/approve`, `POST /admin/review-queue/<id>/reject`.
+- Routes (anchor_failed surface, per Q6 revised): `GET /admin/anchor-failed`, `GET /admin/anchor-failed/<provider>/<provider_record_id>` (compound key — no UUID; the data lives in `sp.resolution_log`, not a queue table). Read-only — no approve/reject. Detail view links to a pre-filled `make alias-add` command for the technical operator.
+- Jinja2 templates: `base.html`, `login.html`, `list.html`, `detail.html`, `anchor_failed_list.html`, `anchor_failed_detail.html`.
 - Auth: `OPERATOR_PASSWORD_HASH` env var, FastAPI `SessionMiddleware`.
 - HTMX: approve/reject buttons swap the row in place; full page reload only on filter changes / pagination.
-- Tests: integration tests against test DB; static guards on auth requirement, no batch operations exposed.
+- Tests: integration tests against test DB (review_queue surface AND anchor_failed surface); static guards on auth requirement, no batch operations exposed, anchor_failed routes have no mutating action handlers.
 
-Estimated size: ~400-600 lines Python + ~200-300 lines HTML.
+Estimated size: ~500-700 lines Python + ~250-350 lines HTML (revised up from ~400-600 / ~200-300 to include anchor_failed surface per Q6).
+
+If 2F.1 timeline tightens (e.g., auth or HTMX ergonomics consume more time), the anchor_failed surface shifts to **2F.2 with a hard sequence commitment** (within 2-3 weeks of 2F.1) — NOT an indefinite defer. Sign-off checklist Q6 captures this fallback path explicitly.
 
 ### 2F.1.5 — Production day-7 measurement
 
@@ -410,6 +432,8 @@ HTMX adds nice in-place updates but introduces a (tiny) client dependency.
 
 **Recommendation: (a).** Adequate for one operator. Swap to (c) when multi-operator becomes real.
 
+**Known limitation (review pushback):** password rotation requires a Railway redeploy because the hash lives in an env var rather than the database. Acceptable for the single-operator MVP — rotation is rare and a redeploy is ~1 minute. **Multi-operator (Q5) requires database-stored hashed passwords** (per the Q5 schema-migration path note); rotation then becomes a self-service UI action with no redeploy needed. The 2F.1 → multi-operator transition swaps the auth lookup but keeps SessionMiddleware unchanged.
+
 ### Q3 — `reason_detail` denormalization vs JOIN **[2F.0]**
 
 **Options:**
@@ -430,9 +454,30 @@ When operator clicks "Reject":
 - **(b)** Re-queueable. `status='rejected'` but next cron's matcher might pick it up again (e.g., after 2D.5 alias additions). Operator may have rejected based on the candidates available at the time; new aliases could surface a better candidate.
 - **(c)** Time-boxed re-queue. `status='rejected'` for 30 days, then automatically returns to `pending` on the off chance the matcher's view of the world has improved.
 
-**Recommendation: (b) re-queueable.** The 2D.5 alias-expansion plan implies the candidate set changes over time. A record rejected today because all 5 candidates were wrong might have a 6th candidate (the right one) tomorrow if 2D.5 adds the alias. The runner's existing query (`WHERE fixture_id IS NULL`) already picks these up; no extra logic needed.
+**Recommendation: (b) re-queueable, with `rejection_count` guardrail to prevent operator burnout cycles.**
 
-If (b) causes operator frustration ("why is this record back?!"), 2F.X adds a `rejected_until` timestamp.
+How re-queueable actually works in practice (a clarifying note — this caused a review pushback):
+
+1. Operator clicks Reject. `status='rejected'`, `rejection_count` incremented (1 on first reject).
+2. Next cron runs. The runner's `WHERE fixture_id IS NULL` query DOES pick the record up; the matcher runs and produces a fresh REVIEW_QUEUE result.
+3. The runner's `INSERT INTO sp.review_queue ... ON CONFLICT (provider, provider_record_id) DO UPDATE ... WHERE status='pending'` (PR #108 hotfix) **fails the WHERE clause** because the existing row is `status='rejected'`. No update happens. The row stays in 'rejected' state and the operator does NOT see it again on the next list view.
+4. Operator-sticky by default: rejection STAYS rejected. No "review the same kalshi ticker 7 days in a row" pathology.
+
+Where `rejection_count` matters: when 2F.X adds an "Unreject" / "Reopen" button (operator looks at audit history, decides to give the record another shot, or 2D.5.X automation surfaces new candidates and sweeps stale rejections back to pending). Each re-rejection increments the count. **2F.X also adds the runner-side guard: after `rejection_count >= 3` AND `candidate_fixtures` unchanged since last rejection, the row stays rejected even if `status='pending'` — protects against burnout cycles when the candidate set is genuinely unmatchable.**
+
+**2F.1 scope (what this PR ships):**
+
+- Add `rejection_count` column to `sp.review_queue` in 2F.0 migration (default 0). Reject action increments it.
+- Surface `rejection_count` in the list view ("Rejected 2 times" badge on history tab; default list filter still hides rejected).
+- DO NOT ship the unreject button or the runner-side threshold guard. Those are 2F.X.
+
+**2F.X scope (deferred but committed):**
+
+- Unreject button (gated by an explicit confirm: "this record was rejected; reopening will surface it in the queue again").
+- Runner-side threshold guard (skip re-evaluation when `rejection_count >= 3 AND candidate_fixtures unchanged`).
+- 2D.5.X automation that compares `candidate_fixtures` snapshots: if new aliases produced a new candidate, auto-flip to `pending` regardless of count.
+
+The 30-day time-boxed re-queue from option (c) is rejected — calendar-based decisions don't track the actual signal (whether the candidate set changed). Count + diff-based escalation is the right shape.
 
 ### Q5 — Multi-operator future **[scope]**
 
@@ -446,16 +491,39 @@ If (b) causes operator frustration ("why is this record back?!"), 2F.X adds a `r
 
 **No question to answer now; document for future scoping.** Confirmation: single-operator is the right MVP. Approved by default unless counter-proposed.
 
-### Q6 — Surface anchor_failed records too **[scope]**
+#### Schema-migration path forward (review pushback)
 
-`sp.review_queue` only contains REVIEW_QUEUE-routed records (confidence 0.70-0.84 OR collision). The ~171/cron `anchor_failed` records (no candidate above any anchor floor) are NOT in review_queue — they're forensic data in `sp.resolution_log`.
+The single-operator schema choices made now don't block multi-operator future. Specifically:
+
+- **`reviewed_by` as Text field** (vs FK to a future `sp.operators` table). Multi-operator migration: add `sp.operators` table; `reviewed_by` text values become eligible to be `operator_id` UUIDs going forward. Existing text-valued rows stay as-is (historical). No destructive migration.
+- **No audit table now.** Multi-operator migration: add `sp.operator_decisions` (append-only). Existing `sp.review_queue.reviewed_by` + `reviewed_at` remain accurate for the current-state slice; the new audit table captures all future mutations.
+- **Single shared password** (Q2). Multi-operator migration: add `sp.operators(id, email, password_hash, ...)`; the FastAPI auth layer swaps from "compare against `OPERATOR_PASSWORD_HASH` env" to "look up by email, verify hash." Same SessionMiddleware, different lookup.
+
+**All three migrations are additive** — new tables + new optional columns. No destructive changes (no column drops, no type changes, no required-field migrations on existing rows). Single-operator schema choices are forward-compatible by design.
+
+### Q6 — Surface anchor_failed records too **[2F.1 — committed]**
+
+`sp.review_queue` only contains REVIEW_QUEUE-routed records (confidence 0.70-0.84 OR collision). The ~170/cron `anchor_failed` records (no candidate above any anchor floor) are NOT in review_queue — they're forensic data in `sp.resolution_log`.
+
+**Initial recommendation was (a) defer to 2F.X. Pushback during review:** structurally that's correct, but operationally wrong. Operators need visibility into ALL unresolvable records, not just the ones that anchored. Without surfacing anchor_failed, alias-coverage gaps stay hidden behind a SQL query and the operator wonders why review_queue keeps growing while resolution rates stagnate.
 
 **Options:**
 
-- **(a)** 2F.1 surfaces only `sp.review_queue`. Anchor_failed stays a separate operator surface (eventually 2D.5.1's `anchor-failed-report` CLI).
-- **(b)** 2F.1 surfaces both. Operator sees a unified "things to review" inbox; anchor_failed records get an "add alias" action that wires into 2D.5.1's `alias-add` workflow.
+- **(a)** 2F.1 surfaces only `sp.review_queue`. Anchor_failed stays invisible to the operator UI; 2D.5.1's `anchor-failed-report` CLI is the only surface.
+- **(b)** **2F.1 includes a separate anchor_failed tab** (different data source, same UI shell). Operator can browse anchor_failed records with full provider context; the detail view links out to the 2D.5.1 CLI (or, if the technical operator is the same person, they have the context to add the alias directly).
+- **(c)** 2F.1 surfaces only review_queue but **2F.2 commits to adding anchor_failed** with a hard sequence ("ships within 2-3 weeks of 2F.1"). Better than indefinite defer.
 
-**Recommendation: (a) for 2F.1.** Different decision shape ("approve/reject candidates" vs "add a missing alias"); blending them in the same UI risks confusing both flows. 2F.X can add anchor_failed as a second surface once 2D.5.1's CLI ships and the workflow is well-understood.
+**Recommendation: (b) — separate UI tab in 2F.1, with (c) as the fallback if 2F.1 scope tightens.**
+
+Implementation shape:
+
+- New routes: `GET /admin/anchor-failed`, `GET /admin/anchor-failed/<id>`. No approve/reject — anchor_failed records have no candidates to approve. Detail view shows the provider record, the matcher's `fail_reason` (alias_no_team_resemblance, anchor_score_below_floor, deferred_to_2d, etc.), and any near-miss candidates the matcher considered.
+- Data source: `sp.resolution_log` filtered by the latest row per `(provider, provider_record_id)` where `reason_code='no_match'` AND `reason_detail->>'fail_reason'` matches the anchor-failed family. Same JOIN-to-provider-tables pattern as the review_queue list view.
+- Detail-view action: a "Suggest alias" link that copies the provider record's title + sport + closest-matching `sp.teams` row to the clipboard, formatted as a `make alias-add ARGS="..."` command. **No inline alias creation in 2F.1** — that's 2D.5.1 CLI territory; the UI just hands the operator a pre-filled command. (The 2D.5.X path of moving alias creation into the UI is tracked in PR #111's §"Operator audience".)
+- Filters: same shape as review_queue (sport, provider, recency).
+- Estimated additional code: ~80-120 lines Python (routes, query, presenter) + ~80-100 lines HTML (list, detail templates). Fits within the 2F.1 size budget (~500-700 + ~250-350 lines total revised).
+
+If 2F.1's scope ends up tighter than expected (e.g., auth or HTMX ergonomics consume more time than estimated), **fallback is (c): explicitly commit anchor_failed to 2F.2 with a hard sequence**, NOT a vague "future work" defer. Anchor_failed visibility is a planned UI surface, not optional.
 
 ### Q7 — Where does the UI run **[2F.1]**
 
@@ -493,15 +561,16 @@ The `sp.review_queue.confidence` column shows `0.0` for alias-tier collision-ind
 - [ ] **Q8** — Confidence display: cosmetic fix in UI (show "(collision)") + separate investigation issue for deeper question. Acknowledged.
 
 **Workflow:**
-- [ ] **Q4** — Reject semantics: recommend (b) re-queueable. Approved or counter-proposed.
+- [ ] **Q4** — Reject semantics: recommend (b) re-queueable + `rejection_count` guardrail (column added in 2F.0; surfaced in UI in 2F.1; runner-side threshold guard + unreject button deferred to 2F.X). Approved or counter-proposed.
 - [ ] **Q5** — Multi-operator deferred. Acknowledged.
-- [ ] **Q6** — Anchor_failed surfacing: recommend (a) defer to 2F.X. Approved or counter-proposed.
+- [ ] **Q6** — Anchor_failed surfacing: recommend (b) include separate UI tab in 2F.1; fallback (c) commit to 2F.2 with hard 2-3 week sequence if scope tightens. NOT indefinite defer. Approved or counter-proposed.
 
 **Negative space:**
 - [ ] No batch operations. Approved.
 - [ ] No fixture/team editing. Approved.
 - [ ] No ingestion control. Approved.
 - [ ] No mobile / public exposure / ML suggestions. Approved.
+- [ ] No revisiting decided records IN 2F.1 (the unreject button is 2F.X per Q4 revised). Approved.
 
 **Sequencing:**
 - [ ] **2D.5 (PR #111) parked as future work; ships only after 2F is operational.** Acknowledged.
@@ -509,12 +578,12 @@ The `sp.review_queue.confidence` column shows `0.0` for alias-tier collision-ind
 
 After rev1 sign-off, 2F ships in this order:
 
-1. **2F.0** — Schema migration (`reason_detail`, `provider_title`, partial index).
-2. **2F.0.5** — Runner write-side update (populate the new columns on REVIEW_QUEUE insert).
-3. **2F.1** — Minimal review UI (FastAPI + Jinja2 + optional HTMX, signed-cookie auth, list/detail/approve/reject).
+1. **2F.0** — Schema migration (`reason_detail`, `provider_title`, `rejection_count`, partial index on `(status='pending', confidence DESC, created_at)`).
+2. **2F.0.5** — Runner write-side update (populate the new columns on REVIEW_QUEUE insert; reject action increments `rejection_count`).
+3. **2F.1** — Minimal review UI (FastAPI + Jinja2 + HTMX, signed-cookie auth, list/detail/approve/reject for `sp.review_queue` + read-only anchor_failed surface fed from `sp.resolution_log`).
 4. **2F.1.5** — Production day-7 measurement.
-5. **2F.2** — Quality-of-life (optional; gated on 2F.1.5 data).
-6. **2F.3** — Hardening (auth, audit table, etc.; gated on actual need).
+5. **2F.2** — Quality-of-life + Q4 follow-ups (keyboard shortcuts, audit views, anchor_failed surface IF deferred from 2F.1, unreject button + runner-side `rejection_count >= 3` guard).
+6. **2F.3** — Hardening (auth upgrade, `sp.operator_decisions` audit table, etc.; gated on actual need).
 
 ---
 
