@@ -2,6 +2,33 @@
 
 This file documents deployment-time configuration that is **not** in the repo. The codebase ships with sensible defaults; the items below are operator-set on Railway (or whichever host).
 
+## Migration-bearing PR checklist
+
+Railway does NOT auto-run alembic on deploy. Migrations are applied manually via `alembic upgrade head` against the production `DATABASE_URL`. Every prior migration in this project (Phase 1A initial schema, Phase 2A.5/2A.6/2A.7, Phase 2B resolver_runs, Phase 2F.0 review_queue columns) followed the same manual pattern documented further down this file.
+
+**Why this checklist exists:** PR #114 (Phase 2F.0) merged with the migration code but the operator did not run `alembic upgrade head` against production. The production DB stayed at the prior head while the ORM in `sp_models.py` declared columns that didn't exist. PR #115 (the dependent runner write-side change) would have crashed on every REVIEW_QUEUE INSERT had it merged before the migration was applied. The mismatch was caught by spot-check before #115 merged, but the workflow gap was real.
+
+For any PR that adds a new alembic revision under `migrations/versions/`:
+
+1. **Before merging the migration PR:**
+   - [ ] Migration applied to a disposable Postgres (Neon dev branch, docker-compose) — forward AND downgrade roundtrip verified.
+   - [ ] `alembic current` against the dev DB shows the new revision as head.
+   - [ ] `tests/test_phase_<n>_migration.py` (or equivalent) passing locally — static guards on the migration shape + ORM-in-sync.
+
+2. **After merging the migration PR, BEFORE merging any dependent code PR:**
+   - [ ] `DATABASE_URL=<prod-Neon> alembic upgrade head` against production.
+   - [ ] `alembic current` against production shows the new revision as head.
+   - [ ] Verify the new schema landed correctly (e.g. `psql ... -c "SELECT column_name, ..."` against `information_schema.columns` or `pg_indexes`).
+   - [ ] Note the production hash + verification output in the migration PR thread for the project history.
+
+3. **Then, and only then,** merge dependent code PRs that depend on the new schema (e.g. runner write-side updates, UI changes that read the new columns).
+
+If you skip step 2 and merge a dependent code PR, Railway redeploys the new code against the stale DB and the next cron / request that touches the missing schema crashes. Recovery is `git revert <dependent PR>` + apply migration + re-merge.
+
+This is enforced by convention, not by CI. The `.github/PULL_REQUEST_TEMPLATE.md` checkbox is a reminder; the responsibility is the merger's. If we hit this gap a second time, the next iteration is a CI check that connects to production and verifies `alembic current` matches the migrations on `main` — credential exposure cost was the reason we deferred that initially.
+
+---
+
 ## Phase 0 — required env vars
 
 ### `WEB_CONCURRENCY`
