@@ -52,6 +52,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -426,10 +427,31 @@ class ReviewQueue(SPBase):
     reviewed_by = Column(Text)
     reviewed_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    # Phase 2F.0 (per PHASE_2F_DESIGN.md rev1.1):
+    # Snapshot of MatchResult.reason_detail at insertion. Denormalized
+    # so the 2F.1 UI reads a single table per page.
+    reason_detail = Column(JSONB, nullable=True)
+    # Snapshot of the human-readable provider title (Kalshi
+    # raw_payload->>'title' / FL synthesized "home vs away"). Saves
+    # per-record raw_payload parsing on every list-view render.
+    provider_title = Column(Text, nullable=True)
+    # Cumulative reject clicks per record. Per Q4 revised: re-queueable
+    # rejection is correct, but this column is the guardrail against
+    # operator burnout cycles. 2F.1 surfaces it; 2F.X adds the unreject
+    # button + runner-side `>= 3 AND candidate_fixtures unchanged` skip.
+    rejection_count = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
         UniqueConstraint("provider", "provider_record_id", name="uq_review_queue_provider_record"),
         Index("ix_review_queue_status_created", "status", "created_at"),
+        # Phase 2F.0 partial index: covers the 2F.1 list view's hot
+        # query (WHERE status='pending' ORDER BY confidence DESC,
+        # created_at DESC) without bloating the full-table index.
+        Index(
+            "ix_review_queue_pending_confidence",
+            "status", text("confidence DESC"), "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
     )
 
 
