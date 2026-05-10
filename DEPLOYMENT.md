@@ -23,7 +23,14 @@ For any PR that adds a new alembic revision under `migrations/versions/`:
 
 3. **Then, and only then,** merge dependent code PRs that depend on the new schema (e.g. runner write-side updates, UI changes that read the new columns).
 
-If you skip step 2 and merge a dependent code PR, Railway redeploys the new code against the stale DB and the next cron / request that touches the missing schema crashes. Recovery is `git revert <dependent PR>` + apply migration + re-merge.
+If you skip step 2 and merge a dependent code PR, Railway redeploys the new code against the stale DB and the next cron / request that touches the missing schema crashes.
+
+**Recovery procedure (if the order is violated):**
+
+1. `git revert -m 1 <merge-commit-sha-of-dependent-PR>` — creates a revert commit
+2. Open PR for the revert, merge it (Railway redeploys with old code; system stable)
+3. Apply the migration: `DATABASE_URL=<prod-Neon> alembic upgrade head`; verify with `alembic current`
+4. Re-merge the original dependent PR (or open a new PR with the same changes if the revert was destructive)
 
 This is enforced by convention, not by CI. The `.github/PULL_REQUEST_TEMPLATE.md` checkbox is a reminder; the responsibility is the merger's. If we hit this gap a second time, the next iteration is a CI check that connects to production and verifies `alembic current` matches the migrations on `main` — credential exposure cost was the reason we deferred that initially.
 
