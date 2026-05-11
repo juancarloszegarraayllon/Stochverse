@@ -92,8 +92,9 @@ async def logout(request: Request):
 
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request, operator: str = Depends(require_operator)):
-    if not admin_configured():
-        return _not_configured_response()
+    # No admin_configured() check here — require_operator handles it
+    # as the single source of truth (raises 503 before reading
+    # request.session, which would crash without SessionMiddleware).
     # Placeholder for the sub-PR #2 review-queue list view. Sub-PR #1
     # exists to prove the auth surface end-to-end; the actual queue
     # rendering ships next.

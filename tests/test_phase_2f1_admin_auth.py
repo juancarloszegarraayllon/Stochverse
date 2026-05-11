@@ -253,6 +253,27 @@ class TestNotConfiguredFallback:
             "FastAPI app's routes."
         )
 
+    def test_index_returns_503_not_500_when_unset(self, app_without_admin):
+        # Latent-bug guard (pre-merge fix on PR #118): GET /admin/
+        # has Depends(require_operator). When env vars are unset,
+        # SessionMiddleware is never added, so reading request.session
+        # would raise AssertionError/AttributeError BEFORE the handler
+        # body could check admin_configured() — turning a clean 503
+        # into a 500. The fix moves the admin_configured() check
+        # INSIDE require_operator so the dep short-circuits before
+        # touching request.session.
+        #
+        # If this test starts returning 500, the regression is back —
+        # the configuration gate moved out of require_operator into
+        # the route handler (where it can't help, because the dep
+        # runs first).
+        resp = app_without_admin.get("/admin/", follow_redirects=False)
+        assert resp.status_code == 503, (
+            f"GET /admin/ with env unset should return 503, got "
+            f"{resp.status_code}. If 500, require_operator no longer "
+            f"checks admin_configured() before reading request.session."
+        )
+
 
 # ── Static guards on the auth surface ──────────────────────────
 

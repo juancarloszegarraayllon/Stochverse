@@ -62,14 +62,30 @@ def verify_password(plain_password: str) -> bool:
 
 def require_operator(request: Request) -> str:
     """FastAPI dependency. Returns the operator identity from the
-    session cookie. Raises 401 (with a redirect target the route can
-    use) when no session is present.
+    session cookie. Raises 401 when no session is present.
 
     Mounting route handlers with `Depends(require_operator)` ensures
     every protected route gets the session check without per-route
     boilerplate. Static guard in tests confirms every mutating route
     pulls this dependency.
+
+    The 503-configuration check fires BEFORE the session read because
+    `request.session` only exists when SessionMiddleware is installed,
+    which only happens when OPERATOR_SESSION_SECRET is set. Reading
+    `.session` on an unconfigured deployment would crash with
+    `AssertionError`/`AttributeError` — turning a clean 503 into a
+    500. This dependency is the single source of truth for the gate;
+    route handlers don't need to repeat it.
     """
+    if not admin_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "admin UI is not configured on this deployment "
+                "(OPERATOR_PASSWORD_HASH and OPERATOR_SESSION_SECRET "
+                "must both be set; see DEPLOYMENT.md for provisioning)."
+            ),
+        )
     operator = request.session.get(SESSION_KEY_OPERATOR)
     if not operator:
         # 401 with WWW-Authenticate so curl-style clients see the
