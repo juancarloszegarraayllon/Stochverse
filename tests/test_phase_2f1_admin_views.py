@@ -287,6 +287,32 @@ class TestRouteAuthSurface:
         assert resp.status_code == 303
         assert resp.headers["location"] == "/admin/review-queue"
 
+    def test_static_css_is_served(self, app_with_admin):
+        # Phase 2F.1 CSS extraction (issue #120): admin styles
+        # consolidated into admin/static/admin.css, linked from
+        # base.html. The /admin/static mount in main.py serves it.
+        # Regression guard against:
+        #   - accidentally removing the StaticFiles mount
+        #   - moving or renaming admin.css
+        #   - removing the <link> tag from base.html
+        # Static files don't require auth (the CSS is non-sensitive
+        # and browsers prefetch via <link>, not via cookie).
+        resp = app_with_admin.get("/admin/static/admin.css")
+        assert resp.status_code == 200, (
+            f"GET /admin/static/admin.css returned {resp.status_code}. "
+            f"Either the StaticFiles mount is missing in main.py, the "
+            f"admin/static/ directory doesn't exist, or admin.css was "
+            f"renamed/moved."
+        )
+        content_type = resp.headers.get("content-type", "")
+        assert content_type.startswith("text/css"), (
+            f"admin.css served with wrong content-type: {content_type!r}"
+        )
+        # Spot-check the file contents — confirms the right file is
+        # served (not an empty placeholder or a misrouted response).
+        assert ":root" in resp.text, "admin.css missing CSS token block"
+        assert "--accent" in resp.text, "admin.css missing --accent token"
+
 
 # ── Integration tests against a real Postgres ──────────────────
 

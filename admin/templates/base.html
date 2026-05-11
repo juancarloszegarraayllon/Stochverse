@@ -6,82 +6,12 @@
   <meta name="robots" content="noindex, nofollow">
   {# Admin UI is internal; no SEO, no link-preview generation. #}
   <title>{% block title %}Admin{% endblock %} — Stochverse</title>
-  <style>
-    /* Phase 2F.1 minimal admin styles — desktop-first per design
-       Negative Space item ("No mobile UI"). Heavier styling lands
-       alongside the review-queue list view in sub-PR #2. */
-    :root {
-      --fg: #1a1a1a;
-      --bg: #fafafa;
-      --border: #d0d0d0;
-      --accent: #2a5ada;
-      --error: #c5302d;
-      --muted: #666;
-      --button-bg: #f0f0f0;
-      --button-bg-hover: #e0e0e0;
-    }
-    * { box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-      font-size: 14px;
-      line-height: 1.5;
-      color: var(--fg);
-      background: var(--bg);
-      margin: 0;
-      padding: 0;
-    }
-    header.admin-bar {
-      background: #fff;
-      border-bottom: 1px solid var(--border);
-      padding: 0.75rem 1.5rem;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    header.admin-bar h1 {
-      font-size: 1rem;
-      font-weight: 600;
-      margin: 0;
-    }
-    header.admin-bar form { margin: 0; }
-    .container {
-      max-width: 960px;
-      margin: 1.5rem auto;
-      padding: 0 1.5rem;
-    }
-    .error {
-      color: var(--error);
-      background: #fff0f0;
-      border: 1px solid var(--error);
-      padding: 0.5rem 0.75rem;
-      border-radius: 4px;
-      margin-bottom: 1rem;
-    }
-    button, .button {
-      font: inherit;
-      background: var(--button-bg);
-      border: 1px solid var(--border);
-      padding: 0.4rem 0.9rem;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-    button:hover, .button:hover { background: var(--button-bg-hover); }
-    button[type="submit"].primary {
-      background: var(--accent);
-      color: white;
-      border-color: var(--accent);
-    }
-    button[type="submit"].primary:hover { opacity: 0.92; }
-    input[type="password"], input[type="text"] {
-      font: inherit;
-      padding: 0.4rem 0.6rem;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      width: 100%;
-    }
-    label { display: block; margin-bottom: 0.25rem; font-weight: 500; }
-    .muted { color: var(--muted); }
-  </style>
+  {# All admin styles consolidated in admin/static/admin.css per
+     issue #120 — single stylesheet across the auth, list, and
+     detail surfaces. Add per-template overrides via {% block extra_head %}
+     when sub-PR #3 introduces approve/reject-specific styles. #}
+  <link rel="stylesheet" href="/admin/static/admin.css">
+  {% block extra_head %}{% endblock %}
 </head>
 <body>
   {% block header %}

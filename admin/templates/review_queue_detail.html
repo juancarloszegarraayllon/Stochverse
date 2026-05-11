@@ -1,65 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ detail.row.provider_record_id }}{% endblock %}
 {% block content %}
-  <style>
-    .panel {
-      background: #fff;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 0.85rem 1.1rem;
-      margin-bottom: 1rem;
-    }
-    .panel h3 {
-      margin: 0 0 0.6rem;
-      font-size: 1rem;
-      color: #444;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
-      font-weight: 600;
-    }
-    .kv {
-      display: grid;
-      grid-template-columns: 10rem 1fr;
-      row-gap: 0.3rem;
-      column-gap: 0.5rem;
-      font-size: 0.9rem;
-    }
-    .kv dt { color: var(--muted); }
-    .kv dd { margin: 0; }
-    .ticker { font-family: ui-monospace, "SF Mono", "Cascadia Mono", monospace; }
-    .candidate-list {
-      list-style: none;
-      padding: 0;
-      margin: 0;
-    }
-    .candidate-list li {
-      padding: 0.5rem 0;
-      border-bottom: 1px solid #eee;
-    }
-    .candidate-list li:last-child { border-bottom: none; }
-    .candidate-list .team-name { font-weight: 500; }
-    .candidate-list .team-meta { color: var(--muted); font-size: 0.85rem; }
-    .actions-placeholder {
-      background: #fffbe7;
-      border: 1px solid #e0d090;
-      color: #6a5800;
-      padding: 0.6rem 0.9rem;
-      border-radius: 4px;
-      font-size: 0.9rem;
-    }
-    pre.json-block {
-      background: #f6f7f9;
-      border: 1px solid #e0e0e0;
-      border-radius: 4px;
-      padding: 0.7rem;
-      overflow-x: auto;
-      font-size: 0.8rem;
-      max-height: 20rem;
-    }
-    .back-link { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
-    .back-link:hover { text-decoration: underline; }
-  </style>
-
   <p>
     <a class="back-link" href="/admin/review-queue">&larr; Back to review queue</a>
   </p>

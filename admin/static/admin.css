@@ -1,0 +1,279 @@
+/* Phase 2F.1 admin UI styles — consolidated from per-template
+   inline <style> blocks per issue #120.
+
+   Sections (in render order):
+     1. Tokens (CSS custom properties)
+     2. Reset + base typography
+     3. Shell — header, container, generic feedback
+     4. Forms — buttons, inputs, labels
+     5. Review-queue list view — filters, table, pagination, badges
+     6. Review-queue detail view — panels, key/value grids, candidates
+     7. Utilities — .muted, .ticker
+
+   Desktop-first per the design's "No mobile UI" Negative Space item.
+   No media queries; no responsive breakpoints. The admin UI lives at
+   /admin/, intentionally separate from any future mobile surface.
+*/
+
+
+/* ── 1. Tokens ─────────────────────────────────────────────── */
+
+:root {
+  --fg: #1a1a1a;
+  --bg: #fafafa;
+  --border: #d0d0d0;
+  --accent: #2a5ada;
+  --error: #c5302d;
+  --muted: #666;
+  --button-bg: #f0f0f0;
+  --button-bg-hover: #e0e0e0;
+}
+
+
+/* ── 2. Reset + base typography ────────────────────────────── */
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--bg);
+  margin: 0;
+  padding: 0;
+}
+
+
+/* ── 3. Shell — header, container, generic feedback ────────── */
+
+header.admin-bar {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+header.admin-bar h1 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+header.admin-bar form { margin: 0; }
+
+.container {
+  max-width: 960px;
+  margin: 1.5rem auto;
+  padding: 0 1.5rem;
+}
+
+.error {
+  color: var(--error);
+  background: #fff0f0;
+  border: 1px solid var(--error);
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+}
+
+
+/* ── 4. Forms — buttons, inputs, labels ────────────────────── */
+
+button, .button {
+  font: inherit;
+  background: var(--button-bg);
+  border: 1px solid var(--border);
+  padding: 0.4rem 0.9rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:hover, .button:hover { background: var(--button-bg-hover); }
+
+button[type="submit"].primary {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+button[type="submit"].primary:hover { opacity: 0.92; }
+
+input[type="password"], input[type="text"] {
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  width: 100%;
+}
+
+label { display: block; margin-bottom: 0.25rem; font-weight: 500; }
+
+
+/* ── 5. Review-queue list view ─────────────────────────────── */
+
+.filters {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  display: flex;
+  gap: 0.75rem;
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+.filters label { font-size: 0.85rem; margin-bottom: 0.2rem; }
+
+.filters input, .filters select {
+  width: auto;
+  min-width: 8rem;
+}
+
+.filters .submit-row { display: flex; gap: 0.5rem; }
+
+table.queue {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+table.queue th, table.queue td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+table.queue th {
+  background: #f5f5f5;
+  font-weight: 600;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+table.queue tr:last-child td { border-bottom: none; }
+table.queue tr:hover { background: #fafbfd; }
+
+.conf-collision { color: var(--muted); font-style: italic; }
+
+.pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 1rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.pagination a { color: var(--accent); text-decoration: none; }
+.pagination a:hover { text-decoration: underline; }
+.pagination .disabled { color: #c0c0c0; pointer-events: none; }
+
+a.detail-link { color: var(--accent); text-decoration: none; }
+a.detail-link:hover { text-decoration: underline; }
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: #eaeaea;
+  font-size: 0.75rem;
+}
+
+.badge.fuzzy { background: #e6f0ff; color: #1a3680; }
+.badge.alias { background: #e8f5e8; color: #1c5a1c; }
+.badge.unknown { background: #fff0e6; color: #804a1a; }
+
+
+/* ── 6. Review-queue detail view ───────────────────────────── */
+
+.panel {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.85rem 1.1rem;
+  margin-bottom: 1rem;
+}
+
+.panel h3 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+  color: #444;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 10rem 1fr;
+  row-gap: 0.3rem;
+  column-gap: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+
+.candidate-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.candidate-list li {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #eee;
+}
+
+.candidate-list li:last-child { border-bottom: none; }
+.candidate-list .team-name { font-weight: 500; }
+.candidate-list .team-meta { color: var(--muted); font-size: 0.85rem; }
+
+.actions-placeholder {
+  background: #fffbe7;
+  border: 1px solid #e0d090;
+  color: #6a5800;
+  padding: 0.6rem 0.9rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+pre.json-block {
+  background: #f6f7f9;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 0.7rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  max-height: 20rem;
+}
+
+.back-link { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+.back-link:hover { text-decoration: underline; }
+
+
+/* ── 7. Utilities ──────────────────────────────────────────── */
+
+.muted { color: var(--muted); }
+
+/* .ticker — monospaced UUIDs / provider record IDs. The list view's
+   <td.ticker> wants smaller font (0.85rem) so 10 columns fit on a
+   1280px-wide screen without horizontal scroll; the detail view's
+   freestanding .ticker uses default body size. Both definitions
+   merged: list-view's <td.ticker> gets its size from the table cell
+   context; standalone .ticker uses the default font-size. */
+.ticker {
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+}
+
+table.queue td.ticker {
+  font-size: 0.85rem;
+}
