@@ -139,7 +139,13 @@ async def review_queue_list(
     status_filter: str = Query("pending", alias="status"),
     provider: str | None = Query(None),
     sport: str | None = Query(None),
-    confidence_min: float | None = Query(None, ge=0.0, le=1.0),
+    # confidence_min bound as str | None (not float | None) because
+    # the filter form submits an empty string when the input is
+    # blank — FastAPI's float binder treats "" as a parse error and
+    # returns 422, kicking the operator out of their flow. Parse to
+    # float manually below with empty-string and out-of-range
+    # fallbacks to None (= no filter applied).
+    confidence_min_raw: str | None = Query(None, alias="confidence_min"),
 ):
     """Paginated review-queue list. Default sort confidence DESC,
     default status='pending' (uses the partial index from 2F.0).
@@ -149,6 +155,20 @@ async def review_queue_list(
     operators sometimes paste arbitrary status values from query
     logs and a hard error mid-debug isn't helpful.
     """
+    # Defensive parse of confidence_min — pre-fix the form's empty
+    # input caused 422; now empty / malformed / out-of-range all
+    # silently degrade to "no filter applied" rather than erroring
+    # the operator out of the queue view.
+    confidence_min: float | None = None
+    if confidence_min_raw and confidence_min_raw.strip():
+        try:
+            parsed = float(confidence_min_raw.strip())
+            if 0.0 <= parsed <= 1.0:
+                confidence_min = parsed
+        except ValueError:
+            # Malformed numeric input (e.g., "xyz") → ignore filter.
+            pass
+
     page_data = await queries.list_review_queue(
         session,
         status=status_filter,

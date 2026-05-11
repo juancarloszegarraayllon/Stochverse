@@ -287,6 +287,54 @@ class TestRouteAuthSurface:
         assert resp.status_code == 303
         assert resp.headers["location"] == "/admin/review-queue"
 
+    def test_list_view_handles_empty_confidence_min(self, app_with_admin):
+        # Regression guard for the 422 bug found during sub-PR #2
+        # production verification: typing "Soccer" in the Sport
+        # filter input and clicking Apply returned 422 because
+        # confidence_min was bound as float | None — empty form
+        # input becomes "" which FastAPI tried to parse as float
+        # and rejected.
+        #
+        # Fix (PR #123 commit A): bind confidence_min as str | None
+        # via Query(..., alias="confidence_min") and parse defensively
+        # in the handler. Empty / malformed / out-of-range all
+        # degrade to "no filter applied".
+        #
+        # Pre-fix: 422. Post-fix: 503 (DB unset in this fixture) or
+        # 200 (DB set). Anything that isn't 422 is acceptable — the
+        # point is the form doesn't reject the empty input.
+        app_with_admin.post(
+            "/admin/login",
+            data={"password": _TEST_PASSWORD},
+            follow_redirects=False,
+        )
+        resp = app_with_admin.get(
+            "/admin/review-queue?confidence_min=&sport=Soccer",
+            follow_redirects=False,
+        )
+        assert resp.status_code != 422, (
+            f"Empty confidence_min query param should not 422; got "
+            f"{resp.status_code} with body {resp.text[:200]}"
+        )
+
+    def test_list_view_ignores_malformed_confidence_min(self, app_with_admin):
+        # Same defensive parse handles "xyz" or "5.0" (out of range)
+        # gracefully — silently ignore the filter rather than 422.
+        app_with_admin.post(
+            "/admin/login",
+            data={"password": _TEST_PASSWORD},
+            follow_redirects=False,
+        )
+        for bad_value in ("xyz", "5.0", "-1.0", "1.5"):
+            resp = app_with_admin.get(
+                f"/admin/review-queue?confidence_min={bad_value}",
+                follow_redirects=False,
+            )
+            assert resp.status_code != 422, (
+                f"confidence_min={bad_value!r} returned 422; defensive "
+                f"parse should silently ignore."
+            )
+
     def test_static_css_is_served(self, app_with_admin):
         # Phase 2F.1 CSS extraction (issue #120): admin styles
         # consolidated into admin/static/admin.css, linked from
