@@ -695,14 +695,33 @@ async def approve_record(
             )
 
         # Server-side validation against the matcher's candidate sets.
-        # For non-collision rows: candidate_fixtures stores team_ids
-        # (NOT fixture_ids — see issue #121 for the rename plan), with
-        # candidate_fixtures[0] = home_team_id and [1] = away_team_id by
-        # the matcher's convention at resolver/alias_tier/matcher.py:337
-        # and resolver/fuzzy_tier/matcher.py:320.
-        raw_cf = await _load_candidate_team_ids(session, record_id)
-        default_home = raw_cf[0] if len(raw_cf) >= 1 else None
-        default_away = raw_cf[1] if len(raw_cf) >= 2 else None
+        #
+        # Defaults come from reason_detail.home_team_id / away_team_id
+        # — the matcher unconditionally populates these for both sides
+        # regardless of collision shape (resolver/alias_tier/matcher.py:216-221
+        # and the corresponding fuzzy-tier emission). Per-side, mapped
+        # by name.
+        #
+        # PR #127 fix: positional indexing into candidate_fixtures
+        # ([0]/[1]) was the prior source. That worked for pure
+        # non-collision rows ([home_id, away_id] flat list) but
+        # BROKE for partial-collision rows: when home collides and
+        # away doesn't, the matcher stores
+        # candidate_fixtures = list(home_match.colliding_team_ids)
+        # + list(away_match.colliding_team_ids), and away's
+        # colliding_team_ids is EMPTY when away has no collision.
+        # So raw_cf[1] picks the SECOND home candidate as the
+        # "away default" — operator submits Cleveland and validation
+        # rejects with "doesn't match home-side-team-2" (the actual
+        # Minnesota / Cleveland 400 traced via PR #126 DIAG logs).
+        #
+        # reason_detail.{home,away}_team_id is always present per the
+        # matcher's invariant and correctly identifies the per-side
+        # default regardless of collision shape.
+        rd_home = detail.reason_detail.get("home_team_id")
+        rd_away = detail.reason_detail.get("away_team_id")
+        default_home = uuid.UUID(rd_home) if rd_home else None
+        default_away = uuid.UUID(rd_away) if rd_away else None
         _validate_candidate_team_id(
             home_team_id,
             side_collision=detail.home_collision,
@@ -878,35 +897,17 @@ async def reject_record(
 
 
 # ── Mutation-helper internals ──────────────────────────────────
-
-
-async def _load_candidate_team_ids(
-    session: AsyncSession, record_id: uuid.UUID,
-) -> list[uuid.UUID]:
-    """Read sp.review_queue.candidate_fixtures for the record. The
-    column is misnamed (stores team_ids, NOT fixture_ids — see
-    issue #121 for the rename plan). For non-collision rows the
-    matcher stores exactly [home_team_id, away_team_id] in that
-    order; collision rows store a flat concatenation of both sides'
-    colliding team_ids.
-
-    This helper is used only by approve_record's validation path
-    for non-collision rows; collision rows validate against
-    reason_detail.colliding_*_team_ids directly.
-    """
-    sql = text(
-        "SELECT candidate_fixtures FROM sp.review_queue WHERE id = :rid"
-    ).bindparams(rid=record_id)
-    row = (await session.execute(sql)).first()
-    if row is None or not row.candidate_fixtures:
-        return []
-    out: list[uuid.UUID] = []
-    for item in row.candidate_fixtures:
-        try:
-            out.append(uuid.UUID(str(item)))
-        except (ValueError, TypeError):
-            continue
-    return out
+#
+# _load_candidate_team_ids was removed in PR #127. It read
+# sp.review_queue.candidate_fixtures and returned the flat list, but
+# its only call site (approve_record's default-team-id sourcing)
+# was misusing positional indexing [0]/[1] on a list whose shape
+# varies with collision state — the source of the Minnesota /
+# Cleveland 400. Defaults now come from
+# reason_detail.{home,away}_team_id which is name-keyed and
+# correctly identifies per-side defaults regardless of collision
+# shape. The candidate_fixtures column itself stays; only the
+# helper that mis-indexed it was removed.
 
 
 def _operator_alias_text(detail: "ReviewQueueDetail", side: str) -> str | None:

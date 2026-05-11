@@ -501,6 +501,138 @@ class TestMutationIntegration:
             "guard (WHERE status='pending') failed."
         )
 
+    # ── Regression test for the partial-collision default bug (PR #127) ──
+
+    def test_approve_partial_collision_validates_away_against_correct_default(self, app, engine):
+        """Regression for PR #127. Minnesota / Cleveland shape:
+        HOME collision (multiple home candidates), AWAY non-collision
+        (single away candidate). Pre-fix the away default came from
+        positional indexing into candidate_fixtures[1], which for
+        partial-collision rows was the SECOND home candidate (not
+        the away pick). Operator submitting the correct away
+        team_id got rejected with "doesn't match matcher's selected
+        away_team_id=<a-home-team-id>".
+
+        Post-fix defaults come from reason_detail.{home,away}_team_id
+        — name-keyed, correct regardless of collision shape.
+
+        This test seeds Minnesota's exact shape:
+          - home_collision=True with 2 colliding home candidates
+          - away_collision=False, single away team
+          - candidate_fixtures = [home_coll_1, home_coll_2]
+            (away NOT included because away_match.colliding_team_ids
+            is empty when away has no collision — this is the
+            matcher's emission convention that the prior code
+            misindexed)
+          - reason_detail.home_team_id = first colliding home
+            (matcher's best guess)
+          - reason_detail.away_team_id = the single away team
+
+        Operator submits home=second-colliding-home (their pick from
+        the radio) + away=the-actual-away-team. Should approve
+        cleanly.
+        """
+        from sqlalchemy import text
+        teams = self._two_real_teams(engine)
+        # teams[0], teams[1] = two colliding home candidates
+        # teams[2]            = single away team
+        ticker = "TEST-2F1-MUT-PARTIAL-COLL"
+        reason_detail = {
+            "sport": "Basketball",
+            "fail_reason": "alias_collision",
+            "home_canonical": "Minnesota Twins",
+            "away_canonical": "Cleveland Guardians",
+            # Matcher's best-guess per side (always populated even
+            # for collision sides).
+            "home_team_id": str(teams[0].id),
+            "away_team_id": str(teams[2].id),
+            # Collision shape: home colliding, away NOT.
+            "home_collision": True,
+            "away_collision": False,
+            "colliding_home_team_ids": [
+                str(teams[0].id), str(teams[1].id),
+            ],
+            "colliding_away_team_ids": [],
+        }
+        with engine.begin() as conn:
+            conn.execute(text(
+                """
+                INSERT INTO sp.kalshi_markets
+                  (ticker, market_type, raw_payload, last_seen_at,
+                   last_changed_at, payload_hash)
+                VALUES
+                  (:ticker, 'game',
+                   CAST(:payload AS jsonb), NOW(), NOW(), 'test-hash')
+                ON CONFLICT (ticker) DO NOTHING
+                """
+            ).bindparams(
+                ticker=ticker,
+                payload=json.dumps({
+                    "title": "Minnesota Twins vs Cleveland Guardians",
+                    "_kickoff_dt": "2026-06-15T17:10:00+00:00",
+                }),
+            ))
+            # candidate_fixtures = ONLY the home colliding ids
+            # (matcher's actual emission for partial-collision rows
+            # per resolver/alias_tier/matcher.py:247-249).
+            candidate_fixtures = [str(teams[0].id), str(teams[1].id)]
+            conn.execute(text(
+                """
+                INSERT INTO sp.review_queue
+                  (id, provider, provider_record_id, candidate_fixtures,
+                   confidence, reason_detail, provider_title,
+                   status, created_at)
+                VALUES
+                  (gen_random_uuid(), 'kalshi', :pk,
+                   CAST(:cands AS jsonb), 0.0,
+                   CAST(:rd AS jsonb), 'Minnesota Twins vs Cleveland Guardians',
+                   'pending', NOW())
+                """
+            ).bindparams(
+                pk=ticker,
+                cands=json.dumps(candidate_fixtures),
+                rd=json.dumps(reason_detail),
+            ))
+            record_id = conn.execute(text(
+                "SELECT id FROM sp.review_queue WHERE provider_record_id = :pk"
+            ).bindparams(pk=ticker)).scalar()
+
+        # Operator picks the SECOND colliding home candidate (teams[1])
+        # — not the matcher's default — and the correct away team
+        # (teams[2]). Both should validate cleanly.
+        resp = app.post(
+            f"/admin/review-queue/{record_id}/approve",
+            data={
+                "home_team_id": str(teams[1].id),
+                "away_team_id": str(teams[2].id),
+            },
+            follow_redirects=False,
+        )
+        # Pre-fix: 400 with "away_team_id=<teams[2]> doesn't match
+        # the matcher's selected away_team_id=<teams[1]>" because
+        # candidate_fixtures[1] = teams[1] was used as the away
+        # default.
+        # Post-fix: 303 (no-JS) — approval succeeds because the
+        # away default comes from reason_detail.away_team_id =
+        # teams[2], matching the operator's submission.
+        assert resp.status_code == 303, (
+            f"Got {resp.status_code} (body: {resp.text[:400]}). "
+            f"400 here means the PR #127 fix regressed — away-side "
+            f"default is being sourced from candidate_fixtures "
+            f"positional indexing instead of "
+            f"reason_detail.away_team_id."
+        )
+
+        # Verify the approve actually wrote the operator's chosen
+        # team_ids (not the matcher's defaults).
+        with engine.begin() as conn:
+            row = conn.execute(text(
+                "SELECT status, reviewed_by FROM sp.review_queue "
+                "WHERE id = :rid"
+            ).bindparams(rid=record_id)).first()
+        assert row.status == "approved"
+        assert row.reviewed_by == "operator"
+
     # ── Regression test for the autobegin 500 bug (PR #125 fix) ──
 
     def test_approve_does_not_hit_session_autobegin_conflict(self, app, engine):
