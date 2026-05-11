@@ -6,6 +6,382 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-10 / 2026-05-11
+
+### Phase 2F.0 + 2F.0.5 + 2F.1 — operator review-queue UI shipped (✅ minus anchor_failed)
+
+The operator review-queue UI is live in production. Two operators can log
+in, page through pending review_queue rows, inspect the matcher's
+reasoning, and approve or reject — with `sp.team_aliases` getting a real
+`source='operator_review'` write-back on approve. Every item under §"2F.1
+— Minimal review UI" of `PHASE_2F_DESIGN.md` rev1.1 is shipped except the
+anchor_failed surface (sub-PR #4), which is the next planned work item
+and is genuinely greenfield (no draft, no partial implementation).
+
+This was a ~36-hour stretch broken into three logical phases that landed
+back-to-back: the schema migration (2F.0), the runner write-side update
+to populate the new columns going forward (2F.0.5), and the UI itself
+(2F.1) shipped as four sub-PRs of which three are merged. Phase 2F.1
+also generated three unplanned production incidents — none catastrophic,
+all the same class of bug — which warrant their own subsection below.
+
+### What landed (PRs merged, in order)
+
+- **PR #112** — `PHASE_2F_DESIGN.md` rev1.1 (doc-only). Locked the
+  design with Q1–Q8 resolved: server-side rendering with HTMX progressive
+  enhancement; cookie-signed bcrypt auth via env vars (two seats, no
+  user table); list+detail+approve+reject in 2F.1; anchor_failed
+  surface in 2F.1 OR hard-sequenced 2F.2 (Q6 revised); "(collision)"
+  cosmetic for `confidence=0` (Q8). The design predates implementation
+  to keep scope-creep audits cheap.
+
+- **PR #114** — Phase 2F.0 schema migration
+  (`20260510_1800_a1c4f9e8b2d7_phase_2f0_review_queue_columns.py`).
+  Three columns added to `sp.review_queue`: `reason_detail` JSONB
+  (snapshot of `MatchResult.reason_detail` at insertion — denormalized
+  so the UI reads a single table per page; staleness is acceptable
+  because the matcher decision was correct at insert and that's what
+  the operator is reviewing), `provider_title` TEXT (snapshot of
+  Kalshi's `raw_payload->>'title'` or FL's synthesized `"home vs
+  away"`; saves per-record JSONB parsing on every page load), and
+  `rejection_count` INTEGER NOT NULL DEFAULT 0 (guardrail against
+  operator burnout cycles — 2F.1 surfaces it in the list view; 2F.X
+  adds the unreject button + runner-side skip logic). Plus a partial
+  index `ix_review_queue_pending_confidence` on `(status, confidence
+  DESC, created_at) WHERE status='pending'` to cover the list view's
+  default query without sort-at-query-time. Latency budget: <500 ms
+  p95. Existing 2,263 pending rows backfilled with NULL for
+  `reason_detail`/`provider_title` (UI falls back to provider-table
+  JOIN) and 0 for `rejection_count` (server-side default).
+
+- **PR #115** — Phase 2F.0.5 runner write-side.
+  `scripts/run_resolver_pass.py` now populates `reason_detail` and
+  `provider_title` on every `INSERT INTO sp.review_queue ... ON
+  CONFLICT DO UPDATE`. Kalshi branch reads `raw_payload['title']`;
+  FL branch synthesizes from `HOME_NAME` + `AWAY_NAME`. Without
+  this, new 2F.0-shape rows would have NULL on the new columns and
+  force the UI's fallback path on 100% of records — the migration
+  is online but useless until the runner backfills it forward.
+  Shipped same day as 2F.0 to keep that gap to a single overnight
+  cron cycle.
+
+- **PR #117** — Migration-bearing PR checklist + PR template. Added
+  `DEPLOYMENT.md → Migration-bearing PR checklist` (Railway does NOT
+  auto-run alembic on deploy; migrations are manual) and
+  `.github/PULL_REQUEST_TEMPLATE.md` with explicit checkboxes for
+  forward+downgrade roundtrip, `alembic current` verification, and
+  operator action-after-merge. Process change, not feature work —
+  but motivated by 2F.0 being the first migration since 2C and a
+  clean template existed only in DEPLOYMENT.md, not at PR-creation
+  time.
+
+- **PR #118** — Phase 2F.1 sub-PR #1: admin auth scaffolding.
+  bcrypt password hashing, itsdangerous signed cookies, two
+  `ADMIN_USER_*` / `ADMIN_PASS_HASH_*` env-var seats,
+  `require_operator` FastAPI dependency. `GET /admin/` returns 503
+  (not 500) when env vars unset — explicit "not configured" instead
+  of leaking a ConfigurationError stacktrace.
+
+- **PR #119** — Phase 2F.1 sub-PR #2: read-only list + detail views.
+  10-column list view (Provider, Ticker, Title, Sport, Kickoff,
+  Confidence, Tier, Candidates, Status, Created) with
+  provider/tier/confidence_min filters and offset pagination.
+  Detail view with the design's three panels (raw payload, parsed
+  fields, matcher decision). `_format_confidence` renders the
+  "(collision)" cosmetic for `confidence=0` per Q8. Vendored
+  htmx-1.9.10 from raw.githubusercontent.com (47,755 bytes) to
+  avoid CDN dependency. The list view shipped with 10 columns
+  rather than the design's 9 — Status was added at operator
+  request during PR review; documented deviation.
+
+- **PR #122** — CSS extraction (closes issue #120). Consolidated
+  inline `<style>` blocks from templates into
+  `admin/static/admin.css`. Pure refactor, no behavior change.
+  Filed pre-mutations to keep the approve/reject diff focused.
+
+- **PR #123** — Phase 2F.1 sub-PR #3: approve / reject mutations.
+  `_validate_candidate_team_id` enforces server-side that the
+  operator-selected team_id is in the candidate set (Python
+  pre-flight + SQL `WHERE status='pending'` + rowcount==0 raise —
+  three-layer idempotency). Approve writes to `sp.team_aliases`
+  with `source='operator_review'` and resolves the fixture; reject
+  increments `rejection_count`. Two commits piggy-backed on the
+  main diff:
+    - **Commit A** — `confidence_min` empty-string filter returns
+      422. FastAPI's `float | None` binder treats `""` as a parse
+      error; fixed by binding as `str | None` and parsing
+      defensively. Filter-UX bug surfaced during local smoke; not
+      on the design.
+    - **Commit B** — `next_record_id` referenced in the decision
+      template but never computed. Added
+      `find_next_pending_record_id()` helper and threaded it
+      through approve/reject/detail handlers so the "Next record"
+      link actually works. Filter-context limitation (next pending
+      ignores current filter set) deferred to 2F.X.
+
+### Production issues encountered during 2F.1 rollout
+
+Three production bugs in three days, all surfacing in PR #123's
+approve path. None catastrophic — each was operator-visible (500 on
+click, recoverable by reload) and patched within the hour. But they
+all sit in the same class: **implicit data contracts at module
+boundaries**. Worth naming the pattern so the next phase catches it
+earlier.
+
+- **PR #125 — `approve_record` session autobegin conflict.** First
+  approve-click in production returned 500. SQLAlchemy 2.0
+  autobegin: the pre-flight reads in `approve_record` opened an
+  implicit transaction; the explicit `async with session.begin():`
+  block then raised `InvalidRequestError: A transaction is already
+  begun on this Session`. The runner side (PR #108) had set the
+  right pattern — reads inside the same `begin()` block — but
+  `approve_record` was written without referencing that convention.
+  Fix: move all reads inside `session.begin()`. Local repro via
+  `apt install postgresql` + `pg_ctlcluster 16 main start` for
+  integration tests; that local harness is the new standard for
+  any DB-transaction PR going forward. Added
+  `test_approve_does_not_hit_session_autobegin_conflict` as a
+  regression guard. While fixing, also caught the HTMX fragment
+  template referencing `detail.*` after the mutation but the
+  handler not re-loading `detail` post-commit — fixed in the same
+  PR.
+
+- **PR #126 / #127 / #128 — Minnesota vs Cleveland partial-collision
+  500.** Bradley vs Campbell approved cleanly (alias-tier,
+  non-collision shape). Minnesota vs Cleveland returned 500 on
+  every approval attempt. `candidate_fixtures` JSONB column stores
+  team_ids in a layout that depends on the matcher branch that
+  wrote it: non-collision → `[home_id, away_id]`; full-collision →
+  `[home_cands..., away_cands...]`; **partial-collision (one side
+  colliding, one not) → `[colliding_side_cands..., empty]`** — so
+  positional `[1]` picked the second HOME candidate instead of the
+  away default. `_validate_candidate_team_id` correctly rejected
+  it as out-of-set; the 500 was the validator working as designed
+  against an upstream bug.
+
+  Diagnostic cycle ran across three PRs over ~90 minutes:
+    - **PR #126** — instrumented `approve_record` raises with the
+      offending team_ids and the validator's expected set. Shipped
+      with explicit "REVERT AFTER USE" in the commit message and
+      title. Instrumentation-first because the bug was data-shape
+      dependent and not reproducible from the operator report
+      alone; needed the actual team_id values from the failing
+      row to confirm the hypothesis.
+    - **PR #127** — DIAG output identified the positional-indexing
+      mismatch within minutes. Fix sourced defaults from
+      `reason_detail.{home,away}_team_id` (name-keyed, correct for
+      all collision shapes) instead of positional `raw_cf[0]/[1]`.
+      Removed the now-unused `_load_candidate_team_ids` helper.
+      Added `test_approve_partial_collision_validates_away_against_correct_default`
+      as a regression guard.
+    - **PR #128** — revert PR #126's instrumentation.
+
+  The positional-indexing bug was wrong from inception: PR #123
+  read `candidate_fixtures` under the non-collision contract
+  assumption, but the column ships *three* contracts depending on
+  the writer branch, with no schema-level distinction. The
+  Bradley row tested cleanly because it was non-collision shape;
+  partial-collision rows are a non-trivial fraction of pending
+  volume but didn't get exercised until Minnesota hit production.
+  Filed as issue #121 (expanded scope: naming AND typing).
+
+  **PR ordering incident (subset of the above).** The revert PR
+  (#128) merged at 20:43 while the fix PR (#127) was still in
+  review; production stayed broken between 20:43 and 20:54.
+  Postmortem: revert PRs (and ANY sequencing-dependent PR pair)
+  need (a) blocking language in the title, (b) a concrete
+  production-deliverable verification step in the PR body (DB row,
+  response payload — not just HTTP status), and (c) branch
+  protection enforcement so the rule doesn't depend on humans
+  being available. Filed as issue #129. This matters as a class of
+  bug, not a single mistake: the same failure mode applies to
+  migration+migration-dependent PR pairs, refactor PRs that split
+  a function before the call-site update lands, and any case
+  where merging in the wrong order leaves production in an
+  inconsistent state for the gap between merges.
+
+### Day-0 production shape
+
+Phase 2F is a UI shipment, not a runner change, so there's no clean
+"day-0 cron run" the way 2D.3 had. The closest comparable
+measurement is the steady-state shape of the queue the UI now
+reads. From the most recent `sp.resolver_runs` row at time of
+writing:
+
+```
+sp.review_queue depth:       ~2,270 pending (within 2C.1's
+                             1,500-row alert headroom because
+                             2C.1's threshold applies to
+                             alias-tier specifically; combined
+                             2C+2D+legacy depth is the relevant
+                             ceiling)
+new rows / cron:             ~310 (combined alias + fuzzy
+                             review_queue from the last
+                             2D.3-shape resolver_runs row)
+reason_detail populated:     100% of post-PR-#115 inserts;
+                             ~0% of pre-2F.0 inserts (fallback
+                             path active for the existing 2,263
+                             rows)
+provider_title populated:    same as reason_detail
+operator approves / cron:    N/A — operator-driven, not
+                             cron-driven; ramp will be measured
+                             at day-7
+```
+
+Two production approve cycles validated against the four-table
+atomic-transaction shape (write to `sp.review_queue` setting
+`status='decided'` + `decision_team_id`; write to `sp.team_aliases`
+with `source='operator_review'`; write to `sp.fixtures` resolving
+`provider_record_id` → `fixture_id`; write to `sp.resolver_runs`
+extra-counter increment):
+
+- **Bradley vs Campbell** — alias-tier, non-collision shape.
+  Approved cleanly post-PR #125. Verified all four table writes
+  committed atomically; idempotent on retry; HTMX fragment swap
+  rendered the decided-state panel without a full page reload.
+
+- **Minnesota vs Cleveland** — collision-tier, partial-collision
+  shape (home colliding, away non-colliding). First attempt
+  500'd pre-PR #127; approved cleanly post-PR #127 + post-PR
+  #128. Same four-table verification.
+
+Sub-PR #4 (anchor_failed read-only surface) is the next planned
+work item. Anchor_failed records account for ~170/cron of FL
+long-tail volume and currently have no operator surface — they
+sit in `sp.resolver_runs.extra.anchor_failed_records` JSON but
+never reach `sp.review_queue`. The 2F.1 design (Q6 revised) put
+the read-only listing in 2F.1 or hard-sequenced 2F.2 depending on
+scope; with 2F.1 shipping clean on review_queue, anchor_failed is
+the natural next sub-PR.
+
+### Tracked deviations from PHASE_2F_DESIGN.md rev1.1
+
+- **List view ships 10 columns, not 9.** Added Status column at
+  operator request during PR #119 review; lets operators see
+  "decided" rows when filters are off without clicking through.
+  Documented deviation, not a bug.
+- **CSS extraction (PR #122) wasn't on the design doc.** Closed
+  issue #120 (inline styles). Pure refactor; consistent with the
+  design's spirit.
+- **Commit A on PR #123** (`confidence_min` empty-string fix) —
+  filter-UX bug, not a design item.
+- **Commit B on PR #123** (`next_record_id` thread-through) — the
+  design referenced the "Next record" link but the implementation
+  was template-only; needed handler-side wiring.
+- **Three production hotfixes** (#125 / #127, with #126/#128 as
+  the diagnostic cycle) — see the "Production issues" subsection.
+
+### Open tech-debt issues (`tech-debt` label, see GitHub)
+
+- **Issue #105** — `test_unpaired_kalshi_only_fixture_appears`
+  date-dependent; still deselected from CI. Fix: `freezegun` /
+  `time-machine`. Carried from 2D.3.
+- **Issue #109** — per-record `session.begin()` adds ~83ms/record.
+  Still comfortably below cron-stagger budget; carried from 2D.3.
+- **Issue #120** — closed by PR #122 (CSS extraction).
+- **Issue #121** — `sp.review_queue.candidate_fixtures` misleading
+  name AND implicit shape contract. Scope expanded post-#127 to
+  cover both the naming and the per-side layout problems (same
+  root cause). Recommended fix: rename + reshape to
+  `candidate_team_ids_by_side` JSONB object with explicit
+  `{home: [...], away: [...]}` shape, scheduled after sub-PR #4
+  lands.
+- **Issue #124** — `test_approve_double_click_is_idempotent`
+  skipped due to TestClient+asyncpg event-loop conflict ("Future
+  attached to a different loop" on sequential POSTs in one test).
+  Idempotency still covered by
+  `test_approve_concurrent_decision_returns_already_decided`.
+  Migration to `httpx.AsyncClient` tracked.
+- **Issue #129** — branch-protection-enforced verification gate
+  for sequencing-dependent PR pairs. Generalized from the
+  #127/#128 ordering incident: applies to ANY PR pair where
+  merge order matters (revert+fix, migration+migration-dependent,
+  refactor that splits a function before the call-site update
+  lands, etc.). Tooling task: GitHub branch-protection required
+  status check that parses PR body for a "blocks: #N" header and
+  refuses merge if the blocker isn't both merged AND has a
+  verification artifact (DB query result, response payload
+  screenshot) posted as a comment.
+
+### Engineering observation: implicit data contracts at module boundaries
+
+Three production bugs in three days — #125, #127, and the Commit
+A/B fixes on #123 — share a class. Each was a contract between two
+modules that wasn't enforced by types, schemas, or tests, only by
+convention documented elsewhere (or not at all):
+
+- **#125** (session autobegin) — the contract "reads must be
+  inside `session.begin()`" exists in PR #108's commit message and
+  in SQLAlchemy 2.0 docs. Not enforced by SQLAlchemy at write
+  time; the error surfaces at the second `begin()` call far from
+  the cause. The runner had the right pattern; `approve_record`
+  reinvented the wrong one because the convention wasn't in code.
+
+- **#127** (positional indexing on partial-collision) — the
+  contract "`candidate_fixtures[0]` is home, `[1]` is away" holds
+  for non-collision rows but not for partial-collision. Two
+  different layouts in the same column. No schema annotation; no
+  test that exercised partial-collision shape pre-production. The
+  bug was wrong from inception — PR #123's reviewer (Claude) and
+  the human reviewer both signed off because the documented
+  contract in the inline comment matched the non-collision case,
+  which was the only case the reviewer's mental model held.
+
+- **Commit A on #123** (`confidence_min` empty-string) —
+  FastAPI's query-binder contract for `float | None` doesn't say
+  how `""` is treated; reasonable people would expect either
+  "treat as None" or "422". The actual answer is 422, surfaced
+  only when the form submitted with an empty filter.
+
+Pattern name: **implicit boundary contracts**. Mitigation worth
+testing in 2F.X / 2G:
+
+1. When module A's output feeds module B's positional/keyed read,
+   require either (a) a typed dataclass at the boundary, or (b) an
+   integration test that exercises every emission shape A
+   produces.
+2. Code review checklist item: "If this PR reads a JSONB/dict
+   from the DB, what shapes does the writer emit, and does at
+   least one test exercise each shape?"
+3. `_load_candidate_team_ids` removal in PR #127 is the right
+   instinct — when a helper exists only to paper over an implicit
+   contract, the contract itself is the bug.
+
+The 2F.1 incidents were all <1-hour fixes because the validators
+caught the bad state — `_validate_candidate_team_id` rejecting the
+wrong team_id is exactly the safety net you want. But the *cost*
+of finding each one in production is real: PR turnaround, operator
+trust, debugger time. Catching them at boundaries before they ship
+is the leverage.
+
+### Notes for the next session's first 5 minutes
+
+- Sub-PR #4 (anchor_failed read-only surface) is the next planned
+  work. Greenfield; no draft branch; references in
+  `admin/__init__.py` and `admin/router.py` are forward-looking
+  comments only.
+- Operator-facing list view filters anchor_failed by
+  `tier='anchor'` + `status='pending'`, but the runner today
+  doesn't write anchor_failed records to `review_queue` — they
+  live in `sp.resolver_runs.extra`. Sub-PR #4 needs either (a) a
+  separate read path that joins resolver_runs JSON, or (b) a
+  2F.0-equivalent schema change to surface them in review_queue
+  with a new tier value. PHASE_2F_DESIGN.md leaves this open;
+  check rev1.1 §"2F.1 — Minimal review UI" + Q6 before
+  committing.
+- Day-7 measurement window for 2F.1 lands ~2026-05-18. Same shape
+  as 2B/2C/2D.4: query `sp.resolver_runs` for the week, compare
+  review-queue depth to operator throughput, decide on 2F.X
+  prioritization (unreject button, rejection_count skip logic,
+  anchor_failed if not already shipped).
+- Issue #129 (branch-protection enforcement) is tooling, not
+  feature — schedule alongside any other GitHub-Actions work.
+- `PROJECT_STATE.md` is now current through 2F.1; the next entry
+  should pick up at sub-PR #4 or the day-7 review, whichever
+  lands first.
+
+---
+
 ## Session — 2026-05-09
 
 ### Phase 2D.3 shipped + 2D.3.1 hotfix verified in production (✅)
