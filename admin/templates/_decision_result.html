@@ -1,0 +1,78 @@
+{# Decided-state shape of the decision panel. Rendered in two
+   contexts per Q4:
+     - As an HTMX fragment after approve/reject (replaces
+       #decision-panel in-place — operator stays on the detail view).
+     - As part of the full detail page when the row is already
+       decided (status != 'pending').
+
+   When `decision` is set, the panel came from the HTMX path —
+   show the just-decided action prominently. When `decision` is
+   not set (full-page render of a previously-decided row), show
+   the persisted status from detail.row.status.
+#}
+
+<div class="panel" id="decision-panel">
+  <h3>Decision</h3>
+
+  {% set action = decision.action if decision is defined else None %}
+  {% set status_value = action or detail.row.status %}
+
+  {% if status_value == "approved" %}
+    <div class="decision-banner approved">
+      <strong>Approved.</strong>
+      {% if decision is defined and decision.fixture_id %}
+        Linked to fixture
+        <span class="ticker">{{ decision.fixture_id }}</span>{%- if decision.fixture_created_new %} (newly created){%- endif -%}.
+      {% else %}
+        {# Full-page render: fixture link lives on the provider table,
+           not displayed in the panel. Operator can navigate to the
+           provider's record via the ticker. #}
+        Provider record's fixture_id is set.
+      {% endif %}
+    </div>
+  {% elif status_value == "rejected" %}
+    <div class="decision-banner rejected">
+      <strong>Rejected.</strong>
+      Status set to <code>rejected</code>; provider record stays
+      <code>fixture_id IS NULL</code>. The runner's WHERE
+      status='pending' guard from PR #108 prevents re-surfacing this
+      record on the next cron pass.
+    </div>
+  {% elif status_value == "already_decided" %}
+    <div class="decision-banner muted-banner">
+      <strong>Already decided.</strong>
+      This record was decided in a prior session (status:
+      <code>{{ decision.previous_status }}</code>). Your click was a
+      no-op — idempotency guard prevented double-write.
+    </div>
+  {% endif %}
+
+  {% if detail.row.reviewed_by or detail.row.reviewed_at %}
+    <dl class="kv" style="margin-top: 0.6rem;">
+      {% if detail.row.reviewed_by %}
+        <dt>Reviewed by</dt>
+        <dd>{{ detail.row.reviewed_by }}</dd>
+      {% endif %}
+      {% if detail.row.reviewed_at %}
+        <dt>Decided at</dt>
+        <dd>{{ detail.row.reviewed_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>
+      {% endif %}
+      {% if detail.row.rejection_count and detail.row.rejection_count > 0 %}
+        <dt>Rejection count</dt>
+        <dd>{{ detail.row.rejection_count }}</dd>
+      {% endif %}
+    </dl>
+  {% endif %}
+
+  <p class="next-record-row" style="margin-top: 1rem;">
+    <a class="button" href="/admin/review-queue">&larr; Back to queue</a>
+    {# Q4 refinement: "Go to next record" link. For the HTMX path
+       the operator stays oriented (still sees the decision context)
+       and clicks through manually rather than auto-advancing. #}
+    {% if next_record_id is defined and next_record_id %}
+      <a class="button primary" href="/admin/review-queue/{{ next_record_id }}">Next record &rarr;</a>
+    {% else %}
+      <span class="muted">(no next record — drained for current filter)</span>
+    {% endif %}
+  </p>
+</div>

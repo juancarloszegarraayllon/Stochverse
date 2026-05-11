@@ -508,3 +508,430 @@ async def get_review_queue_record(
         candidate_team_names=candidate_names,
         fail_reason=reason_detail.get("fail_reason"),
     )
+
+
+# ── Navigation helper for "Go to next record" link ────────────
+
+
+async def find_next_pending_record_id(
+    session: AsyncSession,
+) -> uuid.UUID | None:
+    """Pick the highest-confidence pending review_queue record for
+    the "Go to next record" link in the decision-result panel.
+
+    Sort matches the list view's default (confidence DESC,
+    created_at DESC). Returns None when the queue is drained —
+    template falls through to "(no next record — drained for
+    current filter)".
+
+    Filter-context limitation (deferred to 2F.X): this ignores
+    any sport/provider/confidence_min filters the operator had in
+    the list view URL. The "next" record is always the queue-wide
+    top by confidence. If the operator wants filter continuity
+    they use the "Back to queue" link to return to their filter
+    URL via browser history. Surfaced in the template's tooltip /
+    aria-label if/when the limitation becomes operationally
+    confusing.
+
+    Uses the partial index ix_review_queue_pending_confidence
+    (Phase 2F.0 migration) — single index scan, no sort. The
+    just-decided record is excluded naturally because its status
+    is no longer 'pending' by the time this query runs.
+    """
+    sql = text(
+        """
+        SELECT id FROM sp.review_queue
+        WHERE status = 'pending'
+        ORDER BY confidence DESC, created_at DESC
+        LIMIT 1
+        """
+    )
+    return (await session.execute(sql)).scalar()
+
+
+# ── Mutation helpers (Phase 2F.1 sub-PR #3) ────────────────────
+
+
+# Source value for sp.team_aliases written by the operator review UI.
+# Distinct from 'alias_tier' / 'fuzzy_tier' (runner write-back) and
+# 'operator_2d5' (2D.5 CLI, future). Day-7 queries split per-source
+# attribution.
+TEAM_ALIASES_SOURCE_OPERATOR_REVIEW = "operator_review"
+
+
+class ApprovalError(Exception):
+    """Raised by approve_record when the operator's submission can't
+    be honored. The route handler converts this to an HTTP 400 with
+    the .message rendered for the operator.
+    """
+    def __init__(self, message: str, *, status_code: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+def _validate_candidate_team_id(
+    submitted: uuid.UUID,
+    *,
+    side_collision: bool,
+    side_colliding_ids: list[uuid.UUID],
+    side_default_id: uuid.UUID | None,
+    side_label: str,
+) -> None:
+    """Server-side validation that the operator-submitted team_id
+    matches the candidate set the matcher surfaced. Raises
+    ApprovalError on mismatch.
+
+    Per design: never trust client-submitted IDs. The operator MUST
+    pick from the matcher's candidates — arbitrary team_ids would
+    let an attacker (or accidental URL tampering) link a provider
+    record to any team they want.
+    """
+    if side_collision:
+        if submitted not in side_colliding_ids:
+            raise ApprovalError(
+                f"{side_label}_team_id={submitted} is not in the "
+                f"matcher's {side_label} collision set "
+                f"({len(side_colliding_ids)} candidates). "
+                "Refusing to link to an arbitrary team."
+            )
+    else:
+        # Non-collision: matcher picked a specific team. Operator
+        # submission must match it.
+        if side_default_id is not None and submitted != side_default_id:
+            raise ApprovalError(
+                f"{side_label}_team_id={submitted} doesn't match the "
+                f"matcher's selected {side_label}_team_id={side_default_id}. "
+                "Non-collision records have a single candidate; "
+                "operator can approve as-is or reject."
+            )
+
+
+async def approve_record(
+    session: AsyncSession,
+    *,
+    record_id: uuid.UUID,
+    operator: str,
+    home_team_id: uuid.UUID,
+    away_team_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Atomic approve flow per design Q3:
+      1. Validate submitted team_ids against the matcher's candidate sets.
+      2. ensure_fixture(home, away, kickoff_at) — find-or-create.
+      3. UPDATE provider table SET fixture_id.
+      4. UPDATE review_queue SET status='approved' + audit fields
+         (idempotent via WHERE status='pending' per Q2).
+      5. INSERT sp.team_aliases (source='operator_review') for both
+         sides — same write-back semantics as the runner's auto-apply
+         paths, just attributed to the operator's decision.
+
+    All five steps in one `async with session.begin()` block. Partial
+    failure → full rollback. Per-record txn isolation matches the
+    runner's PR #108 pattern.
+
+    On idempotency: if the row is already approved/rejected (status
+    != 'pending'), the function returns the current state without
+    re-writing — `decided_at` and `reviewed_by` stay at the first
+    decision's values. Double-click protection.
+
+    Returns a dict shape the route handler renders:
+      {
+        "action": "approved" | "already_decided",
+        "record_id": UUID, "fixture_id": UUID,
+        "fixture_created_new": bool, "previous_status": str,
+      }
+
+    Raises ApprovalError for:
+      - record_id not found (404 in caller)
+      - submitted team_id not in candidate set
+      - kickoff_at unavailable from provider raw_payload
+        (per Q1 edge-case refusal)
+    """
+    from resolver.fixtures import ensure_fixture
+
+    # Pre-flight: load the record + its candidate context.
+    detail = await get_review_queue_record(session, record_id)
+    if detail is None:
+        raise ApprovalError(
+            f"review_queue record {record_id} not found", status_code=404,
+        )
+
+    # Idempotency check (Q2). If already decided, return the current
+    # state without any DB writes — operator's double-click is a
+    # no-op, not an error.
+    if detail.row.status != "pending":
+        return {
+            "action": "already_decided",
+            "record_id": record_id,
+            "fixture_id": None,
+            "fixture_created_new": False,
+            "previous_status": detail.row.status,
+        }
+
+    # Q1 edge case: kickoff_at must come from the provider table
+    # (kickoff isn't stored on review_queue). Refuse if neither
+    # provider table has the row OR the row has no kickoff.
+    if detail.row.kickoff_at is None:
+        raise ApprovalError(
+            "Fixture creation requires kickoff data, but the provider "
+            f"record ({detail.row.provider}/{detail.row.provider_record_id}) "
+            "doesn't carry a kickoff timestamp. File a manual ticket "
+            "or wait for the provider to update its data."
+        )
+
+    # Server-side validation against the matcher's candidate sets.
+    # For non-collision rows: candidate_fixtures stores team_ids
+    # (NOT fixture_ids — see issue #121 for the rename plan), with
+    # candidate_fixtures[0] = home_team_id and [1] = away_team_id by
+    # the matcher's convention at resolver/alias_tier/matcher.py:337
+    # and resolver/fuzzy_tier/matcher.py:320.
+    raw_cf = await _load_candidate_team_ids(session, record_id)
+    default_home = raw_cf[0] if len(raw_cf) >= 1 else None
+    default_away = raw_cf[1] if len(raw_cf) >= 2 else None
+    _validate_candidate_team_id(
+        home_team_id,
+        side_collision=detail.home_collision,
+        side_colliding_ids=detail.colliding_home_team_ids,
+        side_default_id=default_home,
+        side_label="home",
+    )
+    _validate_candidate_team_id(
+        away_team_id,
+        side_collision=detail.away_collision,
+        side_colliding_ids=detail.colliding_away_team_ids,
+        side_default_id=default_away,
+        side_label="away",
+    )
+
+    # Atomic write block (Q3). Single transaction wraps all four
+    # writes — partial failure → full rollback.
+    async with session.begin():
+        # Step 1: ensure_fixture (find-or-create). Per Q1 (a): operator
+        # authority overrides the matcher's no-auto-create rule.
+        fixture_id, created_new = await ensure_fixture(
+            session,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            kickoff_at=detail.row.kickoff_at,
+        )
+
+        # Step 2: UPDATE provider table fixture_id.
+        # Provider-aware dispatch — same pattern as the runner.
+        if detail.row.provider == "kalshi":
+            provider_update_sql = text(
+                "UPDATE sp.kalshi_markets SET fixture_id = :fid "
+                "WHERE ticker = :pk"
+            )
+        else:  # fl
+            provider_update_sql = text(
+                "UPDATE sp.fl_events SET fixture_id = :fid "
+                "WHERE fl_event_id = :pk"
+            )
+        await session.execute(provider_update_sql.bindparams(
+            fid=fixture_id, pk=detail.row.provider_record_id,
+        ))
+
+        # Step 3: UPDATE review_queue. WHERE status='pending' is the
+        # idempotency guard (Q2) — if a concurrent approve already
+        # ran, this is a no-op rather than a double-write.
+        # rowcount tells us whether THIS call won the race.
+        update_result = await session.execute(text(
+            """
+            UPDATE sp.review_queue
+            SET status = 'approved',
+                reviewed_by = :operator,
+                reviewed_at = NOW()
+            WHERE id = :record_id AND status = 'pending'
+            """
+        ).bindparams(operator=operator, record_id=record_id))
+
+        if update_result.rowcount == 0:
+            # Lost the race to a concurrent approve. The earlier
+            # decision stands; this transaction's writes (above)
+            # roll back at commit time? Actually no — they don't,
+            # because session.begin() commits on clean exit.
+            #
+            # To prevent partial-state writes, raise so the
+            # transaction rolls back. The caller catches and
+            # returns the current state.
+            raise ApprovalError(
+                "Concurrent decision detected — another operator "
+                "session approved or rejected this record while "
+                "your form was open. Reload to see current state.",
+                status_code=409,  # Conflict
+            )
+
+        # Step 4: INSERT sp.team_aliases for both sides (write-back).
+        # Same shape as the runner's auto-apply paths in
+        # scripts/run_resolver_pass.py — ON CONFLICT DO NOTHING per
+        # design D.5 (confidence is provenance, not a per-match score).
+        for tid, alias_text in (
+            (home_team_id, _operator_alias_text(detail, "home")),
+            (away_team_id, _operator_alias_text(detail, "away")),
+        ):
+            if alias_text:
+                await session.execute(text(
+                    """
+                    INSERT INTO sp.team_aliases
+                      (id, team_id, alias, alias_normalized,
+                       source, confidence, created_at)
+                    VALUES
+                      (gen_random_uuid(), :tid, :alias,
+                       :alias_norm, :source, 1.0, NOW())
+                    ON CONFLICT (alias_normalized, source) DO NOTHING
+                    """
+                ).bindparams(
+                    tid=tid,
+                    alias=alias_text,
+                    alias_norm=_normalize_alias(alias_text),
+                    source=TEAM_ALIASES_SOURCE_OPERATOR_REVIEW,
+                ))
+
+    return {
+        "action": "approved",
+        "record_id": record_id,
+        "fixture_id": fixture_id,
+        "fixture_created_new": created_new,
+        "previous_status": "pending",
+    }
+
+
+async def reject_record(
+    session: AsyncSession,
+    *,
+    record_id: uuid.UUID,
+    operator: str,
+) -> dict[str, Any]:
+    """Atomic reject flow per Q4 design semantics:
+
+      1. UPDATE review_queue SET status='rejected',
+         reviewed_by, reviewed_at, rejection_count += 1
+         WHERE status='pending'  (idempotency guard Q2).
+
+    Single statement, idempotent. Re-clicking reject on an already-
+    rejected row is a no-op (rowcount=0 path returns
+    action='already_decided').
+
+    Per design Q4 revised: rejection is operator-sticky. The next
+    cron's runner picks the record up again but the PR #108 INSERT
+    ON CONFLICT DO UPDATE WHERE status='pending' guard prevents
+    re-surfacing. 2F.X adds the unreject button + the
+    rejection_count >= 3 runner-side guard; this PR just persists
+    the count.
+
+    Returns:
+      {
+        "action": "rejected" | "already_decided",
+        "record_id": UUID,
+        "previous_status": str,
+      }
+    """
+    # Pre-flight: load current state for idempotency check + audit.
+    detail = await get_review_queue_record(session, record_id)
+    if detail is None:
+        raise ApprovalError(
+            f"review_queue record {record_id} not found", status_code=404,
+        )
+    if detail.row.status != "pending":
+        return {
+            "action": "already_decided",
+            "record_id": record_id,
+            "previous_status": detail.row.status,
+        }
+
+    async with session.begin():
+        result = await session.execute(text(
+            """
+            UPDATE sp.review_queue
+            SET status = 'rejected',
+                reviewed_by = :operator,
+                reviewed_at = NOW(),
+                rejection_count = rejection_count + 1
+            WHERE id = :record_id AND status = 'pending'
+            """
+        ).bindparams(operator=operator, record_id=record_id))
+
+        if result.rowcount == 0:
+            raise ApprovalError(
+                "Concurrent decision detected — another operator "
+                "session decided this record while your form was open.",
+                status_code=409,
+            )
+
+    return {
+        "action": "rejected",
+        "record_id": record_id,
+        "previous_status": "pending",
+    }
+
+
+# ── Mutation-helper internals ──────────────────────────────────
+
+
+async def _load_candidate_team_ids(
+    session: AsyncSession, record_id: uuid.UUID,
+) -> list[uuid.UUID]:
+    """Read sp.review_queue.candidate_fixtures for the record. The
+    column is misnamed (stores team_ids, NOT fixture_ids — see
+    issue #121 for the rename plan). For non-collision rows the
+    matcher stores exactly [home_team_id, away_team_id] in that
+    order; collision rows store a flat concatenation of both sides'
+    colliding team_ids.
+
+    This helper is used only by approve_record's validation path
+    for non-collision rows; collision rows validate against
+    reason_detail.colliding_*_team_ids directly.
+    """
+    sql = text(
+        "SELECT candidate_fixtures FROM sp.review_queue WHERE id = :rid"
+    ).bindparams(rid=record_id)
+    row = (await session.execute(sql)).first()
+    if row is None or not row.candidate_fixtures:
+        return []
+    out: list[uuid.UUID] = []
+    for item in row.candidate_fixtures:
+        try:
+            out.append(uuid.UUID(str(item)))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def _operator_alias_text(detail: "ReviewQueueDetail", side: str) -> str | None:
+    """Choose the alias text for the operator's team_aliases write-back.
+
+    Per the runner's existing alias-tier write-back convention
+    (scripts/run_resolver_pass.py:434+), the alias stored is the
+    provider's raw team string ("Bayern Munich"). The admin handler
+    doesn't have the matcher's `signal` object to read
+    `signal.home_team_candidates[0].raw` directly — so we use
+    `reason_detail.home_canonical` / `away_canonical`, which is the
+    matcher's interpretation of the provider's raw name.
+
+    Functional equivalence: alias_normalized (the ON CONFLICT key)
+    strips case + accents identically regardless of which form we
+    write. Operators browsing sp.team_aliases see the matcher's
+    canonical form rather than the literal provider raw, which is
+    slightly less faithful but acceptable for the operator-review
+    write-back source.
+
+    Returns None if reason_detail doesn't carry the canonical field —
+    in that case the alias write-back is skipped for that side
+    (operator-approve still succeeds; the strict tier compounding
+    just doesn't fire for this record on the next cron).
+    """
+    key = "home_canonical" if side == "home" else "away_canonical"
+    text_value = detail.reason_detail.get(key)
+    if not text_value:
+        return None
+    text_value = str(text_value).strip()
+    return text_value or None
+
+
+def _normalize_alias(text_value: str) -> str:
+    """Match the same alias_normalized convention the runner uses
+    (resolver._normalize.normalize_name). Imported lazily so the
+    queries module stays import-light at admin module load.
+    """
+    from resolver._normalize import normalize_name
+    return normalize_name(text_value)

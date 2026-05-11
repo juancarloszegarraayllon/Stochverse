@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pathlib
 import uuid as uuid_pkg
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
@@ -139,7 +139,13 @@ async def review_queue_list(
     status_filter: str = Query("pending", alias="status"),
     provider: str | None = Query(None),
     sport: str | None = Query(None),
-    confidence_min: float | None = Query(None, ge=0.0, le=1.0),
+    # confidence_min bound as str | None (not float | None) because
+    # the filter form submits an empty string when the input is
+    # blank — FastAPI's float binder treats "" as a parse error and
+    # returns 422, kicking the operator out of their flow. Parse to
+    # float manually below with empty-string and out-of-range
+    # fallbacks to None (= no filter applied).
+    confidence_min_raw: str | None = Query(None, alias="confidence_min"),
 ):
     """Paginated review-queue list. Default sort confidence DESC,
     default status='pending' (uses the partial index from 2F.0).
@@ -149,6 +155,20 @@ async def review_queue_list(
     operators sometimes paste arbitrary status values from query
     logs and a hard error mid-debug isn't helpful.
     """
+    # Defensive parse of confidence_min — pre-fix the form's empty
+    # input caused 422; now empty / malformed / out-of-range all
+    # silently degrade to "no filter applied" rather than erroring
+    # the operator out of the queue view.
+    confidence_min: float | None = None
+    if confidence_min_raw and confidence_min_raw.strip():
+        try:
+            parsed = float(confidence_min_raw.strip())
+            if 0.0 <= parsed <= 1.0:
+                confidence_min = parsed
+        except ValueError:
+            # Malformed numeric input (e.g., "xyz") → ignore filter.
+            pass
+
     page_data = await queries.list_review_queue(
         session,
         status=status_filter,
@@ -194,8 +214,189 @@ async def review_queue_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"review_queue record {record_id} not found",
         )
+    # next_record_id is only meaningful when the panel renders
+    # _decision_result.html (status != 'pending'). For the pending
+    # path the form is rendered instead, and next_record_id is
+    # unused. Computing unconditionally keeps the template context
+    # uniform — one extra index scan per page load is negligible.
+    next_record_id = await queries.find_next_pending_record_id(session)
     return templates.TemplateResponse(
         request,
         "review_queue_detail.html",
-        {"operator": operator, "detail": detail},
+        {
+            "operator": operator,
+            "detail": detail,
+            "form_error": None,
+            "next_record_id": next_record_id,
+        },
+    )
+
+
+# ── Approve / reject (sub-PR #3) ───────────────────────────────
+
+
+def _is_htmx_request(request: Request) -> bool:
+    """True iff the request carries an HX-Request: true header.
+    HTMX clients send this on every hx-* triggered request; plain
+    browsers (form POST with no JS) don't.
+
+    Per Q5 progressive enhancement: handler responds with a fragment
+    template for HTMX, full-page redirect for plain browsers.
+    """
+    return request.headers.get("HX-Request", "").lower() == "true"
+
+
+def _decision_response(
+    request: Request,
+    *,
+    record_id: uuid_pkg.UUID,
+    decision_result: dict[str, Any],
+    operator: str,
+    next_record_id: uuid_pkg.UUID | None,
+):
+    """Shape the response per Q4 (candidates panel fragment for HTMX,
+    full-page redirect for no-JS).
+
+    - HTMX path: render _decision_result.html — replaces the candidates
+      panel in-place via HTMX's hx-swap="outerHTML" target on the
+      panel. Includes a "Go to next record" link per Q4 refinement
+      (next_record_id resolved by queries.find_next_pending_record_id;
+      None when the queue is drained).
+    - No-JS path: 303 redirect to the detail view with the record's
+      new state already loaded. The detail handler computes its own
+      next_record_id when rendering — no need to pass it through the
+      redirect.
+    """
+    if _is_htmx_request(request):
+        return templates.TemplateResponse(
+            request,
+            "_decision_result.html",
+            {
+                "decision": decision_result,
+                "record_id": record_id,
+                "operator": operator,
+                "next_record_id": next_record_id,
+            },
+        )
+    # No-JS fallback: redirect back to detail view. Operator sees
+    # the authoritative state (status=approved/rejected, audit fields
+    # populated) AND the detail handler re-computes next_record_id
+    # for the rendered _decision_result.html block.
+    return RedirectResponse(
+        url=f"/admin/review-queue/{record_id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+def _approval_error_response(
+    request: Request,
+    *,
+    record_id: uuid_pkg.UUID,
+    error: queries.ApprovalError,
+    operator: str,
+    session: AsyncSession,
+):
+    """Operator's submission was rejected by server-side validation
+    (bad team_id, missing kickoff, concurrent decision, etc.). Render
+    the detail view with the error message at the top of the actions
+    panel so the operator sees what went wrong without losing
+    context.
+
+    Returns a coroutine — caller must await.
+    """
+    # Defer to a helper that re-loads + re-renders the detail page.
+    async def _render():
+        detail = await queries.get_review_queue_record(session, record_id)
+        if detail is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"review_queue record {record_id} not found",
+            )
+        return templates.TemplateResponse(
+            request,
+            "review_queue_detail.html",
+            {
+                "operator": operator,
+                "detail": detail,
+                "form_error": error.message,
+            },
+            status_code=error.status_code,
+        )
+    return _render()
+
+
+@router.post("/review-queue/{record_id}/approve")
+async def approve(
+    request: Request,
+    record_id: uuid_pkg.UUID,
+    home_team_id: uuid_pkg.UUID = Form(...),
+    away_team_id: uuid_pkg.UUID = Form(...),
+    operator: str = Depends(require_operator),
+    session: AsyncSession = Depends(get_db),
+):
+    """Operator approves the matcher's decision for this record.
+
+    Body (form-encoded):
+      - home_team_id (UUID): operator's chosen home team
+      - away_team_id (UUID): operator's chosen away team
+
+    For non-collision rows the operator's submission must match the
+    matcher's single candidate pair (validated server-side). For
+    collision rows the operator picks one team from each colliding
+    side; submission validated against the collision sets.
+
+    Idempotent on double-click: WHERE status='pending' guard ensures
+    a second click returns the current state without re-writing.
+    """
+    try:
+        result = await queries.approve_record(
+            session,
+            record_id=record_id,
+            operator=operator,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    except queries.ApprovalError as e:
+        return await _approval_error_response(
+            request, record_id=record_id, error=e,
+            operator=operator, session=session,
+        )
+    next_record_id = await queries.find_next_pending_record_id(session)
+    return _decision_response(
+        request, record_id=record_id,
+        decision_result=result, operator=operator,
+        next_record_id=next_record_id,
+    )
+
+
+@router.post("/review-queue/{record_id}/reject")
+async def reject(
+    request: Request,
+    record_id: uuid_pkg.UUID,
+    operator: str = Depends(require_operator),
+    session: AsyncSession = Depends(get_db),
+):
+    """Operator rejects the matcher's decision. No body — rejection
+    is a single decision, not a candidate selection.
+
+    Per Q4 design: rejection is re-queueable; the runner's WHERE
+    status='pending' guard from PR #108 prevents re-surfacing. The
+    rejection_count column (added in 2F.0 per Q4 refinement)
+    increments on each reject — 2F.X adds the unreject button + the
+    rejection_count >= 3 runner-side guard.
+    """
+    try:
+        result = await queries.reject_record(
+            session, record_id=record_id, operator=operator,
+        )
+    except queries.ApprovalError as e:
+        return await _approval_error_response(
+            request, record_id=record_id, error=e,
+            operator=operator, session=session,
+        )
+    next_record_id = await queries.find_next_pending_record_id(session)
+    return _decision_response(
+        request, record_id=record_id,
+        decision_result=result, operator=operator,
+        next_record_id=next_record_id,
     )

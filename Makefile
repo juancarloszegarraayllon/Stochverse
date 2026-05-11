@@ -134,9 +134,9 @@ investigate-corroboration-gap:
 HTMX_VERSION ?= 1.9.10
 vendor-htmx:
 	@mkdir -p admin/static
-	@echo "Fetching htmx@$(HTMX_VERSION) from unpkg.com..."
+	@echo "Fetching htmx@$(HTMX_VERSION) from raw.githubusercontent.com..."
 	@curl -fSL -o admin/static/htmx-$(HTMX_VERSION).min.js \
-		"https://unpkg.com/htmx.org@$(HTMX_VERSION)/dist/htmx.min.js"
+		"https://raw.githubusercontent.com/bigskysoftware/htmx/v$(HTMX_VERSION)/dist/htmx.min.js"
 	@SIZE=$$(wc -c < admin/static/htmx-$(HTMX_VERSION).min.js); \
 	if [ $$SIZE -lt 30000 ] || [ $$SIZE -gt 100000 ]; then \
 		echo "ERROR: htmx file size $$SIZE bytes is outside expected 30-100KB range"; \

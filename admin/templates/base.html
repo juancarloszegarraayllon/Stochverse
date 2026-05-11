@@ -11,6 +11,14 @@
      detail surfaces. Add per-template overrides via {% block extra_head %}
      when sub-PR #3 introduces approve/reject-specific styles. #}
   <link rel="stylesheet" href="/admin/static/admin.css">
+  {# Vendored htmx (Phase 2F.1 Q4 — versioned filename per locked
+     decision; upgrade path: `make vendor-htmx HTMX_VERSION=X.Y.Z`,
+     bump the filename here in lockstep). Loaded in <head> so the
+     hx-* attributes on subsequent pages are recognized as soon as
+     the body parses. Without htmx the admin still works — every
+     mutating action degrades to a plain form POST + redirect per
+     Q5 progressive enhancement. #}
+  <script src="/admin/static/htmx-1.9.10.min.js" defer></script>
   {% block extra_head %}{% endblock %}
 </head>
 <body>
