@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}{{ detail.row.provider_record_id }}{% endblock %}
+{% block content %}
+  <p>
+    <a class="back-link" href="/admin/review-queue">&larr; Back to review queue</a>
+  </p>
+
+  <h2 style="margin-top: 0;">
+    <span class="ticker">{{ detail.row.provider_record_id }}</span>
+    <span class="muted" style="font-weight: normal; font-size: 0.9rem;">
+      &middot; {{ detail.row.provider }} &middot; {{ detail.row.status }}
+    </span>
+  </h2>
+
+  <div class="panel">
+    <h3>Provider record</h3>
+    <dl class="kv">
+      <dt>Provider</dt>
+      <dd>{{ detail.row.provider }}</dd>
+      <dt>Ticker</dt>
+      <dd class="ticker">{{ detail.row.provider_record_id }}</dd>
+      <dt>Title</dt>
+      <dd>
+        {% if detail.row.provider_title %}
+          {{ detail.row.provider_title }}
+        {% else %}
+          <span class="muted">(not snapshotted — predates 2F.0.5)</span>
+        {% endif %}
+      </dd>
+      <dt>Sport</dt>
+      <dd>
+        {% if detail.row.sport %}
+          {{ detail.row.sport }}
+        {% else %}
+          <span class="muted">(unknown)</span>
+        {% endif %}
+      </dd>
+      <dt>Kickoff (UTC)</dt>
+      <dd>
+        {% if detail.row.kickoff_at %}
+          {{ detail.row.kickoff_at.strftime("%Y-%m-%d %H:%M") }}
+        {% else %}
+          <span class="muted">(unknown — provider record not in sp.kalshi_markets / sp.fl_events)</span>
+        {% endif %}
+      </dd>
+      <dt>Created in queue</dt>
+      <dd>{{ detail.row.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>
+      <dt>Tier</dt>
+      <dd>{{ detail.row.tier }}</dd>
+      {% if detail.row.rejection_count > 0 %}
+        <dt>Rejection count</dt>
+        <dd>{{ detail.row.rejection_count }} (re-resolve cycles)</dd>
+      {% endif %}
+    </dl>
+  </div>
+
+  <div class="panel">
+    <h3>Matcher reasoning</h3>
+    <dl class="kv">
+      <dt>Confidence</dt>
+      <dd class="{% if detail.row.is_collision %}muted{% endif %}">
+        {{ detail.row.confidence_display }}
+      </dd>
+      <dt>Fail reason</dt>
+      <dd>
+        {% if detail.fail_reason %}
+          <code>{{ detail.fail_reason }}</code>
+        {% else %}
+          <span class="muted">(none)</span>
+        {% endif %}
+      </dd>
+      <dt>Home canonical</dt>
+      <dd>{{ detail.reason_detail.get("home_canonical", "(n/a)") }}</dd>
+      <dt>Away canonical</dt>
+      <dd>{{ detail.reason_detail.get("away_canonical", "(n/a)") }}</dd>
+    </dl>
+    <details style="margin-top: 0.75rem;">
+      <summary class="muted" style="cursor: pointer;">Raw <code>reason_detail</code> JSON</summary>
+      <pre class="json-block">{{ detail.reason_detail | tojson(indent=2) }}</pre>
+    </details>
+  </div>
+
+  {# Candidates panel + decision form. HTMX swaps this whole panel
+     on approve/reject via hx-swap-oob targeting #decision-panel. #}
+  <div class="panel" id="decision-panel">
+    {% if detail.row.status == "pending" %}
+      {% include "_decision_form.html" %}
+    {% else %}
+      {% include "_decision_result.html" %}
+    {% endif %}
+  </div>
+{% endblock %}

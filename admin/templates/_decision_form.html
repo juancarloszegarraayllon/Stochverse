@@ -1,0 +1,173 @@
+{# Approve / reject form for the detail view, shown when
+   review_queue.status == 'pending'. Per Q4 progressive enhancement:
+   - Default form action POSTs and the response is a full-page
+     redirect (no-JS path).
+   - HTMX intercepts via hx-post + hx-target="#decision-panel"
+     + hx-swap="outerHTML". Server returns _decision_result.html
+     (the decided-state shape) which replaces this whole panel
+     in-place.
+
+   Form values:
+     - home_team_id (required UUID): collision side → operator picks
+       from radio buttons; non-collision side → hidden input
+       pre-filled from reason_detail.home_team_id.
+     - away_team_id: same shape.
+
+   Server-side validates submitted team_ids match the matcher's
+   candidate sets (queries.py::_validate_candidate_team_id).
+   Operator URL tampering can't link to arbitrary teams.
+#}
+
+<h3>Candidates ({{ detail.candidate_team_names | length }} unique teams)</h3>
+
+{% if form_error %}
+  <div class="error" role="alert">{{ form_error }}</div>
+{% endif %}
+
+<form
+  method="post"
+  action="/admin/review-queue/{{ detail.row.id }}/approve"
+  hx-post="/admin/review-queue/{{ detail.row.id }}/approve"
+  hx-target="#decision-panel"
+  hx-swap="outerHTML"
+  hx-disabled-elt="this button[type='submit']"
+  class="decision-form"
+>
+  {# Home side. #}
+  <fieldset class="candidate-side">
+    <legend>
+      {% if detail.home_collision %}
+        Home — choose from
+        {{ detail.colliding_home_team_ids | length }}
+        colliding candidate{{ '' if detail.colliding_home_team_ids | length == 1 else 's' }}
+      {% else %}
+        Home — matcher selected
+      {% endif %}
+    </legend>
+    {% if detail.home_collision %}
+      <ul class="candidate-list">
+        {% set default_home = detail.reason_detail.get("home_team_id") %}
+        {% for tid in detail.colliding_home_team_ids %}
+          {% set team = detail.candidate_team_names.get(tid) %}
+          <li>
+            <label class="radio-row">
+              <input type="radio" name="home_team_id" value="{{ tid }}"
+                {% if default_home and tid|string == default_home %}checked{% endif %}
+                required>
+              {% if team %}
+                <span class="team-name">{{ team.canonical_name }}</span>
+                <span class="team-meta">
+                  ({{ team.country_code or "no country" }} &middot;
+                  <span class="ticker">{{ team.team_id }}</span>)
+                </span>
+              {% else %}
+                <span class="muted">
+                  (team {{ tid }} not found in sp.teams — possibly deleted)
+                </span>
+              {% endif %}
+            </label>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      {% set home_id = detail.reason_detail.get("home_team_id") %}
+      {% set home_team = detail.candidate_team_names.get(home_id) if home_id else None %}
+      <input type="hidden" name="home_team_id" value="{{ home_id or '' }}">
+      <p class="single-pick">
+        {% if home_team %}
+          <span class="team-name">{{ home_team.canonical_name }}</span>
+          <span class="team-meta">
+            ({{ home_team.country_code or "no country" }} &middot;
+            <span class="ticker">{{ home_team.team_id }}</span>)
+          </span>
+        {% elif home_id %}
+          <span class="team-name">{{ detail.reason_detail.get("home_canonical", "(unknown)") }}</span>
+          <span class="team-meta ticker">{{ home_id }}</span>
+        {% else %}
+          <span class="muted">
+            (matcher didn't surface a home team — approve disabled)
+          </span>
+        {% endif %}
+      </p>
+    {% endif %}
+  </fieldset>
+
+  {# Away side. #}
+  <fieldset class="candidate-side">
+    <legend>
+      {% if detail.away_collision %}
+        Away — choose from
+        {{ detail.colliding_away_team_ids | length }}
+        colliding candidate{{ '' if detail.colliding_away_team_ids | length == 1 else 's' }}
+      {% else %}
+        Away — matcher selected
+      {% endif %}
+    </legend>
+    {% if detail.away_collision %}
+      <ul class="candidate-list">
+        {% set default_away = detail.reason_detail.get("away_team_id") %}
+        {% for tid in detail.colliding_away_team_ids %}
+          {% set team = detail.candidate_team_names.get(tid) %}
+          <li>
+            <label class="radio-row">
+              <input type="radio" name="away_team_id" value="{{ tid }}"
+                {% if default_away and tid|string == default_away %}checked{% endif %}
+                required>
+              {% if team %}
+                <span class="team-name">{{ team.canonical_name }}</span>
+                <span class="team-meta">
+                  ({{ team.country_code or "no country" }} &middot;
+                  <span class="ticker">{{ team.team_id }}</span>)
+                </span>
+              {% else %}
+                <span class="muted">
+                  (team {{ tid }} not found in sp.teams — possibly deleted)
+                </span>
+              {% endif %}
+            </label>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      {% set away_id = detail.reason_detail.get("away_team_id") %}
+      {% set away_team = detail.candidate_team_names.get(away_id) if away_id else None %}
+      <input type="hidden" name="away_team_id" value="{{ away_id or '' }}">
+      <p class="single-pick">
+        {% if away_team %}
+          <span class="team-name">{{ away_team.canonical_name }}</span>
+          <span class="team-meta">
+            ({{ away_team.country_code or "no country" }} &middot;
+            <span class="ticker">{{ away_team.team_id }}</span>)
+          </span>
+        {% elif away_id %}
+          <span class="team-name">{{ detail.reason_detail.get("away_canonical", "(unknown)") }}</span>
+          <span class="team-meta ticker">{{ away_id }}</span>
+        {% else %}
+          <span class="muted">
+            (matcher didn't surface an away team — approve disabled)
+          </span>
+        {% endif %}
+      </p>
+    {% endif %}
+  </fieldset>
+
+  <div class="decision-actions">
+    <button type="submit" class="primary">Approve & link fixture</button>
+  </div>
+</form>
+
+{# Reject is a separate form so it doesn't carry the approve form's
+   team_id inputs. Submitting reject is one click; no candidate
+   selection needed. #}
+<form
+  method="post"
+  action="/admin/review-queue/{{ detail.row.id }}/reject"
+  hx-post="/admin/review-queue/{{ detail.row.id }}/reject"
+  hx-target="#decision-panel"
+  hx-swap="outerHTML"
+  hx-confirm="Reject this record? It can be reopened via SQL but the
+              UI won't surface it again."
+  class="reject-form"
+>
+  <button type="submit" class="danger">Reject</button>
+</form>

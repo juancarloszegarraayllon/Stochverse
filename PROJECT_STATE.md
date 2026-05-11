@@ -6,6 +6,585 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-09
+
+### Phase 2D.3 shipped + 2D.3.1 hotfix verified in production (✅)
+
+The 14-day post-2D.3 parallel-run window is now LIVE with all three
+tiers consulting per record (strict → alias → fuzzy → review/no_match).
+Orchestrator version stamp: `tiered@2d.0`. Per-tier resolver versions:
+`strict@2a.6`, `alias@2c.0`, `fuzzy@2d.0`.
+
+### What landed (PRs merged, in order)
+
+- **PR #102** — Phase 2D.2.6 tennis-specific prop suffix extension
+  (`Total Games`, `Set Winner`, `Match Winner`, `Tiebreak`). Cleaned
+  up the `anchor_failed` bucket before measuring 2D.3's behavior.
+- **PR #103** — Phase 2D.2.7 corroboration-gap investigation runbook
+  (`scripts/investigate_corroboration_gap.sql`). Operator runs Q1+Q2+Q3
+  to attribute the 1.5% measured corroboration to one of three paths
+  (tournament gap / kickoff misalignment / genuinely 1.5%).
+- **Investigation outcome** — Path B (kickoff misalignment) confirmed:
+  Q1 100% tournament overlap, Q2 median/max 30 (pile-up at filter
+  edge), Q3 85%→100% lift at ±60min (+15pp).
+- **PR #104** — Phase 2D.2.8 per-tier drift widening
+  (`KICKOFF_DRIFT_SEC = 60 * 60` for fuzzy tier; strict + alias keep
+  30 min). Static guard asserts fuzzy_tier drift > strict tier drift.
+  Dry-run re-run measured corroboration 1.5% → 2.7% (+1.2pp).
+- **PR #106** — PHASE_2D_DESIGN.md rev3 (doc-only). Locked Option C1
+  as primary 2D framing (review queue is the headline, ~150/cron;
+  auto_apply ~2-3/cron is bonus). Day-0 prediction final: ~10-11%
+  combined Kalshi auto-apply. Deferred A.rev2 to 2D.7 follow-up.
+- **PR #107** — Phase 2D.3 TieredMatcher 3-tier extension. Pure
+  infrastructure wiring of the already-shipped 2D.2 matcher into the
+  runner. Bumped `TIERED_RESOLVER_VERSION` to `tiered@2d.0`. Added
+  `fuzzy_auto_applies` and `fuzzy_review_queue` counters in
+  `sp.resolver_runs.extra`. `sp.team_aliases` write-back uses
+  `source='fuzzy_tier'`. Triple-tier resolution_log per design D.4.
+- **PR #108** — Phase 2D.3.1 hotfix. Two changes scoped tightly to the
+  619-crash regression that surfaced after 2D.3 went live:
+  1. **`ON CONFLICT (provider, provider_record_id) DO UPDATE WHERE
+     status='pending'`** on the `sp.review_queue` insert. The same
+     unresolved record (fixture_id IS NULL because review_queue is
+     pending operator approval) comes back to the resolver on every
+     cron pass; without ON CONFLICT, the second pass crashes on the
+     uniqueness constraint. WHERE clause protects operator-decided
+     rows from being overwritten.
+  2. **Per-record `async with session.begin():`** instead of
+     chunk-level. Prior chunk-level transaction caused IntegrityError
+     on one record to cascade `PendingRollbackError` to every
+     subsequent record in the chunk. Each record now commits or rolls
+     back independently.
+
+### Day-0 production numbers (run 545a0379-a9e9-4742-8304-ce741a9444fc)
+
+```
+records_scanned:      4,754
+auto_applies (total):    24
+  strict tier:           19
+  alias  tier:            2
+  fuzzy  tier:            3
+review_queue (total): 1,011
+  alias  tier:          741
+  fuzzy  tier:          270
+no_match:             1,623
+crashes:                  0
+runtime:           6m 36s
+```
+
+Phase 2D.3 fully operational. Three-tier matcher producing expected
+output shape. Tonight's scheduled crons (FL 02:00 UTC / Kalshi 02:15
+UTC) execute cleanly per the verified hotfix.
+
+### Tracked follow-ups (post-2D.4)
+
+- **2D.4 day-7 review** — same cadence as 2B and 2C. Decision point
+  for 2D.5 / 2D.6 / 2D.7 prioritization. Includes re-running the §E.8
+  corroboration investigation against persisted 2D fuzzy-tier data
+  (replaces the team-sport proxy with tennis-specific numbers).
+- **2D.5 / §E.9** — FL alias coverage expansion for the ~170
+  anchor_failed records/cron long-tail. Sample 200 anchor_failed
+  records, classify by failure mode (FL missing vs alias gap), expand
+  `DEFAULT_FL_SPORT_IDS` and/or seed `sp.team_aliases` for top-N
+  tennis players.
+- **2D.6 / §E.10** — Asian-name single/two-character surname handling
+  ("Hu", "Ng", "Li", "Choo"). Country-of-origin disambiguation layer
+  for surnames ≤ 2 chars where ≥ 3 candidates collide. Conservative
+  scope.
+- **2D.7 / §E.11** — A.rev2 per-candidate initial-expansion filter in
+  `_find_personal_match`. Discriminates "Junfeng Hu" from "Zhizhen Hu"
+  for multi-token providers. Deferred from 2D.3 because dry-run
+  showed the fuzzy auto_apply path is small leverage; current
+  cross-team collision detection routes these to review_queue
+  (operators handle the discrimination).
+
+### Open tech-debt issues (`tech-debt` label, see GitHub)
+
+- **Issue #105** — `test_unpaired_kalshi_only_fixture_appears` is
+  date-dependent; deselected from CI runs as a workaround. Fix:
+  freeze the test clock with `freezegun` or `time-machine`.
+- **Issue #109** — Resolver runtime: per-record `session.begin()`
+  adds ~83ms/record (~6m 36s for 4.7k records). Not urgent — sits
+  comfortably below the 15-min cron stagger window. Investigate if
+  any cron run exceeds 10 min, `records_scanned` exceeds 8k for 2+
+  consecutive cycles, or 2D.5 ships and adds more records.
+
+### Notes for the next session's first 5 minutes
+
+- Wait for 5-10 cron cycles to land before any 2D.4 day-7 review
+  work. Steady-state numbers matter, not a single-sample read.
+- The `tech-debt` label needs creating in the GitHub UI; once
+  created, apply to issues #105 and #109.
+- 2C.1 alert threshold of 1,500 review-queue rows still has headroom
+  with combined 2C+2D volume (~400-500/day). If review queue depth
+  grows past 1,500 sustained for >7 days, escalate per 2C.1 mechanism.
+- Operator capacity: ~67-83 min/day of review work at ~10 sec/record
+  for the combined 2C+2D queue. If the actual review pace lags,
+  revisit 2D.7 (A.rev2) prioritization to shave the auto-apply path.
+
+---
+
+## Session — 2026-05-08 (afternoon onwards)
+
+### Phase 2A.5 — Bootstrap (✅ complete in production)
+
+Bootstrap ran 2026-05-08T15:33:43Z, completed in 41.9s.
+**24,400 teams + 30,442 aliases inserted, 0 chunks failed,
+no leaked transactions.**
+
+Per-sport baseline (the strict-tier coverage benchmark for Phase 2B):
+
+| Sport             | Teams  | Aliases |
+|-------------------|--------|---------|
+| Soccer            | 17,305 | 22,040  |
+| Tennis (singles)  |  3,452 |  3,843  |
+| Basketball        |  1,973 |  2,419  |
+| Rugby Union       |    320 |    359  |
+| American Football |    309 |    501  |
+| Baseball          |    272 |    397  |
+| Hockey            |    252 |    310  |
+| Darts             |    174 |    190  |
+| Cricket           |    107 |    139  |
+| MMA               |     95 |     98  |
+| Boxing            |     75 |     79  |
+| Aussie Rules      |     66 |     67  |
+| Golf              |      0 |      0  |
+| Handball          |      0 |      0  |
+| Rugby League      |      0 |      0  |
+| Snooker           |      0 |      0  |
+| Volleyball        |      0 |      0  |
+
+**5 sports have zero teams** (Golf, Handball, Rugby League, Snooker,
+Volleyball). Resolver's alias tier (Phase 2C) or human review
+queue (Phase 2F) will populate them organically when Kalshi/FL
+coverage starts.
+
+Skipped (intentional): 1,745 tennis doubles partnerships, 452
+entities in unmapped sports (Esports / Motorsport / Table Tennis).
+
+### Phase 2B — Strict matcher (this session)
+
+Per locked design in `PHASE_2B_DESIGN.md` (PR #77).
+
+**Migration `bdf12a30e49b`:**
+- Created `sp.resolver_runs` table with `provider` + `run_mode` columns.
+- Altered `sp.fixtures.competition_id` from NOT NULL to NULL —
+  enables sport-only fallback when `sp.competitions` is empty.
+
+**New modules:**
+- `resolver/aliases.py` — `AliasResolver` bulk-load + in-memory
+  `(alias_normalized, sport_id) → set of team_ids` index. Strict
+  tier punts on ambiguous aliases (>1 team_id per key).
+- `resolver/fixtures.py` — `find_fixture` (drift-windowed search) +
+  `ensure_fixture` (DO-NOTHING + re-fetch per design §1).
+  `ensure_fixture` returns `(fixture_id, created_new)` so insert-vs-
+  conflict path is recorded in `resolution_log.reason_detail`.
+- `resolver/matcher.py` — `StrictMatcher` with 4-condition gate
+  (kickoff_confidence ≥ 0.85, both teams alias-resolved unambiguously,
+  sport classified, kickoff drift ≤ 30min). Tries swapped
+  orientation when find_fixture misses (handles direction-blind
+  Kalshi abbr_block). 0.98 confidence on hit.
+- `scripts/run_resolver_pass.py` — standalone runner. Bulk-loads
+  aliases, walks unresolved provider records in 200-row chunks,
+  each chunk one transaction. Atomic per design §1: UPDATE
+  provider table's fixture_id + INSERT resolution_log in the same
+  `session.begin()` block. Writes one `sp.resolver_runs` row at
+  end with parallel-run metrics.
+- 22 unit tests + 1 integration stub.
+
+**Operator action sequence (parallel-run kickoff):**
+
+```bash
+git checkout main && git pull
+
+# Apply migration (creates sp.resolver_runs, alters sp.fixtures)
+DATABASE_URL=<prod-Neon> alembic upgrade head
+
+# Smoke-run on a small slice
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
+  --provider kalshi --limit 100
+
+# Full passes
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider kalshi
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider fl
+
+# Day-7 metrics query (filters out post-2E live activity):
+psql "$DATABASE_URL" <<'SQL'
+SELECT provider,
+       SUM(records_scanned)  AS scanned,
+       SUM(auto_applies)     AS auto_applies,
+       ROUND(100.0 * SUM(auto_applies) / NULLIF(SUM(records_scanned), 0), 2) AS coverage_pct
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '7 days'
+  AND run_mode IN ('standalone', 'cron')
+GROUP BY 1;
+SQL
+```
+
+### Phase 2A.6 — Competition seeding + matcher gate (this session, follow-up to 2B)
+
+Caught a defect during 2B post-merge review: the strict-tier matcher
+read `signal.competition_hint` only into `reason_detail` for logging;
+it never resolved or filtered by competition. Combined with
+`sp.fixtures.competition_id` becoming nullable in migration
+`bdf12a30e49b`, the strict tier had silently degraded into
+"competition-blind" rather than implementing the design's intended
+sport-only fallback. **Smoke-run was paused before the first pass.**
+
+Path B chosen (defer FL competitions to 2C, ship Kalshi competition
+gate now):
+
+**New modules:**
+- `scripts/bootstrap_sp_competitions.py` — Kalshi-only seed.
+  Bulk-loads existing `sp.competitions.kalshi_series_bases` into a
+  Python set, fetches DISTINCT `(_sport, series_ticker)` from
+  `sp.kalshi_markets`, applies `kalshi_identity.strip_known_suffix`
+  to derive `series_base`, queues new rows with
+  `kalshi_series_bases=[base]` and inserts in 1000-row chunks. Same
+  idempotency pattern as `bootstrap_sp_teams`.
+- `resolver/competitions.py` — `CompetitionResolver` with bulk-load +
+  in-memory `(provider, hint) → (competition_id, kind)` lookup. Kinds:
+  `'explicit'`, `'no_hint'`, `'unresolvable'`. For Kalshi tries hint
+  as-is then `strip_known_suffix(hint)` so callers can pass either
+  the full series_ticker or a stripped base.
+
+**Matcher changes (`resolver/matcher.py`):**
+- `RESOLVER_VERSION` bumped from `strict@2b.0` → `strict@2a.6`.
+- Constructor accepts optional `competitions: CompetitionResolver`.
+- New `_competition_gate` enforces per-provider policy:
+  * Kalshi `'explicit'` → use competition_id, filter `find_fixture`,
+    write on `ensure_fixture`.
+  * Kalshi `'no_hint'` → sport-only fallback, log
+    `kalshi_no_hint_sport_only: true`.
+  * Kalshi `'unresolvable'` → strict tier FAILS (`fail_reason=
+    'kalshi_competition_unresolvable'`).
+  * FL → transitional sport-only, every successful match logs
+    `fl_transitional_sport_only: true`.
+- `find_fixture` accepts optional `competition_id` filter; matches
+  on `(competition_id = filter OR competition_id IS NULL)` to avoid
+  forking one logical fixture into two when FL (no comp) created it
+  before Kalshi (with comp) arrives.
+
+**Other:**
+- `resolver/kalshi.py`: `competition_hint` now uses `series_ticker`
+  (the canonical Kalshi-side identifier). `_soccer_comp` ("Champions
+  League") is preserved on `raw_signals['soccer_comp']` for
+  diagnostics. Mirrors the bootstrap's seed key.
+- `resolver/__init__.py` exports `CompetitionResolver`.
+- `scripts/run_resolver_pass.py` loads a CompetitionResolver after
+  AliasResolver and passes it to `StrictMatcher`.
+- 13 new unit tests (CompetitionResolver coverage + matcher gate
+  per-provider behavior + degrade-without-index).
+- DEPLOYMENT.md adds a Phase 2A.6 runbook before the 2B section.
+
+**Operator action sequence updated:**
+
+```bash
+git checkout main && git pull
+# Migration was already applied for 2B (bdf12a30e49b at head).
+
+# 2A.6 step — seed competitions before the first parallel-run pass.
+DATABASE_URL=<prod-Neon> python scripts/bootstrap_sp_competitions.py --dry-run
+DATABASE_URL=<prod-Neon> python scripts/bootstrap_sp_competitions.py
+
+# Then proceed with 2B parallel-run as documented above.
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
+  --provider kalshi --limit 100  # smoke
+
+# Audit gate decisions during the run:
+psql "$DATABASE_URL" -c "
+  SELECT reason_detail->>'competition_resolution' AS resolution, COUNT(*)
+  FROM sp.resolution_log
+  WHERE provider='kalshi' AND decided_at > NOW() - INTERVAL '24 hours'
+  GROUP BY 1 ORDER BY 2 DESC"
+```
+
+**FL transitional path is queryable** via
+`reason_detail ? 'fl_transitional_sport_only'`. Phase 2C work will
+seed `fl_tournament_stage_ids` and re-run the matcher against rows
+carrying that flag to backfill explicit competition_ids.
+
+**Two audit refinements added pre-PR (per review feedback):**
+
+1. **Kalshi linked-to-NULL backfill flag.** When `find_fixture`'s
+   equal-or-NULL filter links a Kalshi explicit-comp signal to a
+   NULL-comp fixture, `reason_detail` now records
+   `linked_to_null_comp_fixture: true` AND
+   `null_comp_fixture_pending_backfill: <fixture-uuid>`. Phase 2C's
+   backfill query is now a one-liner against `resolution_log`
+   instead of a manual SQL audit.
+2. **FL transitional sub-paths.** Every successful FL match also
+   stamps `fl_transitional_path` with one of three values:
+   `matched_null_comp_fixture` (typical), `matched_existing_comp_fixture`
+   (Kalshi created it earlier with explicit comp — Phase 2C must
+   verify FL's resolved comp aligns), or `created_null_comp_fixture`
+   (FL was first; new row, awaits 2C to set the column). Required
+   `find_fixture` return shape change: now returns
+   `(fixture_id, fixture_competition_id)` so the matcher can audit
+   the equal-or-NULL filter outcome.
+
+### Phase 2A.7 — sp.fl_events.sport_id (this session, follow-up to 2B/2A.6)
+
+First production FL pass produced **0/19,753 auto-applies**. Diagnosed:
+`sp.fl_events` had no sport context preserved (no column, and
+`raw_payload.SPORT_ID` was always null), so the runner couldn't pass
+`sport=...` into `FLResolverModule.extract_signal`. Every FL signal
+hit the matcher's gate 2 (`sport_not_classified`).
+
+Earlier (PR #85) review claimed FL was "sport-shaped by construction"
+because `ingestion/fl.py` polls per-sport — that conflated "polled
+per-sport" with "preserved sport in storage." The poller had the
+sport_id in scope at write time but never wrote it.
+
+**Migration `7c3f9b1a2e58`:**
+- Adds `sp.fl_events.sport_id INTEGER REFERENCES sp.sports(id)` (nullable).
+- Partial index `ix_fl_events_sport_unresolved` on
+  `(sport_id, last_seen_at DESC) WHERE fixture_id IS NULL` —
+  supports the runner's hot query without bloating the full table.
+
+**Ingestion (`ingestion/fl.py`):**
+- New `FL_SPORT_ID_TO_SP_NAME` map (single source of truth, 17
+  entries matching `DEFAULT_FL_SPORT_IDS`). Decoupled from
+  `main.py._KALSHI_SPORT_BY_FL_ID` which is older + has several
+  conflicting IDs.
+- One bulk SELECT at pass start resolves `FL sport_id → sp.sports.id`.
+- Per-sport batch now passes `{"sport_id": sp_sport_id}` in fields,
+  so UPSERT populates the column on insert AND backfills it on
+  conflict.
+- Unmapped FL sport_ids are skipped with `ingestion.fl.sport_id_unmapped`
+  warning rather than NULL-out the column on existing rows during
+  conflict resolution.
+
+**Runner (`scripts/run_resolver_pass.py`):**
+- FL SQL now `INNER JOIN sp.sports` and filters `sport_id IS NOT NULL`.
+- `extract_signal` is called with `sport=row.sport_name` for FL.
+- Kalshi path unchanged — `_sport` lives on `raw_payload` already.
+
+**Backfill:**
+- `scripts/backfill_sp_fl_events_sport_id.py` wraps the existing
+  `backfill_fl.py` and reports pre/post NULL counts + per-sport
+  coverage. Re-fetching the FL ±7 day window backfills sport_id on
+  every currently-fetchable row.
+- Rows outside the ±7 day window stay NULL until a future
+  per-tournament historical fetch lands. Documented; not in scope.
+
+**Tests (+7 new):**
+- `TestFLSportIdMap` (2): every DEFAULT_FL_SPORT_ID is mapped; every
+  mapped name aligns with the canonical sp.sports seed.
+- `TestIngestionWritesSportId` (3): static guards that batch fields
+  include `sport_id`, pre-pass bulk-loads sp.sports, and unmapped
+  ids are skipped with warning.
+- `test_fl_query_joins_sports_and_filters_sport_id` (1): static
+  guard on the runner SQL JOIN + filter + extract_signal call shape.
+- 1 existing FL-test class kept (TestFLEventValidator etc.).
+
+**Operator action sequence (2A.7 → re-run smoke):**
+
+```bash
+git checkout main && git pull
+DATABASE_URL=<prod-Neon> alembic upgrade head            # apply 7c3f9b1a2e58
+
+# Backfill existing rows (re-fetch FL ±7 days; populates sport_id).
+DATABASE_URL=<prod-Neon> python scripts/backfill_sp_fl_events_sport_id.py
+
+# Re-run smoke. Expected: real auto-applies + meaningful no_match
+# fail_reason distribution. Compare against the 0/19,753 baseline.
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
+    --provider fl --limit 100
+```
+
+### Production incident — Phase 2A.7 NameError in `_ingest_pass`
+
+**Root cause:** The 2A.7 PR (#86) built `sp_sport_id_by_fl_id` inside
+`run()` and referenced it from `_ingest_pass` as a free variable.
+Python doesn't propagate locals across function boundaries, so every
+call from `_today_pre_game_loop` / `_week_loop` raised NameError.
+Bonus bug: `run()` itself called `session.execute(...)` before the
+`async with session_factory() as lock_session:` block opened —
+NameError on `session` would have crashed `run()` first.
+
+**Production effect:** From PR #86 deploy until the hotfix lands,
+**every FL ingestion poll silently failed.** Production
+`sp.fl_events.sport_id` stayed 100% NULL across all 19,759 rows
+despite `last_seen_at` updates (a separate code path keeps writing
+that). The supervisor caught the NameError and restarted `run()` in a
+tight loop — Railway logs should show one warning per supervisor
+restart cycle.
+
+**Why static guards missed it:** The 2A.7 PR's tests asserted that
+specific strings appeared in the source ("`sport_id`" in batch fields,
+"`SELECT id, name FROM sp.sports`" in the file). Those substrings did
+appear — just in the wrong function. A real call-path test would have
+NameError'd within seconds.
+
+**Fix shipped (this hotfix):**
+- Move the `sp_sport_id_by_fl_id` build into `_ingest_pass` so it has
+  the function's own session in scope. Cost: one extra 17-row SELECT
+  per pass (sp.sports). Self-correcting if sp.sports gains rows
+  mid-process. Drops the broken pre-pass code from `run()`.
+- 4 new integration tests (`TestIngestPassIntegration`):
+  * `test_ingest_pass_runs_without_name_error` — the smoking gun.
+    Mocks `flashlive_feed._fl_get` + `upsert_provider_records_batch`,
+    calls `_ingest_pass` end-to-end, asserts it completes.
+  * `test_ingest_pass_writes_sport_id_in_batch` — asserts each
+    record's `fields["sport_id"]` is the canonical sp.sports.id, not
+    None or the FL numeric id.
+  * `test_ingest_pass_skips_unmapped_fl_sport_id` — asserts unmapped
+    FL ids are filtered out of the iteration (don't get polled, don't
+    NULL-out existing rows).
+  * `test_run_does_not_name_error_at_startup` — exercises `run()`
+    against a mocked session_factory + advisory_lock returning False.
+    Pre-hotfix, this would NameError at the `session.execute` line.
+- Plus a static guard `test_lookup_is_built_inside_ingest_pass_not_run`
+  that asserts the construction lives inside `_ingest_pass`'s body,
+  not `run()`'s. Defends against re-introduction.
+
+**Deploy sequence:**
+```bash
+git checkout main && git pull           # after hotfix merge
+# Railway redeploys automatically.
+# Watch Railway logs: ingestion.fl.pass_complete (no errors expected).
+
+# Verify production writes start landing:
+psql "$DATABASE_URL" -c "
+  SELECT COUNT(*) FILTER (WHERE sport_id IS NOT NULL) AS with_sport,
+         COUNT(*) FILTER (WHERE sport_id IS NULL)     AS without_sport
+  FROM sp.fl_events
+  WHERE last_seen_at > NOW() - INTERVAL '15 minutes';"
+# Expected after one poll cycle (~60s for today loop, ~10min for
+# week loop): with_sport > 0 and rising.
+
+# Then backfill the existing rows:
+DATABASE_URL=<prod-Neon> python scripts/backfill_sp_fl_events_sport_id.py
+# Then re-run the FL smoke (--limit 100) to validate matcher behavior.
+```
+
+### Production incident — transaction leak in db.py
+
+**Reported:** four connections leaked over ~35 minutes (pids 645, 647,
+649, 32493). `idle in transaction` state. Manually killed by operator;
+the same pattern reappeared within 5 minutes.
+
+**Root cause:** two anti-patterns in `db.py`:
+1. `db.upsert_entities` and `db.sync_events_to_db` wrap a slow loop
+   over thousands of records in a single `async with session.begin()`
+   block. With Neon's ~75ms round-trip, transactions stay open for
+   5-30+ minutes. Cancellation or asyncpg state issues mid-loop leave
+   the connection idle-in-transaction.
+2. `db.sync_events_to_db` creates its own engine per call but only
+   disposes it on the success path (the except branch's dispose call
+   itself can fail silently). Cancelled calls leak 2 pool connections
+   per occurrence until process exit.
+
+**Fix shipped (this session):**
+- `idle_in_transaction_session_timeout=60000` and `statement_timeout=60000`
+  added to engine `connect_args.server_settings` — Postgres self-kills
+  stuck transactions / queries even if app code is buggy.
+- `lock_timeout=30000` added to defend against deadlocks.
+- `application_name='stochverse-web'` added so leaks surface clearly
+  in `pg_stat_activity` triage queries.
+- `db.upsert_entities` refactored: chunk teams into batches of 100,
+  one transaction per chunk. Per-chunk failures isolated; subsequent
+  chunks proceed.
+- `db.sync_events_to_db` refactored: chunk records into batches of 50,
+  one transaction per chunk. `try/finally` around `_engine.dispose()`
+  so cancellation paths can't leak the engine.
+- 10 unit tests verify chunking math + failure isolation + static-
+  inspection guards against regressing to the mega-transaction pattern.
+
+**Bootstrap (Phase 2A.5) was paused while this incident was active.**
+Resume after the fix is deployed and the leak pattern stops
+reproducing.
+
+### What landed
+
+- **Transaction leak fix in `db.py`** (this commit). 10 new tests; all
+  60 existing tests still pass.
+
+- **Phase 2A.5 — Bootstrap.** New `scripts/bootstrap_sp_teams.py` +
+  Alembic migration `d8e717ed79dd` (seeds `sp.sports` with 17-sport
+  finite list, each with per-sport drift threshold from §5.4). One-
+  time legacy → SP migration: pulls `public.entities` (team-typed)
+  into `sp.teams`, `public.entity_aliases` into `sp.team_aliases`
+  with `source='legacy_bootstrap'`, `confidence=0.95`. Idempotent
+  via `(alias_normalized, source)` unique constraint. Has `--dry-run`
+  flag for safe operator preview. Makefile target `bootstrap-sp-teams`,
+  DEPLOYMENT.md runbook.
+  - **Operator action required after merge:** apply migration,
+    `--dry-run` first, then run for real, **document per-sport
+    coverage counts in this file** (replaces "open question:
+    Phase 2B baseline").
+
+- **Phase 2B design doc** locked at `PHASE_2B_DESIGN.md` (PR #77).
+  Three pushbacks addressed: ensure_fixture pinned to DO-NOTHING +
+  re-fetch; parallel-run criteria split per-provider (Kalshi auto
+  diff, FL operator spot-check); bootstrap as separate 2A.5 PR.
+  `sp.resolver_runs` schema includes `provider` + `run_mode` for
+  filtering parallel-run vs live-runner data.
+
+- **Phase 2A — Resolver scaffolding.** New `resolver/` package with the
+  contract types and per-provider extraction logic. No DB writes,
+  no matching, no resolution_log — pure foundation for 2B+.
+  - `resolver/types.py` — `FixtureSignal`, `TeamCandidate`,
+    `MatchResult`, `ReasonCode` (Pydantic v2 + Enum).
+  - `resolver/protocol.py` — `ResolverModule` runtime-checkable
+    Protocol.
+  - `resolver/_normalize.py` — strict NFD-only name normalization
+    per architecture §9.2.
+  - `resolver/fl.py` — `FLResolverModule.extract_signal` reads FL's
+    raw_payload + tournament context, produces FixtureSignal with
+    fl_team_id / name / shortname candidates.
+  - `resolver/kalshi.py` — `KalshiResolverModule.extract_signal`
+    reads Kalshi cache record, runs `parse_ticker`, produces
+    FixtureSignal with title-parsed name candidates + abbr_block
+    direction-blind candidate.
+  - `tests/test_resolver_2a.py` — 31 unit tests covering
+    normalization, type validation, Protocol conformance, FL
+    extraction edge cases, Kalshi extraction edge cases (per_fixture
+    vs outright, kickoff fallbacks, sport_override, title parsing
+    `vs` / `at` / `@` separators).
+
+### Phase 2 sub-roadmap (decomposition)
+
+| Sub-phase | Scope | Status |
+|---|---|---|
+| **2A** | Resolver scaffolding: types, Protocol, extract_signal stubs | ✅ this session |
+| 2B | Strict tier — match against sp.fixtures via exact alias on both teams + kickoff ±30min + competition. Write to sp.resolution_log + sp.review_queue. UPSERT sp.fixtures. | next |
+| 2C | Confidence scoring + alias tier (per-sport drift threshold) | after 2B |
+| 2D | Time-anchored fuzzy + cross-provider corroboration | after 2C |
+| 2E | Three-loop resolver runner (hot via LISTEN/NOTIFY + 30s batch + 5–10min re-resolution) | after 2D |
+| 2F | Admin review-queue UI minimum: auth + list + approve/reject + audit | separate PR |
+| 2G | Diff tooling — compare new resolver decisions to legacy `kalshi_join` pairings via `/api/_debug/resolver_diff` | after 2E |
+
+### Deferred design questions — resolve in Phase 2C+ scoping
+
+- **Individual sports don't fit the team model.** Tennis singles, golf,
+  MMA, boxing entities currently land in `sp.teams` as "team-of-one"
+  rows. Works mechanically (resolver matches against alias rows
+  regardless), but is awkward — a player isn't a team. Surfaced
+  during the 2A.5 cross-sport audit. May warrant a separate
+  `sp.players` table with similar alias machinery in Phase 2C+
+  scoping. Don't attempt during Phase 2B — strict-tier matching
+  works as-is on the team-of-one shape.
+
+### Open questions still — decide before 2B
+
+- **Hot-loop trigger.** Implement `LISTEN/NOTIFY` immediately in 2E,
+  or start with a 1s polling loop and add NOTIFY in a follow-up?
+  Recommendation: polling first (simpler, easier to debug);
+  `LISTEN/NOTIFY` in a 2E.fix PR once polling-based correctness is proven.
+- **Confidence threshold for auto-apply vs review-queue routing.**
+  Architecture default 0.85 — verify against real production data
+  during 2B's parallel-run period.
+- **Admin UI tech.** Architecture §7.5 says "auth, list view, detail
+  view, approve/reject, audit log." Phase 2F decision: render via
+  vanilla JS in `static/admin/` (consistent with current frontend
+  stack) or use FastAPI + Jinja2 server templates. Lean toward Jinja2
+  — server-rendered admin pages are easier to keep secure and
+  versionable than a SPA.
+
+---
+
 ## Session — 2026-05-07/08
 
 ### What landed (PRs merged, in order)

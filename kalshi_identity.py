@@ -133,6 +133,22 @@ _OUTRIGHT_SERIES_PREFIXES = (
     "KXSTARTINGQB", "KXNBARETURN",
     "KXNBADRAFT", "KXNFLDRAFT",
     "KXNBAPLAYOFF",       # playoff-related outright counts
+    # Per-player-stat for a per-fixture date (Phase 2C.1).
+    # Ticker shape LOOKS like G1 (date + abbr) but the abbr_block
+    # is a player handle, not a home/away team pair. Pre-2C.1
+    # these reached parse_ticker as kind='per_fixture' and the
+    # alias resolver rejected them on alias_resolution_incomplete —
+    # noisy signal that obscured genuine alias-tier candidates.
+    #
+    # Extension pattern: when the post-2C.4 alias_no_team_resemblance
+    # fail_reason audit shows new prefixes climbing (e.g. additional
+    # NFL/NHL stat futures, or KXMLBWINS/KXMLBSTAT season-level
+    # markets), add them here. Each entry needs a regression test in
+    # tests/test_kalshi_identity.py::TestOutrightSeriesPrefixes.
+    "KXMLBTB",            # MLB total bases per player per game
+    "KXMLBHR",            # MLB home runs per player per game
+    "KXMLBHRR",           # MLB home runs+runs per player per game
+    "KXNBASTL",           # NBA steals per player per game
     # Misc / cross-sport novelty
     "KXEUROVISIONISRAELBAN", "KXPIZZASCORE",
     "KXCOLLEGEGAMEDAYGUEST", "KXWSOPENTRANTS",

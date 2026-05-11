@@ -52,6 +52,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -222,7 +223,7 @@ class Fixture(SPBase):
 
     home_team_id = Column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.teams.id"), nullable=False)
     away_team_id = Column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.teams.id"), nullable=False)
-    competition_id = Column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.competitions.id"), nullable=False)
+    competition_id = Column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.competitions.id"), nullable=True)
 
     kickoff_at = Column(DateTime(timezone=True), nullable=False)
     stage = Column(Text)                                        # group/round/leg/playoff metadata
@@ -270,19 +271,34 @@ class FLEvent(SPBase):
     fl_event_id = Column(Text, primary_key=True)
     fixture_id = Column(UUID(as_uuid=True), ForeignKey(f"{SCHEMA}.fixtures.id"))
 
+    # Sport context recovered at ingestion time. FL's
+    # /v1/events/list is polled per-sport, so sport_id is in scope at
+    # write time; we just have to remember to write it. NULL on rows
+    # ingested before Phase 2A.7 — `make backfill-fl` repopulates
+    # them via the same UPSERT path on the next pass.
+    sport_id = Column(Integer, ForeignKey(f"{SCHEMA}.sports.id"), nullable=True)
+
     raw_payload = Column(JSONB, nullable=False)
 
     last_seen_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     last_changed_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
-    payload_hash = Column(String(64), nullable=False)           # sha256 of normalized JSON
+    payload_hash = Column(String(64), nullable=False)               # sha256 of normalized JSON
 
     fixture = relationship("Fixture")
+    sport = relationship("Sport")
 
     __table_args__ = (
         Index("ix_fl_events_fixture_id", "fixture_id"),
         Index("ix_fl_events_unresolved", "fixture_id",
               postgresql_where=Column("fixture_id").is_(None)),
         Index("ix_fl_events_last_seen", "last_seen_at"),
+        # Phase 2A.7: partial index for the resolver runner's hot
+        # query (sport-classified + unresolved).
+        Index(
+            "ix_fl_events_sport_unresolved",
+            "sport_id", "last_seen_at",
+            postgresql_where=Column("fixture_id").is_(None),
+        ),
     )
 
 
@@ -411,10 +427,31 @@ class ReviewQueue(SPBase):
     reviewed_by = Column(Text)
     reviewed_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    # Phase 2F.0 (per PHASE_2F_DESIGN.md rev1.1):
+    # Snapshot of MatchResult.reason_detail at insertion. Denormalized
+    # so the 2F.1 UI reads a single table per page.
+    reason_detail = Column(JSONB, nullable=True)
+    # Snapshot of the human-readable provider title (Kalshi
+    # raw_payload->>'title' / FL synthesized "home vs away"). Saves
+    # per-record raw_payload parsing on every list-view render.
+    provider_title = Column(Text, nullable=True)
+    # Cumulative reject clicks per record. Per Q4 revised: re-queueable
+    # rejection is correct, but this column is the guardrail against
+    # operator burnout cycles. 2F.1 surfaces it; 2F.X adds the unreject
+    # button + runner-side `>= 3 AND candidate_fixtures unchanged` skip.
+    rejection_count = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
         UniqueConstraint("provider", "provider_record_id", name="uq_review_queue_provider_record"),
         Index("ix_review_queue_status_created", "status", "created_at"),
+        # Phase 2F.0 partial index: covers the 2F.1 list view's hot
+        # query (WHERE status='pending' ORDER BY confidence DESC,
+        # created_at DESC) without bloating the full-table index.
+        Index(
+            "ix_review_queue_pending_confidence",
+            "status", text("confidence DESC"), "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
     )
 
 
@@ -443,4 +480,37 @@ class ProviderApiCall(SPBase):
     __table_args__ = (
         Index("ix_provider_api_calls_provider_called", "provider", "called_at"),
         Index("ix_provider_api_calls_status", "status"),
+    )
+
+
+class ResolverRun(SPBase):
+    """Per-run audit row written by scripts/run_resolver_pass.py and
+    (Phase 2E onward) the live runner.
+
+    One row per pass. Provides queryable parallel-run metrics without
+    log-grepping. The run_mode column distinguishes parallel-run data
+    ('standalone' | 'cron') from post-Phase-2E live activity ('live'),
+    so day-7 reports can filter cleanly.
+    """
+    __tablename__ = "resolver_runs"
+
+    id                  = Column(BigInteger, primary_key=True, autoincrement=True)
+    run_id              = Column(UUID(as_uuid=True), nullable=False)
+    resolver_version    = Column(Text, nullable=False)
+    provider            = Column(Text, nullable=False)            # 'fl' | 'kalshi'
+    run_mode            = Column(Text, nullable=False)            # 'standalone' | 'cron' | 'live'
+    started_at          = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    finished_at         = Column(DateTime(timezone=True))
+    records_scanned     = Column(Integer, nullable=False, default=0)
+    auto_applies        = Column(Integer, nullable=False, default=0)
+    no_match            = Column(Integer, nullable=False, default=0)
+    crashes             = Column(Integer, nullable=False, default=0)
+    legacy_diff_count   = Column(Integer)                         # Kalshi only; NULL for FL
+    legacy_diff_details = Column(JSONB)
+    latency_p95_ms      = Column(Integer)
+    extra               = Column(JSONB, default=dict)
+
+    __table_args__ = (
+        Index("ix_resolver_runs_provider_started", "provider", "started_at"),
+        Index("ix_resolver_runs_run_mode_started", "run_mode", "started_at"),
     )

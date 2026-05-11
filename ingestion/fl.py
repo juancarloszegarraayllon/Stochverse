@@ -32,6 +32,7 @@ import asyncio
 import time
 from typing import Any, Iterable
 
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from observability import get_logger
@@ -81,6 +82,39 @@ DEFAULT_FL_SPORT_IDS: list[int] = [
 ]
 
 
+# Phase 2A.7: FL numeric sport_id → sp.sports.name. Used during
+# ingestion to translate the per-sport poll's sport_id into the
+# canonical sp.sports row, populating sp.fl_events.sport_id on every
+# UPSERT. Keep keys aligned with DEFAULT_FL_SPORT_IDS above; values
+# must match an existing sp.sports.name (case-sensitive).
+#
+# WHY this lives here, not in main.py: main.py's _KALSHI_SPORT_BY_FL_ID
+# is older and conflicts on several IDs (e.g., 8 → "Rugby" / "Cricket"
+# disagreement); it's tied to the legacy Kalshi-merge feed shape and
+# carries non-resolver semantics. The map below is the SP architecture's
+# single source of truth for FL → sp.sports translation. Resolver
+# extraction reads sp.sports.name back through the runner SQL JOIN.
+FL_SPORT_ID_TO_SP_NAME: dict[int, str] = {
+    1:  "Soccer",
+    2:  "Tennis",
+    3:  "Basketball",
+    4:  "Hockey",
+    5:  "American Football",
+    6:  "Baseball",
+    7:  "Handball",
+    8:  "Cricket",
+    9:  "Volleyball",
+    11: "Rugby Union",
+    12: "Aussie Rules",
+    13: "Rugby League",
+    21: "MMA",
+    22: "Boxing",
+    23: "Golf",
+    24: "Snooker",
+    25: "Darts",
+}
+
+
 # ── Cadence loops ────────────────────────────────────────────────
 
 async def _ingest_pass(
@@ -100,6 +134,38 @@ async def _ingest_pass(
     run_id = new_run_id()
     result = IngestionResult()
     started = time.monotonic()
+
+    # Phase 2A.7 hotfix: resolve FL sport_id → sp.sports.id via this
+    # function's own session. Previously the lookup was built in
+    # `run()` and referenced from here as a free variable — a scope
+    # bug that NameError'd on every pass and stopped sport_id from
+    # ever being persisted (production sp.fl_events.sport_id stayed
+    # 100% NULL after PR #86 merged).
+    #
+    # Cost: one bulk SELECT (17-row sp.sports table) per pass. Cheap;
+    # also self-correcting if sp.sports gains rows mid-process.
+    sport_ids_in = list(sport_ids)
+    name_rows = (await session.execute(
+        sa_text("SELECT id, name FROM sp.sports")
+    )).all()
+    sp_sports_id_by_name = {row.name: row.id for row in name_rows}
+
+    sp_sport_id_by_fl_id: dict[int, int] = {}
+    skipped_unmapped: list[int] = []
+    for fl_id in sport_ids_in:
+        sp_name = FL_SPORT_ID_TO_SP_NAME.get(fl_id)
+        sp_id = sp_sports_id_by_name.get(sp_name) if sp_name else None
+        if sp_id is None:
+            skipped_unmapped.append(fl_id)
+            continue
+        sp_sport_id_by_fl_id[fl_id] = sp_id
+    if skipped_unmapped:
+        _log.warning(
+            "ingestion.fl.sport_id_unmapped",
+            fl_sport_ids=skipped_unmapped,
+            hint="Add to FL_SPORT_ID_TO_SP_NAME or seed sp.sports.",
+        )
+    sport_ids = [s for s in sport_ids_in if s in sp_sport_id_by_fl_id]
 
     for sport_id in sport_ids:
         try:
@@ -166,9 +232,14 @@ async def _ingest_pass(
                     # skip records that can't be parsed; downstream
                     # alerting catches the rate.
 
+                # Phase 2A.7: stamp sport_id from the per-sport loop
+                # context. The unmapped-FL-id pre-filter above means
+                # every sport_id reached here has a non-NULL sp_id;
+                # stable update_cols across sports and existing rows
+                # get backfilled on conflict.
                 batch.append({
                     "pk":     {"fl_event_id": event_id},
-                    "fields": {},  # FL has no extracted fields at the ingestion layer
+                    "fields": {"sport_id": sp_sport_id_by_fl_id[sport_id]},
                     "raw":    event_raw,
                 })
 

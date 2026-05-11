@@ -1,0 +1,74 @@
+# Railway service config — Phase 2B parallel-run cron.
+#
+# IMPORTANT: Railway does NOT auto-create services from this file.
+# The two cron services below must be manually created in the
+# Railway dashboard with matching names (resolver-cron-kalshi and
+# resolver-cron-fl). Once created, Railway picks up cronSchedule +
+# startCommand from this file on each deploy. See DEPLOYMENT.md →
+# "One-time Railway setup (services don't auto-create)" for the
+# full provisioning runbook.
+#
+# ALSO: Railway reads this file only at service CREATION. Updates
+# to cronSchedule / startCommand DO NOT propagate to existing
+# services on subsequent deploys — the operator must manually edit
+# Settings → Cron Schedule / Start Command in the dashboard for
+# each service. See DEPLOYMENT.md → "Updating cronSchedule /
+# startCommand on existing services" for the dashboard-edit
+# runbook. (Discovered post-PR #97 swap; PR #98 documented it.)
+#
+# Scheduled daily at 02:00 UTC per PHASE_2B_DESIGN.md §2 (the design
+# doc's locked cadence). Two services, staggered 15 minutes apart so
+# they don't compete for Neon connections — at peak each pass holds
+# one transaction at a time, but the bootstrap-load phase pulls
+# ~30k aliases + ~24k teams (CandidateIndex) into memory and we'd
+# rather not double that concurrently.
+#
+# **Provider order: FL FIRST, Kalshi SECOND** (post-PR #98 swap).
+# The 02:00 / 02:15 schedule was originally Kalshi-first (PR #88),
+# but the only rationale was Neon connection-staggering — the
+# stagger holds either way. Running FL first benefits cross-provider
+# corroboration: by the time Kalshi cron starts at 02:15, FL has
+# already strict-tier-resolved its corpus, so Kalshi's
+# alias-tier and (post-2D) fuzzy-tier corroboration lookups against
+# sp.fixtures see fresh fixtures from the same morning. Pre-swap
+# corroboration rate measured ~2-5%; post-swap expected 20-40%
+# (validated by Phase 2D.2.5 dry-run before 2D.3 ships).
+#
+# Both pass `--run-mode cron`. The runner rejects `--run-mode live`
+# (reserved for Phase 2E's continuous loop); cron is the only
+# scheduled mode 2B supports.
+#
+# Halt-criteria warnings are emitted to stdout AND the structured log
+# at the end of every pass — Railway's cron-log scrape catches both.
+# A non-zero exit code from the runner would trigger Railway's
+# normal failure alert; we deliberately keep exit 0 here so
+# transient halt-criteria warnings don't surface as deploy failures.
+# The operator reviews warnings via the day-7 query, not exit codes.
+#
+# Existing web service is unchanged — it picks up its config from
+# Railway's auto-detect (Python project, default start command).
+# This file adds resolver-cron-* services on top.
+
+[[services]]
+name = "resolver-cron-fl"
+
+[services.deploy]
+# Daily at 02:00 UTC. ~18k FL records → ~90s wall time. Runs FIRST
+# so its strict-tier auto-applies create / link sp.fixtures rows
+# that Kalshi's 02:15 pass can use for cross-provider corroboration.
+cronSchedule = "0 2 * * *"
+startCommand = "python scripts/run_resolver_pass.py --provider fl --run-mode cron"
+restartPolicyType = "NEVER"
+
+[[services]]
+name = "resolver-cron-kalshi"
+
+[services.deploy]
+# Daily at 02:15 UTC. ~4k Kalshi sport-filtered records → ~30s wall
+# time at strict@2a.6 throughput. The 15-min stagger after FL
+# preserves the Neon connection-budget separation AND lets FL
+# finish its ~90s pass with comfortable margin before Kalshi's
+# bulk-load phase begins.
+cronSchedule = "15 2 * * *"
+startCommand = "python scripts/run_resolver_pass.py --provider kalshi --run-mode cron"
+restartPolicyType = "NEVER"

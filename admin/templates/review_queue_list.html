@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Review queue ({{ page_data.total }}){% endblock %}
+{% block content %}
+  <h2 style="margin-top: 0;">
+    Review queue
+    <span class="muted" style="font-weight: normal; font-size: 1rem;">
+      &middot; {{ page_data.total }} matching
+    </span>
+  </h2>
+
+  <form class="filters" method="get" action="/admin/review-queue">
+    <div>
+      <label for="status">Status</label>
+      <select id="status" name="status">
+        <option value="pending" {% if filters.status == "pending" %}selected{% endif %}>pending</option>
+        <option value="approved" {% if filters.status == "approved" %}selected{% endif %}>approved</option>
+        <option value="rejected" {% if filters.status == "rejected" %}selected{% endif %}>rejected</option>
+      </select>
+    </div>
+    <div>
+      <label for="provider">Provider</label>
+      <select id="provider" name="provider">
+        <option value="" {% if not filters.provider %}selected{% endif %}>(any)</option>
+        <option value="kalshi" {% if filters.provider == "kalshi" %}selected{% endif %}>kalshi</option>
+        <option value="fl" {% if filters.provider == "fl" %}selected{% endif %}>fl</option>
+      </select>
+    </div>
+    <div>
+      <label for="sport">Sport</label>
+      <input id="sport" name="sport" type="text" value="{{ filters.sport }}" placeholder="e.g. Tennis">
+    </div>
+    <div>
+      <label for="confidence_min">Min confidence</label>
+      <input id="confidence_min" name="confidence_min" type="text" value="{{ filters.confidence_min }}" placeholder="0.0–1.0">
+    </div>
+    <div class="submit-row">
+      <button type="submit" class="primary">Apply</button>
+      <a class="button" href="/admin/review-queue">Reset</a>
+    </div>
+  </form>
+
+  {% if page_data.rows %}
+    <table class="queue">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Ticker</th>
+          <th>Title</th>
+          <th>Sport</th>
+          <th>Kickoff (UTC)</th>
+          <th>Confidence</th>
+          <th>Tier</th>
+          <th>Candidates</th>
+          <th>Status</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in page_data.rows %}
+          <tr>
+            <td>{{ row.provider }}</td>
+            <td class="ticker">
+              <a class="detail-link" href="/admin/review-queue/{{ row.id }}">
+                {{ row.provider_record_id }}
+              </a>
+            </td>
+            <td>
+              {% if row.provider_title %}
+                {{ row.provider_title }}
+              {% else %}
+                <span class="muted">(not snapshotted)</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if row.sport %}
+                {{ row.sport }}
+              {% else %}
+                <span class="muted">(unknown)</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if row.kickoff_at %}
+                {{ row.kickoff_at.strftime("%Y-%m-%d %H:%M") }}
+              {% else %}
+                <span class="muted">(unknown)</span>
+              {% endif %}
+            </td>
+            <td class="{% if row.is_collision %}conf-collision{% endif %}">
+              {{ row.confidence_display }}
+            </td>
+            <td>
+              {% if row.tier.startswith('fuzzy') %}
+                <span class="badge fuzzy">{{ row.tier }}</span>
+              {% elif row.tier.startswith('alias') %}
+                <span class="badge alias">{{ row.tier }}</span>
+              {% else %}
+                <span class="badge unknown">{{ row.tier }}</span>
+              {% endif %}
+            </td>
+            <td>{{ row.candidate_count }}</td>
+            <td>
+              {{ row.status }}
+              {% if row.rejection_count > 0 %}
+                <span class="muted">(rejected {{ row.rejection_count }}×)</span>
+              {% endif %}
+            </td>
+            <td>{{ row.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="pagination">
+      <div>
+        Page {{ page_data.page }} of {{ page_data.page_count }}
+        &middot;
+        Showing {{ page_data.rows | length }} of {{ page_data.total }}
+      </div>
+      <div>
+        {% set qs_base = "?status=" ~ filters.status ~
+                          "&provider=" ~ filters.provider ~
+                          "&sport=" ~ filters.sport ~
+                          "&confidence_min=" ~ filters.confidence_min %}
+        {% if page_data.has_prev %}
+          <a href="/admin/review-queue{{ qs_base }}&page={{ page_data.page - 1 }}">&larr; Previous</a>
+        {% else %}
+          <span class="disabled">&larr; Previous</span>
+        {% endif %}
+        &nbsp;
+        {% if page_data.has_next %}
+          <a href="/admin/review-queue{{ qs_base }}&page={{ page_data.page + 1 }}">Next &rarr;</a>
+        {% else %}
+          <span class="disabled">Next &rarr;</span>
+        {% endif %}
+      </div>
+    </div>
+  {% else %}
+    <p class="muted">No records match the current filters.</p>
+  {% endif %}
+{% endblock %}

@@ -11,3 +11,14 @@ alembic
 sentry-sdk[fastapi]
 structlog>=24.0
 pydantic>=2.0
+rapidfuzz>=3.0
+# Phase 2F.1 admin UI:
+#   bcrypt           — operator password hashing (OPERATOR_PASSWORD_HASH)
+#   itsdangerous     — required by Starlette's SessionMiddleware for cookie signing
+#   jinja2           — server-rendered admin templates
+#   python-multipart — required by FastAPI's Form() handling on the
+#                      login route (POST x-www-form-urlencoded body)
+bcrypt>=4.0
+itsdangerous>=2.0
+jinja2>=3.0
+python-multipart>=0.0.6

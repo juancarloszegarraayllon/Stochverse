@@ -315,3 +315,313 @@ class TestBatchUpsertClassification:
             loop.close()
         assert result == (0, 0, 0)
         mock_session.execute.assert_not_called()
+
+
+# ── Phase 2A.7: FL sport_id mapping + ingestion wiring ─────────
+
+
+class TestFLSportIdMap:
+    """Phase 2A.7: FL numeric sport_id → sp.sports.name translation
+    must cover every entry in DEFAULT_FL_SPORT_IDS, and every value
+    must match the canonical sp.sports.name spelling.
+    """
+
+    def test_every_default_sport_id_is_mapped(self):
+        from ingestion.fl import DEFAULT_FL_SPORT_IDS, FL_SPORT_ID_TO_SP_NAME
+        unmapped = [s for s in DEFAULT_FL_SPORT_IDS if s not in FL_SPORT_ID_TO_SP_NAME]
+        assert not unmapped, (
+            f"DEFAULT_FL_SPORT_IDS includes {unmapped} but FL_SPORT_ID_TO_SP_NAME "
+            f"doesn't translate them — ingestion would skip those sports with a "
+            f"sport_id_unmapped warning."
+        )
+
+    def test_map_values_align_with_sp_sports_seed(self):
+        """The values in FL_SPORT_ID_TO_SP_NAME must exactly match the
+        canonical names seeded in sp.sports (migration d8e717ed79dd).
+        Keep this list in sync with the seed migration."""
+        from ingestion.fl import FL_SPORT_ID_TO_SP_NAME
+        # The 17-sport canonical list per architecture v1.4 §5.4.
+        # Mirrors migration d8e717ed79dd_seed_sp_sports.py.
+        canonical_sp_names = {
+            "Soccer", "Tennis", "Basketball", "Hockey", "American Football",
+            "Baseball", "Handball", "Cricket", "Volleyball", "Rugby Union",
+            "Aussie Rules", "Rugby League", "MMA", "Boxing", "Golf",
+            "Snooker", "Darts",
+        }
+        for fl_id, sp_name in FL_SPORT_ID_TO_SP_NAME.items():
+            assert sp_name in canonical_sp_names, (
+                f"FL_SPORT_ID_TO_SP_NAME[{fl_id}] = {sp_name!r} but that name "
+                f"isn't in the sp.sports seed — ingestion would skip with "
+                f"sport_id_unmapped."
+            )
+
+
+class TestIngestionWritesSportId:
+    """Phase 2A.7: the per-sport batch in _ingest_pass must include
+    `sport_id` in its `fields` dict so the UPSERT populates the column.
+    Static-source guard against regression."""
+
+    def setup_method(self):
+        import inspect
+        import ingestion.fl
+        self.src = inspect.getsource(ingestion.fl)
+
+    def test_batch_includes_sport_id_field(self):
+        # Find the batch.append( call inside _ingest_pass.
+        idx = self.src.find("batch.append({")
+        assert idx > 0
+        # The next ~600 chars should include the sport_id field.
+        block = self.src[idx:idx + 600]
+        assert "\"sport_id\"" in block, (
+            "ingestion.fl._ingest_pass batch must include sport_id in fields "
+            "so the UPSERT populates sp.fl_events.sport_id."
+        )
+
+    def test_pre_pass_resolves_sp_sport_id_lookup(self):
+        # The function should bulk-load sp.sports → id map up-front.
+        assert "SELECT id, name FROM sp.sports" in self.src
+        assert "sp_sport_id_by_fl_id" in self.src
+
+    def test_unmapped_sports_are_skipped_with_warning(self):
+        # Sports without an sp.sports entry must NOT be polled (would
+        # NULL-out sport_id on existing rows during UPSERT).
+        assert "sport_id_unmapped" in self.src
+        assert "skipped_unmapped" in self.src
+
+    def test_lookup_is_built_inside_ingest_pass_not_run(self):
+        """Hotfix invariant: `sp_sport_id_by_fl_id` must be built inside
+        `_ingest_pass` so it has a valid session in scope. The original
+        2A.7 PR built it inside `run()` and referenced it from
+        `_ingest_pass` as a free variable — every call NameError'd
+        (production sp.fl_events.sport_id stayed 100% NULL after PR #86).
+
+        Static guard: the lookup-construction code must appear after
+        the `_ingest_pass` definition AND before the `_today_pre_game_loop`
+        definition, i.e. inside `_ingest_pass`'s body.
+        """
+        ingest_pass_idx = self.src.find("async def _ingest_pass(")
+        today_loop_idx = self.src.find("async def _today_pre_game_loop(")
+        run_idx = self.src.find("async def run(")
+        lookup_idx = self.src.find("sp_sport_id_by_fl_id: dict[int, int]")
+        assert ingest_pass_idx > 0
+        assert today_loop_idx > ingest_pass_idx
+        assert run_idx > today_loop_idx
+        assert lookup_idx > 0, "sp_sport_id_by_fl_id construction missing entirely"
+        assert ingest_pass_idx < lookup_idx < today_loop_idx, (
+            "sp_sport_id_by_fl_id must be built inside _ingest_pass "
+            "(it has the function's session in scope). The 2A.7 hotfix "
+            "moved it from run() — don't move it back."
+        )
+
+
+# ── Phase 2A.7 hotfix: end-to-end integration test ─────────────
+
+
+class TestIngestPassIntegration:
+    """Real call-path test for `_ingest_pass`. The original 2A.7 PR
+    relied on static guards that confirmed the right strings appeared
+    in the source — but didn't actually invoke the function. As a
+    result a NameError ('sp_sport_id_by_fl_id' referenced inside
+    _ingest_pass but built inside run()) shipped to production and
+    every poll silently failed.
+
+    These tests mock the FL HTTP boundary + DB boundary and exercise
+    the actual call path. A regression of the same shape would crash
+    here immediately.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ingest_pass_runs_without_name_error(self, monkeypatch):
+        """The smoking-gun: just call _ingest_pass and assert it
+        completes. Pre-hotfix this raised NameError at the
+        sp_sport_id_by_fl_id reference."""
+        from ingestion.fl import _ingest_pass
+
+        # 1. Mock the FL HTTP boundary.
+        async def fake_fl_get(path, params):
+            return {"DATA": [{
+                "TOURNAMENT_STAGE_ID": "stg_test",
+                "NAME": "Test League",
+                "EVENTS": [{
+                    "EVENT_ID":   "evt_1",
+                    "HOME_NAME":  "Bayern",
+                    "AWAY_NAME":  "PSG",
+                    "START_TIME": 1778191200,
+                }],
+            }]}
+
+        import flashlive_feed
+        monkeypatch.setattr(flashlive_feed, "_fl_get", fake_fl_get)
+
+        # 2. Mock the DB UPSERT — capture the records arg.
+        captured: list[list[dict]] = []
+
+        async def fake_upsert(session, table, records):
+            captured.append(records)
+            return (len(records), 0, 0)
+
+        monkeypatch.setattr(
+            "ingestion.fl.upsert_provider_records_batch",
+            fake_upsert,
+        )
+
+        # 3. Mock the AsyncSession: SELECT returns sp.sports rows.
+        class _Row:
+            def __init__(self, id, name):
+                self.id = id
+                self.name = name
+        soccer = _Row(1, "Soccer")
+        tennis = _Row(2, "Tennis")
+        sp_sports_result = MagicMock()
+        sp_sports_result.all.return_value = [soccer, tennis]
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=sp_sports_result)
+        session.commit = AsyncMock()
+
+        # 4. Run.
+        result = await _ingest_pass(
+            session, sport_ids=[1, 2], indent_days=0,
+        )
+
+        # 5. Did not crash. Records actually flowed through.
+        assert result.fetched > 0
+        assert captured, "Expected at least one batch to reach upsert"
+
+    @pytest.mark.asyncio
+    async def test_ingest_pass_writes_sport_id_in_batch(self, monkeypatch):
+        """Per-record sport_id must be set to the resolved sp.sports.id,
+        not None and not the FL numeric id. The matcher reads this
+        column via JOIN later — wrong sport_id → wrong sport name →
+        wrong gate decision."""
+        from ingestion.fl import _ingest_pass
+
+        async def fake_fl_get(path, params):
+            return {"DATA": [{
+                "TOURNAMENT_STAGE_ID": "stg_test",
+                "EVENTS": [{
+                    "EVENT_ID":   f"evt_{params['sport_id']}",
+                    "HOME_NAME":  "H",
+                    "AWAY_NAME":  "A",
+                    "START_TIME": 1778191200,
+                }],
+            }]}
+
+        import flashlive_feed
+        monkeypatch.setattr(flashlive_feed, "_fl_get", fake_fl_get)
+
+        captured: list[list[dict]] = []
+
+        async def fake_upsert(session, table, records):
+            captured.append(records)
+            return (len(records), 0, 0)
+
+        monkeypatch.setattr(
+            "ingestion.fl.upsert_provider_records_batch",
+            fake_upsert,
+        )
+
+        # FL id 1 (Soccer) → sp.sports.id 100; FL id 2 (Tennis) → 200.
+        # NOTE: MagicMock(name=...) treats `name` as a debug-repr kwarg;
+        # `.name` doesn't pick it up. Use a plain row stand-in instead.
+        class _Row:
+            def __init__(self, id, name):
+                self.id = id
+                self.name = name
+        soccer = _Row(100, "Soccer")
+        tennis = _Row(200, "Tennis")
+        sp_sports_result = MagicMock()
+        sp_sports_result.all.return_value = [soccer, tennis]
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=sp_sports_result)
+        session.commit = AsyncMock()
+
+        await _ingest_pass(session, sport_ids=[1, 2], indent_days=0)
+
+        # Two batches expected (one per sport). Each record must carry
+        # the sp.sports.id matching its FL sport (100 for Soccer, 200
+        # for Tennis).
+        assert len(captured) == 2
+        all_records = [r for batch in captured for r in batch]
+        assert all_records, "No records reached upsert"
+        sport_ids_in_batch = {r["fields"]["sport_id"] for r in all_records}
+        assert sport_ids_in_batch == {100, 200}, (
+            f"Expected sport_id values {{100, 200}}, got {sport_ids_in_batch}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_does_not_name_error_at_startup(self, monkeypatch):
+        """`run()` is the production entry point (called by
+        ingestion.runner). Pre-hotfix it referenced `session` before
+        the session_factory block opened, NameError'ing on first
+        invocation. Smoke-test that it gets past startup and into the
+        loops (we cancel before they run a real pass).
+        """
+        from ingestion import fl as fl_module
+
+        # Mock try_acquire_advisory_lock to return False — `run` then
+        # logs and exits without spawning the loops, which is plenty
+        # to verify it gets past the startup code without NameError.
+        async def fake_lock(session, key):
+            return False
+        monkeypatch.setattr(
+            "ingestion.fl.try_acquire_advisory_lock", fake_lock,
+        )
+
+        # session_factory just needs to be a context manager that
+        # yields something async — `try_acquire_advisory_lock` is
+        # mocked, so the session is unused.
+        class _FakeSessionCM:
+            async def __aenter__(self):
+                return AsyncMock()
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+        def fake_session_factory():
+            return _FakeSessionCM()
+
+        # Should return cleanly (no NameError) when the lock is held
+        # elsewhere.
+        await fl_module.run(fake_session_factory)
+
+    @pytest.mark.asyncio
+    async def test_ingest_pass_skips_unmapped_fl_sport_id(self, monkeypatch):
+        """An FL sport_id not in FL_SPORT_ID_TO_SP_NAME (or one whose
+        target sp.sports.name is missing) must be skipped with a
+        warning, NOT polled with sport_id=None — that would NULL-out
+        the column on every existing row during UPSERT."""
+        from ingestion.fl import _ingest_pass
+
+        fetch_calls: list[int] = []
+
+        async def fake_fl_get(path, params):
+            fetch_calls.append(params["sport_id"])
+            return {"DATA": []}
+
+        import flashlive_feed
+        monkeypatch.setattr(flashlive_feed, "_fl_get", fake_fl_get)
+
+        async def fake_upsert(session, table, records):
+            return (0, 0, 0)
+        monkeypatch.setattr(
+            "ingestion.fl.upsert_provider_records_batch",
+            fake_upsert,
+        )
+
+        # Only Soccer (FL=1) is seeded; FL=999 has no map entry.
+        class _Row:
+            def __init__(self, id, name):
+                self.id = id
+                self.name = name
+        soccer = _Row(100, "Soccer")
+        sp_sports_result = MagicMock()
+        sp_sports_result.all.return_value = [soccer]
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=sp_sports_result)
+        session.commit = AsyncMock()
+
+        await _ingest_pass(session, sport_ids=[1, 999], indent_days=0)
+
+        # Only Soccer (FL=1) should have been polled; 999 dropped.
+        assert fetch_calls == [1], (
+            f"Expected only FL sport_id=1 to be polled (999 unmapped), "
+            f"got {fetch_calls}"
+        )

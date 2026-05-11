@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  {# Admin UI is internal; no SEO, no link-preview generation. #}
+  <title>{% block title %}Admin{% endblock %} — Stochverse</title>
+  {# All admin styles consolidated in admin/static/admin.css per
+     issue #120 — single stylesheet across the auth, list, and
+     detail surfaces. Add per-template overrides via {% block extra_head %}
+     when sub-PR #3 introduces approve/reject-specific styles. #}
+  <link rel="stylesheet" href="/admin/static/admin.css">
+  {# Vendored htmx (Phase 2F.1 Q4 — versioned filename per locked
+     decision; upgrade path: `make vendor-htmx HTMX_VERSION=X.Y.Z`,
+     bump the filename here in lockstep). Loaded in <head> so the
+     hx-* attributes on subsequent pages are recognized as soon as
+     the body parses. Without htmx the admin still works — every
+     mutating action degrades to a plain form POST + redirect per
+     Q5 progressive enhancement. #}
+  <script src="/admin/static/htmx-1.9.10.min.js" defer></script>
+  {% block extra_head %}{% endblock %}
+</head>
+<body>
+  {% block header %}
+    {% if request.session.get("operator") %}
+      <header class="admin-bar">
+        <h1>Stochverse Admin</h1>
+        <form method="post" action="/admin/logout">
+          <button type="submit">Sign out</button>
+        </form>
+      </header>
+    {% endif %}
+  {% endblock %}
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

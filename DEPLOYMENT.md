@@ -2,6 +2,74 @@
 
 This file documents deployment-time configuration that is **not** in the repo. The codebase ships with sensible defaults; the items below are operator-set on Railway (or whichever host).
 
+## Migration-bearing PR checklist
+
+Railway does NOT auto-run alembic on deploy. Migrations are applied manually via `alembic upgrade head` against the production `DATABASE_URL`. Every prior migration in this project (Phase 1A initial schema, Phase 2A.5/2A.6/2A.7, Phase 2B resolver_runs, Phase 2F.0 review_queue columns) followed the same manual pattern documented further down this file.
+
+**Why this checklist exists:** PR #114 (Phase 2F.0) merged with the migration code but the operator did not run `alembic upgrade head` against production. The production DB stayed at the prior head while the ORM in `sp_models.py` declared columns that didn't exist. PR #115 (the dependent runner write-side change) would have crashed on every REVIEW_QUEUE INSERT had it merged before the migration was applied. The mismatch was caught by spot-check before #115 merged, but the workflow gap was real.
+
+For any PR that adds a new alembic revision under `migrations/versions/`:
+
+1. **Before merging the migration PR:**
+   - [ ] Migration applied to a disposable Postgres (Neon dev branch, docker-compose) — forward AND downgrade roundtrip verified.
+   - [ ] `alembic current` against the dev DB shows the new revision as head.
+   - [ ] `tests/test_phase_<n>_migration.py` (or equivalent) passing locally — static guards on the migration shape + ORM-in-sync.
+
+2. **After merging the migration PR, BEFORE merging any dependent code PR:**
+   - [ ] `DATABASE_URL=<prod-Neon> alembic upgrade head` against production.
+   - [ ] `alembic current` against production shows the new revision as head.
+   - [ ] Verify the new schema landed correctly (e.g. `psql ... -c "SELECT column_name, ..."` against `information_schema.columns` or `pg_indexes`).
+   - [ ] Note the production hash + verification output in the migration PR thread for the project history.
+
+3. **Then, and only then,** merge dependent code PRs that depend on the new schema (e.g. runner write-side updates, UI changes that read the new columns).
+
+If you skip step 2 and merge a dependent code PR, Railway redeploys the new code against the stale DB and the next cron / request that touches the missing schema crashes.
+
+**Recovery procedure (if the order is violated):**
+
+1. `git revert -m 1 <merge-commit-sha-of-dependent-PR>` — creates a revert commit
+2. Open PR for the revert, merge it (Railway redeploys with old code; system stable)
+3. Apply the migration: `DATABASE_URL=<prod-Neon> alembic upgrade head`; verify with `alembic current`
+4. Re-merge the original dependent PR (or open a new PR with the same changes if the revert was destructive)
+
+This is enforced by convention, not by CI. The `.github/PULL_REQUEST_TEMPLATE.md` checkbox is a reminder; the responsibility is the merger's. If we hit this gap a second time, the next iteration is a CI check that connects to production and verifies `alembic current` matches the migrations on `main` — credential exposure cost was the reason we deferred that initially.
+
+## DB-transaction PRs — integration tests required
+
+Separate from the migration checklist above, ANY PR that adds or modifies code which opens a SQLAlchemy session and writes to production tables MUST run its integration tests against a real Postgres (Neon dev branch or local `pg_ctlcluster`) **before merge** — not optional.
+
+**Why this checklist exists:** PR #123 (Phase 2F.1 sub-PR #3 — operator approve/reject) shipped with `approve_record()` doing pre-flight DB reads OUTSIDE the `async with session.begin():` block. SQLAlchemy 2.0's autobegin auto-starts a transaction on the first `session.execute()`, then the explicit `session.begin()` raises `InvalidRequestError: A transaction is already begun on this Session.` Every approve attempt returned HTTP 500 on first production click. The bug existed because integration tests in the PR were SKIPPED in CI (no `SP_INTEGRATION_DB` available in the sandbox); they never ran against a real session lifecycle, so the autobegin pattern conflict was invisible to test signal.
+
+For any PR touching DB transactions:
+
+1. **Before merging:**
+   - [ ] `SP_INTEGRATION_DB=postgresql+asyncpg://... pytest tests/test_phase_<n>_*.py` runs against a disposable Postgres (Neon dev branch or local `pg_ctlcluster start && createdb`).
+   - [ ] All integration tests gated on `SP_INTEGRATION_DB` either PASS or are explicitly skipped with a reason that references a tracked issue (not "no DB available in sandbox").
+   - [ ] Verify the test goes through the FastAPI dependency-injected session (e.g., `TestClient.post()` → `Depends(get_db)` yields the AsyncSession) — NOT a bare session in a test-only fixture. Test-only sessions bypass autobegin semantics and miss this class of bug.
+
+2. **After merging, before assuming the deploy is healthy:**
+   - [ ] Operator manually exercises the new endpoint against production (one approve / one reject / one whatever). Don't trust "CI green" for write paths — CI didn't run write paths.
+
+Local Postgres setup (10 minutes, reusable across PRs):
+
+```bash
+apt-get install -y postgresql
+pg_ctlcluster 16 main start
+sudo -u postgres psql -c "CREATE DATABASE sports_local;"
+sudo -u postgres psql -c "CREATE USER dev WITH PASSWORD 'dev' SUPERUSER;"
+sudo -u postgres psql -d sports_local -c "CREATE SCHEMA sp; GRANT ALL ON SCHEMA sp TO dev;"
+export SP_INTEGRATION_DB="postgresql+asyncpg://dev:dev@localhost:5432/sports_local"
+export DATABASE_URL="$SP_INTEGRATION_DB"
+alembic upgrade head
+# Seed minimal test data (e.g., 4 sp.teams rows) per the test file's
+# `_two_real_teams` fixture expectations.
+pytest tests/test_phase_<n>_*.py -v
+```
+
+Neon dev branches are equivalent and preferred for shared review (operator can hand the URL to whoever's reviewing the PR).
+
+---
+
 ## Phase 0 — required env vars
 
 ### `WEB_CONCURRENCY`
@@ -55,6 +123,60 @@ After deploy, every outbound provider call emits a `provider_api_call` JSON even
 Cache hits emit the same event with `status: 0` and `extra: {"cache_hit": true}`. Use the difference between request rate and `cache_hit=false` count to compute cache effectiveness.
 
 These events match the Phase 1 `provider_api_calls` table schema (architecture doc §6.3), so the Phase 1 migration can backfill historical call volume from these logs.
+
+## Phase 2F.1 — admin UI env vars (optional)
+
+The operator review-queue UI mounts at `/admin/` per `PHASE_2F_DESIGN.md` rev1.1. Both env vars below must be set together; if either is missing, the admin routes return `503 admin UI is not configured` and the rest of the FastAPI app keeps serving normally.
+
+### `OPERATOR_PASSWORD_HASH`
+
+bcrypt hash of the operator password. Never plaintext.
+
+**Generate locally and paste the output into Railway:**
+
+```bash
+python -c "import bcrypt; print(bcrypt.hashpw(b'<your-password-here>', bcrypt.gensalt()).decode())"
+```
+
+The output looks like `$2b$12$XYZ.....` (60 characters). Set that string as the env var value.
+
+To rotate: regenerate the hash with a new password, replace the env var value in Railway, redeploy. Existing sessions stay valid until the cookie expires or the session secret changes (whichever comes first) — per the Phase 2F design's Q2 known-limitation note, password rotation requires a redeploy because the hash lives in an env var. Multi-operator (Phase 2F.X) replaces this with DB-stored hashes for self-service rotation.
+
+### `OPERATOR_SESSION_SECRET`
+
+Random secret for Starlette `SessionMiddleware` cookie signing. The cookie is signed (not encrypted); its contents are readable, just not forgeable.
+
+**Generate once at provisioning time:**
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Paste the output (43-character URL-safe string) into the Railway env var. **Do NOT commit the value to git.** If the secret leaks, an attacker can forge admin session cookies — rotate by generating a new value and redeploying (all existing sessions invalidate immediately).
+
+### Setting both on Railway
+
+1. Open the web service in Railway dashboard.
+2. **Variables** tab → add `OPERATOR_PASSWORD_HASH` (paste bcrypt output).
+3. Same tab → add `OPERATOR_SESSION_SECRET` (paste secrets.token_urlsafe output).
+4. The service redeploys automatically. After redeploy, `GET /admin/login` should render the login form (not 503).
+
+### Verification
+
+After deploy:
+
+```bash
+# Without auth: should redirect to login (or return 401 on /admin/, the auth-required landing page)
+curl -i https://<railway-host>/admin/
+# Expected: HTTP/2 401 or a redirect to /admin/login
+
+# Login form should render
+curl -i https://<railway-host>/admin/login
+# Expected: HTTP/2 200 with HTML body containing "<form ... action="/admin/login">
+
+# 503 if env vars missing (sanity check that the configured-check works)
+# (Temporarily unset OPERATOR_SESSION_SECRET, redeploy, retry — should return 503)
+```
 
 ## Phase 1E — Backfill scripts
 
@@ -122,6 +244,1022 @@ SELECT 'kalshi_markets', MIN(last_seen_at), MAX(last_seen_at) FROM sp.kalshi_mar
 - FL backfill (±7 days × ~17 sports): ~3-5 minutes against Neon US-West.
 
 The script is network-bound on the FL API, not the database.
+
+## Phase 2A.5 — Bootstrap sp.teams + sp.team_aliases from legacy
+
+One-time migration that seeds the SP entity layer's team data from
+`public.entities` (entity_type='team') and `public.entity_aliases`.
+Pre-seeds the alias table so Phase 2B's strict-tier resolver has
+data to match against on day 1, instead of cold-starting from zero
+coverage.
+
+### When to run
+
+Once, after the seed_sp_sports migration is applied. Before Phase 2B
+ships its matcher. The bootstrap is idempotent — re-running is safe
+but produces no new rows after the first successful run.
+
+### How to run
+
+Locally against production Neon:
+
+```bash
+# Verify migrations are at head — the seed_sp_sports migration must
+# have applied. Required revision: d8e717ed79dd or later.
+DATABASE_URL="<prod-Neon>" alembic current
+
+# Dry-run first — reads everything, writes nothing, logs counts.
+DATABASE_URL="<prod-Neon>" python scripts/bootstrap_sp_teams.py --dry-run
+
+# If the dry-run counts look reasonable (per-sport teams >= legacy
+# entity counts), run for real:
+DATABASE_URL="<prod-Neon>" python scripts/bootstrap_sp_teams.py
+```
+
+Or via Makefile (uses local docker-compose Postgres):
+
+```bash
+make bootstrap-sp-teams
+make bootstrap-sp-teams ARGS="--dry-run"
+```
+
+### Verification
+
+After running, check the per-sport coverage:
+
+```sql
+SELECT
+  s.name,
+  COUNT(DISTINCT t.id)            AS teams,
+  COUNT(a.id)                     AS aliases,
+  COUNT(DISTINCT a.team_id)       AS teams_with_at_least_one_alias
+FROM sp.sports s
+LEFT JOIN sp.teams t        ON t.sport_id = s.id
+LEFT JOIN sp.team_aliases a ON a.team_id = t.id AND a.source = 'legacy_bootstrap'
+GROUP BY 1
+ORDER BY 1;
+```
+
+Expected: most active sports (Soccer, Basketball, Hockey, Baseball,
+Tennis, Football) should show non-zero teams + aliases. Sports with
+no legacy data (Snooker, Darts, etc. — depends on your historical
+ingestion coverage) may show zero; that's not a bootstrap failure,
+it's a fact about the legacy data.
+
+### Document the baseline
+
+After bootstrap completes, copy the per-sport counts table into
+`PROJECT_STATE.md`. Phase 2B's parallel-run will reference this
+baseline when assessing whether strict-tier coverage is healthy
+(architecture v1.4 §13 / Phase 2B design doc §2 — the **<60%
+coverage** threshold).
+
+### Limitations / known scoping
+
+- Bootstrap migrates `public.entities` (team-typed) and
+  `public.entity_aliases`. Player and league entities are not
+  migrated — out of scope for the resolver's matching surface.
+- `public.markets` (sub-market identity) is **not** bootstrapped;
+  that's deferred to Phase 2C alias-tier work.
+- `country_code` on `sp.teams` is left NULL — legacy schema doesn't
+  carry it. Population is a future concern (Phase 4 if/when needed
+  for OddsAPI integration).
+- Bootstrapped aliases get `source='legacy_bootstrap'` and
+  `confidence=0.95`. The 0.05 gap from 1.0 distinguishes them from
+  human-curated aliases (added later via the review queue), so a
+  bootstrapped alias that produces a false-positive can be
+  identified and downweighted/removed without touching curated data.
+
+## Phase 2A.6 — Bootstrap sp.competitions (Kalshi only)
+
+Phase 2A.6 seeds `sp.competitions` from distinct (sport, series_base)
+tuples observed in `sp.kalshi_markets` so the strict-tier matcher's
+competition gate has data to resolve against. FL competitions are
+deferred to Phase 2C — `sp.fl_events.raw_payload` doesn't currently
+carry a tournament-level sport_id, so a clean FL seed needs an
+ingestion change first. Until then, FL signals take an explicit
+`fl_transitional_sport_only` path through the matcher (logged on
+every successful match).
+
+### When to run
+
+Once, after `bootstrap_sp_teams` has been applied and the Phase 2B
+migration is at head. Before running the first Phase 2B parallel-run
+pass — without this step the Kalshi side of the matcher would
+sport-only-fall-back on every record (silently degraded gate).
+
+### How to run
+
+```bash
+DATABASE_URL=<prod-Neon> python scripts/bootstrap_sp_competitions.py --dry-run
+DATABASE_URL=<prod-Neon> python scripts/bootstrap_sp_competitions.py
+```
+
+Or via Makefile:
+
+```bash
+make bootstrap-sp-competitions
+make bootstrap-sp-competitions ARGS="--dry-run"
+```
+
+Idempotent — a re-run is a no-op for any series_base already covered.
+
+### Verification
+
+```sql
+SELECT s.name              AS sport,
+       COUNT(c.id)         AS competitions,
+       SUM(jsonb_array_length(c.kalshi_series_bases)) AS kalshi_bases_indexed
+FROM sp.sports s
+LEFT JOIN sp.competitions c ON c.sport_id = s.id
+GROUP BY 1
+ORDER BY 1;
+```
+
+After Phase 2B parallel-run starts, audit the per-resolution
+competition decisions:
+
+```sql
+-- Kalshi distribution of competition gate outcomes
+SELECT reason_detail->>'competition_resolution' AS resolution,
+       COUNT(*) AS count
+FROM sp.resolution_log
+WHERE provider = 'kalshi'
+  AND decided_at > NOW() - INTERVAL '24 hours'
+GROUP BY 1
+ORDER BY 2 DESC;
+
+-- FL transitional-path coverage (will be 100% of FL strict matches
+-- until Phase 2C lands)
+SELECT COUNT(*) FILTER (WHERE reason_detail ? 'fl_transitional_sport_only') AS transitional,
+       COUNT(*)                                                              AS fl_strict_total
+FROM sp.resolution_log
+WHERE provider = 'fl'
+  AND reason_code = 'strict'
+  AND decided_at > NOW() - INTERVAL '24 hours';
+```
+
+### Limitations
+
+- canonical_name = series_base (e.g., `KXEPL`). Display polish
+  (mapping `KXEPL` → "Premier League") is a Phase 2C concern via
+  manual_review or a name-mapping pass.
+- FL `fl_tournament_stage_ids` array stays empty; CompetitionResolver
+  returns `unresolvable` for FL hints. The matcher routes around this
+  via the FL transitional path — no FL strict match is gated on
+  competition match in 2A.6.
+- A Kalshi explicit-comp signal arriving on a fixture FL created
+  earlier with NULL competition_id will still LINK — `find_fixture`
+  uses an equal-or-NULL filter precisely to avoid forking one
+  logical fixture into two during the 2A.6 → 2C transition. When
+  this happens the matcher stamps two flags on `resolution_log.reason_detail`:
+  ```
+  linked_to_null_comp_fixture: true
+  null_comp_fixture_pending_backfill: <fixture-uuid>
+  ```
+  Phase 2C's reconciliation query becomes a one-liner:
+  ```sql
+  SELECT (reason_detail->>'null_comp_fixture_pending_backfill')::uuid AS fixture_id,
+         (reason_detail->>'competition_id')::uuid                     AS expected_competition_id
+  FROM sp.resolution_log
+  WHERE reason_detail ? 'linked_to_null_comp_fixture'
+    AND decided_at > '<2A.6 deploy timestamp>';
+  ```
+
+### FL transitional sub-paths
+
+Every successful FL strict-tier match in 2A.6 stamps both
+`fl_transitional_sport_only=true` AND a `fl_transitional_path`
+sub-flag describing which of three reachable paths the match took:
+
+| `fl_transitional_path`            | Meaning                                                                                    |
+|-----------------------------------|--------------------------------------------------------------------------------------------|
+| `matched_null_comp_fixture`       | Typical 2A.6 case. Existing fixture had NULL competition_id; FL joined it sport-only.      |
+| `matched_existing_comp_fixture`   | Uncommon: fixture was previously created by Kalshi with explicit competition_id. FL is now joining sport-only. Phase 2C must verify FL's resolved comp aligns with what Kalshi wrote. |
+| `created_null_comp_fixture`       | FL was first to see this fixture; new row created with NULL competition_id. Awaits Phase 2C to set the column. |
+
+Day-7 audit:
+
+```sql
+SELECT reason_detail->>'fl_transitional_path' AS path, COUNT(*)
+FROM sp.resolution_log
+WHERE provider = 'fl'
+  AND reason_code = 'strict'
+  AND decided_at > NOW() - INTERVAL '24 hours'
+GROUP BY 1 ORDER BY 2 DESC;
+```
+
+Most should be `matched_null_comp_fixture` or `created_null_comp_fixture`.
+A material `matched_existing_comp_fixture` count means Kalshi-Kalshi-FL
+order is common in your data — fine, but flags real comp-asymmetry
+work for 2C.
+
+## Phase 2A.7 — sp.fl_events.sport_id (recover sport context per row)
+
+FL ingestion polls per-sport but pre-2A.7 didn't persist sport
+context anywhere — neither column nor `raw_payload` top-level. The
+resolver runner had no way to pass `sport=...` to
+`FLResolverModule.extract_signal`, so every FL signal hit the
+matcher's gate 2 (`sport_not_classified`) and got rejected. First
+production FL pass produced **0/19,753 auto-applies**.
+
+Phase 2A.7 fixes the architectural gap with a new column + ingestion
+update + thin backfill wrapper. No design doc changes — this is a
+data-shape fix discovered post-2B.
+
+### Migration
+
+```bash
+DATABASE_URL=<prod-Neon> alembic upgrade head
+```
+
+Applies revision `7c3f9b1a2e58`:
+- Adds `sp.fl_events.sport_id INTEGER REFERENCES sp.sports(id)` (nullable; backfilled by ingestion).
+- Creates partial index `ix_fl_events_sport_unresolved` on `(sport_id, last_seen_at DESC) WHERE fixture_id IS NULL` — supports the resolver runner's hot query.
+
+### Backfill
+
+```bash
+DATABASE_URL=<prod-Neon> python scripts/backfill_sp_fl_events_sport_id.py
+```
+
+Or:
+
+```bash
+make backfill-sp-fl-events-sport-id
+make backfill-sp-fl-events-sport-id ARGS="--skip-backfill"   # residual report only
+```
+
+Mechanics: re-runs the standard FL backfill (`scripts/backfill_fl.py`)
+for indent_days `-7..+7`. Phase 2A.7's ingestion change populates
+`sport_id` on every UPSERT, so existing rows in the FL ±7 day window
+get backfilled in one pass. The script reports pre/post NULL counts
+and per-sport coverage, plus a residual count for rows that stay
+NULL.
+
+Rows that legitimately stay `sport_id IS NULL`:
+- Events outside the FL ±7 day window (legacy historical rows; no
+  FL endpoint serves them today, so they drain naturally as old
+  fixtures roll off).
+- Events for FL sport_ids not in `FL_SPORT_ID_TO_SP_NAME`. The
+  ingestion logs `ingestion.fl.sport_id_unmapped` warnings naming
+  the unrecognized FL ids — add them to the map (or seed the
+  matching sp.sports row) and re-run.
+
+### Verification
+
+```sql
+-- Per-sport coverage on the new column.
+SELECT s.name AS sport, COUNT(fle.fl_event_id) AS rows
+FROM sp.fl_events fle
+INNER JOIN sp.sports s ON s.id = fle.sport_id
+GROUP BY 1 ORDER BY 2 DESC;
+
+-- Residual NULLs (expected: rows outside FL's ±7 day window).
+SELECT COUNT(*) FROM sp.fl_events WHERE sport_id IS NULL;
+```
+
+### What 2A.7 does NOT do
+
+- Does not change `raw_payload` content. Older rows still have
+  `SPORT_ID = null` inside their payloads — that field was never
+  populated by FL, and the resolver doesn't read it now anyway.
+- Does not unlock historical FL fixtures beyond the ±7 day window.
+  Out of scope until a per-tournament historical fetch is added.
+
+## Phase 2C.2.5 — alias-tier dry-run calibration
+
+Read-only calibration script. Runs Phase 2C.2's `structurally_normalize`
++ fixture-level scorer pipeline against unresolved provider records
+and reports the predicted bucket distribution before the matcher
+in Phase 2C.3 commits to the threshold choice.
+
+**No DB writes.** Reads `sp.kalshi_markets` / `sp.fl_events`,
+`sp.teams`, and (optionally) `sp.fixtures` for the cross-provider
+corroboration pass. Resolver crons continue to run at strict@2a.6.
+
+### How to run
+
+```bash
+DATABASE_URL=<prod-Neon> python scripts/dry_run_alias_tier.py \
+    --provider kalshi --sport-code tennis --limit 600
+
+# Show top 5 examples per bucket
+DATABASE_URL=<prod-Neon> python scripts/dry_run_alias_tier.py \
+    --provider kalshi --sport-code tennis --limit 600 \
+    --show-examples 5
+
+# Faster — skip the with-corroboration pass (no sp.fixtures lookups)
+DATABASE_URL=<prod-Neon> python scripts/dry_run_alias_tier.py \
+    --provider kalshi --sport-code tennis --skip-corroboration
+```
+
+Or via Makefile:
+
+```bash
+make dry-run-alias-tier ARGS="--provider kalshi --sport-code tennis --limit 600"
+```
+
+### What the report tells you
+
+Two passes per record:
+1. **Without corroboration** — pure name match. Most pessimistic case.
+2. **With corroboration** — `find_fixture` lookup against
+   `sp.fixtures` adds +0.20 when the candidate (home_id, away_id)
+   pair has an existing fixture at the kickoff window.
+
+The delta between the two passes answers: how much of alias-tier
+auto-apply gain depends on cross-provider corroboration?
+
+Bucket distribution: `auto_apply` (≥ 0.85) / `review_queue`
+(0.70–0.84) / `no_match` (< 0.70) / `anchor_failed` (no surname
+match found) / `extraction_skipped` (extract_signal returned None).
+
+### Calibration decision input
+
+If `auto_apply` is much smaller than the design-doc prediction,
+options before 2C.3:
+- (a) Accept large day-0 review queue (drains via reviewer write-back which compounds).
+- (b) Lower personal-path auto-apply threshold from 0.85 (with stricter top-2 margin).
+- (c) Bump corroboration weight from +0.20 to +0.25.
+
+The dry-run output is the data that picks among (a)/(b)/(c).
+
+## Phase 2D.2.5 — fuzzy-tier dry-run calibration
+
+Read-only calibration script. Runs `FuzzyTierMatcher` against
+production records (typically the `deferred_to_2d` tennis bucket
+that 2C.3 routes to no_match) and reports the predicted bucket
+distribution PLUS the empirical cross-provider corroboration rate.
+
+**No DB writes.** Reads `sp.team_aliases`, `sp.competitions`,
+`sp.teams`, `sp.fixtures` (for the matcher's corroboration check),
+and the provider tables. Resolver crons continue to run at
+`strict@2a.6` + `alias@2c.0` — the 3-tier orchestration is 2D.3.
+
+### Why this script exists
+
+PHASE_2D_DESIGN.md rev1 §C predicted a 20-40% post-cron-swap
+corroboration rate (Pushback 5). The 2C.2.5 dry-run measured 2.4%
+PRE-cron-swap. The 2D.2.5 dry-run validates the rate POST-cron-
+swap before 2D.3 commits to the threshold values that depend on
+it.
+
+If actual rate diverges:
+- **Below 20%**: day-0 prediction was optimistic. Before 2D.3,
+  consider (a) accepting smaller auto-apply gain, (b) bumping
+  `CORROBORATION_SCORE` to e.g. +0.40, or (c) lowering
+  `AUTO_APPLY_THRESHOLD`.
+- **Above 40%**: day-0 prediction was conservative. Auto-apply
+  gain is larger than predicted; threshold choices remain valid.
+- **Within 20-40%**: threshold choices validated; ship 2D.3.
+
+### How to run
+
+```bash
+DATABASE_URL=<prod-Neon> python scripts/dry_run_fuzzy_tier.py \
+    --provider kalshi --sport-code tennis --limit 600
+
+# With top-5 examples per bucket
+DATABASE_URL=<prod-Neon> python scripts/dry_run_fuzzy_tier.py \
+    --provider kalshi --sport-code tennis --limit 600 \
+    --show-examples 5
+
+# Team-sport residuals (Gap 2 from PHASE_2D_DESIGN.md)
+DATABASE_URL=<prod-Neon> python scripts/dry_run_fuzzy_tier.py \
+    --provider kalshi --sport-code soccer --limit 600
+```
+
+Or via Makefile:
+
+```bash
+make dry-run-fuzzy-tier ARGS="--provider kalshi --sport-code tennis --limit 600"
+```
+
+### What the report tells you
+
+Single pass through the matcher per record (corroboration check
+fires naturally via `find_fixture` against `sp.fixtures`).
+Counterfactual analysis subtracts `CORROBORATION_SCORE` from each
+auto-apply's confidence to determine which auto-applies depend on
+corroboration vs which would auto-apply anyway.
+
+**Key headline numbers:**
+- **Bucket distribution**: `auto_apply` / `review_queue` /
+  `no_match` / `anchor_failed` / `extraction_skipped`.
+- **Empirical corroboration rate**: % of anchored records where
+  `find_fixture` returned a hit.
+- **Counterfactual auto-apply analysis**: for each auto-apply
+  with corroboration, would it survive subtraction of
+  `CORROBORATION_SCORE` (0.30)? Records that would NOT auto-apply
+  without corroboration are "corroboration-dependent." For 2D's
+  current weights (0.40 anchor + 0.30 quality + 0.30 corr = 1.00
+  max), ALL fuzzy auto-applies are corroboration-dependent by
+  construction (anchor + quality maxes at 0.70 alone).
+- **Calibration warning**: explicit BELOW / ABOVE / WITHIN-range
+  message comparing empirical rate to design rev1's 20-40%.
+
+### Calibration decision input → 2D.3
+
+The dry-run output drives one of three paths:
+1. **Within 20-40%**: lock 2D.3 thresholds as-is, ship the matcher
+   integration + runner wiring.
+2. **Below 20%**: revisit confidence weights (likely bump
+   corroboration to +0.40) before 2D.3 ships. Possibly also lower
+   `TEAM_FUZZ_RATIO_THRESHOLD` from 0.85 to 0.78 to broaden anchor
+   coverage.
+3. **Above 40%**: ship 2D.3 with current weights; expect higher
+   auto-apply rate than predicted. Day-7 review monitors FP rate
+   to confirm the higher recall doesn't come at unacceptable
+   precision cost.
+
+Same calibration discipline as 2C.2.5 → 2C.2.7 where dry-run
+output drove the 0.92 → 0.78 threshold change.
+
+## Phase 2C.3 — Alias tier (TieredMatcher: strict → alias → review)
+
+The 2B parallel-run cron (`resolver-cron-fl`, `resolver-cron-kalshi`)
+keeps the same 02:00 / 02:15 UTC schedule. After 2C.3 it runs
+`TieredMatcher` instead of bare `StrictMatcher` — same entry point,
+same DATABASE_URL, no Railway-side changes needed.
+
+### What changes per pass
+
+- **Strict tier** runs first (unchanged from 2B). On STRICT hit:
+  same auto-apply path as before (UPDATE provider.fixture_id +
+  INSERT resolution_log row stamped `strict@2a.6`).
+- **Alias tier** runs only when strict returns `NO_MATCH`. Tries
+  fuzzy team-name matching with cross-team-collision detection
+  and exact-match-wins. On ALIAS hit: UPDATE provider.fixture_id
+  + INSERT resolution_log row stamped `alias@2c.0` + INSERT new
+  `sp.team_aliases` row (`source='alias_tier'`, `confidence=<match score>`).
+- **Review queue**: when the alias tier detects a cross-team
+  collision (multiple candidates above 0.78 with no single 1.0
+  winner) OR confidence lands in 0.70–0.84, an `sp.review_queue`
+  row is inserted with the candidate team_ids. Phase 2F admin UI
+  is the consumer.
+- **Tennis (and individual sports generally)** early-exit with
+  `reason_code='no_match'`, `fail_reason='deferred_to_2d'`. ~180
+  Kalshi tennis records / day until Phase 2D ships.
+
+### Dual-tier logging (Phase 2C design D.4)
+
+When alias rescues a record strict missed, BOTH `resolution_log`
+rows are written in the same atomic transaction:
+
+- Row 1: strict's `no_match` (`resolver_version='strict@2a.6'`,
+  fail_reason='alias_resolution_incomplete'`)
+- Row 2: alias's hit (`resolver_version='alias@2c.0'`,
+  reason_code='alias'`)
+
+Strict's "I tried and failed" is forensic data — the day-7 review
+query joins the two via `(provider, provider_record_id)` to see
+the full per-record decision history.
+
+### sp.resolver_runs.extra additions
+
+The single `auto_applies` aggregate now decomposes into
+per-tier counters in `extra`:
+
+```json
+{
+  "limit": null,
+  "chunk_size": 200,
+  "signal_extraction_skipped": 286,
+  "strict_auto_applies":       312,
+  "alias_auto_applies":         68,
+  "alias_review_queue":        248,
+  "alias_tennis_deferred":     180
+}
+```
+
+`auto_applies` (top-level column) = `strict_auto_applies + alias_auto_applies`.
+
+### Day-7 query additions
+
+The full report is in `scripts/parallel_run_day7_report.sql`. The
+2C.3-relevant additions:
+
+```sql
+-- Per-tier auto-apply breakdown
+SELECT date_trunc('day', started_at)::date         AS day,
+       provider,
+       SUM((extra->>'strict_auto_applies')::int)   AS strict,
+       SUM((extra->>'alias_auto_applies')::int)    AS alias,
+       SUM((extra->>'alias_review_queue')::int)    AS review,
+       SUM((extra->>'alias_tennis_deferred')::int) AS tennis_deferred
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '7 days'
+  AND run_mode IN ('standalone', 'cron')
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- Senior-vs-reserve collision patterns (drives Phase 2C.4 sizing)
+SELECT reason_detail->>'home_canonical' AS canonical,
+       COUNT(*) AS collisions
+FROM sp.resolution_log
+WHERE provider IN ('kalshi', 'fl')
+  AND reason_code = 'review_queue'
+  AND (reason_detail->>'home_collision')::boolean = true
+  AND decided_at > NOW() - INTERVAL '7 days'
+GROUP BY 1
+ORDER BY 2 DESC
+LIMIT 50;
+```
+
+### Review-queue alert threshold (per design C.1)
+
+Architecture §7.5's `> 100` review-queue alert threshold is raised
+to **1,500 for the 14-day post-2C.3 window** to absorb the launch
+spike (predicted 400–1,200 review rows on day 1, draining over
+~2 weeks). Reverts to 100 on day 15 automatically unless extended
+via documented decision.
+
+### Operator action after merge
+
+```bash
+git checkout main && git pull
+# Railway redeploys the resolver-cron-* services automatically.
+
+# Verify the next 02:00 UTC pass produces alias-tier rows.
+psql "$DATABASE_URL" <<'SQL'
+SELECT provider,
+       SUM((extra->>'strict_auto_applies')::int) AS strict_auto,
+       SUM((extra->>'alias_auto_applies')::int)  AS alias_auto,
+       SUM((extra->>'alias_review_queue')::int)  AS review_q
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '24 hours'
+  AND run_mode = 'cron'
+GROUP BY 1;
+SQL
+```
+
+Day-7 review (after the parallel-run window): run the full
+`scripts/parallel_run_day7_report.sql` and read off the cross-
+provider summary (section 9) plus the per-tier breakdown.
+**Phase 2C.4 (senior-team disambiguation)** ships only after
+day-7 confirms which collision patterns are actually appearing in
+production — see PHASE_2C_DESIGN.md.
+
+## Phase 2D.3 — Fuzzy tier (TieredMatcher: strict → alias → fuzzy → review/no_match)
+
+Phase 2D.3 wires the already-shipped fuzzy-tier matcher (PR #100,
+2D.2) into the runner orchestration. Same cron entry points
+(`resolver-cron-fl` 02:00 UTC, `resolver-cron-kalshi` 02:15 UTC),
+same DATABASE_URL — no Railway-side changes needed.
+
+### Framing — Option C1 locked (per PHASE_2D_DESIGN.md rev3)
+
+**The fuzzy tier is a review-queue tool, not an auto-apply tool.**
+The 2D.2.8 dry-run (PR #104) measured 2.7% cross-provider
+corroboration on tennis (was 1.5% pre-drift-widening). Auto-apply
+requires corroboration to clear the 0.85 threshold; corroboration
+fires rarely, so auto-apply is a small bonus rather than the
+headline. The headline is the ~150 review-queue records / Kalshi
+tennis cron — high-quality structurally-anchored pairs (e.g.,
+provider 'Khachanov' vs candidate 'Khachanov K. (Wrl)') that
+operators approve in seconds via the review-queue UI.
+
+Day-0 prediction (rev3 final, post-2D.2.8 dry-run):
+
+| Bucket                                    | Per Kalshi tennis cron |
+|-------------------------------------------|------------------------|
+| fuzzy auto_applies                        | ~2–3                   |
+| **fuzzy review_queue (headline output)**  | **~150**               |
+| fuzzy no_match (below threshold)          | ~34                    |
+| anchor_failed (long-tail names)           | ~171                   |
+| Combined Kalshi auto-apply rate post-2D.3 | **~10–11%**            |
+
+### What changes per pass
+
+- **Strict tier** unchanged from 2C.3.
+- **Alias tier** runs only when strict returns `NO_MATCH` —
+  unchanged.
+- **Fuzzy tier (NEW)** runs only when alias tier returns
+  `NO_MATCH`. ALIAS auto-apply and REVIEW_QUEUE outcomes from the
+  alias tier are already actionable; fuzzy's lower anchor floor
+  (0.40 vs alias 0.50) cannot improve on them, so the orchestrator
+  short-circuits.
+- **Tennis early-exit** flow: alias tier still emits
+  `fail_reason='deferred_to_2d'` for individual sports (unchanged).
+  In 2D.3 the orchestrator then passes that record to fuzzy, which
+  may resolve it (FUZZY auto-apply), route it to review (REVIEW_QUEUE),
+  or pass on it (NO_MATCH with a fuzzy-specific fail_reason).
+- **Fuzzy auto-apply path:** UPDATE `provider.fixture_id` + INSERT
+  `resolution_log` row stamped `fuzzy@2d.0` + INSERT
+  `sp.team_aliases` rows with `source='fuzzy_tier'` (parallel to
+  the alias-tier write-back; same `ON CONFLICT (alias_normalized,
+  source) DO NOTHING` shape).
+- **Fuzzy review queue:** insert `sp.review_queue` row with
+  candidate team_ids; `provider.fixture_id` stays NULL. Operator
+  approval via Phase 2F admin UI converts to a fixture link.
+
+### Triple-tier logging (Phase 2D.3 design D.4 carry-forward)
+
+When all three tiers are consulted (strict miss → alias miss →
+fuzzy decision), THREE `resolution_log` rows are written in the
+same atomic transaction:
+
+- Row 1: strict's `no_match` (`resolver_version='strict@2a.6'`).
+- Row 2: alias's `no_match` (`resolver_version='alias@2c.0'`,
+  `fail_reason='deferred_to_2d'` for tennis or
+  `'alias_no_team_resemblance'` for team sports).
+- Row 3: fuzzy's outcome (`resolver_version='fuzzy@2d.0'`,
+  `reason_code` ∈ {`fuzzy`, `review_queue`, `no_match`}).
+
+Per-record decision history is reconstructible by joining the
+three rows on `(provider, provider_record_id, run_id)`.
+
+### sp.resolver_runs.extra additions
+
+`auto_applies` (top-level column) now decomposes across three
+tiers:
+
+```json
+{
+  "limit": null,
+  "chunk_size": 200,
+  "signal_extraction_skipped": 286,
+  "strict_auto_applies":       312,
+  "alias_auto_applies":         68,
+  "alias_review_queue":        248,
+  "alias_tennis_deferred":      30,
+  "fuzzy_auto_applies":          3,
+  "fuzzy_review_queue":        148
+}
+```
+
+`auto_applies` (top-level) = `strict_auto_applies + alias_auto_applies + fuzzy_auto_applies`.
+
+`alias_tennis_deferred` drops post-2D.3 because most of those
+records now flow through to fuzzy and land in `fuzzy_review_queue`
+or `fuzzy_auto_applies`. The remaining count is records where
+fuzzy also emitted `NO_MATCH` with a `deferred_to_2d` marker
+(rare; happens when the matcher catches a record post-alias
+early-exit but before fuzzy sees it).
+
+The orchestrator version stamp on the run row bumps from
+`tiered@2c.0` to `tiered@2d.0`. Older 2C run rows keep their 2c.0
+stamp so the day-7 query can split per-version metrics if needed.
+
+### Day-7 query additions
+
+The full report lives in `scripts/parallel_run_day7_report.sql`.
+2D.3-relevant additions:
+
+```sql
+-- Per-tier auto-apply + review-queue breakdown (extends 2C.3 query)
+SELECT date_trunc('day', started_at)::date          AS day,
+       provider,
+       SUM((extra->>'strict_auto_applies')::int)    AS strict_auto,
+       SUM((extra->>'alias_auto_applies')::int)     AS alias_auto,
+       SUM((extra->>'alias_review_queue')::int)     AS alias_review,
+       SUM((extra->>'fuzzy_auto_applies')::int)     AS fuzzy_auto,
+       SUM((extra->>'fuzzy_review_queue')::int)     AS fuzzy_review,
+       SUM((extra->>'alias_tennis_deferred')::int)  AS tennis_deferred
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '7 days'
+  AND run_mode IN ('standalone', 'cron')
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- Per-tier resolution_log breakdown (3-tier vs 2-tier vs 1-tier records)
+SELECT provider,
+       COUNT(*) FILTER (WHERE row_count = 1) AS strict_only,
+       COUNT(*) FILTER (WHERE row_count = 2) AS strict_alias,
+       COUNT(*) FILTER (WHERE row_count = 3) AS strict_alias_fuzzy
+FROM (
+  SELECT provider, provider_record_id, run_id, COUNT(*) AS row_count
+  FROM sp.resolution_log
+  WHERE decided_at > NOW() - INTERVAL '7 days'
+  GROUP BY 1, 2, 3
+) per_record
+GROUP BY provider;
+
+-- Fuzzy-tier write-back to sp.team_aliases (compounds same way 2C.3 did)
+SELECT date_trunc('day', created_at)::date AS day,
+       source,
+       COUNT(*) AS new_aliases
+FROM sp.team_aliases
+WHERE created_at > NOW() - INTERVAL '7 days'
+  AND source IN ('alias_tier', 'fuzzy_tier')
+GROUP BY 1, 2
+ORDER BY 1, 2;
+```
+
+### Review-queue alert threshold
+
+The 1,500-row alert threshold from 2C.3 absorbs the 2D.3 spike;
+no further raise. Predicted 2D contribution: ~150 fuzzy
+review-queue rows/Kalshi tennis cron ≈ ~300-400/day combined with
+2C alias review queue (~250/day baseline). Total daily review
+load: ~400-500 rows. Operator capacity check: at ~10 sec/record,
+~67-83 min/day of review work. If review queue depth grows past
+1,500 sustained for >7 days, escalate per 2C.1 alert mechanism.
+
+### Operator action after merge
+
+```bash
+git checkout main && git pull
+# Railway redeploys the resolver-cron-* services automatically.
+
+# Verify the next 02:00 UTC pass produces fuzzy-tier rows.
+psql "$DATABASE_URL" <<'SQL'
+SELECT provider,
+       SUM((extra->>'strict_auto_applies')::int) AS strict_auto,
+       SUM((extra->>'alias_auto_applies')::int)  AS alias_auto,
+       SUM((extra->>'fuzzy_auto_applies')::int)  AS fuzzy_auto,
+       SUM((extra->>'alias_review_queue')::int)  AS alias_review,
+       SUM((extra->>'fuzzy_review_queue')::int)  AS fuzzy_review,
+       SUM((extra->>'alias_tennis_deferred')::int) AS tennis_def
+FROM sp.resolver_runs
+WHERE started_at > NOW() - INTERVAL '24 hours'
+  AND run_mode = 'cron';
+SQL
+```
+
+Day-7 review (after the post-2D.3 parallel-run window): run the
+full `scripts/parallel_run_day7_report.sql` and read off the
+per-tier breakdown plus the new 3-tier-row count. **Phases 2D.5
+(FL alias coverage expansion), 2D.6 (Asian-name handling), and
+2D.7 (A.rev2 per-candidate filter)** are tracked as post-2D.4
+follow-ups — see PHASE_2D_DESIGN.md §E.9 / §E.10 / §E.11.
+
+## Phase 2B — Strict-tier resolver parallel-run
+
+Phase 2A.5 baseline is in place. Phase 2B's standalone runner
+(`scripts/run_resolver_pass.py`) drives the parallel-run period
+defined in `PHASE_2B_DESIGN.md` §2.
+
+### Migration
+
+```bash
+DATABASE_URL=<prod-Neon> alembic upgrade head
+```
+
+Applies revision `bdf12a30e49b`:
+- Creates `sp.resolver_runs` (one row per pass; queryable metrics)
+- Alters `sp.fixtures.competition_id` to nullable
+
+### What each run produces
+
+- For each provider record matched by the strict tier: an UPDATE
+  setting `fixture_id` on the provider table + an INSERT into
+  `sp.resolution_log` with confidence 0.98, `reason_code='strict'`,
+  and full `reason_detail` JSONB. Both writes happen in one
+  transaction per the leak-fix discipline.
+- For each match-attempt that misses any of the 4 gates: an INSERT
+  into `sp.resolution_log` with `fixture_id IS NULL`, `confidence=0`,
+  `reason_code='no_match'`, and the full `reason_detail` JSONB
+  capturing which gate rejected the signal. Provider record's
+  `fixture_id` stays NULL. Day-7 review queries
+  `reason_detail->>'fail_reason'` against this log.
+- For provider records the extractor can't produce a FixtureSignal
+  from (Kalshi outright/series/tournament shapes — no per-fixture
+  semantics): no `resolution_log` row (no signal → no reason_detail
+  to log). Tracked in the run-level
+  `extra->>'signal_extraction_skipped'` counter so the
+  records_scanned breakdown reconciles.
+- One row per pass in `sp.resolver_runs` with `provider`,
+  `run_mode`, counters, latency p95, and
+  `extra.signal_extraction_skipped`.
+
+The Kalshi runner SQL filters to sport-shaped rows
+(`(raw_payload->>'_is_sport')::boolean = true OR raw_payload->>'category' = 'Sports'`).
+`sp.kalshi_markets` stores every Kalshi category we ingest —
+Elections, Politics, Crypto, Entertainment, Economics, etc. — and
+those non-sport rows dominate `ORDER BY last_seen_at DESC` because
+they trade more actively. Without the filter, `--limit 100` produced
+~99% non-sport records and zero matcher data. The FL runner needs no
+equivalent filter: `ingestion/fl.py` only fetches the sport_ids in
+`DEFAULT_FL_SPORT_IDS`, so `sp.fl_events` is sport-shaped by
+construction.
+
+### Parallel-run cron schedule
+
+Daily at 02:00 UTC, two scheduled passes via Railway cron services
+(`railway.toml`). Staggered 15 minutes apart so they don't compete
+for Neon connections during the bulk-load phase.
+
+| Service              | Schedule (UTC) | Command |
+|----------------------|----------------|---------|
+| `resolver-cron-fl`     | `0 2 * * *`  | `python scripts/run_resolver_pass.py --provider fl --run-mode cron`     |
+| `resolver-cron-kalshi` | `15 2 * * *` | `python scripts/run_resolver_pass.py --provider kalshi --run-mode cron` |
+
+**Provider order: FL first, Kalshi second.** The original PR #88
+ordering (Kalshi-first) was set on connection-budget grounds only;
+post-PR #98 swap preserves the 15-min stagger but runs FL first so
+Kalshi's 02:15 pass sees fresh `sp.fixtures` for cross-provider
+corroboration. Benefits 2C.3 alias-tier corroboration immediately
+and prepares ground for 2D's calibration measurement.
+
+#### One-time Railway setup (services don't auto-create)
+
+**Important:** Railway does **not** auto-provision services from
+`railway.toml`. The TOML only configures services that already exist
+in the project; missing services are silently ignored. The first
+deploy after this PR landed produced no cron runs because of this —
+the operator has to create each service in the dashboard once, then
+the TOML's `cronSchedule` and `startCommand` take over.
+
+Setup steps (do this once per Railway project):
+
+1. Open the Railway project dashboard.
+2. Click **+ New** → **Empty Service**. Name it exactly
+   `resolver-cron-kalshi` (the name must match the `[[services]]`
+   block in `railway.toml`).
+3. Connect it to the same GitHub repo + branch as the web service
+   (so it picks up the same code).
+4. Set the same environment variables the web service uses —
+   minimum: `DATABASE_URL`. Use the Railway **Shared Variables**
+   feature so all three services (web + both crons) read from one
+   source.
+5. Repeat for `resolver-cron-fl`.
+6. Trigger a redeploy on each. After the first deploy, Railway
+   reads `railway.toml`, sees the matching `[[services]]` block,
+   and applies `cronSchedule` + `startCommand` for the **initial
+   provisioning**. Subsequent code pushes redeploy the services
+   but **do NOT update `cronSchedule` or `startCommand`** — see
+   the "Updating cronSchedule / startCommand" note below.
+
+#### Updating cronSchedule / startCommand on existing services
+
+**Important:** Railway reads `railway.toml` only at service
+**creation** time, not on subsequent deploys. Code pushes that
+modify `cronSchedule` or `startCommand` will redeploy the
+services but **leave the existing schedule/command unchanged**.
+This is the same pattern as the manual service-creation step
+above — `railway.toml` is initial-provisioning config, not a
+declarative-state file Railway reconciles.
+
+To change a service's schedule or command after creation:
+
+1. Edit `railway.toml` in the repo (so future re-creations get
+   the right config + the file documents current state).
+2. **Manually edit the service in the dashboard:**
+   - Schedule: **Settings → Cron Schedule → Edit schedule** →
+     enter the new cron expression.
+   - Start command: **Settings → Start Command → Edit** → enter
+     the new command.
+3. Trigger a redeploy on the affected service to pick up the
+   new dashboard config.
+
+This caveat was discovered post-PR #97 (FL/Kalshi cron swap):
+`railway.toml` was updated correctly, the deploy succeeded, but
+neither service picked up the new `cronSchedule` until the
+operator manually edited each one's schedule in the dashboard.
+The DEPLOYMENT.md note in PR #97 was wrong; this section is the
+correction.
+
+Verify:
+- Each service's **Settings → Cron Schedule** field shows
+  `0 2 * * *` (fl) or `15 2 * * *` (kalshi).
+- Each service's **Settings → Start Command** matches the table
+  above.
+- The Railway deploy logs for each cron service show
+  `Resolver pass complete in Xs:` and the per-counter summary on
+  the next scheduled run.
+
+If a cron service runs but exits with `ERROR: DATABASE_URL not
+set`, the env var didn't propagate from Shared Variables — set
+`DATABASE_URL` directly on that service's **Variables** tab.
+
+#### Per-run signals
+
+Both passes write one row to `sp.resolver_runs` with
+`run_mode='cron'` so day-7 reports filter cleanly (excluding ad-hoc
+`standalone` runs and post-2E `live` activity).
+
+Each cron run emits two halt-criteria signals:
+1. **Stdout WARNING block** at the end of the summary if any
+   threshold was exceeded — Railway's cron-log scrape catches it.
+2. **Structured log event** `resolver.run_pass.halt_criteria_exceeded`
+   for observability tooling.
+
+The runner deliberately exits 0 even when warnings fire — transient
+threshold spikes shouldn't surface as Railway deploy failures. The
+operator reviews via the day-7 query and the cron logs, not exit
+codes.
+
+### Halt criteria (per design doc §2)
+
+Wired into the per-pass evaluation in `_evaluate_halt_criteria()`:
+
+| Trigger                                       | Threshold       | Remediation |
+|-----------------------------------------------|-----------------|-------------|
+| Crashes in a single pass                      | `> 5`           | Halt parallel-run; investigate before re-enabling. Most likely cause: Neon connection issue or a matcher exception loop. |
+| Coverage (auto_applies / records_scanned)     | `< 60%` sustained | Review extraction; possibly relax competition-match or bootstrap more aliases. (Smoke runs `< 100` records skip this check.) |
+| Latency p95                                   | `> 5 min`       | Switch from polling to LISTEN/NOTIFY for Phase 2E.fix. |
+
+Two halt criteria from the design doc are evaluated at day-7 review
+time (not per-pass — they need cross-pass aggregation):
+
+| Trigger                                | Computed how | Remediation |
+|----------------------------------------|--------------|-------------|
+| Kalshi false-positive rate `> 1%/24h`  | Diff resolver auto-applies vs `legacy_kalshi_join.pair_via_registry`. Comparator wiring still pending — column `sp.resolver_runs.legacy_diff_count` exists but is NULL until the diff lands. | Tighten kickoff drift to 15 min. |
+| FL spot-check error rate `≥ 1 of 5`    | Operator picks 5 random FL strict auto-applies/day from `sp.resolution_log` and verifies against FL's web UI. ~5 min/day manual step. | Halt FL parallel-run, investigate. |
+
+### Day-7 parallel-run report
+
+Single SQL file with all the queries the day-7 review needs:
+
+```bash
+psql "$DATABASE_URL" -f scripts/parallel_run_day7_report.sql
+```
+
+Runs nine sections (auto-apply rate per day, day-over-day trend,
+latency p95, crash count, fail_reason distribution last 24h + full
+7-day window, FL transitional sub-paths, Phase 2C backfill candidate
+count, cross-provider summary). All queries scope to
+`run_mode IN ('standalone', 'cron')` so they exclude post-2E live
+activity.
+
+Individual queries can be copy-pasted from the file for ad-hoc
+audits. The cross-provider summary (section 9) is the right place
+to start the day-7 review.
+
+### Why isn't strict tier matching? — fail_reason audit
+
+Every no_match decision is logged with the gate that rejected it.
+Use this as the first stop when coverage looks low:
+
+```sql
+SELECT provider,
+       reason_detail->>'fail_reason' AS fail_reason,
+       COUNT(*)                      AS n,
+       ROUND(100.0 * COUNT(*) /
+             SUM(COUNT(*)) OVER (PARTITION BY provider), 1) AS pct_of_provider
+FROM sp.resolution_log
+WHERE reason_code = 'no_match'
+  AND decided_at > NOW() - INTERVAL '24 hours'
+GROUP BY 1, 2
+ORDER BY 1, 3 DESC;
+```
+
+(This is also section 5 of `parallel_run_day7_report.sql`.)
+
+Common values + remediation:
+- `alias_resolution_incomplete` — team didn't normalize to a seeded
+  alias. Check `reason_detail->>'home_resolved'` /
+  `away_resolved` to see which side. Phase 2C alias tier will
+  recover most of these.
+- `kalshi_competition_unresolvable` — `series_ticker` strips to a
+  base not in `sp.competitions.kalshi_series_bases`. Re-run
+  `bootstrap_sp_competitions.py` against the latest Kalshi data.
+- `sport_not_classified` — `_sport` field empty/unknown on the
+  raw payload. Ingestion-side classification problem, not resolver.
+- `kickoff_at_missing` / `kickoff_confidence_below_threshold` —
+  payload lacked an explicit kickoff timestamp; ticker fallback
+  gave 0.6 confidence. Strict tier requires ≥0.85.
+- `home_and_away_same_team` — alias data bug; both sides resolved
+  to the same `team_id`. Manual triage on the specific alias.
+
+### Manual / ad-hoc parallel-run pass
+
+Operators can trigger a pass between the daily 02:00 UTC slots
+without disturbing the cron series — `--run-mode standalone` is the
+default and the day-7 query includes both modes:
+
+```bash
+# Smoke first (skips the coverage halt-check at < 100 records).
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py \
+    --provider kalshi --limit 100
+
+# Full ad-hoc passes.
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider kalshi
+DATABASE_URL=<prod-Neon> python scripts/run_resolver_pass.py --provider fl
+```
+
+Or via Makefile against the local docker-compose Postgres:
+
+```bash
+make resolver-pass-kalshi
+make resolver-pass-kalshi ARGS="--limit 100"
+make resolver-pass-fl
+```
+
+### FL spot-check (operator runbook, daily)
+
+The "FL spot-check error rate" halt criterion above is a manual
+step. Pick 5 random FL strict-tier auto-applies per day:
+
+```sql
+SELECT decided_at, provider_record_id, fixture_id,
+       reason_detail->>'home_team_id' AS home,
+       reason_detail->>'away_team_id' AS away
+FROM sp.resolution_log
+WHERE provider = 'fl'
+  AND reason_code = 'strict'
+  AND decided_at > NOW() - INTERVAL '24 hours'
+ORDER BY random()
+LIMIT 5;
+```
+
+Cross-reference each row's fixture against FL's web UI (or another
+source). ≥1 of 5 wrong on any day → halt FL parallel-run, investigate.
+0 of 5 wrong for 5 consecutive days → FL precision is acceptable;
+resume normal cadence. ~5 minutes/day. Replaced by automated
+cross-provider corroboration in Phase 2D.
 
 ## Future phases
 
