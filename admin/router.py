@@ -214,10 +214,21 @@ async def review_queue_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"review_queue record {record_id} not found",
         )
+    # next_record_id is only meaningful when the panel renders
+    # _decision_result.html (status != 'pending'). For the pending
+    # path the form is rendered instead, and next_record_id is
+    # unused. Computing unconditionally keeps the template context
+    # uniform — one extra index scan per page load is negligible.
+    next_record_id = await queries.find_next_pending_record_id(session)
     return templates.TemplateResponse(
         request,
         "review_queue_detail.html",
-        {"operator": operator, "detail": detail, "form_error": None},
+        {
+            "operator": operator,
+            "detail": detail,
+            "form_error": None,
+            "next_record_id": next_record_id,
+        },
     )
 
 
@@ -241,16 +252,20 @@ def _decision_response(
     record_id: uuid_pkg.UUID,
     decision_result: dict[str, Any],
     operator: str,
+    next_record_id: uuid_pkg.UUID | None,
 ):
     """Shape the response per Q4 (candidates panel fragment for HTMX,
     full-page redirect for no-JS).
 
     - HTMX path: render _decision_result.html — replaces the candidates
       panel in-place via HTMX's hx-swap="outerHTML" target on the
-      panel. Includes a "Go to next record" link per Q4 refinement.
+      panel. Includes a "Go to next record" link per Q4 refinement
+      (next_record_id resolved by queries.find_next_pending_record_id;
+      None when the queue is drained).
     - No-JS path: 303 redirect to the detail view with the record's
-      new state already loaded. Operator's browser shows the
-      authoritative state without re-submitting the form.
+      new state already loaded. The detail handler computes its own
+      next_record_id when rendering — no need to pass it through the
+      redirect.
     """
     if _is_htmx_request(request):
         return templates.TemplateResponse(
@@ -260,11 +275,13 @@ def _decision_response(
                 "decision": decision_result,
                 "record_id": record_id,
                 "operator": operator,
+                "next_record_id": next_record_id,
             },
         )
     # No-JS fallback: redirect back to detail view. Operator sees
     # the authoritative state (status=approved/rejected, audit fields
-    # populated).
+    # populated) AND the detail handler re-computes next_record_id
+    # for the rendered _decision_result.html block.
     return RedirectResponse(
         url=f"/admin/review-queue/{record_id}",
         status_code=status.HTTP_303_SEE_OTHER,
@@ -344,9 +361,11 @@ async def approve(
             request, record_id=record_id, error=e,
             operator=operator, session=session,
         )
+    next_record_id = await queries.find_next_pending_record_id(session)
     return _decision_response(
         request, record_id=record_id,
         decision_result=result, operator=operator,
+        next_record_id=next_record_id,
     )
 
 
@@ -375,7 +394,9 @@ async def reject(
             request, record_id=record_id, error=e,
             operator=operator, session=session,
         )
+    next_record_id = await queries.find_next_pending_record_id(session)
     return _decision_response(
         request, record_id=record_id,
         decision_result=result, operator=operator,
+        next_record_id=next_record_id,
     )

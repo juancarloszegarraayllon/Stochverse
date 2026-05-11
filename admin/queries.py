@@ -510,6 +510,45 @@ async def get_review_queue_record(
     )
 
 
+# ── Navigation helper for "Go to next record" link ────────────
+
+
+async def find_next_pending_record_id(
+    session: AsyncSession,
+) -> uuid.UUID | None:
+    """Pick the highest-confidence pending review_queue record for
+    the "Go to next record" link in the decision-result panel.
+
+    Sort matches the list view's default (confidence DESC,
+    created_at DESC). Returns None when the queue is drained —
+    template falls through to "(no next record — drained for
+    current filter)".
+
+    Filter-context limitation (deferred to 2F.X): this ignores
+    any sport/provider/confidence_min filters the operator had in
+    the list view URL. The "next" record is always the queue-wide
+    top by confidence. If the operator wants filter continuity
+    they use the "Back to queue" link to return to their filter
+    URL via browser history. Surfaced in the template's tooltip /
+    aria-label if/when the limitation becomes operationally
+    confusing.
+
+    Uses the partial index ix_review_queue_pending_confidence
+    (Phase 2F.0 migration) — single index scan, no sort. The
+    just-decided record is excluded naturally because its status
+    is no longer 'pending' by the time this query runs.
+    """
+    sql = text(
+        """
+        SELECT id FROM sp.review_queue
+        WHERE status = 'pending'
+        ORDER BY confidence DESC, created_at DESC
+        LIMIT 1
+        """
+    )
+    return (await session.execute(sql)).scalar()
+
+
 # ── Mutation helpers (Phase 2F.1 sub-PR #3) ────────────────────
 
 

@@ -654,6 +654,108 @@ class TestMutationIntegration:
             "decision."
         )
 
+    # ── "Go to next record" link logic (Commit B fix) ──────────
+
+    def test_next_record_link_points_to_a_real_pending_uuid(self, app, engine):
+        """After approving one record, the decision-result panel
+        should surface a link to ANOTHER pending record (the
+        highest-confidence one remaining). Validates the
+        queries.find_next_pending_record_id helper + the
+        _decision_response wiring.
+        """
+        from sqlalchemy import text
+        teams = self._two_real_teams(engine)
+        # Seed three pending rows at different confidences.
+        decided_id = self._seed_non_collision_pending_row(
+            engine, "TEST-2F1-MUT-NEXT-A", teams[0].id, teams[1].id,
+        )
+        # Seed a higher-confidence pending row so the "next" pick is
+        # deterministic — the find helper sorts confidence DESC.
+        with engine.begin() as conn:
+            high_conf_id = conn.execute(text(
+                """
+                INSERT INTO sp.review_queue
+                  (id, provider, provider_record_id, candidate_fixtures,
+                   confidence, status, created_at, reason_detail,
+                   provider_title)
+                VALUES
+                  (gen_random_uuid(), 'kalshi', 'TEST-2F1-MUT-NEXT-B',
+                   CAST(:cands AS jsonb), 0.99, 'pending', NOW(),
+                   CAST(:rd AS jsonb), 'next record')
+                RETURNING id
+                """
+            ).bindparams(
+                cands=json.dumps([str(teams[0].id), str(teams[1].id)]),
+                rd=json.dumps({"sport": "Tennis"}),
+            )).scalar()
+
+        # Approve the lower-confidence record via HTMX path so the
+        # response carries the fragment + next_record_id.
+        resp = app.post(
+            f"/admin/review-queue/{decided_id}/approve",
+            data={
+                "home_team_id": str(teams[0].id),
+                "away_team_id": str(teams[1].id),
+            },
+            headers={"HX-Request": "true"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 200
+        # The fragment should include a link to the OTHER pending
+        # record (high-confidence one), NOT the just-decided one.
+        assert f"/admin/review-queue/{high_conf_id}" in resp.text, (
+            "Decision fragment should link to the next pending record "
+            "by confidence DESC. Got body:\n" + resp.text[:500]
+        )
+        assert f"/admin/review-queue/{decided_id}" not in resp.text or (
+            # Acceptable: a non-link reference (e.g., in audit kv).
+            f'href="/admin/review-queue/{decided_id}"' not in resp.text
+        ), "Next-record link should not point at the just-decided record"
+
+    def test_next_record_link_falls_through_when_queue_drained(self, app, engine):
+        """When the only pending record is the one being decided,
+        find_next_pending_record_id returns None and the template
+        falls through to the "(no next record — drained)" string.
+        """
+        teams = self._two_real_teams(engine)
+        # Clear ALL existing pending rows first, then seed exactly one.
+        # (Other tests' rows may linger; the autouse cleanup only
+        # purges TEST-2F1-MUT-* prefixed records.)
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            # Mark all non-test pending rows as approved so they don't
+            # interfere. Restore at test teardown via the autouse fixture.
+            # Actually simpler: skip if there are real pending rows.
+            other_pending = conn.execute(text(
+                "SELECT COUNT(*) FROM sp.review_queue "
+                "WHERE status = 'pending' "
+                "  AND provider_record_id NOT LIKE 'TEST-2F1-MUT-%'"
+            )).scalar()
+        if other_pending > 0:
+            pytest.skip(
+                "integration DB has real pending records; "
+                "can't reliably assert empty-queue fallback"
+            )
+
+        record_id = self._seed_non_collision_pending_row(
+            engine, "TEST-2F1-MUT-NEXT-ONLY", teams[0].id, teams[1].id,
+        )
+        resp = app.post(
+            f"/admin/review-queue/{record_id}/approve",
+            data={
+                "home_team_id": str(teams[0].id),
+                "away_team_id": str(teams[1].id),
+            },
+            headers={"HX-Request": "true"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 200
+        # Drained-queue fallback string from _decision_result.html.
+        assert "drained" in resp.text.lower(), (
+            "Empty-queue path should render '(no next record — drained "
+            "for current filter)'. Body:\n" + resp.text[:500]
+        )
+
     def test_approve_refuses_when_kickoff_missing(self, app, engine):
         """Scenario 3 variant — partial-failure boundary. Q1 edge
         case: kickoff_at unavailable from provider raw_payload →
