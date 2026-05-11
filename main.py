@@ -385,6 +385,16 @@ if _operator_session_secret:
 from admin import router as _admin_router  # noqa: E402  (post-app-setup import is intentional)
 app.include_router(_admin_router)
 
+# Mount vendored admin static assets (htmx, etc.) at /admin/static.
+# Path is repo-local: admin/static/. See admin/static/README.md for
+# the vendoring procedure (operator runs `make vendor-htmx` to
+# populate). Sub-PR #2 doesn't reference any file in this dir yet;
+# the mount is set up now so sub-PR #3's HTMX usage works without
+# a wiring follow-up.
+_admin_static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin", "static")
+if os.path.isdir(_admin_static_dir):
+    app.mount("/admin/static", StaticFiles(directory=_admin_static_dir), name="admin-static")
+
 
 async def _price_prune_loop():
     """Hourly: delete price rows older than PRICE_RETENTION_HOURS.

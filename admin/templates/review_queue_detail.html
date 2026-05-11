@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block title %}{{ detail.row.provider_record_id }}{% endblock %}
+{% block content %}
+  <style>
+    .panel {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.85rem 1.1rem;
+      margin-bottom: 1rem;
+    }
+    .panel h3 {
+      margin: 0 0 0.6rem;
+      font-size: 1rem;
+      color: #444;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 10rem 1fr;
+      row-gap: 0.3rem;
+      column-gap: 0.5rem;
+      font-size: 0.9rem;
+    }
+    .kv dt { color: var(--muted); }
+    .kv dd { margin: 0; }
+    .ticker { font-family: ui-monospace, "SF Mono", "Cascadia Mono", monospace; }
+    .candidate-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .candidate-list li {
+      padding: 0.5rem 0;
+      border-bottom: 1px solid #eee;
+    }
+    .candidate-list li:last-child { border-bottom: none; }
+    .candidate-list .team-name { font-weight: 500; }
+    .candidate-list .team-meta { color: var(--muted); font-size: 0.85rem; }
+    .actions-placeholder {
+      background: #fffbe7;
+      border: 1px solid #e0d090;
+      color: #6a5800;
+      padding: 0.6rem 0.9rem;
+      border-radius: 4px;
+      font-size: 0.9rem;
+    }
+    pre.json-block {
+      background: #f6f7f9;
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      padding: 0.7rem;
+      overflow-x: auto;
+      font-size: 0.8rem;
+      max-height: 20rem;
+    }
+    .back-link { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+    .back-link:hover { text-decoration: underline; }
+  </style>
+
+  <p>
+    <a class="back-link" href="/admin/review-queue">&larr; Back to review queue</a>
+  </p>
+
+  <h2 style="margin-top: 0;">
+    <span class="ticker">{{ detail.row.provider_record_id }}</span>
+    <span class="muted" style="font-weight: normal; font-size: 0.9rem;">
+      &middot; {{ detail.row.provider }} &middot; {{ detail.row.status }}
+    </span>
+  </h2>
+
+  <div class="panel">
+    <h3>Provider record</h3>
+    <dl class="kv">
+      <dt>Provider</dt>
+      <dd>{{ detail.row.provider }}</dd>
+      <dt>Ticker</dt>
+      <dd class="ticker">{{ detail.row.provider_record_id }}</dd>
+      <dt>Title</dt>
+      <dd>
+        {% if detail.row.provider_title %}
+          {{ detail.row.provider_title }}
+        {% else %}
+          <span class="muted">(not snapshotted — predates 2F.0.5)</span>
+        {% endif %}
+      </dd>
+      <dt>Sport</dt>
+      <dd>{{ detail.reason_detail.get("sport", "(unknown)") }}</dd>
+      <dt>Created in queue</dt>
+      <dd>{{ detail.row.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>
+      <dt>Tier</dt>
+      <dd>{{ detail.row.tier }}</dd>
+      {% if detail.row.rejection_count > 0 %}
+        <dt>Rejection count</dt>
+        <dd>{{ detail.row.rejection_count }} (re-resolve cycles)</dd>
+      {% endif %}
+    </dl>
+  </div>
+
+  <div class="panel">
+    <h3>Matcher reasoning</h3>
+    <dl class="kv">
+      <dt>Confidence</dt>
+      <dd class="{% if detail.row.is_collision %}muted{% endif %}">
+        {{ detail.row.confidence_display }}
+      </dd>
+      <dt>Fail reason</dt>
+      <dd>
+        {% if detail.fail_reason %}
+          <code>{{ detail.fail_reason }}</code>
+        {% else %}
+          <span class="muted">(none)</span>
+        {% endif %}
+      </dd>
+      <dt>Home canonical</dt>
+      <dd>{{ detail.reason_detail.get("home_canonical", "(n/a)") }}</dd>
+      <dt>Away canonical</dt>
+      <dd>{{ detail.reason_detail.get("away_canonical", "(n/a)") }}</dd>
+    </dl>
+    <details style="margin-top: 0.75rem;">
+      <summary class="muted" style="cursor: pointer;">Raw <code>reason_detail</code> JSON</summary>
+      <pre class="json-block">{{ detail.reason_detail | tojson(indent=2) }}</pre>
+    </details>
+  </div>
+
+  <div class="panel">
+    <h3>Candidates ({{ detail.candidate_team_names | length }} unique teams)</h3>
+    {% if detail.home_collision %}
+      <p>
+        <strong>Home-side collision.</strong>
+        {{ detail.colliding_home_team_ids | length }} candidate
+        team{{ '' if detail.colliding_home_team_ids | length == 1 else 's' }}
+        for home:
+      </p>
+      <ul class="candidate-list">
+        {% for tid in detail.colliding_home_team_ids %}
+          {% set team = detail.candidate_team_names.get(tid) %}
+          <li>
+            {% if team %}
+              <span class="team-name">{{ team.canonical_name }}</span>
+              <span class="team-meta">
+                ({{ team.country_code or "no country" }} &middot;
+                <span class="ticker">{{ team.team_id }}</span>)
+              </span>
+            {% else %}
+              <span class="muted">
+                (team {{ tid }} not found in sp.teams — possibly deleted)
+              </span>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if detail.away_collision %}
+      <p style="margin-top: 0.75rem;">
+        <strong>Away-side collision.</strong>
+        {{ detail.colliding_away_team_ids | length }} candidate
+        team{{ '' if detail.colliding_away_team_ids | length == 1 else 's' }}
+        for away:
+      </p>
+      <ul class="candidate-list">
+        {% for tid in detail.colliding_away_team_ids %}
+          {% set team = detail.candidate_team_names.get(tid) %}
+          <li>
+            {% if team %}
+              <span class="team-name">{{ team.canonical_name }}</span>
+              <span class="team-meta">
+                ({{ team.country_code or "no country" }} &middot;
+                <span class="ticker">{{ team.team_id }}</span>)
+              </span>
+            {% else %}
+              <span class="muted">
+                (team {{ tid }} not found in sp.teams — possibly deleted)
+              </span>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if not detail.home_collision and not detail.away_collision %}
+      <p class="muted">
+        No collision flags in <code>reason_detail</code> — this record
+        is in review_queue for a non-collision reason (confidence
+        below auto-apply threshold, etc.). The approve / reject UI
+        ships in sub-PR #3 and will offer candidate selection from
+        the candidate_fixtures list.
+      </p>
+    {% endif %}
+  </div>
+
+  <div class="actions-placeholder">
+    <strong>Read-only view (sub-PR #2).</strong>
+    Approve / reject / skip actions ship in sub-PR #3. For now,
+    operators can read the matcher's full reasoning and the
+    candidate team names; decisions are recorded against
+    <code>sp.review_queue.status</code> via SQL until the buttons land.
+  </div>
+{% endblock %}
