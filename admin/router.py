@@ -246,18 +246,26 @@ def _is_htmx_request(request: Request) -> bool:
     return request.headers.get("HX-Request", "").lower() == "true"
 
 
-def _decision_response(
+async def _decision_response(
     request: Request,
     *,
     record_id: uuid_pkg.UUID,
     decision_result: dict[str, Any],
     operator: str,
     next_record_id: uuid_pkg.UUID | None,
+    session: AsyncSession,
 ):
     """Shape the response per Q4 (candidates panel fragment for HTMX,
     full-page redirect for no-JS).
 
-    - HTMX path: render _decision_result.html — replaces the candidates
+    - HTMX path: re-load `detail` AFTER the mutation so the fragment
+      template can render fresh audit fields (reviewed_by,
+      reviewed_at, rejection_count). _decision_result.html references
+      `detail.row.*` to show the audit grid — without re-loading we
+      get `jinja2.exceptions.UndefinedError: 'detail' is undefined`
+      from the fragment path.
+
+      Then render _decision_result.html — replaces the candidates
       panel in-place via HTMX's hx-swap="outerHTML" target on the
       panel. Includes a "Go to next record" link per Q4 refinement
       (next_record_id resolved by queries.find_next_pending_record_id;
@@ -265,14 +273,16 @@ def _decision_response(
     - No-JS path: 303 redirect to the detail view with the record's
       new state already loaded. The detail handler computes its own
       next_record_id when rendering — no need to pass it through the
-      redirect.
+      redirect. The GET detail handler also re-loads detail.
     """
     if _is_htmx_request(request):
+        detail = await queries.get_review_queue_record(session, record_id)
         return templates.TemplateResponse(
             request,
             "_decision_result.html",
             {
                 "decision": decision_result,
+                "detail": detail,
                 "record_id": record_id,
                 "operator": operator,
                 "next_record_id": next_record_id,
@@ -362,10 +372,11 @@ async def approve(
             operator=operator, session=session,
         )
     next_record_id = await queries.find_next_pending_record_id(session)
-    return _decision_response(
+    return await _decision_response(
         request, record_id=record_id,
         decision_result=result, operator=operator,
         next_record_id=next_record_id,
+        session=session,
     )
 
 
@@ -395,8 +406,9 @@ async def reject(
             operator=operator, session=session,
         )
     next_record_id = await queries.find_next_pending_record_id(session)
-    return _decision_response(
+    return await _decision_response(
         request, record_id=record_id,
         decision_result=result, operator=operator,
         next_record_id=next_record_id,
+        session=session,
     )
