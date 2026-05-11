@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -48,6 +49,8 @@ class ReviewQueueRow:
     provider: str
     provider_record_id: str
     provider_title: str | None
+    sport: str | None               # from reason_detail['sport'] (snapshotted by PR #115)
+    kickoff_at: datetime | None     # JOINed from provider tables; None if neither table has a row
     confidence: float
     confidence_display: str         # "(collision)" or formatted "0.78"
     is_collision: bool
@@ -162,6 +165,35 @@ def _candidate_count(row_candidate_fixtures: Any) -> int:
         return 0
 
 
+def _extract_kickoff(
+    provider: str,
+    kalshi_kickoff_iso: str | None,
+    fl_kickoff_epoch: str | None,
+) -> datetime | None:
+    """Per-provider kickoff extraction from the JOINed raw_payload fields:
+
+    - Kalshi: raw_payload->>'_kickoff_dt' is an ISO 8601 string set by
+      ingestion.kalshi's get_data() classification. Parse via fromisoformat.
+    - FL: raw_payload->>'START_TIME' is the Unix epoch (seconds, stored
+      as int in JSONB; the ->>'...' cast yields a string). Convert via
+      datetime.fromtimestamp.
+
+    Returns None when:
+      - The provider's record doesn't exist in its table (LEFT JOIN miss).
+      - The raw_payload field is missing (older ingestion rows).
+      - The value is malformed (defensive — operators shouldn't see 500s
+        because of one bad row).
+    """
+    try:
+        if provider == "kalshi" and kalshi_kickoff_iso:
+            return datetime.fromisoformat(kalshi_kickoff_iso)
+        if provider == "fl" and fl_kickoff_epoch:
+            return datetime.fromtimestamp(int(fl_kickoff_epoch), tz=timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return None
+
+
 async def _load_latest_tier_versions(
     session: AsyncSession,
     pairs: list[tuple[str, str]],
@@ -240,32 +272,51 @@ async def list_review_queue(
     page_size = max(1, min(int(page_size), MAX_PAGE_SIZE))
     offset = (page - 1) * page_size
 
-    # Build the WHERE clause dynamically. Using parameterized text()
-    # rather than SQLAlchemy ORM keeps the partial-index access plan
-    # transparent (the ORM tends to add column expressions that
-    # disqualify the partial index).
-    where_clauses = ["status = :status"]
+    # Build the WHERE clause dynamically with rq.-qualified column
+    # names so it composes cleanly with the LEFT JOIN below (ambiguous
+    # column references in JOINed queries cause Postgres to error).
+    # Using parameterized text() rather than SQLAlchemy ORM keeps the
+    # partial-index access plan transparent (the ORM tends to add
+    # column expressions that disqualify the partial index).
+    where_clauses = ["rq.status = :status"]
     params: dict[str, Any] = {"status": status}
     if provider:
-        where_clauses.append("provider = :provider")
+        where_clauses.append("rq.provider = :provider")
         params["provider"] = provider
     if sport:
-        where_clauses.append("reason_detail->>'sport' = :sport")
+        where_clauses.append("rq.reason_detail->>'sport' = :sport")
         params["sport"] = sport
     if confidence_min is not None:
-        where_clauses.append("confidence >= :confidence_min")
+        where_clauses.append("rq.confidence >= :confidence_min")
         params["confidence_min"] = float(confidence_min)
-    where_sql = " AND ".join(where_clauses)
+    where_sql_joined = " AND ".join(where_clauses)
+    # Count query uses unqualified column names (no JOINs).
+    where_sql_count = where_sql_joined.replace("rq.", "")
 
-    # Page query.
+    # Page query. LEFT JOINs to the provider tables surface kickoff
+    # time on the list view — operators triage urgent (kicks off in
+    # 2h) differently from non-urgent (in 3 weeks), and kickoff isn't
+    # stored on review_queue. The provider PKs (kalshi_markets.ticker,
+    # fl_events.fl_event_id) are indexed; one JOIN per provider keeps
+    # the plan cheap. NULL on either side is acceptable — the helper
+    # _extract_kickoff falls back to None and the template renders
+    # "(unknown)".
     rows_sql = text(
         f"""
-        SELECT id, provider, provider_record_id, provider_title,
-               candidate_fixtures, confidence, status,
-               rejection_count, created_at, reason_detail
-        FROM sp.review_queue
-        WHERE {where_sql}
-        ORDER BY confidence DESC, created_at DESC
+        SELECT rq.id, rq.provider, rq.provider_record_id, rq.provider_title,
+               rq.candidate_fixtures, rq.confidence, rq.status,
+               rq.rejection_count, rq.created_at, rq.reason_detail,
+               km.raw_payload->>'_kickoff_dt' AS kalshi_kickoff_iso,
+               fe.raw_payload->>'START_TIME' AS fl_kickoff_epoch
+        FROM sp.review_queue rq
+        LEFT JOIN sp.kalshi_markets km
+          ON rq.provider = 'kalshi'
+         AND rq.provider_record_id = km.ticker
+        LEFT JOIN sp.fl_events fe
+          ON rq.provider = 'fl'
+         AND rq.provider_record_id = fe.fl_event_id
+        WHERE {where_sql_joined}
+        ORDER BY rq.confidence DESC, rq.created_at DESC
         LIMIT :limit OFFSET :offset
         """
     ).bindparams(**params, limit=page_size, offset=offset)
@@ -273,9 +324,10 @@ async def list_review_queue(
 
     # Total count (separate query — keeps the page query simple +
     # cacheable). For the default status='pending' filter, Postgres
-    # uses the partial index for both queries.
+    # uses the partial index for both queries. No JOINs here (count
+    # is over review_queue alone), so the unqualified WHERE form.
     count_sql = text(
-        f"SELECT COUNT(*) AS total FROM sp.review_queue WHERE {where_sql}"
+        f"SELECT COUNT(*) AS total FROM sp.review_queue WHERE {where_sql_count}"
     ).bindparams(**params)
     total = (await session.execute(count_sql)).scalar() or 0
 
@@ -294,6 +346,12 @@ async def list_review_queue(
             provider=r.provider,
             provider_record_id=r.provider_record_id,
             provider_title=r.provider_title,
+            sport=reason_detail.get("sport"),
+            kickoff_at=_extract_kickoff(
+                r.provider,
+                kalshi_kickoff_iso=r.kalshi_kickoff_iso,
+                fl_kickoff_epoch=r.fl_kickoff_epoch,
+            ),
             confidence=float(r.confidence),
             confidence_display=_format_confidence(float(r.confidence), is_collision),
             is_collision=is_collision,
@@ -379,11 +437,19 @@ async def get_review_queue_record(
     """
     row_sql = text(
         """
-        SELECT id, provider, provider_record_id, provider_title,
-               candidate_fixtures, confidence, status,
-               rejection_count, created_at, reason_detail
-        FROM sp.review_queue
-        WHERE id = :record_id
+        SELECT rq.id, rq.provider, rq.provider_record_id, rq.provider_title,
+               rq.candidate_fixtures, rq.confidence, rq.status,
+               rq.rejection_count, rq.created_at, rq.reason_detail,
+               km.raw_payload->>'_kickoff_dt' AS kalshi_kickoff_iso,
+               fe.raw_payload->>'START_TIME' AS fl_kickoff_epoch
+        FROM sp.review_queue rq
+        LEFT JOIN sp.kalshi_markets km
+          ON rq.provider = 'kalshi'
+         AND rq.provider_record_id = km.ticker
+        LEFT JOIN sp.fl_events fe
+          ON rq.provider = 'fl'
+         AND rq.provider_record_id = fe.fl_event_id
+        WHERE rq.id = :record_id
         """
     ).bindparams(record_id=record_id)
     row = (await session.execute(row_sql)).first()
@@ -417,6 +483,12 @@ async def get_review_queue_record(
         provider=row.provider,
         provider_record_id=row.provider_record_id,
         provider_title=row.provider_title,
+        sport=reason_detail.get("sport"),
+        kickoff_at=_extract_kickoff(
+            row.provider,
+            kalshi_kickoff_iso=row.kalshi_kickoff_iso,
+            fl_kickoff_epoch=row.fl_kickoff_epoch,
+        ),
         confidence=float(row.confidence),
         confidence_display=_format_confidence(float(row.confidence), is_collision),
         is_collision=is_collision,

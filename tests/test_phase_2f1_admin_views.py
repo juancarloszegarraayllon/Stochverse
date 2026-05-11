@@ -143,6 +143,68 @@ class TestQueriesPureHelpers:
         assert p.has_prev is False
         assert p.has_next is False
 
+    def test_extract_kickoff_parses_kalshi_iso(self):
+        from datetime import timezone
+        from admin.queries import _extract_kickoff
+        result = _extract_kickoff(
+            "kalshi",
+            kalshi_kickoff_iso="2026-06-15T14:30:00+00:00",
+            fl_kickoff_epoch=None,
+        )
+        assert result is not None
+        assert result.year == 2026
+        assert result.month == 6
+        assert result.day == 15
+        assert result.hour == 14
+        assert result.minute == 30
+        assert result.tzinfo is not None  # tz-aware
+
+    def test_extract_kickoff_parses_fl_epoch(self):
+        from admin.queries import _extract_kickoff
+        # Unix epoch 1781015400 = 2026-06-15 14:30:00 UTC.
+        result = _extract_kickoff(
+            "fl",
+            kalshi_kickoff_iso=None,
+            fl_kickoff_epoch="1781015400",
+        )
+        assert result is not None
+        assert result.year == 2026
+        assert result.month == 6
+        assert result.hour == 14
+        assert result.tzinfo is not None
+
+    def test_extract_kickoff_returns_none_on_provider_mismatch(self):
+        from admin.queries import _extract_kickoff
+        # kalshi provider with only fl_kickoff_epoch set → None.
+        # Defensive: the LEFT JOIN can match the wrong side if data
+        # gets weird; the helper trusts provider, not the JOIN result.
+        assert _extract_kickoff(
+            "kalshi",
+            kalshi_kickoff_iso=None,
+            fl_kickoff_epoch="1781015400",
+        ) is None
+
+    def test_extract_kickoff_returns_none_on_malformed_input(self):
+        from admin.queries import _extract_kickoff
+        # Malformed ISO string → None (not 500).
+        assert _extract_kickoff(
+            "kalshi",
+            kalshi_kickoff_iso="not-an-iso-string",
+            fl_kickoff_epoch=None,
+        ) is None
+        # Malformed FL epoch (non-numeric) → None.
+        assert _extract_kickoff(
+            "fl",
+            kalshi_kickoff_iso=None,
+            fl_kickoff_epoch="banana",
+        ) is None
+
+    def test_extract_kickoff_returns_none_when_both_missing(self):
+        from admin.queries import _extract_kickoff
+        # Most common case in practice: LEFT JOIN miss on both sides.
+        assert _extract_kickoff("kalshi", None, None) is None
+        assert _extract_kickoff("fl", None, None) is None
+
 
 # ── Route-level tests requiring no DB (auth/redirect surface) ──
 
@@ -322,7 +384,14 @@ class TestReviewQueueIntegration:
         confidence: float = 0.78,
         provider_title: str = "Test vs Other",
         reason_detail: dict | None = None,
+        also_seed_provider_row: bool = False,
+        kickoff_iso: str | None = None,
     ):
+        """Seed a sp.review_queue row. When also_seed_provider_row is
+        True, additionally seed a matching sp.kalshi_markets or
+        sp.fl_events row carrying the kickoff timestamp — exercises
+        the LEFT JOIN path in queries.py.
+        """
         from sqlalchemy import text
         rd = reason_detail or {
             "sport": "Tennis",
@@ -351,6 +420,45 @@ class TestReviewQueueIntegration:
                 rd=json.dumps(rd),
                 title=provider_title,
             ))
+            if also_seed_provider_row:
+                # Seed the matching provider table row carrying the
+                # kickoff timestamp. The LEFT JOIN in queries.py picks
+                # it up. raw_payload uses the provider-native key:
+                # kalshi stores ISO string under '_kickoff_dt', fl
+                # stores Unix epoch under 'START_TIME'.
+                if provider == "kalshi":
+                    payload = {
+                        "title": provider_title,
+                        "_kickoff_dt": kickoff_iso or "2026-06-15T14:30:00+00:00",
+                    }
+                    conn.execute(text(
+                        """
+                        INSERT INTO sp.kalshi_markets
+                          (ticker, market_type, raw_payload, last_seen_at,
+                           last_changed_at, payload_hash)
+                        VALUES (:ticker, 'game', CAST(:payload AS jsonb),
+                                NOW(), NOW(), 'test-hash-placeholder')
+                        ON CONFLICT (ticker) DO NOTHING
+                        """
+                    ).bindparams(ticker=ticker, payload=json.dumps(payload)))
+                else:  # fl
+                    payload = {
+                        "EVENT_ID": ticker,
+                        "HOME_NAME": "Test Home",
+                        "AWAY_NAME": "Test Away",
+                        # Unix epoch for 2026-06-15 14:30 UTC.
+                        "START_TIME": 1781015400,
+                    }
+                    conn.execute(text(
+                        """
+                        INSERT INTO sp.fl_events
+                          (fl_event_id, raw_payload, last_seen_at,
+                           last_changed_at, payload_hash)
+                        VALUES (:fl_event_id, CAST(:payload AS jsonb),
+                                NOW(), NOW(), 'test-hash-placeholder')
+                        ON CONFLICT (fl_event_id) DO NOTHING
+                        """
+                    ).bindparams(fl_event_id=ticker, payload=json.dumps(payload)))
 
     def test_list_view_renders_seeded_rows(self, app, engine):
         self._seed_pending_row(engine, ticker="TEST-2F1-LIST-001")
@@ -373,6 +481,53 @@ class TestReviewQueueIntegration:
             "Sort order should be confidence DESC; higher-confidence "
             "row should appear earlier in the HTML."
         )
+        # Sport column populated from reason_detail snapshot.
+        assert "Tennis" in resp.text
+        # All 10 columns render in the header.
+        for header in ("Provider", "Ticker", "Title", "Sport",
+                       "Kickoff (UTC)", "Confidence", "Tier",
+                       "Candidates", "Status", "Created"):
+            assert f"<th>{header}</th>" in resp.text, (
+                f"List view missing <th>{header}</th> column header."
+            )
+
+    def test_list_view_renders_kickoff_via_provider_join(self, app, engine):
+        """Kickoff column comes from a LEFT JOIN to sp.kalshi_markets
+        or sp.fl_events — the runner snapshots reason_detail / title
+        but NOT kickoff into review_queue, so the JOIN is the source.
+        """
+        # Kalshi row with a matching kalshi_markets entry → kickoff
+        # renders as "2026-06-15 14:30".
+        self._seed_pending_row(
+            engine,
+            ticker="TEST-2F1-KICKOFF-KALSHI",
+            provider="kalshi",
+            also_seed_provider_row=True,
+            kickoff_iso="2026-06-15T14:30:00+00:00",
+        )
+        # FL row with a matching fl_events entry → kickoff renders
+        # (epoch 1781015400 = 2026-06-15 14:30 UTC).
+        self._seed_pending_row(
+            engine,
+            ticker="TEST-2F1-KICKOFF-FL",
+            provider="fl",
+            also_seed_provider_row=True,
+        )
+        # Kalshi row WITHOUT matching provider row → kickoff renders
+        # as "(unknown)" (LEFT JOIN miss; helper returns None).
+        self._seed_pending_row(
+            engine,
+            ticker="TEST-2F1-KICKOFF-MISSING",
+            provider="kalshi",
+            also_seed_provider_row=False,
+        )
+
+        resp = app.get("/admin/review-queue?status=pending")
+        assert resp.status_code == 200
+        # Both seeded kickoff timestamps render.
+        assert "2026-06-15 14:30" in resp.text
+        # The missing-provider-row case shows the "(unknown)" fallback.
+        assert "(unknown)" in resp.text
 
     def test_list_view_filters_by_provider(self, app, engine):
         self._seed_pending_row(engine, ticker="TEST-2F1-FILTER-KALSHI", provider="kalshi")

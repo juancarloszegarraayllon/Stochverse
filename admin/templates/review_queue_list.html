@@ -115,6 +115,8 @@
           <th>Provider</th>
           <th>Ticker</th>
           <th>Title</th>
+          <th>Sport</th>
+          <th>Kickoff (UTC)</th>
           <th>Confidence</th>
           <th>Tier</th>
           <th>Candidates</th>
@@ -136,6 +138,20 @@
                 {{ row.provider_title }}
               {% else %}
                 <span class="muted">(not snapshotted)</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if row.sport %}
+                {{ row.sport }}
+              {% else %}
+                <span class="muted">(unknown)</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if row.kickoff_at %}
+                {{ row.kickoff_at.strftime("%Y-%m-%d %H:%M") }}
+              {% else %}
+                <span class="muted">(unknown)</span>
               {% endif %}
             </td>
             <td class="{% if row.is_collision %}conf-collision{% endif %}">

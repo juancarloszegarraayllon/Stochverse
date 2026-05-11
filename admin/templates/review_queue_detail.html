@@ -87,7 +87,21 @@
         {% endif %}
       </dd>
       <dt>Sport</dt>
-      <dd>{{ detail.reason_detail.get("sport", "(unknown)") }}</dd>
+      <dd>
+        {% if detail.row.sport %}
+          {{ detail.row.sport }}
+        {% else %}
+          <span class="muted">(unknown)</span>
+        {% endif %}
+      </dd>
+      <dt>Kickoff (UTC)</dt>
+      <dd>
+        {% if detail.row.kickoff_at %}
+          {{ detail.row.kickoff_at.strftime("%Y-%m-%d %H:%M") }}
+        {% else %}
+          <span class="muted">(unknown — provider record not in sp.kalshi_markets / sp.fl_events)</span>
+        {% endif %}
+      </dd>
       <dt>Created in queue</dt>
       <dd>{{ detail.row.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>
       <dt>Tier</dt>
