@@ -23,7 +23,8 @@ than ticking aspirationally. -->
 - [ ] `python -m pytest` (or scoped subset) — all relevant tests pass locally
 - [ ] Manual verification of the changed behavior (describe below)
 - [ ] No new lints / type errors introduced
-- [ ] Tested against a real Postgres (Neon dev branch or docker-compose) — only required if the PR touches SQL paths
+- [ ] **If this PR opens a SQLAlchemy session and writes to production tables:** integration tests ran against a real Postgres (`SP_INTEGRATION_DB=...`) AND went through the FastAPI dependency-injected session lifecycle (`TestClient.post()` → `Depends(get_db)`). See `DEPLOYMENT.md → DB-transaction PRs — integration tests required` for the full procedure (PR #123 → #125 incident).
+- [ ] Tested against a real Postgres (Neon dev branch or docker-compose) — required for any PR touching SQL paths
 
 <!-- Brief notes on what you actually verified, especially anything
 the test suite doesn't cover. -->

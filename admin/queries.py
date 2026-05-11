@@ -625,9 +625,19 @@ async def approve_record(
          sides — same write-back semantics as the runner's auto-apply
          paths, just attributed to the operator's decision.
 
-    All five steps in one `async with session.begin()` block. Partial
-    failure → full rollback. Per-record txn isolation matches the
-    runner's PR #108 pattern.
+    All five steps inside one `async with session.begin()` block.
+    Pre-flight reads (get_review_queue_record, _load_candidate_team_ids)
+    ALSO live inside the block — moved there to fix the production
+    500 surfaced by PR #123: pre-flight reads outside the block
+    auto-begin a transaction in SQLAlchemy 2.0 autobegin mode, then
+    the explicit `session.begin()` raises
+    `InvalidRequestError: A transaction is already begun on this
+    Session.` Matches the runner's pattern at
+    scripts/run_resolver_pass.py where matcher reads happen inside
+    the per-record transaction.
+
+    Partial failure → full rollback. Per-record txn isolation matches
+    the runner's PR #108 pattern.
 
     On idempotency: if the row is already approved/rejected (status
     != 'pending'), the function returns the current state without
@@ -649,63 +659,65 @@ async def approve_record(
     """
     from resolver.fixtures import ensure_fixture
 
-    # Pre-flight: load the record + its candidate context.
-    detail = await get_review_queue_record(session, record_id)
-    if detail is None:
-        raise ApprovalError(
-            f"review_queue record {record_id} not found", status_code=404,
-        )
-
-    # Idempotency check (Q2). If already decided, return the current
-    # state without any DB writes — operator's double-click is a
-    # no-op, not an error.
-    if detail.row.status != "pending":
-        return {
-            "action": "already_decided",
-            "record_id": record_id,
-            "fixture_id": None,
-            "fixture_created_new": False,
-            "previous_status": detail.row.status,
-        }
-
-    # Q1 edge case: kickoff_at must come from the provider table
-    # (kickoff isn't stored on review_queue). Refuse if neither
-    # provider table has the row OR the row has no kickoff.
-    if detail.row.kickoff_at is None:
-        raise ApprovalError(
-            "Fixture creation requires kickoff data, but the provider "
-            f"record ({detail.row.provider}/{detail.row.provider_record_id}) "
-            "doesn't carry a kickoff timestamp. File a manual ticket "
-            "or wait for the provider to update its data."
-        )
-
-    # Server-side validation against the matcher's candidate sets.
-    # For non-collision rows: candidate_fixtures stores team_ids
-    # (NOT fixture_ids — see issue #121 for the rename plan), with
-    # candidate_fixtures[0] = home_team_id and [1] = away_team_id by
-    # the matcher's convention at resolver/alias_tier/matcher.py:337
-    # and resolver/fuzzy_tier/matcher.py:320.
-    raw_cf = await _load_candidate_team_ids(session, record_id)
-    default_home = raw_cf[0] if len(raw_cf) >= 1 else None
-    default_away = raw_cf[1] if len(raw_cf) >= 2 else None
-    _validate_candidate_team_id(
-        home_team_id,
-        side_collision=detail.home_collision,
-        side_colliding_ids=detail.colliding_home_team_ids,
-        side_default_id=default_home,
-        side_label="home",
-    )
-    _validate_candidate_team_id(
-        away_team_id,
-        side_collision=detail.away_collision,
-        side_colliding_ids=detail.colliding_away_team_ids,
-        side_default_id=default_away,
-        side_label="away",
-    )
-
-    # Atomic write block (Q3). Single transaction wraps all four
-    # writes — partial failure → full rollback.
+    # Single transaction wrapping reads AND writes (Q3 + autobegin
+    # fix). Early-return / raise paths roll back / commit an empty
+    # transaction cleanly via __aexit__.
     async with session.begin():
+        # Pre-flight: load the record + its candidate context.
+        detail = await get_review_queue_record(session, record_id)
+        if detail is None:
+            raise ApprovalError(
+                f"review_queue record {record_id} not found",
+                status_code=404,
+            )
+
+        # Idempotency check (Q2). If already decided, return the
+        # current state without any DB writes — operator's double-
+        # click is a no-op, not an error.
+        if detail.row.status != "pending":
+            return {
+                "action": "already_decided",
+                "record_id": record_id,
+                "fixture_id": None,
+                "fixture_created_new": False,
+                "previous_status": detail.row.status,
+            }
+
+        # Q1 edge case: kickoff_at must come from the provider table
+        # (kickoff isn't stored on review_queue). Refuse if neither
+        # provider table has the row OR the row has no kickoff.
+        if detail.row.kickoff_at is None:
+            raise ApprovalError(
+                "Fixture creation requires kickoff data, but the provider "
+                f"record ({detail.row.provider}/{detail.row.provider_record_id}) "
+                "doesn't carry a kickoff timestamp. File a manual ticket "
+                "or wait for the provider to update its data."
+            )
+
+        # Server-side validation against the matcher's candidate sets.
+        # For non-collision rows: candidate_fixtures stores team_ids
+        # (NOT fixture_ids — see issue #121 for the rename plan), with
+        # candidate_fixtures[0] = home_team_id and [1] = away_team_id by
+        # the matcher's convention at resolver/alias_tier/matcher.py:337
+        # and resolver/fuzzy_tier/matcher.py:320.
+        raw_cf = await _load_candidate_team_ids(session, record_id)
+        default_home = raw_cf[0] if len(raw_cf) >= 1 else None
+        default_away = raw_cf[1] if len(raw_cf) >= 2 else None
+        _validate_candidate_team_id(
+            home_team_id,
+            side_collision=detail.home_collision,
+            side_colliding_ids=detail.colliding_home_team_ids,
+            side_default_id=default_home,
+            side_label="home",
+        )
+        _validate_candidate_team_id(
+            away_team_id,
+            side_collision=detail.away_collision,
+            side_colliding_ids=detail.colliding_away_team_ids,
+            side_default_id=default_away,
+            side_label="away",
+        )
+
         # Step 1: ensure_fixture (find-or-create). Per Q1 (a): operator
         # authority overrides the matcher's no-auto-create rule.
         fixture_id, created_new = await ensure_fixture(
@@ -746,14 +758,9 @@ async def approve_record(
         ).bindparams(operator=operator, record_id=record_id))
 
         if update_result.rowcount == 0:
-            # Lost the race to a concurrent approve. The earlier
-            # decision stands; this transaction's writes (above)
-            # roll back at commit time? Actually no — they don't,
-            # because session.begin() commits on clean exit.
-            #
-            # To prevent partial-state writes, raise so the
-            # transaction rolls back. The caller catches and
-            # returns the current state.
+            # Lost the race to a concurrent approve. Raise so the
+            # transaction rolls back (preventing partial-state writes
+            # from ensure_fixture / provider UPDATE).
             raise ApprovalError(
                 "Concurrent decision detected — another operator "
                 "session approved or rejected this record while "
@@ -819,6 +826,10 @@ async def reject_record(
     rejection_count >= 3 runner-side guard; this PR just persists
     the count.
 
+    Pre-flight read (get_review_queue_record) and write happen in
+    the SAME session.begin() block — same autobegin-fix discipline
+    as approve_record above.
+
     Returns:
       {
         "action": "rejected" | "already_decided",
@@ -826,20 +837,21 @@ async def reject_record(
         "previous_status": str,
       }
     """
-    # Pre-flight: load current state for idempotency check + audit.
-    detail = await get_review_queue_record(session, record_id)
-    if detail is None:
-        raise ApprovalError(
-            f"review_queue record {record_id} not found", status_code=404,
-        )
-    if detail.row.status != "pending":
-        return {
-            "action": "already_decided",
-            "record_id": record_id,
-            "previous_status": detail.row.status,
-        }
-
     async with session.begin():
+        # Pre-flight: load current state for idempotency check + audit.
+        detail = await get_review_queue_record(session, record_id)
+        if detail is None:
+            raise ApprovalError(
+                f"review_queue record {record_id} not found",
+                status_code=404,
+            )
+        if detail.row.status != "pending":
+            return {
+                "action": "already_decided",
+                "record_id": record_id,
+                "previous_status": detail.row.status,
+            }
+
         result = await session.execute(text(
             """
             UPDATE sp.review_queue

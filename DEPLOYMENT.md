@@ -34,6 +34,40 @@ If you skip step 2 and merge a dependent code PR, Railway redeploys the new code
 
 This is enforced by convention, not by CI. The `.github/PULL_REQUEST_TEMPLATE.md` checkbox is a reminder; the responsibility is the merger's. If we hit this gap a second time, the next iteration is a CI check that connects to production and verifies `alembic current` matches the migrations on `main` — credential exposure cost was the reason we deferred that initially.
 
+## DB-transaction PRs — integration tests required
+
+Separate from the migration checklist above, ANY PR that adds or modifies code which opens a SQLAlchemy session and writes to production tables MUST run its integration tests against a real Postgres (Neon dev branch or local `pg_ctlcluster`) **before merge** — not optional.
+
+**Why this checklist exists:** PR #123 (Phase 2F.1 sub-PR #3 — operator approve/reject) shipped with `approve_record()` doing pre-flight DB reads OUTSIDE the `async with session.begin():` block. SQLAlchemy 2.0's autobegin auto-starts a transaction on the first `session.execute()`, then the explicit `session.begin()` raises `InvalidRequestError: A transaction is already begun on this Session.` Every approve attempt returned HTTP 500 on first production click. The bug existed because integration tests in the PR were SKIPPED in CI (no `SP_INTEGRATION_DB` available in the sandbox); they never ran against a real session lifecycle, so the autobegin pattern conflict was invisible to test signal.
+
+For any PR touching DB transactions:
+
+1. **Before merging:**
+   - [ ] `SP_INTEGRATION_DB=postgresql+asyncpg://... pytest tests/test_phase_<n>_*.py` runs against a disposable Postgres (Neon dev branch or local `pg_ctlcluster start && createdb`).
+   - [ ] All integration tests gated on `SP_INTEGRATION_DB` either PASS or are explicitly skipped with a reason that references a tracked issue (not "no DB available in sandbox").
+   - [ ] Verify the test goes through the FastAPI dependency-injected session (e.g., `TestClient.post()` → `Depends(get_db)` yields the AsyncSession) — NOT a bare session in a test-only fixture. Test-only sessions bypass autobegin semantics and miss this class of bug.
+
+2. **After merging, before assuming the deploy is healthy:**
+   - [ ] Operator manually exercises the new endpoint against production (one approve / one reject / one whatever). Don't trust "CI green" for write paths — CI didn't run write paths.
+
+Local Postgres setup (10 minutes, reusable across PRs):
+
+```bash
+apt-get install -y postgresql
+pg_ctlcluster 16 main start
+sudo -u postgres psql -c "CREATE DATABASE sports_local;"
+sudo -u postgres psql -c "CREATE USER dev WITH PASSWORD 'dev' SUPERUSER;"
+sudo -u postgres psql -d sports_local -c "CREATE SCHEMA sp; GRANT ALL ON SCHEMA sp TO dev;"
+export SP_INTEGRATION_DB="postgresql+asyncpg://dev:dev@localhost:5432/sports_local"
+export DATABASE_URL="$SP_INTEGRATION_DB"
+alembic upgrade head
+# Seed minimal test data (e.g., 4 sp.teams rows) per the test file's
+# `_two_real_teams` fixture expectations.
+pytest tests/test_phase_<n>_*.py -v
+```
+
+Neon dev branches are equivalent and preferred for shared review (operator can hand the URL to whoever's reviewing the PR).
+
 ---
 
 ## Phase 0 — required env vars
