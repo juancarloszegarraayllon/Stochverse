@@ -28,6 +28,15 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# DIAG REVERT — temporary diagnostic logging in approve_record +
+# _validate_candidate_team_id to identify the 400 source for record
+# e7485d6a-1392-4552-9bbd-40db337a7d91 (Minnesota / Cleveland).
+# Tagged "DIAG" prefix on every event name for grep + revert. Will
+# be removed in the next PR once the trigger is identified in
+# Railway logs.
+from observability import get_logger
+_log = get_logger("admin.queries.diag")
+
 
 # Hard cap so a misbehaving query string can't request a 100k-row
 # page. The UI default is 50; operators typing ?page_size=N in the
@@ -589,6 +598,16 @@ def _validate_candidate_team_id(
     """
     if side_collision:
         if submitted not in side_colliding_ids:
+            # DIAG REVERT — log every collision-side rejection so we
+            # can see in Railway what the server saw vs what the
+            # operator submitted.
+            _log.warning(
+                "DIAG validate_candidate_team_id collision-rejection",
+                side_label=side_label,
+                submitted=str(submitted),
+                candidates=[str(t) for t in side_colliding_ids],
+                candidate_count=len(side_colliding_ids),
+            )
             raise ApprovalError(
                 f"{side_label}_team_id={submitted} is not in the "
                 f"matcher's {side_label} collision set "
@@ -599,6 +618,16 @@ def _validate_candidate_team_id(
         # Non-collision: matcher picked a specific team. Operator
         # submission must match it.
         if side_default_id is not None and submitted != side_default_id:
+            # DIAG REVERT — log every non-collision rejection too.
+            # If Minnesota's home/away_team_id matches the matcher's
+            # pick exactly (per the production diagnostic), the
+            # 400 isn't from here. But log defensively to confirm.
+            _log.warning(
+                "DIAG validate_candidate_team_id non-collision-rejection",
+                side_label=side_label,
+                submitted=str(submitted),
+                matcher_default=str(side_default_id),
+            )
             raise ApprovalError(
                 f"{side_label}_team_id={submitted} doesn't match the "
                 f"matcher's selected {side_label}_team_id={side_default_id}. "
@@ -659,6 +688,17 @@ async def approve_record(
     """
     from resolver.fixtures import ensure_fixture
 
+    # DIAG REVERT — log every approve_record invocation with the
+    # operator-submitted inputs. Lets us correlate Railway log lines
+    # with the specific record + team_ids that produced a 400.
+    _log.warning(
+        "DIAG approve_record inputs",
+        record_id=str(record_id),
+        home_team_id=str(home_team_id),
+        away_team_id=str(away_team_id),
+        operator=operator,
+    )
+
     # Single transaction wrapping reads AND writes (Q3 + autobegin
     # fix). Early-return / raise paths roll back / commit an empty
     # transaction cleanly via __aexit__.
@@ -666,6 +706,11 @@ async def approve_record(
         # Pre-flight: load the record + its candidate context.
         detail = await get_review_queue_record(session, record_id)
         if detail is None:
+            # DIAG REVERT — log the not-found case.
+            _log.warning(
+                "DIAG approve_record raise: record_not_found",
+                record_id=str(record_id),
+            )
             raise ApprovalError(
                 f"review_queue record {record_id} not found",
                 status_code=404,
@@ -687,6 +732,18 @@ async def approve_record(
         # (kickoff isn't stored on review_queue). Refuse if neither
         # provider table has the row OR the row has no kickoff.
         if detail.row.kickoff_at is None:
+            # DIAG REVERT — production diagnostic showed Minnesota's
+            # kalshi_kickoff_iso was populated and parseable. If THIS
+            # log line fires for Minnesota, _extract_kickoff or the
+            # JOIN behavior is doing something unexpected on the
+            # detail-reload path. Log the row context so we can see.
+            _log.warning(
+                "DIAG approve_record raise: kickoff_missing",
+                record_id=str(record_id),
+                provider=detail.row.provider,
+                provider_record_id=detail.row.provider_record_id,
+                status=detail.row.status,
+            )
             raise ApprovalError(
                 "Fixture creation requires kickoff data, but the provider "
                 f"record ({detail.row.provider}/{detail.row.provider_record_id}) "
@@ -758,6 +815,15 @@ async def approve_record(
         ).bindparams(operator=operator, record_id=record_id))
 
         if update_result.rowcount == 0:
+            # DIAG REVERT — log the concurrent-decision case. This
+            # is a 409, not a 400, so it shouldn't be the Minnesota
+            # culprit, but logging defensively to confirm.
+            _log.warning(
+                "DIAG approve_record raise: concurrent_decision",
+                record_id=str(record_id),
+                provider=detail.row.provider,
+                rowcount=update_result.rowcount,
+            )
             # Lost the race to a concurrent approve. Raise so the
             # transaction rolls back (preventing partial-state writes
             # from ensure_fixture / provider UPDATE).
