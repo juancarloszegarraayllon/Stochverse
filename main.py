@@ -354,6 +354,38 @@ class EventsETagMiddleware(BaseHTTPMiddleware):
 app.add_middleware(EventsETagMiddleware)
 
 
+# ── Phase 2F.1 admin UI mount ─────────────────────────────────────
+#
+# Conditional setup: the admin router only gets a usable
+# SessionMiddleware when OPERATOR_SESSION_SECRET is set in the env.
+# Without it, the routes still register but every handler short-
+# circuits to 503 via admin.auth.admin_configured(). This keeps the
+# public API on this same FastAPI instance serving cleanly when admin
+# isn't provisioned (dev environments, deploys without the operator
+# password set yet, etc.) — rather than failing at startup.
+#
+# SessionMiddleware must be added BEFORE the admin router can use
+# request.session. FastAPI evaluates middleware in reverse-add order,
+# so this still wraps the admin routes correctly even though it's
+# added after the CORS / GZip / cache middleware above.
+_operator_session_secret = os.environ.get("OPERATOR_SESSION_SECRET", "")
+if _operator_session_secret:
+    from starlette.middleware.sessions import SessionMiddleware
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=_operator_session_secret,
+        session_cookie="stochverse_admin_session",
+        same_site="lax",
+        # https_only stays default-False so local-dev `make dev` works
+        # over http://localhost. Railway terminates TLS at the edge;
+        # the session cookie is signed (not encrypted) so the same-
+        # site lax + signing is the operative defense.
+    )
+
+from admin import router as _admin_router  # noqa: E402  (post-app-setup import is intentional)
+app.include_router(_admin_router)
+
+
 async def _price_prune_loop():
     """Hourly: delete price rows older than PRICE_RETENTION_HOURS.
     Also runs once immediately on startup to clear any overflow
