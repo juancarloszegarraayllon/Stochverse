@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block header %}{# No top bar on the login page. #}{% endblock %}
+{% block content %}
+  <h1 style="margin-top: 2rem;">Stochverse Admin</h1>
+  <p class="muted">Sign in to triage the review queue.</p>
+
+  {% if error %}
+    <div class="error" role="alert">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" action="/admin/login" autocomplete="off">
+    <p>
+      <label for="password">Password</label>
+      <input
+        id="password"
+        type="password"
+        name="password"
+        autocomplete="current-password"
+        required
+        autofocus>
+    </p>
+    <p>
+      <button type="submit" class="primary">Sign in</button>
+    </p>
+  </form>
+{% endblock %}

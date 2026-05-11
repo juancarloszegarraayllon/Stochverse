@@ -90,6 +90,60 @@ Cache hits emit the same event with `status: 0` and `extra: {"cache_hit": true}`
 
 These events match the Phase 1 `provider_api_calls` table schema (architecture doc §6.3), so the Phase 1 migration can backfill historical call volume from these logs.
 
+## Phase 2F.1 — admin UI env vars (optional)
+
+The operator review-queue UI mounts at `/admin/` per `PHASE_2F_DESIGN.md` rev1.1. Both env vars below must be set together; if either is missing, the admin routes return `503 admin UI is not configured` and the rest of the FastAPI app keeps serving normally.
+
+### `OPERATOR_PASSWORD_HASH`
+
+bcrypt hash of the operator password. Never plaintext.
+
+**Generate locally and paste the output into Railway:**
+
+```bash
+python -c "import bcrypt; print(bcrypt.hashpw(b'<your-password-here>', bcrypt.gensalt()).decode())"
+```
+
+The output looks like `$2b$12$XYZ.....` (60 characters). Set that string as the env var value.
+
+To rotate: regenerate the hash with a new password, replace the env var value in Railway, redeploy. Existing sessions stay valid until the cookie expires or the session secret changes (whichever comes first) — per the Phase 2F design's Q2 known-limitation note, password rotation requires a redeploy because the hash lives in an env var. Multi-operator (Phase 2F.X) replaces this with DB-stored hashes for self-service rotation.
+
+### `OPERATOR_SESSION_SECRET`
+
+Random secret for Starlette `SessionMiddleware` cookie signing. The cookie is signed (not encrypted); its contents are readable, just not forgeable.
+
+**Generate once at provisioning time:**
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Paste the output (43-character URL-safe string) into the Railway env var. **Do NOT commit the value to git.** If the secret leaks, an attacker can forge admin session cookies — rotate by generating a new value and redeploying (all existing sessions invalidate immediately).
+
+### Setting both on Railway
+
+1. Open the web service in Railway dashboard.
+2. **Variables** tab → add `OPERATOR_PASSWORD_HASH` (paste bcrypt output).
+3. Same tab → add `OPERATOR_SESSION_SECRET` (paste secrets.token_urlsafe output).
+4. The service redeploys automatically. After redeploy, `GET /admin/login` should render the login form (not 503).
+
+### Verification
+
+After deploy:
+
+```bash
+# Without auth: should redirect to login (or return 401 on /admin/, the auth-required landing page)
+curl -i https://<railway-host>/admin/
+# Expected: HTTP/2 401 or a redirect to /admin/login
+
+# Login form should render
+curl -i https://<railway-host>/admin/login
+# Expected: HTTP/2 200 with HTML body containing "<form ... action="/admin/login">
+
+# 503 if env vars missing (sanity check that the configured-check works)
+# (Temporarily unset OPERATOR_SESSION_SECRET, redeploy, retry — should return 503)
+```
+
 ## Phase 1E — Backfill scripts
 
 Phase 1E ships standalone scripts under `scripts/` that pump historical data through the same ingestion pipeline as live ingestion. Idempotent — safe to re-run.
