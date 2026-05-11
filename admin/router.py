@@ -1,15 +1,17 @@
-"""Admin router — auth scaffolding for sub-PR #1 + landing page.
+"""Admin router — auth scaffolding (sub-PR #1) + review-queue read-
+only list and detail views (sub-PR #2).
 
 Routes:
 
-  GET  /admin/login    — render login form
-  POST /admin/login    — verify password, set session cookie, redirect
-  POST /admin/logout   — clear session, redirect to /admin/login
-  GET  /admin/         — landing page (placeholder for the
-                          sub-PR #2 review-queue list view)
+  GET  /admin/login                 — render login form
+  POST /admin/login                 — verify password, set session, redirect
+  POST /admin/logout                — clear session, redirect to /admin/login
+  GET  /admin/                      — redirect to /admin/review-queue
+  GET  /admin/review-queue          — list view (paginated, filtered)
+  GET  /admin/review-queue/<uuid>   — detail view (single record)
 
-The review-queue + anchor_failed routes land in subsequent sub-PRs.
-This PR ships only the auth surface so it's reviewable in isolation.
+The mutating actions (approve / reject) ship in sub-PR #3. The
+anchor_failed surface ships in sub-PR #4.
 
 Static asset mount (`/admin/static`) and SessionMiddleware are wired
 in main.py, not here — the router stays import-light and the operator
@@ -18,10 +20,13 @@ can disable the admin UI by not setting OPERATOR_SESSION_SECRET.
 from __future__ import annotations
 
 import pathlib
+import uuid as uuid_pkg
+from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, Form, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import (
     SESSION_KEY_OPERATOR,
@@ -29,6 +34,7 @@ from .auth import (
     require_operator,
     verify_password,
 )
+from . import queries
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -95,9 +101,101 @@ async def index(request: Request, operator: str = Depends(require_operator)):
     # No admin_configured() check here — require_operator handles it
     # as the single source of truth (raises 503 before reading
     # request.session, which would crash without SessionMiddleware).
-    # Placeholder for the sub-PR #2 review-queue list view. Sub-PR #1
-    # exists to prove the auth surface end-to-end; the actual queue
-    # rendering ships next.
+    # The list view IS the operator's landing page; index redirects.
+    return RedirectResponse(
+        url="/admin/review-queue", status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ── DB session dependency ──────────────────────────────────────
+
+
+async def get_db() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency yielding an AsyncSession. Imported lazily so
+    the admin module stays loadable when DATABASE_URL is unset (tests
+    without DB still hit auth flows). 503 if the DB isn't configured —
+    consistent with the admin_configured() fallback shape.
+    """
+    from db import async_session
+    if async_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DATABASE_URL not configured; admin UI requires Postgres.",
+        )
+    async with async_session() as session:
+        yield session
+
+
+# ── Review-queue read-only views (sub-PR #2) ───────────────────
+
+
+@router.get("/review-queue", response_class=HTMLResponse)
+async def review_queue_list(
+    request: Request,
+    operator: str = Depends(require_operator),
+    session: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(queries.DEFAULT_PAGE_SIZE, ge=1, le=queries.MAX_PAGE_SIZE),
+    status_filter: str = Query("pending", alias="status"),
+    provider: str | None = Query(None),
+    sport: str | None = Query(None),
+    confidence_min: float | None = Query(None, ge=0.0, le=1.0),
+):
+    """Paginated review-queue list. Default sort confidence DESC,
+    default status='pending' (uses the partial index from 2F.0).
+
+    The status filter accepts 'pending' / 'approved' / 'rejected';
+    other values fall through to empty results rather than 400 —
+    operators sometimes paste arbitrary status values from query
+    logs and a hard error mid-debug isn't helpful.
+    """
+    page_data = await queries.list_review_queue(
+        session,
+        status=status_filter,
+        provider=provider,
+        sport=sport,
+        confidence_min=confidence_min,
+        page=page,
+        page_size=page_size,
+    )
     return templates.TemplateResponse(
-        request, "index.html", {"operator": operator},
+        request,
+        "review_queue_list.html",
+        {
+            "operator": operator,
+            "page_data": page_data,
+            # Echo filter state into the template so the form
+            # repopulates correctly on submit.
+            "filters": {
+                "status": status_filter,
+                "provider": provider or "",
+                "sport": sport or "",
+                "confidence_min": (
+                    f"{confidence_min:.2f}" if confidence_min is not None else ""
+                ),
+            },
+        },
+    )
+
+
+@router.get("/review-queue/{record_id}", response_class=HTMLResponse)
+async def review_queue_detail(
+    request: Request,
+    record_id: uuid_pkg.UUID,
+    operator: str = Depends(require_operator),
+    session: AsyncSession = Depends(get_db),
+):
+    """Single review_queue record + candidate-team JOIN (Q6 design
+    lock). 404 if the UUID doesn't match a row.
+    """
+    detail = await queries.get_review_queue_record(session, record_id)
+    if detail is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"review_queue record {record_id} not found",
+        )
+    return templates.TemplateResponse(
+        request,
+        "review_queue_detail.html",
+        {"operator": operator, "detail": detail},
     )

@@ -6,7 +6,7 @@
 # (e.g., a Neon branch for migration testing).
 export DATABASE_URL ?= postgresql+asyncpg://dev:dev@localhost:5432/sports_dev
 
-.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions backfill-sp-fl-events-sport-id resolver-pass-kalshi resolver-pass-fl dry-run-alias-tier dry-run-fuzzy-tier investigate-corroboration-gap
+.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions backfill-sp-fl-events-sport-id resolver-pass-kalshi resolver-pass-fl dry-run-alias-tier dry-run-fuzzy-tier investigate-corroboration-gap vendor-htmx
 
 help:
 	@echo "SP Architecture dev targets:"
@@ -45,6 +45,10 @@ help:
 	@echo ""
 	@echo "  make investigate-corroboration-gap"
 	@echo "  # Phase 2D.2.7: E.8 investigation runbook (Q1 tournament overlap, Q2 kickoff alignment, Q3 drift window)"
+	@echo ""
+	@echo "  make vendor-htmx               # Fetch htmx-1.9.10.min.js into admin/static/"
+	@echo "  make vendor-htmx HTMX_VERSION=1.10.0   # Override version"
+	@echo "  # Phase 2F.1: vendored client asset (per design Q4). Sub-PR #3 uses it."
 	@echo ""
 	@echo "DATABASE_URL = $(DATABASE_URL)"
 
@@ -121,3 +125,23 @@ dry-run-fuzzy-tier:
 
 investigate-corroboration-gap:
 	psql "$$DATABASE_URL" -f scripts/investigate_corroboration_gap.sql
+
+# Phase 2F.1 admin UI: vendor htmx into admin/static/. Per design Q4
+# (vendor vs CDN), htmx is committed to the repo with a versioned
+# filename so upgrades are explicit. Sub-PR #2 ships this Make target
+# + the static dir scaffolding; sub-PR #3 adds the <script> tag in
+# base.html when HTMX-driven UI lands.
+HTMX_VERSION ?= 1.9.10
+vendor-htmx:
+	@mkdir -p admin/static
+	@echo "Fetching htmx@$(HTMX_VERSION) from unpkg.com..."
+	@curl -fSL -o admin/static/htmx-$(HTMX_VERSION).min.js \
+		"https://unpkg.com/htmx.org@$(HTMX_VERSION)/dist/htmx.min.js"
+	@SIZE=$$(wc -c < admin/static/htmx-$(HTMX_VERSION).min.js); \
+	if [ $$SIZE -lt 30000 ] || [ $$SIZE -gt 100000 ]; then \
+		echo "ERROR: htmx file size $$SIZE bytes is outside expected 30-100KB range"; \
+		echo "Possible failed download or upstream change — inspect admin/static/htmx-$(HTMX_VERSION).min.js"; \
+		exit 1; \
+	fi
+	@echo "OK: admin/static/htmx-$(HTMX_VERSION).min.js ($$(wc -c < admin/static/htmx-$(HTMX_VERSION).min.js) bytes)"
+	@echo "Commit the file when ready: git add admin/static/htmx-$(HTMX_VERSION).min.js"

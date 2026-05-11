@@ -182,20 +182,21 @@ class TestProtectedRoutes:
         # instead — out of scope for sub-PR #1.)
         assert resp.status_code == 401
 
-    def test_root_admin_renders_after_login(self, app_with_admin):
-        # POST login (sets session), then GET /admin/.
+    def test_root_admin_redirects_to_review_queue_after_login(self, app_with_admin):
+        # POST login (sets session), then GET /admin/ → 303 to
+        # /admin/review-queue. The list view IS the landing page;
+        # /admin/ is just an alias.
+        #
+        # Pre-2F.1 sub-PR #2 this redirected to a placeholder index.
+        # Sub-PR #2 made the list view the actual landing surface.
         app_with_admin.post(
             "/admin/login",
             data={"password": _TEST_PASSWORD},
             follow_redirects=False,
         )
-        resp = app_with_admin.get("/admin/")
-        assert resp.status_code == 200
-        # Placeholder landing page shows the operator identity.
-        assert "Signed in" in resp.text
-        # Logout button is visible on the authed page (rendered by
-        # base.html's header block).
-        assert 'action="/admin/logout"' in resp.text
+        resp = app_with_admin.get("/admin/", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/admin/review-queue"
 
 
 class TestLogoutFlow:
