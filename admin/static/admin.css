@@ -246,6 +246,103 @@ a.detail-link:hover { text-decoration: underline; }
   font-size: 0.9rem;
 }
 
+/* Phase 2F.1 sub-PR #3 — approve / reject form + decided-state banner. */
+
+.decision-form {
+  margin: 0;
+}
+
+.candidate-side {
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 0.6rem 0.85rem;
+  margin: 0 0 0.85rem;
+}
+
+.candidate-side legend {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #444;
+  padding: 0 0.4rem;
+}
+
+.candidate-side .candidate-list { margin-top: 0.25rem; }
+
+.candidate-side .single-pick {
+  margin: 0.25rem 0 0;
+  font-size: 0.95rem;
+}
+
+.radio-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  cursor: pointer;
+  padding: 0.25rem 0.1rem;
+}
+
+.radio-row:hover { background: #f5f7fb; border-radius: 3px; }
+
+.radio-row input[type="radio"] {
+  width: auto;
+  margin: 0;
+}
+
+.decision-actions {
+  margin-top: 0.85rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.reject-form {
+  display: inline-block;
+  margin: 0.6rem 0 0;
+}
+
+button.danger {
+  background: #fbeaea;
+  color: var(--error);
+  border-color: #e0a8a6;
+}
+
+button.danger:hover {
+  background: #f5d4d2;
+}
+
+/* Decided-state banner. Three variants — approved (green), rejected
+   (red), already_decided (muted yellow). */
+.decision-banner {
+  padding: 0.6rem 0.85rem;
+  border-radius: 4px;
+  border: 1px solid;
+  margin-bottom: 0.6rem;
+  font-size: 0.95rem;
+}
+
+.decision-banner.approved {
+  background: #eafaee;
+  border-color: #a8d6b6;
+  color: #1c5a1c;
+}
+
+.decision-banner.rejected {
+  background: #fbeaea;
+  border-color: #e0a8a6;
+  color: #7a1a1a;
+}
+
+.decision-banner.muted-banner {
+  background: #fffbe7;
+  border-color: #e0d090;
+  color: #6a5800;
+}
+
+.next-record-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
 pre.json-block {
   background: #f6f7f9;
   border: 1px solid #e0e0e0;

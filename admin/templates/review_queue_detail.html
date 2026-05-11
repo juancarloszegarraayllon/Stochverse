@@ -80,76 +80,13 @@
     </details>
   </div>
 
-  <div class="panel">
-    <h3>Candidates ({{ detail.candidate_team_names | length }} unique teams)</h3>
-    {% if detail.home_collision %}
-      <p>
-        <strong>Home-side collision.</strong>
-        {{ detail.colliding_home_team_ids | length }} candidate
-        team{{ '' if detail.colliding_home_team_ids | length == 1 else 's' }}
-        for home:
-      </p>
-      <ul class="candidate-list">
-        {% for tid in detail.colliding_home_team_ids %}
-          {% set team = detail.candidate_team_names.get(tid) %}
-          <li>
-            {% if team %}
-              <span class="team-name">{{ team.canonical_name }}</span>
-              <span class="team-meta">
-                ({{ team.country_code or "no country" }} &middot;
-                <span class="ticker">{{ team.team_id }}</span>)
-              </span>
-            {% else %}
-              <span class="muted">
-                (team {{ tid }} not found in sp.teams — possibly deleted)
-              </span>
-            {% endif %}
-          </li>
-        {% endfor %}
-      </ul>
+  {# Candidates panel + decision form. HTMX swaps this whole panel
+     on approve/reject via hx-swap-oob targeting #decision-panel. #}
+  <div class="panel" id="decision-panel">
+    {% if detail.row.status == "pending" %}
+      {% include "_decision_form.html" %}
+    {% else %}
+      {% include "_decision_result.html" %}
     {% endif %}
-    {% if detail.away_collision %}
-      <p style="margin-top: 0.75rem;">
-        <strong>Away-side collision.</strong>
-        {{ detail.colliding_away_team_ids | length }} candidate
-        team{{ '' if detail.colliding_away_team_ids | length == 1 else 's' }}
-        for away:
-      </p>
-      <ul class="candidate-list">
-        {% for tid in detail.colliding_away_team_ids %}
-          {% set team = detail.candidate_team_names.get(tid) %}
-          <li>
-            {% if team %}
-              <span class="team-name">{{ team.canonical_name }}</span>
-              <span class="team-meta">
-                ({{ team.country_code or "no country" }} &middot;
-                <span class="ticker">{{ team.team_id }}</span>)
-              </span>
-            {% else %}
-              <span class="muted">
-                (team {{ tid }} not found in sp.teams — possibly deleted)
-              </span>
-            {% endif %}
-          </li>
-        {% endfor %}
-      </ul>
-    {% endif %}
-    {% if not detail.home_collision and not detail.away_collision %}
-      <p class="muted">
-        No collision flags in <code>reason_detail</code> — this record
-        is in review_queue for a non-collision reason (confidence
-        below auto-apply threshold, etc.). The approve / reject UI
-        ships in sub-PR #3 and will offer candidate selection from
-        the candidate_fixtures list.
-      </p>
-    {% endif %}
-  </div>
-
-  <div class="actions-placeholder">
-    <strong>Read-only view (sub-PR #2).</strong>
-    Approve / reject / skip actions ship in sub-PR #3. For now,
-    operators can read the matcher's full reasoning and the
-    candidate team names; decisions are recorded against
-    <code>sp.review_queue.status</code> via SQL until the buttons land.
   </div>
 {% endblock %}

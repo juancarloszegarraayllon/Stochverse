@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pathlib
 import uuid as uuid_pkg
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
@@ -197,5 +197,165 @@ async def review_queue_detail(
     return templates.TemplateResponse(
         request,
         "review_queue_detail.html",
-        {"operator": operator, "detail": detail},
+        {"operator": operator, "detail": detail, "form_error": None},
+    )
+
+
+# ── Approve / reject (sub-PR #3) ───────────────────────────────
+
+
+def _is_htmx_request(request: Request) -> bool:
+    """True iff the request carries an HX-Request: true header.
+    HTMX clients send this on every hx-* triggered request; plain
+    browsers (form POST with no JS) don't.
+
+    Per Q5 progressive enhancement: handler responds with a fragment
+    template for HTMX, full-page redirect for plain browsers.
+    """
+    return request.headers.get("HX-Request", "").lower() == "true"
+
+
+def _decision_response(
+    request: Request,
+    *,
+    record_id: uuid_pkg.UUID,
+    decision_result: dict[str, Any],
+    operator: str,
+):
+    """Shape the response per Q4 (candidates panel fragment for HTMX,
+    full-page redirect for no-JS).
+
+    - HTMX path: render _decision_result.html — replaces the candidates
+      panel in-place via HTMX's hx-swap="outerHTML" target on the
+      panel. Includes a "Go to next record" link per Q4 refinement.
+    - No-JS path: 303 redirect to the detail view with the record's
+      new state already loaded. Operator's browser shows the
+      authoritative state without re-submitting the form.
+    """
+    if _is_htmx_request(request):
+        return templates.TemplateResponse(
+            request,
+            "_decision_result.html",
+            {
+                "decision": decision_result,
+                "record_id": record_id,
+                "operator": operator,
+            },
+        )
+    # No-JS fallback: redirect back to detail view. Operator sees
+    # the authoritative state (status=approved/rejected, audit fields
+    # populated).
+    return RedirectResponse(
+        url=f"/admin/review-queue/{record_id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+def _approval_error_response(
+    request: Request,
+    *,
+    record_id: uuid_pkg.UUID,
+    error: queries.ApprovalError,
+    operator: str,
+    session: AsyncSession,
+):
+    """Operator's submission was rejected by server-side validation
+    (bad team_id, missing kickoff, concurrent decision, etc.). Render
+    the detail view with the error message at the top of the actions
+    panel so the operator sees what went wrong without losing
+    context.
+
+    Returns a coroutine — caller must await.
+    """
+    # Defer to a helper that re-loads + re-renders the detail page.
+    async def _render():
+        detail = await queries.get_review_queue_record(session, record_id)
+        if detail is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"review_queue record {record_id} not found",
+            )
+        return templates.TemplateResponse(
+            request,
+            "review_queue_detail.html",
+            {
+                "operator": operator,
+                "detail": detail,
+                "form_error": error.message,
+            },
+            status_code=error.status_code,
+        )
+    return _render()
+
+
+@router.post("/review-queue/{record_id}/approve")
+async def approve(
+    request: Request,
+    record_id: uuid_pkg.UUID,
+    home_team_id: uuid_pkg.UUID = Form(...),
+    away_team_id: uuid_pkg.UUID = Form(...),
+    operator: str = Depends(require_operator),
+    session: AsyncSession = Depends(get_db),
+):
+    """Operator approves the matcher's decision for this record.
+
+    Body (form-encoded):
+      - home_team_id (UUID): operator's chosen home team
+      - away_team_id (UUID): operator's chosen away team
+
+    For non-collision rows the operator's submission must match the
+    matcher's single candidate pair (validated server-side). For
+    collision rows the operator picks one team from each colliding
+    side; submission validated against the collision sets.
+
+    Idempotent on double-click: WHERE status='pending' guard ensures
+    a second click returns the current state without re-writing.
+    """
+    try:
+        result = await queries.approve_record(
+            session,
+            record_id=record_id,
+            operator=operator,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+    except queries.ApprovalError as e:
+        return await _approval_error_response(
+            request, record_id=record_id, error=e,
+            operator=operator, session=session,
+        )
+    return _decision_response(
+        request, record_id=record_id,
+        decision_result=result, operator=operator,
+    )
+
+
+@router.post("/review-queue/{record_id}/reject")
+async def reject(
+    request: Request,
+    record_id: uuid_pkg.UUID,
+    operator: str = Depends(require_operator),
+    session: AsyncSession = Depends(get_db),
+):
+    """Operator rejects the matcher's decision. No body — rejection
+    is a single decision, not a candidate selection.
+
+    Per Q4 design: rejection is re-queueable; the runner's WHERE
+    status='pending' guard from PR #108 prevents re-surfacing. The
+    rejection_count column (added in 2F.0 per Q4 refinement)
+    increments on each reject — 2F.X adds the unreject button + the
+    rejection_count >= 3 runner-side guard.
+    """
+    try:
+        result = await queries.reject_record(
+            session, record_id=record_id, operator=operator,
+        )
+    except queries.ApprovalError as e:
+        return await _approval_error_response(
+            request, record_id=record_id, error=e,
+            operator=operator, session=session,
+        )
+    return _decision_response(
+        request, record_id=record_id,
+        decision_result=result, operator=operator,
     )
