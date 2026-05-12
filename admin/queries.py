@@ -1052,6 +1052,15 @@ class AnchorFailedDetail:
     # within the matcher-classified sport.
     suggested_aliases: dict[str, dict[str, Any]]
 
+    # Path-state field added in PR #137 (sub-PR #4.1). Distinguishes
+    # the four "no candidates shown" causes so the template can render
+    # the right operator message. Sub-PR #4 (PR #133) used empty-dict
+    # truthiness to fall through to one shared message, which today's
+    # France/Senegal smoke test surfaced as factually wrong for three
+    # of the four causes. See SUGGESTED_ALIASES_STATE_* constants and
+    # _build_suggested_aliases for the state-machine.
+    suggested_aliases_state: str
+
 
 def _format_fail_reason(fail_reason: str) -> str:
     """Operator-readable rendering of the fail_reason string.
@@ -1255,8 +1264,13 @@ async def get_anchor_failed_record(
         fl_away_name=(row.fl_payload or {}).get("AWAY_NAME"),
     )
 
-    suggested = await _build_suggested_aliases(
-        session, reason_detail=reason_detail, sport_name=sport,
+    state, suggested = await _build_suggested_aliases(
+        session,
+        reason_detail=reason_detail,
+        sport_name=sport,
+        provider=row.provider,
+        kalshi_raw_payload=row.kalshi_payload,
+        fl_raw_payload=row.fl_payload,
     )
 
     return AnchorFailedDetail(
@@ -1272,6 +1286,7 @@ async def get_anchor_failed_record(
         kalshi_raw_payload=row.kalshi_payload,
         fl_raw_payload=row.fl_payload,
         suggested_aliases=suggested,
+        suggested_aliases_state=state,
     )
 
 
@@ -1281,28 +1296,127 @@ async def get_anchor_failed_record(
 SUGGESTED_TEAMS_PER_SIDE: int = 3
 
 
+# Minimum trigram similarity for a candidate to qualify as a suggestion.
+# Below this threshold, the candidate-suggestion query returns no rows
+# and the template falls into the "no good candidates" state (Path B in
+# the PR #137 conversation). pg_trgm similarity() returns a float in
+# [0.0, 1.0]; 0.30 is a conservative cutoff that excludes wildly
+# unrelated rows (e.g. "France" vs "Real Madrid" returns ~0.0-0.1) while
+# allowing near-matches ("France" vs "France National Team" ~0.4-0.5)
+# through. Tunable — bump up if operators report wrong-looking
+# suggestions; bump down if real near-matches are missed.
+SUGGESTED_TEAMS_MIN_SIMILARITY: float = 0.30
+
+
+# Path states for the Suggest-alias widget. Surfaced on
+# AnchorFailedDetail.suggested_aliases_state so the template can render
+# the right message per state instead of falling through to a shared
+# wrong message (the bug PR #137 fixes). Strings (not enum) so Jinja
+# can compare them with literal string equality without an import.
+SUGGESTED_ALIASES_STATE_OK = "ok"
+SUGGESTED_ALIASES_STATE_NO_GOOD_CANDIDATES = "no_good_candidates"
+SUGGESTED_ALIASES_STATE_NO_PARSED_NAMES = "no_parsed_names"
+SUGGESTED_ALIASES_STATE_UNCLASSIFIED = "unclassified"
+
+
+def _extract_parsed_name_for_side(
+    *,
+    side: str,
+    reason_detail: dict[str, Any],
+    provider: str,
+    kalshi_raw_payload: dict[str, Any] | None,
+    fl_raw_payload: dict[str, Any] | None,
+) -> str | None:
+    """Return the provider-supplied parsed name for the given side, or
+    None if no source has it.
+
+    Lookup chain (PR #137 B-aware fallback):
+      1. reason_detail['<side>_provider_normalized']
+           — alias tier sets this before its alias_no_team_resemblance
+             early-return (resolver/alias_tier/matcher.py:208-211).
+      2. reason_detail['<side>_canonical']
+           — fuzzy tier sets this for its non-anchor-failure path
+             (and PR #138 will lift it above the fuzzy_no_team_
+             resemblance early-return).
+      3. FL raw_payload's HOME_NAME / AWAY_NAME
+           — recovers parsed name for FL records where the matcher
+             didn't preserve it in reason_detail (e.g. pre-PR-#138
+             fuzzy_no_team_resemblance records).
+
+    Kalshi's title field is intentionally not split into home/away by
+    this helper — title format varies ("Sinner vs Alcaraz", "Sinner @
+    Alcaraz", "TournamentName: Sinner vs Alcaraz") and a naive split
+    risks attaching an alias to the wrong side. For Kalshi pre-PR-#138
+    fuzzy records, the helper returns None for both sides and the UI
+    falls into the no_parsed_names state — the template then surfaces
+    the raw payload below so the operator reads the title manually
+    (which is fine because PR #138 closes this gap for new records).
+    """
+    parsed = (
+        reason_detail.get(f"{side}_provider_normalized")
+        or reason_detail.get(f"{side}_canonical")
+    )
+    if parsed:
+        return parsed
+    # FL raw_payload fallback. FL stores parsed home/away names in
+    # HOME_NAME / AWAY_NAME directly; recovery is unambiguous.
+    if provider == "fl" and fl_raw_payload:
+        key = "HOME_NAME" if side == "home" else "AWAY_NAME"
+        value = fl_raw_payload.get(key)
+        if value:
+            return str(value).strip() or None
+    # Kalshi: title is a single string with both sides combined; no
+    # safe per-side split. Return None and let the template render the
+    # raw payload for the operator.
+    return None
+
+
 async def _build_suggested_aliases(
     session: AsyncSession,
     *,
     reason_detail: dict[str, Any],
     sport_name: str | None,
-) -> dict[str, dict[str, Any]]:
-    """Build the "Suggest alias" widget data per side.
+    provider: str,
+    kalshi_raw_payload: dict[str, Any] | None,
+    fl_raw_payload: dict[str, Any] | None,
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    """Build the "Suggest alias" widget data + state.
 
-    Returns a dict keyed by side ("home"/"away"). Each entry has:
-      - parsed_name: the provider-supplied name string (what the
-        matcher tried to anchor against)
-      - candidates: list[SuggestedTeam] — top-N closest sp.teams rows
-        within the matcher-classified sport, ordered by trigram
-        similarity DESC.
+    Returns (state, suggestions). State is one of:
+      'ok'                  — sport classified, parsed names found, at
+                              least one candidate above similarity
+                              threshold. Template renders the
+                              candidate-button list (sub-PR #4
+                              original behavior).
+      'no_good_candidates'  — sport classified, parsed names found,
+                              candidate query returned no rows above
+                              SUGGESTED_TEAMS_MIN_SIMILARITY. Template
+                              renders a stub `make alias-add` command
+                              with --team-canonical left blank for the
+                              operator to fill in (Path B).
+      'no_parsed_names'     — sport classified, but parsed names not
+                              recoverable from reason_detail OR
+                              JOINed provider payload. Template
+                              surfaces raw payload + points at PR #138
+                              for the resolver-side fix (Path C).
+      'unclassified'        — sport not classified by matcher
+                              (reason_detail.sport missing). Template
+                              renders the existing
+                              "no sport classified" message (Path A —
+                              kept as-is since it's correct for this
+                              path).
 
-    Returns an empty dict if the matcher didn't classify a sport
-    (the candidate lookup needs a sport_id). The UI handles the
-    no-suggestions case by showing the parsed names with a note that
-    the operator should pick a team manually.
+    Suggestions dict structure (same shape as sub-PR #4 except always
+    has 'candidates' key even when empty):
+      {side: {parsed_name: str, candidates: list[SuggestedTeam]}}
+
+    For 'unclassified' and 'no_parsed_names', returns {} for the dict.
+    For 'no_good_candidates', returns dict with parsed_name set and
+    candidates as empty list — template uses parsed_name for the stub
+    clipboard widget.
     """
     if not sport_name:
-        return {}
+        return SUGGESTED_ALIASES_STATE_UNCLASSIFIED, {}
 
     # Resolve sport_id from sport_name. sp.sports has 17 rows; an
     # extra query is negligible.
@@ -1311,23 +1425,28 @@ async def _build_suggested_aliases(
         {"name": sport_name},
     )).first()
     if sport_id_row is None:
-        return {}
+        # Sport name doesn't resolve to an sp.sports row. This is a
+        # different cause than "unclassified" — matcher classified
+        # SOMETHING but it doesn't match the canonical sport list.
+        # Bucket with 'unclassified' for now; if real cases surface,
+        # split into its own state in a follow-up.
+        return SUGGESTED_ALIASES_STATE_UNCLASSIFIED, {}
     sport_id = sport_id_row.id
 
     out: dict[str, dict[str, Any]] = {}
+    any_parsed_name_found = False
+    any_candidate_found = False
     for side in ("home", "away"):
-        # The matcher stores the provider-supplied name string in
-        # reason_detail at one of these keys depending on which tier
-        # produced the fail. Alias tier uses _provider_normalized;
-        # fuzzy tier sets _canonical (the StructuredName.raw). Both
-        # are the right thing to alias against — they're what the
-        # provider sent, not the matcher's interpretation.
-        parsed = (
-            reason_detail.get(f"{side}_provider_normalized")
-            or reason_detail.get(f"{side}_canonical")
+        parsed = _extract_parsed_name_for_side(
+            side=side,
+            reason_detail=reason_detail,
+            provider=provider,
+            kalshi_raw_payload=kalshi_raw_payload,
+            fl_raw_payload=fl_raw_payload,
         )
         if not parsed:
             continue
+        any_parsed_name_found = True
         candidates = (await session.execute(
             text(
                 """
@@ -1335,6 +1454,7 @@ async def _build_suggested_aliases(
                        similarity(canonical_name, :parsed) AS sim
                 FROM sp.teams
                 WHERE sport_id = :sport_id
+                  AND similarity(canonical_name, :parsed) >= :min_sim
                 ORDER BY sim DESC
                 LIMIT :limit
                 """
@@ -1342,19 +1462,34 @@ async def _build_suggested_aliases(
             {
                 "parsed": parsed,
                 "sport_id": sport_id,
+                "min_sim": SUGGESTED_TEAMS_MIN_SIMILARITY,
                 "limit": SUGGESTED_TEAMS_PER_SIDE,
             },
         )).all()
+        shaped_candidates = [
+            SuggestedTeam(
+                team_id=c.id,
+                canonical_name=c.canonical_name,
+                country_code=c.country_code,
+                similarity=float(c.sim or 0.0),
+            )
+            for c in candidates
+        ]
+        if shaped_candidates:
+            any_candidate_found = True
         out[side] = {
             "parsed_name": parsed,
-            "candidates": [
-                SuggestedTeam(
-                    team_id=c.id,
-                    canonical_name=c.canonical_name,
-                    country_code=c.country_code,
-                    similarity=float(c.sim or 0.0),
-                )
-                for c in candidates
-            ],
+            "candidates": shaped_candidates,
         }
-    return out
+
+    if not any_parsed_name_found:
+        # Path C — sport classified, parsed names not recoverable.
+        # Drop any partial dict (shouldn't have one, but defensive).
+        return SUGGESTED_ALIASES_STATE_NO_PARSED_NAMES, {}
+    if not any_candidate_found:
+        # Path B — parsed names found, but no candidate cleared the
+        # similarity threshold. out has parsed_name set per side,
+        # candidates=[] per side.
+        return SUGGESTED_ALIASES_STATE_NO_GOOD_CANDIDATES, out
+    # Path D / "ok" — sub-PR #4 original happy path.
+    return SUGGESTED_ALIASES_STATE_OK, out

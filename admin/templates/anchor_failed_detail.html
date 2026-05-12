@@ -27,9 +27,36 @@
   </dl>
 
   {# ── Panel 1: Suggested aliases ─────────────────────────────── #}
+  {#
+    Four-state render driven by detail.suggested_aliases_state. The
+    state is computed in admin/queries.py:_build_suggested_aliases
+    and distinguishes:
+
+      'ok'                  — sub-PR #4 happy path: parsed names + at
+                              least one candidate above similarity
+                              threshold. Render candidate buttons.
+      'no_good_candidates'  — Path B: parsed names found, but no
+                              candidate cleared SUGGESTED_TEAMS_MIN_
+                              SIMILARITY. Render stub `make alias-add`
+                              command with --team-canonical blank.
+      'no_parsed_names'     — Path C: sport classified, parsed names
+                              not recoverable (e.g. pre-PR-#138
+                              fuzzy_no_team_resemblance records). No
+                              clipboard widget; surface raw payload
+                              below and reference PR #138.
+      'unclassified'        — Path A (sub-PR #4 original message):
+                              matcher didn't classify a sport. Keep
+                              as-is, it's correct for this state.
+
+    PR #137 conversation: A + C are dangerously coupled — fixing A
+    alone removes the accidental safety net that hides the empty-
+    candidates state. This file ships A + C + B together.
+  #}
   <section class="panel">
     <h3>Suggest alias</h3>
-    {% if detail.suggested_aliases %}
+
+    {% if detail.suggested_aliases_state == "ok" %}
+      {# Sub-PR #4 happy path. #}
       <p class="muted">
         For each side, the closest 3 teams in <code>sp.teams</code>
         (filtered to <em>{{ detail.sport }}</em>, ordered by trigram
@@ -39,44 +66,95 @@
       </p>
       {% for side in ["home", "away"] %}
         {% set sugg = detail.suggested_aliases.get(side) %}
+        {% if sugg and sugg.candidates %}
+          <div class="suggest-side">
+            <h4>{{ side | capitalize }} &mdash; provider sent
+              <code class="parsed-name">{{ sugg.parsed_name }}</code></h4>
+            <ul class="candidate-list">
+              {% for cand in sugg.candidates %}
+                <li>
+                  <button type="button"
+                          class="copy-alias-cmd"
+                          data-sport="{{ detail.sport }}"
+                          data-team="{{ cand.canonical_name }}"
+                          data-alias="{{ sugg.parsed_name }}">
+                    Copy <code>make alias-add</code> for &ldquo;{{ cand.canonical_name }}&rdquo;
+                  </button>
+                  <span class="muted">
+                    ({{ cand.country_code or "no country" }} &middot;
+                    similarity {{ "%.2f" | format(cand.similarity) }})
+                  </span>
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
+      {% endfor %}
+
+    {% elif detail.suggested_aliases_state == "no_good_candidates" %}
+      {# Path B: parsed names found, no candidate above similarity
+         threshold. Stub clipboard command + visible command pre. #}
+      <p class="muted">
+        Sport is classified (<em>{{ detail.sport }}</em>) and the
+        matcher recovered the provider's parsed team names, but no
+        team in <code>sp.teams</code> matched closely enough to suggest
+        as a canonical (trigram similarity below threshold). The
+        operator must supply the canonical team name manually.
+      </p>
+      {% for side in ["home", "away"] %}
+        {% set sugg = detail.suggested_aliases.get(side) %}
         {% if sugg %}
           <div class="suggest-side">
             <h4>{{ side | capitalize }} &mdash; provider sent
               <code class="parsed-name">{{ sugg.parsed_name }}</code></h4>
-            {% if sugg.candidates %}
-              <ul class="candidate-list">
-                {% for cand in sugg.candidates %}
-                  <li>
-                    <button type="button"
-                            class="copy-alias-cmd"
-                            data-sport="{{ detail.sport }}"
-                            data-team="{{ cand.canonical_name }}"
-                            data-alias="{{ sugg.parsed_name }}">
-                      Copy <code>make alias-add</code> for &ldquo;{{ cand.canonical_name }}&rdquo;
-                    </button>
-                    <span class="muted">
-                      ({{ cand.country_code or "no country" }} &middot;
-                      similarity {{ "%.2f" | format(cand.similarity) }})
-                    </span>
-                  </li>
-                {% endfor %}
-              </ul>
-            {% else %}
-              <p class="muted">
-                (No candidate teams found in <em>{{ detail.sport }}</em>
-                &mdash; sport may have no <code>sp.teams</code> rows yet.)
-              </p>
-            {% endif %}
+            <p class="muted">
+              No candidate in <em>{{ detail.sport }}</em> matched
+              closely. Type the canonical team name (must already exist
+              in <code>sp.teams</code> for this sport) into
+              <code>--team-canonical</code>, then run the command
+              below. If the canonical doesn't exist yet, see issue
+              <a href="https://github.com/juancarloszegarraayllon/Stochverse/issues/135">#135</a>
+              (UI affordance) or
+              <a href="https://github.com/juancarloszegarraayllon/Stochverse/issues/136">#136</a>
+              (bootstrap).
+            </p>
+            <pre class="stub-cmd"><code>make alias-add ARGS="--sport '{{ detail.sport }}' --team-canonical '' --alias '{{ sugg.parsed_name }}'"</code></pre>
+            <button type="button"
+                    class="copy-alias-cmd"
+                    data-sport="{{ detail.sport }}"
+                    data-team=""
+                    data-alias="{{ sugg.parsed_name }}">
+              Copy stub <code>make alias-add</code> command (fill in <code>--team-canonical</code>)
+            </button>
           </div>
         {% endif %}
       {% endfor %}
-    {% else %}
+
+    {% elif detail.suggested_aliases_state == "no_parsed_names" %}
+      {# Path C: sport classified, parsed names not recoverable. No
+         clipboard widget — operator reads raw payload below. #}
+      <p class="muted">
+        Parsed team names unavailable for this record (resolver-side
+        gap, fix tracked in PR
+        <a href="https://github.com/juancarloszegarraayllon/Stochverse/pull/138">#138</a>).
+        The matcher classified the sport (<em>{{ detail.sport }}</em>)
+        but didn't preserve the provider's parsed home/away strings
+        in <code>reason_detail</code>. Inspect the raw payload below
+        to derive <code>--alias</code> values, then run
+        <code>make alias-add</code> manually if you can identify the
+        canonical team in <code>sp.teams</code>.
+      </p>
+
+    {% elif detail.suggested_aliases_state == "unclassified" %}
+      {# Path A: sport not classified by matcher. Sub-PR #4 original
+         message — kept as-is because it's correct for this state. #}
       <p class="muted">
         Matcher didn't classify a sport, so no candidate teams can be
         suggested. Inspect the raw payload below and run
         <code>make alias-add</code> manually with the right
         <code>--sport</code> value.
       </p>
+
     {% endif %}
   </section>
 
@@ -109,7 +187,17 @@
      alias-add args; the click handler builds the command string and
      writes it to the clipboard. Falls back to a textarea + manual-
      select prompt if navigator.clipboard isn't available (older
-     browsers / non-HTTPS contexts). #}
+     browsers / non-HTTPS contexts).
+
+     Conditionally rendered: only ship the script when the page
+     actually has clipboard buttons. Path A (sport unclassified) and
+     Path C (parsed names missing) don't render any .copy-alias-cmd
+     elements, so the script is dead weight there — AND it would
+     embed the literal string "copy-alias-cmd" in the response body,
+     defeating the static guard tests that assert no clipboard widget
+     is exposed in those states.
+  #}
+  {% if detail.suggested_aliases_state in ["ok", "no_good_candidates"] %}
   <script>
     document.querySelectorAll(".copy-alias-cmd").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -143,4 +231,5 @@
       });
     });
   </script>
+  {% endif %}
 {% endblock %}
