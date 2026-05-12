@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Anchor-failed {{ detail.provider }} / {{ detail.provider_record_id }}{% endblock %}
+{% block content %}
+  <p>
+    <a href="/admin/anchor-failed">&larr; Back to anchor-failed list</a>
+  </p>
+
+  <h2 style="margin-top: 0;">
+    {{ detail.provider_title or "(no title)" }}
+    <span class="muted" style="font-weight: normal; font-size: 0.9em; display: block; margin-top: 0.25rem;">
+      {{ detail.provider }} &middot;
+      <code>{{ detail.provider_record_id }}</code>
+    </span>
+  </h2>
+
+  <dl class="record-meta">
+    <dt>Sport</dt><dd>{{ detail.sport or "(unclassified)" }}</dd>
+    <dt>Fail reason</dt>
+    <dd>
+      <code>{{ detail.fail_reason }}</code>
+      <div class="muted">{{ format_fail_reason(detail.fail_reason) }}</div>
+    </dd>
+    <dt>Decided at (UTC)</dt>
+    <dd>{{ detail.decided_at.strftime("%Y-%m-%d %H:%M:%S") if detail.decided_at else "(unknown)" }}</dd>
+    <dt>Resolver version</dt><dd><code>{{ detail.resolver_version }}</code></dd>
+    <dt>Run ID</dt><dd><code>{{ detail.run_id }}</code></dd>
+  </dl>
+
+  {# ── Panel 1: Suggested aliases ─────────────────────────────── #}
+  <section class="panel">
+    <h3>Suggest alias</h3>
+    {% if detail.suggested_aliases %}
+      <p class="muted">
+        For each side, the closest 3 teams in <code>sp.teams</code>
+        (filtered to <em>{{ detail.sport }}</em>, ordered by trigram
+        similarity). Pick the team this alias should attach to, then
+        copy the generated <code>make alias-add</code> command and run
+        it locally.
+      </p>
+      {% for side in ["home", "away"] %}
+        {% set sugg = detail.suggested_aliases.get(side) %}
+        {% if sugg %}
+          <div class="suggest-side">
+            <h4>{{ side | capitalize }} &mdash; provider sent
+              <code class="parsed-name">{{ sugg.parsed_name }}</code></h4>
+            {% if sugg.candidates %}
+              <ul class="candidate-list">
+                {% for cand in sugg.candidates %}
+                  <li>
+                    <button type="button"
+                            class="copy-alias-cmd"
+                            data-sport="{{ detail.sport }}"
+                            data-team="{{ cand.canonical_name }}"
+                            data-alias="{{ sugg.parsed_name }}">
+                      Copy <code>make alias-add</code> for &ldquo;{{ cand.canonical_name }}&rdquo;
+                    </button>
+                    <span class="muted">
+                      ({{ cand.country_code or "no country" }} &middot;
+                      similarity {{ "%.2f" | format(cand.similarity) }})
+                    </span>
+                  </li>
+                {% endfor %}
+              </ul>
+            {% else %}
+              <p class="muted">
+                (No candidate teams found in <em>{{ detail.sport }}</em>
+                &mdash; sport may have no <code>sp.teams</code> rows yet.)
+              </p>
+            {% endif %}
+          </div>
+        {% endif %}
+      {% endfor %}
+    {% else %}
+      <p class="muted">
+        Matcher didn't classify a sport, so no candidate teams can be
+        suggested. Inspect the raw payload below and run
+        <code>make alias-add</code> manually with the right
+        <code>--sport</code> value.
+      </p>
+    {% endif %}
+  </section>
+
+  {# ── Panel 2: Parsed signal + matcher decision ───────────────── #}
+  <section class="panel">
+    <h3>Matcher decision (reason_detail)</h3>
+    <pre class="json-dump">{{ detail.reason_detail | tojson(indent=2) }}</pre>
+  </section>
+
+  {# ── Panel 3: Raw provider payload ──────────────────────────── #}
+  <section class="panel">
+    <h3>Raw provider payload</h3>
+    {% if detail.kalshi_raw_payload %}
+      <pre class="json-dump">{{ detail.kalshi_raw_payload | tojson(indent=2) }}</pre>
+    {% elif detail.fl_raw_payload %}
+      <pre class="json-dump">{{ detail.fl_raw_payload | tojson(indent=2) }}</pre>
+    {% else %}
+      <p class="muted">
+        Provider record not in the joined table &mdash; the underlying
+        <code>sp.{{ detail.provider }}_*</code> row may have been
+        purged or the ingestion ID drifted. Anchor-failed log entry is
+        still readable via direct query on
+        <code>sp.resolution_log</code>.
+      </p>
+    {% endif %}
+  </section>
+
+  {# Clipboard handoff. Pure vanilla JS — no HTMX swap, no server
+     round-trip. The button's data-* attributes encode the make
+     alias-add args; the click handler builds the command string and
+     writes it to the clipboard. Falls back to a textarea + manual-
+     select prompt if navigator.clipboard isn't available (older
+     browsers / non-HTTPS contexts). #}
+  <script>
+    document.querySelectorAll(".copy-alias-cmd").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        const sport = btn.dataset.sport;
+        const team = btn.dataset.team;
+        const alias = btn.dataset.alias;
+        const shellEscape = function (s) {
+          return "'" + String(s).replace(/'/g, "'\\''") + "'";
+        };
+        const cmd = 'make alias-add ARGS="' +
+          '--sport ' + shellEscape(sport) + ' ' +
+          '--team-canonical ' + shellEscape(team) + ' ' +
+          '--alias ' + shellEscape(alias) +
+          '"';
+        const setDone = function () {
+          const orig = btn.textContent;
+          btn.textContent = "Copied!";
+          btn.disabled = true;
+          setTimeout(function () {
+            btn.textContent = orig;
+            btn.disabled = false;
+          }, 1500);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(cmd).then(setDone, function () {
+            window.prompt("Copy this command:", cmd);
+          });
+        } else {
+          window.prompt("Copy this command:", cmd);
+        }
+      });
+    });
+  </script>
+{% endblock %}

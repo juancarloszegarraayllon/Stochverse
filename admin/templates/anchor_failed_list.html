@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Anchor-failed ({{ page.total }}){% endblock %}
+{% block content %}
+  <h2 style="margin-top: 0;">
+    Anchor-failed records
+    <span class="muted" style="font-weight: normal; font-size: 1rem;">
+      &middot; {{ page.total }} in last {{ page.recent_runs }} runs
+    </span>
+  </h2>
+
+  <p class="muted">
+    Records where no team name in <code>sp.teams</code> resembled the
+    provider's parsed home/away strings closely enough to anchor a
+    match. Operator action: pick a candidate team from the detail
+    view and run the pre-filled <code>make alias-add</code> command.
+    <a href="/admin/review-queue">Back to review queue &rarr;</a>
+  </p>
+
+  <form class="filters" method="get" action="/admin/anchor-failed">
+    <div>
+      <label for="provider">Provider</label>
+      <select id="provider" name="provider">
+        <option value="" {% if not page.filter_provider %}selected{% endif %}>(any)</option>
+        <option value="kalshi" {% if page.filter_provider == "kalshi" %}selected{% endif %}>kalshi</option>
+        <option value="fl" {% if page.filter_provider == "fl" %}selected{% endif %}>fl</option>
+      </select>
+    </div>
+    <div>
+      <label for="sport">Sport</label>
+      <input id="sport" name="sport" type="text"
+             value="{{ page.filter_sport or '' }}" placeholder="e.g. Tennis">
+    </div>
+    <div>
+      <label for="fail_reason">Fail reason</label>
+      <select id="fail_reason" name="fail_reason">
+        <option value="" {% if not page.filter_fail_reason %}selected{% endif %}>(any)</option>
+        {% for fr in fail_reason_family %}
+          <option value="{{ fr }}" {% if page.filter_fail_reason == fr %}selected{% endif %}>{{ fr }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="submit-row">
+      <button type="submit" class="primary">Apply</button>
+      <a class="button" href="/admin/anchor-failed">Reset</a>
+    </div>
+  </form>
+
+  {% if page.rows %}
+    <table class="queue">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Ticker / Event ID</th>
+          <th>Title</th>
+          <th>Sport</th>
+          <th>Fail reason</th>
+          <th>Decided at (UTC)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in page.rows %}
+          <tr>
+            <td>{{ row.provider }}</td>
+            <td class="ticker">
+              <a href="/admin/anchor-failed/{{ row.provider }}/{{ row.provider_record_id | urlencode }}">
+                {{ row.provider_record_id }}
+              </a>
+            </td>
+            <td>{{ row.provider_title or "(no title)" }}</td>
+            <td>{{ row.sport or "(unknown)" }}</td>
+            <td>
+              <code>{{ row.fail_reason }}</code>
+              <div class="muted" style="font-size: 0.85em;">
+                {{ format_fail_reason(row.fail_reason) }}
+              </div>
+            </td>
+            <td>{{ row.decided_at.strftime("%Y-%m-%d %H:%M") if row.decided_at else "(unknown)" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">
+      No anchor-failed records in the last {{ page.recent_runs }}
+      resolver runs matching these filters.
+      {% if page.filter_provider or page.filter_sport or page.filter_fail_reason %}
+        <a href="/admin/anchor-failed">Clear filters</a> to see all.
+      {% endif %}
+    </p>
+  {% endif %}
+{% endblock %}

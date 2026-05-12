@@ -248,11 +248,25 @@ extra-counter increment):
 Sub-PR #4 (anchor_failed read-only surface) is the next planned
 work item. Anchor_failed records account for ~170/cron of FL
 long-tail volume and currently have no operator surface — they
-sit in `sp.resolver_runs.extra.anchor_failed_records` JSON but
+sit in `sp.resolution_log` rows with `reason_code='no_match'`
+AND `reason_detail->>'fail_reason'` in the anchor-failed family
+(`alias_no_team_resemblance`, `fuzzy_no_team_resemblance`,
+`alias_no_existing_fixture`, `fuzzy_no_existing_fixture`). They
 never reach `sp.review_queue`. The 2F.1 design (Q6 revised) put
-the read-only listing in 2F.1 or hard-sequenced 2F.2 depending on
-scope; with 2F.1 shipping clean on review_queue, anchor_failed is
-the natural next sub-PR.
+the read-only listing in 2F.1 or hard-sequenced 2F.2 depending
+on scope; with 2F.1 shipping clean on review_queue,
+anchor_failed is the natural next sub-PR.
+
+> **Erratum (2026-05-12 / sub-PR #4 scoping pass):** Earlier
+> drafts of this paragraph said the records "sit in
+> `sp.resolver_runs.extra.anchor_failed_records` JSON." That was
+> wrong — `sp.resolver_runs.extra` carries per-run counters, not
+> per-record forensic data. Per-record `no_match` decisions land
+> in `sp.resolution_log` (one row per tier consulted, per
+> `scripts/run_resolver_pass.py:430-440`). The mistake came from
+> conflating the run-level counter `extra.fuzzy_review_queue` /
+> `extra.fuzzy_auto_applies` shape with per-record audit
+> storage. Sub-PR #4's query targets `sp.resolution_log`.
 
 ### Tracked deviations from PHASE_2F_DESIGN.md rev1.1
 
@@ -360,15 +374,17 @@ is the leverage.
   work. Greenfield; no draft branch; references in
   `admin/__init__.py` and `admin/router.py` are forward-looking
   comments only.
-- Operator-facing list view filters anchor_failed by
-  `tier='anchor'` + `status='pending'`, but the runner today
-  doesn't write anchor_failed records to `review_queue` — they
-  live in `sp.resolver_runs.extra`. Sub-PR #4 needs either (a) a
-  separate read path that joins resolver_runs JSON, or (b) a
-  2F.0-equivalent schema change to surface them in review_queue
-  with a new tier value. PHASE_2F_DESIGN.md leaves this open;
-  check rev1.1 §"2F.1 — Minimal review UI" + Q6 before
-  committing.
+- Sub-PR #4 reads from `sp.resolution_log` (see erratum above
+  if reading the body of this entry). No schema change needed
+  — the `ix_resolution_log_provider_record` and
+  `ix_resolution_log_run` indexes cover the query shape. Plan
+  is `DISTINCT ON (provider, provider_record_id)` over the
+  `LIMIT 7` most recent `resolver_runs` rows, filtered to the
+  four-element anchor-failed fail_reason family. PHASE_2F_DESIGN
+  rev1.1's fail_reason enumeration is wrong (lists
+  `anchor_score_below_floor` which doesn't exist in the code,
+  and `deferred_to_2d` which is non-terminal) — sub-PR #4 bumps
+  the design doc to rev1.2 with the corrected list.
 - Day-7 measurement window for 2F.1 lands ~2026-05-18. Same shape
   as 2B/2C/2D.4: query `sp.resolver_runs` for the week, compare
   review-queue depth to operator throughput, decide on 2F.X

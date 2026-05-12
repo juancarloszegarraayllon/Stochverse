@@ -6,7 +6,7 @@
 # (e.g., a Neon branch for migration testing).
 export DATABASE_URL ?= postgresql+asyncpg://dev:dev@localhost:5432/sports_dev
 
-.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions backfill-sp-fl-events-sport-id resolver-pass-kalshi resolver-pass-fl dry-run-alias-tier dry-run-fuzzy-tier investigate-corroboration-gap vendor-htmx
+.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions backfill-sp-fl-events-sport-id resolver-pass-kalshi resolver-pass-fl dry-run-alias-tier dry-run-fuzzy-tier investigate-corroboration-gap vendor-htmx alias-add
 
 help:
 	@echo "SP Architecture dev targets:"
@@ -49,6 +49,10 @@ help:
 	@echo "  make vendor-htmx               # Fetch htmx-1.9.10.min.js into admin/static/"
 	@echo "  make vendor-htmx HTMX_VERSION=1.10.0   # Override version"
 	@echo "  # Phase 2F.1: vendored client asset (per design Q4). Sub-PR #3 uses it."
+	@echo ""
+	@echo "  make alias-add ARGS=\"--sport tennis --team-canonical 'Jannik Sinner' --alias 'J. Sinner'\""
+	@echo "  # Phase 2F.1 sub-PR #4: add one sp.team_aliases row. Idempotent."
+	@echo "  # Default source=manual_anchor_failed. Add --dry-run to verify resolution before writing."
 	@echo ""
 	@echo "DATABASE_URL = $(DATABASE_URL)"
 
@@ -110,6 +114,9 @@ bootstrap-sp-competitions:
 
 backfill-sp-fl-events-sport-id:
 	python scripts/backfill_sp_fl_events_sport_id.py $(ARGS)
+
+alias-add:
+	python scripts/alias_add.py $(ARGS)
 
 resolver-pass-kalshi:
 	python scripts/run_resolver_pass.py --provider kalshi $(ARGS)
