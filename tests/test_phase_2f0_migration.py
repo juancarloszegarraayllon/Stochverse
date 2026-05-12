@@ -248,7 +248,25 @@ class TestMigrationIntegration:
     def test_upgrade_then_downgrade_roundtrip(self, engine):
         from sqlalchemy import inspect as sa_inspect
 
+        # Park the DB at exactly the 2F.0 revision regardless of
+        # starting state. This test is scoped to the 2F.0 migration's
+        # roundtrip behavior; using "head" silently broke when PR #140
+        # (2F.0.1 pg_trgm) added a subsequent migration, since
+        # `downgrade -1` from head no longer rolls back 2F.0 — it
+        # rolls back only 2F.0.1.
+        #
+        # Two-step "go to revision" pattern (idempotent regardless of
+        # current state):
+        #   1. upgrade head — deterministic: lands at head no matter
+        #      where we started.
+        #   2. downgrade a1c4f9e8b2d7 — deterministic: lands at 2F.0
+        #      from any state at-or-past 2F.0.
+        # Note that `alembic upgrade <past-revision>` is a silent no-op,
+        # which is what broke the previous shape when prior tests in
+        # the same session left the DB at head.
+        TWOF0_REVISION = "a1c4f9e8b2d7"
         self._alembic(["upgrade", "head"])
+        self._alembic(["downgrade", TWOF0_REVISION])
 
         insp = sa_inspect(engine)
         cols = {c["name"] for c in insp.get_columns("review_queue", schema="sp")}
@@ -259,9 +277,9 @@ class TestMigrationIntegration:
         idxs = {i["name"] for i in insp.get_indexes("review_queue", schema="sp")}
         assert "ix_review_queue_pending_confidence" in idxs
 
-        # Downgrade one step and verify the new columns + index are
-        # gone. The other (pre-2F.0) review_queue columns must still
-        # be present.
+        # Downgrade one step from 2F.0 and verify the new columns +
+        # index are gone. The other (pre-2F.0) review_queue columns
+        # must still be present.
         self._alembic(["downgrade", "-1"])
 
         insp = sa_inspect(engine)

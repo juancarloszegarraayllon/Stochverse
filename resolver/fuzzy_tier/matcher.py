@@ -213,6 +213,26 @@ class FuzzyTierMatcher:
             home_match = self._find_team_match(home_struct, sport_id)
             away_match = self._find_team_match(away_struct, sport_id)
 
+        # Preserve parsed names BEFORE any early-return paths below.
+        # Phase 2F.1 sub-PR #5: the anchor-failure branch used to drop
+        # these, which left the anchor_failed admin surface with no
+        # operator-actionable signal (raw_payload.title was the only
+        # forward path for Kalshi records). Matched alias tier's
+        # already-correct pattern at alias_tier/matcher.py:208-211 by
+        # lifting these assignments above the anchor check.
+        #
+        # `home_provider_normalized` / `away_provider_normalized`: the
+        # provider's pre-normalization team string (StructuredName.raw).
+        # `home_canonical` / `away_canonical`: matcher's best-effort
+        # canonical (may be empty when no candidates existed pre-anchor).
+        # Downstream consumer (admin/queries.py:_build_suggested_aliases)
+        # prefers _provider_normalized; _canonical is the secondary
+        # fallback. Both kept for forensic completeness.
+        reason_detail["home_provider_normalized"] = home_struct.raw
+        reason_detail["away_provider_normalized"] = away_struct.raw
+        reason_detail["home_canonical"] = home_match.canonical_name
+        reason_detail["away_canonical"] = away_match.canonical_name
+
         # Anchor failure
         if home_match.anchor_failed or away_match.anchor_failed:
             reason_detail["home_anchor_failed"] = home_match.anchor_failed
@@ -227,8 +247,6 @@ class FuzzyTierMatcher:
         reason_detail["away_team_id"] = (
             str(away_match.team_id) if away_match.team_id else None
         )
-        reason_detail["home_canonical"] = home_match.canonical_name
-        reason_detail["away_canonical"] = away_match.canonical_name
         reason_detail["home_quality"] = round(home_match.quality_contribution, 4)
         reason_detail["away_quality"] = round(away_match.quality_contribution, 4)
 
