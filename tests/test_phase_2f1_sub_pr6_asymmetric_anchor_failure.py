@@ -179,57 +179,65 @@ class TestAsymmetricAnchorFailureRendering:
         """One side has a matching canonical in sp.teams (anchors);
         the other side has no matching canonical (fails). Page must
         render BOTH sides — anchored side with candidate buttons,
-        failed side with stub clipboard widget."""
-        # Seed one Basketball team — the anchored side's parsed name
-        # will match this via trigram similarity (>= 0.30).
-        anchored_canonical = f"{_TEST_MARKER}-TeamAlpha"
+        failed side with stub clipboard widget.
+
+        Fixture-naming care: the two parsed names must share NO
+        trigram structure. pg_trgm splits strings into 3-char shingles
+        and a shared prefix like 'TEST-' contributes ~30% overlap on
+        its own, which is enough to push the failed side's similarity
+        over the 0.30 threshold and accidentally route it to the
+        anchored path. The anchored canonical uses 'Hawks' tokens;
+        the failed parsed name uses 'Zzqx' tokens. No shared trigrams
+        between them.
+        """
+        anchored_canonical = "HawksTestAlpha"
         self._seed_one_basketball_team(engine, anchored_canonical)
 
         run_id = self._seed_run(engine)
         pk = f"{_TEST_MARKER}-ASYM"
-        # Home side parsed name resembles the seeded team (anchors).
-        # Away side parsed name has no match in sp.teams Basketball roster.
         self._seed_log(engine, run_id=run_id, pk=pk, reason_detail={
             "sport": "Basketball",
             "sport_id": 7,  # placeholder; helper looks up real id
-            "home_provider_normalized": f"{_TEST_MARKER}-TeamAlpha",
-            "away_provider_normalized": f"{_TEST_MARKER}-NoMatchTeam",
+            "home_provider_normalized": "HawksTestAlpha",
+            "away_provider_normalized": "ZzqxFakeOrbital",
         })
 
         resp = app.get(f"/admin/anchor-failed/kalshi/{pk}")
         assert resp.status_code == 200
         body = resp.text
 
-        # Wrong-message guard: the sub-PR #4 "Matcher didn't classify a
-        # sport" string must NOT appear (sport IS classified).
+        # Wrong-message guard.
         assert "didn't classify a sport" not in body.lower()
 
-        # Anchored side: candidate button must render with the seeded
-        # canonical name pre-filled.
+        # Anchored side: candidate button with the seeded canonical.
         assert anchored_canonical in body
         assert "copy-alias-cmd" in body, (
             "Sub-PR #6 contract: anchored side must still render "
             "candidate buttons (existing ok-state behavior)."
         )
 
-        # Failed side: parsed name must be visible in the rendered
-        # page (regression check — pre-#6 silently omitted it).
-        assert f"{_TEST_MARKER}-NoMatchTeam" in body, (
+        # Failed side: parsed name must be visible (pre-#6 silently
+        # omitted it).
+        assert "ZzqxFakeOrbital" in body, (
             "Sub-PR #6 contract: failed side's parsed name must be "
             "visible. Pre-PR-#6 the template silently omitted sides "
             "with empty candidates lists."
         )
 
-        # Failed side: stub make alias-add command must render with
-        # parsed name pre-filled into --alias.
+        # Failed side: stub `make alias-add` command must render with
+        # --team-canonical empty. Single-quote pairs are HTML-escaped
+        # to &#39;&#39; inside <pre><code> by Jinja's autoescape; allow
+        # both raw and escaped forms so the test is robust against
+        # template-rendering details.
         assert "make alias-add" in body
-        # The visible <pre> command for the failed side. Match against
-        # the actual command shape with --team-canonical '' empty and
-        # --alias filled.
-        assert "--team-canonical ''" in body or "--team-canonical ' '" in body or \
-               "--team-canonical \"\"" in body, (
+        assert (
+            "--team-canonical ''" in body
+            or "--team-canonical &#39;&#39;" in body
+        ), (
             "Sub-PR #6 contract: failed side's stub command must "
-            "leave --team-canonical empty for the operator to fill in."
+            "leave --team-canonical empty (rendered as either raw "
+            "single quotes or HTML-escaped &#39;&#39;) for the "
+            "operator to fill in."
         )
 
     def test_asymmetric_failed_side_stub_pre_fills_alias(self, engine, app):
@@ -245,14 +253,15 @@ class TestAsymmetricAnchorFailureRendering:
         pre-fill (it was dropped from reason_detail). Now that #138
         preserves it, the stub MUST surface it. Guard the contract.
         """
-        anchored_canonical = f"{_TEST_MARKER}-AnchoredTeam"
+        # Same no-shared-trigram discipline as the first test.
+        anchored_canonical = "HawksTestAnchored"
         self._seed_one_basketball_team(engine, anchored_canonical)
 
         run_id = self._seed_run(engine)
         pk = f"{_TEST_MARKER}-PREFILL"
-        # Distinctive parsed name on the failed side so we can assert
-        # the EXACT string is in the rendered output.
-        failed_parsed_name = f"{_TEST_MARKER}-DistinctParsedName"
+        # Distinctive parsed name on the failed side, no trigram
+        # overlap with the anchored canonical.
+        failed_parsed_name = "ZzqxFakeDistinctName"
         self._seed_log(engine, run_id=run_id, pk=pk, reason_detail={
             "sport": "Basketball",
             "home_provider_normalized": anchored_canonical,
@@ -263,24 +272,13 @@ class TestAsymmetricAnchorFailureRendering:
         assert resp.status_code == 200
         body = resp.text
 
-        # The parsed name must appear in the response. (Necessary
-        # precondition; pinned separately by the per-side render test.)
+        # Precondition: parsed name must be in the response.
         assert failed_parsed_name in body
 
-        # Locate the failed side's button block. The button's
-        # data-alias attribute must equal the parsed name, NOT ''.
-        # The data-team attribute must be '' (operator types it).
-        # Both shapes are valid:
-        #   data-alias="<parsed>"
-        #   data-alias='<parsed>'
-        # We don't care about quote style; we DO care that the
-        # parsed name is the data-alias value.
-        # Static guard: search for the data-alias-equals-blank
-        # anti-pattern AND assert it's not paired with this parsed
-        # name (i.e. no Path B-style stub for THIS side has a blank
-        # --alias).
-        # Substring search is sufficient — the parsed name is
-        # _TEST_MARKER-prefixed and unique to this side.
+        # Button's data-alias attribute is HTML-attribute-escaped — Jinja
+        # uses &#34; for " and &#39; for ' but inside a double-quoted
+        # attribute, the value itself doesn't need quote-escaping. The
+        # parsed name should appear raw inside data-alias="...".
         assert (
             f'data-alias="{failed_parsed_name}"' in body
             or f"data-alias='{failed_parsed_name}'" in body
@@ -293,14 +291,35 @@ class TestAsymmetricAnchorFailureRendering:
             "stub command rather than a blank --alias."
         )
 
-        # The visible <pre> command must also contain --alias '<parsed>',
-        # not --alias ''. Pin both surfaces (button data-attr + pre block)
-        # because future template refactors might keep one and break
-        # the other.
-        assert f"--alias '{failed_parsed_name}'" in body, (
+        # The visible <pre> command's --alias substring. Inside
+        # <pre><code>, single quotes get auto-escaped to &#39;. Allow
+        # both raw and escaped forms so the test is robust against
+        # template-rendering details (future autoescape config might
+        # change, but the contract is "parsed name surfaces as the
+        # --alias value inside the visible command").
+        assert (
+            f"--alias '{failed_parsed_name}'" in body
+            or f"--alias &#39;{failed_parsed_name}&#39;" in body
+        ), (
             "Sub-PR #6 STATIC GUARD: failed side's visible <pre> "
             f"command must include --alias '{failed_parsed_name}' "
-            "(NOT --alias '' or --alias \"<blank>\"). The operator "
-            "copies this command and runs it; a blank --alias would "
-            "require them to type two values manually instead of one."
+            "(raw or HTML-escaped). NOT --alias '' or --alias \"\". "
+            "The operator copies this command and runs it; a blank "
+            "--alias would require them to type two values manually "
+            "instead of one."
+        )
+
+        # Anti-pattern guard: there must NOT be a blank --alias '' (or
+        # &#39;&#39;) in the body. Pre-PR-#6 might have rendered this
+        # if the helper had populated parsed_name="" on the failed side;
+        # ensure that regression mode never surfaces.
+        assert "--alias ''" not in body, (
+            "Sub-PR #6 STATIC GUARD: body must not contain a blank "
+            "--alias '' anywhere. If this triggers, the helper's "
+            "parsed-name extraction is returning empty string for "
+            "the failed side."
+        )
+        assert "--alias &#39;&#39;" not in body, (
+            "Sub-PR #6 STATIC GUARD: body must not contain a blank "
+            "(HTML-escaped) --alias &#39;&#39; anywhere."
         )

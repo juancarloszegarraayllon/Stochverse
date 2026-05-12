@@ -56,37 +56,83 @@
     <h3>Suggest alias</h3>
 
     {% if detail.suggested_aliases_state == "ok" %}
-      {# Sub-PR #4 happy path. #}
+      {# Sub-PR #4 happy path, with sub-PR #6's per-side handling for
+         asymmetric anchor failures.
+
+         The record-level state is `ok` because at least one side has
+         candidates above SUGGESTED_TEAMS_MIN_SIMILARITY (otherwise we'd
+         be in `no_good_candidates`). But individual sides may still
+         have zero candidates — the dominant asymmetric shape is "one
+         side anchored, one side failed." Pre-PR-#6 the failed side
+         was silently omitted; now it renders a per-side stub clipboard
+         widget with the parsed name pre-filled into --alias.
+
+         The state-machine in admin/queries.py:_build_suggested_aliases
+         is unchanged at the record level — it still emits 'ok' for
+         the asymmetric case. Per-side rendering is the template's job
+         (Issue #143 fix). #}
       <p class="muted">
         For each side, the closest 3 teams in <code>sp.teams</code>
         (filtered to <em>{{ detail.sport }}</em>, ordered by trigram
         similarity). Pick the team this alias should attach to, then
         copy the generated <code>make alias-add</code> command and run
-        it locally.
+        it locally. Sides without close matches render a stub command
+        for the operator to fill in <code>--team-canonical</code>
+        manually.
       </p>
       {% for side in ["home", "away"] %}
         {% set sugg = detail.suggested_aliases.get(side) %}
-        {% if sugg and sugg.candidates %}
+        {% if sugg %}
           <div class="suggest-side">
             <h4>{{ side | capitalize }} &mdash; provider sent
               <code class="parsed-name">{{ sugg.parsed_name }}</code></h4>
-            <ul class="candidate-list">
-              {% for cand in sugg.candidates %}
-                <li>
-                  <button type="button"
-                          class="copy-alias-cmd"
-                          data-sport="{{ detail.sport }}"
-                          data-team="{{ cand.canonical_name }}"
-                          data-alias="{{ sugg.parsed_name }}">
-                    Copy <code>make alias-add</code> for &ldquo;{{ cand.canonical_name }}&rdquo;
-                  </button>
-                  <span class="muted">
-                    ({{ cand.country_code or "no country" }} &middot;
-                    similarity {{ "%.2f" | format(cand.similarity) }})
-                  </span>
-                </li>
-              {% endfor %}
-            </ul>
+            {% if sugg.candidates %}
+              {# Candidates present: existing sub-PR #4 button list. #}
+              <ul class="candidate-list">
+                {% for cand in sugg.candidates %}
+                  <li>
+                    <button type="button"
+                            class="copy-alias-cmd"
+                            data-sport="{{ detail.sport }}"
+                            data-team="{{ cand.canonical_name }}"
+                            data-alias="{{ sugg.parsed_name }}">
+                      Copy <code>make alias-add</code> for &ldquo;{{ cand.canonical_name }}&rdquo;
+                    </button>
+                    <span class="muted">
+                      ({{ cand.country_code or "no country" }} &middot;
+                      similarity {{ "%.2f" | format(cand.similarity) }})
+                    </span>
+                  </li>
+                {% endfor %}
+              </ul>
+            {% else %}
+              {# Sub-PR #6: failed side inside an `ok`-state record.
+                 Mirrors the no_good_candidates state's stub widget
+                 shape — visible <pre> + clipboard button. --alias
+                 pre-fills from sugg.parsed_name; --team-canonical
+                 stays empty for the operator. Static guard test
+                 test_asymmetric_failed_side_stub_pre_fills_alias
+                 pins the parsed-name-in-data-alias contract. #}
+              <p class="muted">
+                No candidate in <em>{{ detail.sport }}</em> matched
+                closely (trigram similarity below threshold). Type the
+                canonical team name (must already exist in
+                <code>sp.teams</code> for this sport) into
+                <code>--team-canonical</code>, then run the command
+                below. If the canonical doesn't exist yet, see issue
+                <a href="https://github.com/juancarloszegarraayllon/Stochverse/issues/135">#135</a>
+                or
+                <a href="https://github.com/juancarloszegarraayllon/Stochverse/issues/136">#136</a>.
+              </p>
+              <pre class="stub-cmd"><code>make alias-add ARGS="--sport '{{ detail.sport }}' --team-canonical '' --alias '{{ sugg.parsed_name }}'"</code></pre>
+              <button type="button"
+                      class="copy-alias-cmd"
+                      data-sport="{{ detail.sport }}"
+                      data-team=""
+                      data-alias="{{ sugg.parsed_name }}">
+                Copy stub <code>make alias-add</code> command (fill in <code>--team-canonical</code>)
+              </button>
+            {% endif %}
           </div>
         {% endif %}
       {% endfor %}
