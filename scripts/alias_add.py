@@ -250,25 +250,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--source", default=DEFAULT_SOURCE,
+        choices=sorted(KNOWN_SOURCES),
         help=f"sp.team_aliases.source value. Default: {DEFAULT_SOURCE!r}. "
-             f"Known values: {sorted(KNOWN_SOURCES)}",
+             f"Hard-restricted to KNOWN_SOURCES via argparse `choices` to "
+             f"prevent operator typos from polluting the source "
+             f"enum-by-convention (e.g. accidentally typing "
+             f"'manuel_anchor_failed' and discovering it three months "
+             f"later via audit query). To add a new source value, "
+             f"update KNOWN_SOURCES in this file FIRST.",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Resolve sport + team + check idempotency, but don't INSERT.",
     )
     args = parser.parse_args(argv)
-
-    if args.source not in KNOWN_SOURCES:
-        # Soft warning, not an error — TEXT column accepts anything;
-        # operator may be adding a new convention deliberately.
-        print(
-            f"WARNING: source={args.source!r} is not in the known set "
-            f"({sorted(KNOWN_SOURCES)}). Proceeding anyway. Document the "
-            f"new value in scripts/alias_add.py:KNOWN_SOURCES if it's "
-            f"meant to stick.",
-            file=sys.stderr,
-        )
 
     return asyncio.run(add_alias(
         sport=args.sport,

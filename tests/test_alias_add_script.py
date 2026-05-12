@@ -88,7 +88,10 @@ class TestAliasAddUnit:
         assert called_with["source"] == "manual_anchor_failed"  # default
         assert called_with["dry_run"] is False
 
-    def test_arg_parser_accepts_dry_run_and_custom_source(self, monkeypatch):
+    def test_arg_parser_accepts_dry_run_and_known_source(self, monkeypatch):
+        """--source must be one of KNOWN_SOURCES (argparse `choices`).
+        Pick a non-default KNOWN value (operator_review) to confirm the
+        override path works for legitimate values."""
         called_with = {}
         import scripts.alias_add as mod
 
@@ -101,13 +104,19 @@ class TestAliasAddUnit:
             "--sport", "tennis",
             "--team-canonical", "Jannik Sinner",
             "--alias", "J. Sinner",
-            "--source", "manual_review",
+            "--source", "operator_review",
             "--dry-run",
         ])
-        assert called_with["source"] == "manual_review"
+        assert called_with["source"] == "operator_review"
         assert called_with["dry_run"] is True
 
-    def test_unknown_source_warns_but_proceeds(self, monkeypatch, capsys):
+    def test_unknown_source_hard_rejects_at_argparse(self, monkeypatch, capsys):
+        """argparse `choices=sorted(KNOWN_SOURCES)` makes unknown
+        --source values exit with code 2 (parse error) before any DB
+        contact. Defends against the operator-typo pollution case
+        (`--source manuel_anchor_failed` writing a near-miss value
+        that's only discovered three months later via audit query).
+        """
         called = []
         import scripts.alias_add as mod
 
@@ -115,18 +124,21 @@ class TestAliasAddUnit:
             called.append(kwargs)
             return 0
 
+        # Patch add_alias so if the test regresses (argparse stops
+        # rejecting), we catch the side-effect of it being called.
         monkeypatch.setattr(mod, "add_alias", fake_add_alias)
-        rc = mod.main([
-            "--sport", "tennis",
-            "--team-canonical", "X",
-            "--alias", "Y",
-            "--source", "not_a_known_source",
-        ])
-        assert rc == 0
-        assert len(called) == 1
+        with pytest.raises(SystemExit) as exc:
+            mod.main([
+                "--sport", "tennis",
+                "--team-canonical", "X",
+                "--alias", "Y",
+                "--source", "not_a_known_source",
+            ])
+        assert exc.value.code == 2
+        assert called == [], "add_alias must not be invoked on parse error"
         captured = capsys.readouterr()
-        # Warning lands on stderr; the run continues.
-        assert "WARNING" in captured.err
+        # argparse writes the error message + usage line to stderr.
+        assert "invalid choice" in captured.err
         assert "not_a_known_source" in captured.err
 
 
