@@ -421,6 +421,21 @@ table.queue td.ticker {
   border: 1px solid #e0e0e0;
   border-radius: 2px;
 }
+/* PR #137 Path B stub-cmd: visible <pre> showing the make alias-add
+   command the operator must fill in (--team-canonical left blank).
+   Same shape as .json-dump but tighter padding for the single-line
+   command. */
+.suggest-side .stub-cmd {
+  background: #fff8e1;
+  border: 1px solid #f0e0a0;
+  border-radius: 3px;
+  padding: 0.5rem 0.75rem;
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+  font-size: 0.85rem;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 0.5rem 0;
+}
 
 /* "Copy make alias-add" button. Plain button look; per-click state
    toggle to "Copied!" handled inline in the template script. */
