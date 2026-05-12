@@ -6,6 +6,265 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-12
+
+### Phase 2F.0.1 + 2F.1 closeout — pg_trgm migration, anchor_failed surface hardening, sub-PR #4 production smoke completed (✅)
+
+Phase 2F.1's anchor_failed surface (sub-PR #4, shipped 2026-05-11) reached
+production smoke validation today. Smoke testing surfaced **four
+distinct issues** in cascading sequence; all four were addressed via
+focused PRs landing in correct dependency order per Issue #129's
+PR-ordering convention. The day closes with anchor_failed routing
+operators to actionable suggest-alias widgets for the dominant record
+shape, and with all major roadmap items through 2F.1 marked complete.
+
+This was the highest-yield smoke-test day of the 2F phase — three of
+the four findings were operationally invisible until production data
+ran against the surface. Worth naming the pattern explicitly:
+integration tests prove the code is right; production click proves
+the deploy + data + extension state is right; **both matter**.
+
+### What landed (PRs merged, in order)
+
+- **PR #140** — Phase 2F.0.1 `pg_trgm` extension migration. Single-line
+  alembic revision `b8e1f4c2a7d3` (`CREATE EXTENSION IF NOT EXISTS
+  pg_trgm`). Surfaced during PR #133 smoke test against
+  France/Senegal — `pg_trgm` was **available** on the Neon server
+  (visible via `pg_available_extensions`) but **never activated** in
+  `sports_prod` (`installed_version IS NULL`). Two existing call sites
+  depended on `similarity()`: `admin/queries.py:_build_suggested_aliases`
+  (the suggest-alias widget) and `scripts/alias_add.py` (the
+  "team not found in sport" error path). Both 500'd in production
+  pre-#140. Verification via PR comment showing
+  `pg_extension` row (`extname='pg_trgm', extversion='1.6'`) AFTER
+  `alembic upgrade head` against production. Forward+downgrade+
+  re-upgrade roundtrip verified locally; verification artifact comment
+  is the downstream-gate per Issue #129.
+
+- **PR #137** — Phase 2F.1 sub-PR #4.1. Suggest-alias widget's `{% else %}`
+  branch in `admin/templates/anchor_failed_detail.html` split into four
+  distinct state branches: `ok` (existing candidate-button list),
+  `no_good_candidates` (Path B — stub `make alias-add` command with
+  `--team-canonical ''` left blank), `no_parsed_names` (Path C —
+  surface raw payload + reference PR #138), `unclassified` (Path A —
+  sub-PR #4 original message kept as-is). State assignment lives in
+  `_build_suggested_aliases`; template branches on
+  `detail.suggested_aliases_state` string equality. Introduces
+  `SUGGESTED_TEAMS_MIN_SIMILARITY = 0.30` and the B-aware
+  parsed-name-source fallback (`reason_detail._provider_normalized`
+  → `_canonical` → FL `raw_payload.HOME_NAME` / `AWAY_NAME` — Kalshi
+  title NOT auto-split because format varies). Smoke-validated against
+  France/Senegal (`KXWCGAME-26JUN16FRASEN`) — rendered Path C
+  correctly with the "(Soccer)" sport-name disambiguation parenthetical
+  added during template review.
+
+- **PR #138** — Phase 2F.1 sub-PR #5. Resolver-side fix: lift the
+  four parsed-name preservation assignments
+  (`home_provider_normalized`, `away_provider_normalized`,
+  `home_canonical`, `away_canonical`) above the anchor-failure
+  early-return in `resolver/fuzzy_tier/matcher.py:217-221`. Mirrors
+  alias-tier's already-correct pattern at
+  `alias_tier/matcher.py:208-211`. Pre-#138 records in
+  `sp.resolution_log` are append-only audit; they stay at Path C
+  indefinitely. Post-#138 records route to Path B or `ok` per the
+  PR #137 state machine. Two production smoke records cited in the
+  PR body: France/Senegal (Soccer, Kalshi) AND UFC Fight Night
+  (`KXUFCFIGHT-26MAY16TGTERS`, MMA — "George Tuco Tokkos" /
+  "Ivan Erslan"). Two sports, two providers, same bug pattern.
+  Verified post-merge via SQL probe — `has_home_pn=true` on rows
+  created post-cron. Drive-by: also fixed
+  `test_phase_2f0_migration::test_upgrade_then_downgrade_roundtrip`
+  which silently broke when PR #140 extended the migration chain
+  past 2F.0 (test assumed `downgrade -1 from head` returns to
+  pre-2F.0; now returns to 2F.0 only).
+
+### Production issues discovered AND closed during today's smoke loop
+
+Four distinct issues, each surfaced by a different test record. None
+catastrophic. All four addressed within the day.
+
+- **Issue 1: `pg_trgm` not activated in production** — surfaced by the
+  first attempted detail-view click. Closed by PR #140.
+
+- **Issue 2: Suggest-alias widget conflated three "no candidates" causes
+  into one wrong message** — France/Senegal showed
+  "Matcher didn't classify a sport" when sport WAS classified
+  ("Soccer"). Root cause: empty-dict truthiness fell through to a
+  single `{% else %}` branch. Closed by PR #137 (four-state machine
+  + Path B / Path C explicit branches).
+
+- **Issue 3: fuzzy tier dropped parsed names on anchor-failure
+  early-return** — France/Senegal and UFC Fight Night records had
+  `reason_detail` without `home_provider_normalized` /
+  `home_canonical` etc. Alias tier preserved them; fuzzy tier didn't.
+  Closed by PR #138 (lift assignments above early-return).
+
+- **Issue 4: asymmetric anchor failures silently omit the failed side**
+  — three FL Basketball records (`fJ2dHHQj`, `bsAhY9ld`, `dSItAYDD`)
+  rendered only the anchored side's candidate buttons. State machine
+  routes mixed-per-side records to `ok` because at least one side has
+  candidates; template skips sides with empty `candidates` lists. Filed
+  as **Issue #143**; fix tracked as sub-PR #6 (sequenced after this
+  journal entry).
+
+**Key structural finding (Issue 4)**: pure Path B
+(`no_good_candidates`) is structurally unreachable for asymmetric
+records — any side with at least one above-threshold candidate routes
+the record to `ok` state. Pure Path B requires BOTH sides to have
+zero candidates, which the fuzzy tier's permissive per-side anchoring
+rarely produces in current data. Issue 4's fix in sub-PR #6 makes
+Path B-shape rendering visible **per-side** inside the `ok` state
+without changing the four-state record-level model. This was framed
+in the original PR #133 conversation as "Path B is rare in
+production" — the sharper framing is "structurally unreachable for
+the dominant record shape."
+
+### Day-0 production shape (post-#138, post-cron)
+
+```
+sp.resolution_log fuzzy_no_team_resemblance rows / cron:    ~50-80
+  with parsed names preserved (post-#138, last 30 min):     100%
+  pre-#138 (older rows, audit log immutable):                stay
+                                                             Path C
+  asymmetric anchor failure (one side, not both):           ~dominant
+                                                             shape
+                                                             in casual
+                                                             browsing
+sp.team_aliases.source values in production:
+  legacy_bootstrap                                           (Phase 2A.5)
+  alias_tier / fuzzy_tier                                    (runner write-back)
+  operator_review                                            (PR #123 approve)
+  manual_anchor_failed                                       (NEW: PR #133;
+                                                             sub-PR #4
+                                                             primitive,
+                                                             ~0 rows
+                                                             today —
+                                                             will grow
+                                                             as operators
+                                                             use the
+                                                             clipboard
+                                                             widget)
+```
+
+Day-7 measurement window for 2F.1 opens ~2026-05-18.
+
+### Engineering observation: implicit boundary contracts (continued from 2D.3 entry)
+
+Yesterday's entry named the pattern: **"implicit data contracts at
+module boundaries"** — three production bugs in three days during
+the 2F.1 mutation work, all surfacing in `_validate_candidate_team_id` /
+session autobegin / positional indexing. Today extended the same
+pattern with four more cases.
+
+What's worth carrying forward: **today's four issues were caught
+earlier than yesterday's three.** Specifically:
+
+- **PR #140 (pg_trgm extension)**: caught in seconds, by the first
+  attempted detail-view click. Production data + production extension
+  state combined to expose it. No automated test could have predicted
+  this; the contract was between `admin/queries.py` and Neon's
+  installed-vs-available extension state.
+- **PR #137 (template conditional)**: caught in the same session as
+  the pg_trgm bug — France/Senegal records exercised the wrong-message
+  path immediately. Contract was between empty-dict truthiness and
+  template's `{% else %}` semantics.
+- **PR #138 (resolver-side preservation)**: caught by the diagnosis
+  trail of PR #137 — looking at WHY France/Senegal had no parsed
+  names traced back to the fuzzy tier's early-return. Contract was
+  between fuzzy-tier emission and alias-tier-equivalent expectations.
+- **Issue #143 (asymmetric per-side rendering)**: caught during PR #137
+  smoke verification rounds — three out of three browsed records hit
+  the bug. Contract was between record-level state machine and
+  per-side template rendering.
+
+The "implicit boundary contracts" pattern is now formally named **and
+operationally validated**: each of the four cases would have stayed
+hidden behind a "looks fine in tests" state until a real production
+record exercised the contract. The bias was that pre-production
+integration tests **only seeded data they knew about** — France/Senegal
+was a real-world record with shapes the tests didn't anticipate.
+
+**Mitigation worth committing to from today forward**:
+
+1. Sub-PR-#4-style smoke testing isn't optional. Every operator-facing
+   surface needs at least one round of production-data browsing
+   before "ready to declare shipped." Integration tests prove the
+   code; production click proves the deploy + data + state.
+2. Schema-gotcha-style discoveries (sp.resolver_runs.id BIGINT vs
+   run_id UUID, caught early during PR #133 work) suggest a
+   prospective audit: every JOIN crossing the BIGINT/UUID schema
+   line should have a typed comment at the SQL site explaining
+   which column is which. Filed informally — would be a 2F.X /
+   2G concern if it becomes a pattern.
+3. Issue #129's downstream-gating convention worked cleanly today:
+   PR #140 → #137 → #138, each gated on production verification of
+   the upstream. Branch protection blocked one inadvertent direct-
+   push attempt, demonstrating "value-of-branch-protection working
+   as intended."
+
+### Tracked deviations from PHASE_2F_DESIGN rev1.2
+
+- Sub-PR #4.1 (PR #137) was not in the original 2F.1 design — emerged
+  from production smoke test as a four-state refinement of the original
+  two-state widget. Design doc could be bumped to rev1.3 to capture the
+  state machine, but the cost-benefit (more doc churn vs. PR #137's
+  inline state-machine documentation) doesn't justify it for a
+  shipped-and-validated state. Leave rev1.2 as the lock; PR #137's
+  inline comments are the source of truth for the state model.
+- Sub-PR #5 (PR #138) is on the rev1.2 fallback path under §Q6
+  ("anchor_failed surface in 2F.1 OR hard-sequenced 2F.2"). It
+  shipped in 2F.1 timeline, not 2F.2 — better than the design's
+  fallback. No deviation in spirit.
+- Sub-PR #6 (Issue #143 fix, in flight) was unanticipated by rev1.2.
+  Not on the design doc; emerged from production smoke. Same
+  rev1.3-vs-leave-alone tradeoff as #137 — leaving rev1.2 as-is.
+
+### Open follow-ups (issues filed today, ordered by intended action)
+
+**Actionable now (small admin polish, no day-7 dependency):**
+- **#131** — Approve route empty body on `ApprovalError` (HX-Request branch + `_error.html` partial). ~30-40 LOC. Real UX bug.
+- **#132** — `hx-disabled-elt` selector typo (one-line fix). ~5 LOC.
+- **#134** — Per-record recurrence count column on anchor_failed list view. ~20 LOC. Operationally useful for day-7 triage.
+- **#143** — Asymmetric anchor failure silent omission (sub-PR #6 in flight). ~40-60 LOC. Closes the dominant-shape gap before day-7 measurement window opens.
+
+**Tech-debt + convention (low priority, ship-when-convenient):**
+- **#141** — Pin `SUGGESTED_ALIASES_STATE_*` constant values (template literal-string drift guard). ~15 LOC.
+- **#144** — Add `test_phase_2f0_1_pg_trgm_migration::test_upgrade_then_downgrade_roundtrip`. ~80 LOC.
+- **#145** — Migration test scoping convention (PR template checkbox + optional static guard). Establishes the prospective convention #144 instantiates.
+
+**Deferred (gated on day-7 or external triggers):**
+- **#135** — UI affordance to create canonical `sp.teams` from anchor_failed surface. Deferred indefinitely pending day-7 data.
+- **#136** — Bootstrap national-team rows into `sp.teams`. Defer to 2D.5.X OR sooner if World Cup / Euros / AFCON within 8 weeks.
+- **#142** — `SUGGESTED_TEAMS_MIN_SIMILARITY` length-aware tuning. Passive marker — DO NOT ACT until day-7 data shows real operator-reported missing matches.
+
+**Passive marker (3-year-out concern):**
+- **#139** — Investigate Python-side `rapidfuzz` alternative if Neon ever drops `pg_trgm`.
+
+### Notes for the next session's first 5 minutes
+
+- **Sub-PR #6 is the next scheduled work** (Issue #143). Branch
+  `claude/phase-2f1-sub-PR-6-asymmetric-anchor-failure` is already
+  checked out at the start of this entry's commit; implementation
+  follows immediately.
+- **Day-7 measurement window opens ~2026-05-18.** Same shape as
+  2B/2C/2D.4 day-7 reviews: query `sp.resolver_runs` for the week,
+  measure operator throughput, decide on 2F.X prioritization. The
+  asymmetric-anchor-failure fix (sub-PR #6) lands before the window
+  opens so day-7 data isn't biased by the silent-omission bug.
+- **No actively-scoped 2F.2 / 2F.3 work** (per `PHASE_2F_DESIGN.md:364`
+  — "Quality-of-life improvements, optional, gated on day-7"). The
+  next time-bound item after sub-PR #6 is the day-7 measurement
+  itself.
+- **Phase 3 doesn't have a design doc yet.** 2D.5 has a draft design
+  in PR #111 but is paused per the 2026-05-10 spot-check. If day-7
+  data triggers 2D.5 resumption, that's the natural next-phase
+  decision point.
+- `PROJECT_STATE.md` is now current through 2F.1 closeout. The next
+  entry should pick up at sub-PR #6 ship + day-7 review, whichever
+  lands first.
+
+---
+
 ## Session — 2026-05-10 / 2026-05-11
 
 ### Phase 2F.0 + 2F.0.5 + 2F.1 — operator review-queue UI shipped (✅ minus anchor_failed)
