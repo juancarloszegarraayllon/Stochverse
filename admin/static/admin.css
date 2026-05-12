@@ -374,3 +374,81 @@ pre.json-block {
 table.queue td.ticker {
   font-size: 0.85rem;
 }
+
+
+/* ── 8. Anchor-failed surface (sub-PR #4) ───────────────────── */
+
+/* Record metadata definition list at the top of the detail view.
+   Same shape as the .kv pattern but the anchor-failed surface has
+   fewer rows and they're informational, not interactive. */
+.record-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.4rem 1rem;
+  margin: 0.5rem 0 1.5rem;
+}
+.record-meta dt { color: var(--muted); font-weight: 600; }
+.record-meta dd { margin: 0; }
+.record-meta dd .muted { font-size: 0.85em; }
+
+/* JSON dumps in the parsed-signal + raw-payload panels. Pre tag with
+   horizontal scroll so a wide payload doesn't break layout. */
+.json-dump {
+  background: #f7f7f7;
+  border: 1px solid #e0e0e0;
+  border-radius: 3px;
+  padding: 0.75rem 1rem;
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+  font-size: 0.85rem;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 0.5rem 0 0;
+}
+
+/* Per-side block in the Suggest-alias widget. Visually separates the
+   home suggestions from the away suggestions. */
+.suggest-side {
+  margin: 1rem 0;
+  padding: 0.75rem 1rem;
+  border-left: 3px solid var(--accent);
+  background: #fafbfc;
+}
+.suggest-side h4 { margin: 0 0 0.5rem; font-size: 1rem; }
+.suggest-side .parsed-name {
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+  background: #fff;
+  padding: 0 0.25rem;
+  border: 1px solid #e0e0e0;
+  border-radius: 2px;
+}
+
+/* "Copy make alias-add" button. Plain button look; per-click state
+   toggle to "Copied!" handled inline in the template script. */
+.copy-alias-cmd {
+  background: #fff;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 0.4rem 0.75rem;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  margin-right: 0.5rem;
+}
+.copy-alias-cmd:hover:not(:disabled) {
+  background: var(--accent);
+  color: white;
+}
+.copy-alias-cmd:disabled {
+  background: #e8f5e8;
+  color: #1c5a1c;
+  border-color: #c8e0c8;
+  cursor: default;
+}
+
+/* Empty-state on the list view (no anchor-failed records in window). */
+.empty {
+  color: var(--muted);
+  font-style: italic;
+  margin: 2rem 0;
+  text-align: center;
+}

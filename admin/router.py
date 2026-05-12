@@ -412,3 +412,89 @@ async def reject(
         next_record_id=next_record_id,
         session=session,
     )
+
+
+# ── Anchor-failed surface (sub-PR #4, design doc rev1.2 §Q6) ─────
+
+
+@router.get("/anchor-failed", response_class=HTMLResponse)
+async def anchor_failed_list(
+    request: Request,
+    operator: str = Depends(require_operator),
+    session: AsyncSession = Depends(get_db),
+    provider: str | None = Query(None),
+    sport: str | None = Query(None),
+    fail_reason: str | None = Query(None),
+):
+    """Anchor-failed records from the most recent
+    ANCHOR_FAILED_RECENT_RUNS resolver_runs. Read-only — no POST
+    handlers exist under /admin/anchor-failed/ (static guard test
+    asserts this).
+
+    No pagination: the run-window cap bounds the result to a few
+    hundred rows in steady state. Operators filter via the
+    provider/sport/fail_reason query params.
+    """
+    page = await queries.list_anchor_failed(
+        session,
+        provider=provider,
+        sport=sport,
+        fail_reason=fail_reason,
+    )
+    return templates.TemplateResponse(
+        request,
+        "anchor_failed_list.html",
+        {
+            "operator": operator,
+            "page": page,
+            "fail_reason_family": queries.ANCHOR_FAILED_FAIL_REASONS,
+            "format_fail_reason": queries._format_fail_reason,
+        },
+    )
+
+
+@router.get(
+    "/anchor-failed/{provider}/{provider_record_id}",
+    response_class=HTMLResponse,
+)
+async def anchor_failed_detail(
+    request: Request,
+    provider: str,
+    provider_record_id: str,
+    operator: str = Depends(require_operator),
+    session: AsyncSession = Depends(get_db),
+):
+    """Single anchor-failed record. Shows the raw provider payload,
+    the matcher's parsed signal, the fail_reason + reason_detail
+    snapshot, and the 'Suggest alias' widget per side with the top-N
+    closest sp.teams candidates.
+
+    Read-only — no approve/reject. Operator's action is to copy the
+    pre-filled `make alias-add` command from the Suggest-alias widget
+    and run it locally.
+    """
+    detail = await queries.get_anchor_failed_record(
+        session,
+        provider=provider,
+        provider_record_id=provider_record_id,
+    )
+    if detail is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"No anchor-failed record for ({provider!r}, "
+                f"{provider_record_id!r}) in the most recent "
+                f"{queries.ANCHOR_FAILED_RECENT_RUNS} resolver_runs. "
+                f"Older records require a direct SQL query against "
+                f"sp.resolution_log."
+            ),
+        )
+    return templates.TemplateResponse(
+        request,
+        "anchor_failed_detail.html",
+        {
+            "operator": operator,
+            "detail": detail,
+            "format_fail_reason": queries._format_fail_reason,
+        },
+    )

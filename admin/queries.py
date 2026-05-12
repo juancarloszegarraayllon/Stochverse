@@ -948,3 +948,413 @@ def _normalize_alias(text_value: str) -> str:
     """
     from resolver._normalize import normalize_name
     return normalize_name(text_value)
+
+
+# ── Anchor-failed surface (sub-PR #4, design doc rev1.2 §Q6) ─────
+
+
+# The four terminal "anchor-failed family" fail_reason values. Enumerated
+# explicitly here because the resolver emits other no_match fail_reasons
+# too (sport_not_classified, kickoff_at_missing, structural_normalize_
+# failed, etc.) that belong to a different operator-visibility bucket
+# (ingestion-level failures, not anchor-failed). See PHASE_2F_DESIGN.md
+# rev1.2 §Q6 for the carve-out.
+#
+# Emission sites:
+#   alias_no_team_resemblance       — resolver/alias_tier/matcher.py:211
+#                                     (terminal for sports that don't
+#                                     route to fuzzy)
+#   fuzzy_no_team_resemblance       — resolver/fuzzy_tier/matcher.py:221
+#                                     (terminal after alias deferred +
+#                                     fuzzy ran)
+#   alias_no_existing_fixture       — resolver/alias_tier/matcher.py:318
+#                                     (matched teams, no fixture exists)
+#   fuzzy_no_existing_fixture       — resolver/fuzzy_tier/matcher.py:301
+ANCHOR_FAILED_FAIL_REASONS: tuple[str, ...] = (
+    "alias_no_team_resemblance",
+    "fuzzy_no_team_resemblance",
+    "alias_no_existing_fixture",
+    "fuzzy_no_existing_fixture",
+)
+
+
+# Number of most-recent sp.resolver_runs to include in the anchor-failed
+# surface. The design lock (PR #133 conversation) is "fix-forward, not
+# audit" — operators care about recent unresolvable records to drive
+# alias-coverage extensions, not a historical archive. LIMIT 7 captures
+# ~2-3 days at current cron cadence; older anchor-failed records require
+# a future filter or a direct SQL query.
+ANCHOR_FAILED_RECENT_RUNS: int = 7
+
+
+@dataclass(frozen=True)
+class AnchorFailedRow:
+    """One row in the anchor-failed list view. Pre-shaped per the same
+    convention as ReviewQueueRow — handler not template.
+    """
+    provider: str
+    provider_record_id: str
+    provider_title: str | None
+    sport: str | None
+    fail_reason: str
+    decided_at: Any                 # datetime
+    resolver_version: str
+    run_id: uuid.UUID
+
+
+@dataclass(frozen=True)
+class AnchorFailedPage:
+    """List-view result. No pagination — the run-window cap bounds the
+    total to low-hundreds rows in steady state, so we return everything
+    and let the operator filter client-side if needed."""
+    rows: list[AnchorFailedRow]
+    total: int
+    filter_provider: str | None
+    filter_sport: str | None
+    filter_fail_reason: str | None
+    recent_runs: int
+
+
+@dataclass(frozen=True)
+class SuggestedTeam:
+    """One candidate team for the 'Suggest alias' widget. The detail
+    view surfaces the top-N closest matches per side; operator picks
+    one and the template builds the make alias-add command around the
+    pick."""
+    team_id: uuid.UUID
+    canonical_name: str
+    country_code: str | None
+    similarity: float
+
+
+@dataclass(frozen=True)
+class AnchorFailedDetail:
+    """Detail-view shape. Mirrors ReviewQueueDetail's three-panel
+    layout: raw payload + parsed signal + matcher decision. The
+    'Suggest alias' widget lives in the matcher-decision panel."""
+    provider: str
+    provider_record_id: str
+    provider_title: str | None
+    sport: str | None
+    fail_reason: str
+    reason_detail: dict[str, Any]
+    decided_at: Any
+    resolver_version: str
+    run_id: uuid.UUID
+
+    # Provider-table fields surfaced via LEFT JOIN. Either both Kalshi
+    # fields or both FL fields are non-None; the other side is None.
+    kalshi_raw_payload: dict[str, Any] | None
+    fl_raw_payload: dict[str, Any] | None
+
+    # Suggest-alias widget data. Keyed by side ("home"/"away"); each
+    # entry is the parsed provider name + top-N closest team candidates
+    # within the matcher-classified sport.
+    suggested_aliases: dict[str, dict[str, Any]]
+
+
+def _format_fail_reason(fail_reason: str) -> str:
+    """Operator-readable rendering of the fail_reason string.
+    The raw values are snake_case implementation names; the UI shows
+    a brief human gloss next to them so non-developer operators don't
+    have to mentally translate.
+    """
+    glosses = {
+        "alias_no_team_resemblance":
+            "no team name matched (alias tier — no fuzzy fallback for this sport)",
+        "fuzzy_no_team_resemblance":
+            "no team name matched (fuzzy tier — alias tier also failed)",
+        "alias_no_existing_fixture":
+            "teams matched, but no fixture in sp.fixtures for them",
+        "fuzzy_no_existing_fixture":
+            "teams matched (fuzzy), but no fixture in sp.fixtures for them",
+    }
+    return glosses.get(fail_reason, fail_reason)
+
+
+async def list_anchor_failed(
+    session: AsyncSession,
+    *,
+    provider: str | None = None,
+    sport: str | None = None,
+    fail_reason: str | None = None,
+    recent_runs: int = ANCHOR_FAILED_RECENT_RUNS,
+) -> AnchorFailedPage:
+    """List anchor-failed records from the most recent N resolver_runs.
+
+    Query shape (per sub-PR #4 design lock):
+      - DISTINCT ON (provider, provider_record_id) to surface one row
+        per record even when the same record failed across multiple
+        cron cycles.
+      - Scoped to the LIMIT N most recent sp.resolver_runs.id values
+        — bounds the resolution_log scan to ~2-3 days at current
+        cadence.
+      - Filtered to the four-element ANCHOR_FAILED_FAIL_REASONS family.
+      - LEFT JOIN to provider tables for the title (same pattern as
+        the review_queue list view).
+
+    No new index needed — the existing ix_resolution_log_run +
+    ix_resolution_log_provider_record cover the access plan.
+    """
+    where_clauses = [
+        "rl.reason_code = 'no_match'",
+        "rl.reason_detail->>'fail_reason' = ANY(:fail_reasons)",
+        # sp.resolver_runs.id is BIGINT autoincrement; the UUID linkage
+        # to sp.resolution_log.run_id is the `run_id` column on BOTH
+        # tables. Joining on `id` would type-error (UUID vs bigint).
+        "rl.run_id IN (SELECT run_id FROM sp.resolver_runs "
+        "              ORDER BY started_at DESC LIMIT :recent_runs)",
+    ]
+    params: dict[str, Any] = {
+        "fail_reasons": list(ANCHOR_FAILED_FAIL_REASONS),
+        "recent_runs": int(recent_runs),
+    }
+    if provider:
+        where_clauses.append("rl.provider = :provider")
+        params["provider"] = provider
+    if sport:
+        where_clauses.append("rl.reason_detail->>'sport' = :sport")
+        params["sport"] = sport
+    if fail_reason:
+        # Narrow within the family. If the operator passes a fail_reason
+        # outside the family, the ANY(:fail_reasons) clause above
+        # excludes it — no special-case error needed.
+        where_clauses.append("rl.reason_detail->>'fail_reason' = :fail_reason")
+        params["fail_reason"] = fail_reason
+    where_sql_joined = " AND ".join(where_clauses)
+
+    rows_sql = text(
+        f"""
+        SELECT DISTINCT ON (rl.provider, rl.provider_record_id)
+               rl.provider,
+               rl.provider_record_id,
+               rl.reason_detail,
+               rl.resolver_version,
+               rl.decided_at,
+               rl.run_id,
+               km.raw_payload->>'title' AS kalshi_title,
+               fe.raw_payload->>'HOME_NAME' AS fl_home_name,
+               fe.raw_payload->>'AWAY_NAME' AS fl_away_name
+        FROM sp.resolution_log rl
+        LEFT JOIN sp.kalshi_markets km
+          ON rl.provider = 'kalshi'
+         AND rl.provider_record_id = km.ticker
+        LEFT JOIN sp.fl_events fe
+          ON rl.provider = 'fl'
+         AND rl.provider_record_id = fe.fl_event_id
+        WHERE {where_sql_joined}
+        ORDER BY rl.provider, rl.provider_record_id, rl.id DESC
+        """
+    ).bindparams(**params)
+    rows_result = (await session.execute(rows_sql)).all()
+
+    shaped_rows: list[AnchorFailedRow] = []
+    for r in rows_result:
+        reason_detail = r.reason_detail or {}
+        title = _anchor_failed_title(
+            provider=r.provider,
+            kalshi_title=r.kalshi_title,
+            fl_home_name=r.fl_home_name,
+            fl_away_name=r.fl_away_name,
+        )
+        shaped_rows.append(AnchorFailedRow(
+            provider=r.provider,
+            provider_record_id=r.provider_record_id,
+            provider_title=title,
+            sport=reason_detail.get("sport"),
+            fail_reason=reason_detail.get("fail_reason") or "(unknown)",
+            decided_at=r.decided_at,
+            resolver_version=r.resolver_version,
+            run_id=r.run_id,
+        ))
+
+    return AnchorFailedPage(
+        rows=shaped_rows,
+        total=len(shaped_rows),
+        filter_provider=provider,
+        filter_sport=sport,
+        filter_fail_reason=fail_reason,
+        recent_runs=int(recent_runs),
+    )
+
+
+def _anchor_failed_title(
+    *, provider: str,
+    kalshi_title: str | None,
+    fl_home_name: str | None,
+    fl_away_name: str | None,
+) -> str | None:
+    """Recover the human title from the JOINed provider table. Kalshi
+    stores it directly; FL synthesizes from HOME_NAME + AWAY_NAME. The
+    sp.review_queue table has its own provider_title column populated
+    by the runner (PR #115), but sp.resolution_log doesn't — so we
+    JOIN at query time.
+    """
+    if provider == "kalshi" and kalshi_title:
+        return kalshi_title
+    if provider == "fl" and (fl_home_name or fl_away_name):
+        return f"{fl_home_name or '?'} vs {fl_away_name or '?'}"
+    return None
+
+
+async def get_anchor_failed_record(
+    session: AsyncSession,
+    *,
+    provider: str,
+    provider_record_id: str,
+    recent_runs: int = ANCHOR_FAILED_RECENT_RUNS,
+) -> AnchorFailedDetail | None:
+    """Detail-view query: the most recent anchor-failed resolution_log
+    row for this (provider, provider_record_id), plus the LEFT-JOINed
+    provider record's raw_payload, plus the suggested-alias widget
+    data per side.
+
+    Returns None if no anchor-failed row exists for this key in the
+    recent-runs window — the route handler renders 404.
+    """
+    detail_sql = text(
+        """
+        SELECT rl.provider, rl.provider_record_id,
+               rl.reason_detail, rl.resolver_version,
+               rl.decided_at, rl.run_id,
+               km.raw_payload AS kalshi_payload,
+               fe.raw_payload AS fl_payload
+        FROM sp.resolution_log rl
+        LEFT JOIN sp.kalshi_markets km
+          ON rl.provider = 'kalshi'
+         AND rl.provider_record_id = km.ticker
+        LEFT JOIN sp.fl_events fe
+          ON rl.provider = 'fl'
+         AND rl.provider_record_id = fe.fl_event_id
+        WHERE rl.provider = :provider
+          AND rl.provider_record_id = :pk
+          AND rl.reason_code = 'no_match'
+          AND rl.reason_detail->>'fail_reason' = ANY(:fail_reasons)
+          AND rl.run_id IN (SELECT run_id FROM sp.resolver_runs
+                            ORDER BY started_at DESC LIMIT :recent_runs)
+        ORDER BY rl.id DESC
+        LIMIT 1
+        """
+    ).bindparams(
+        provider=provider,
+        pk=provider_record_id,
+        fail_reasons=list(ANCHOR_FAILED_FAIL_REASONS),
+        recent_runs=int(recent_runs),
+    )
+    row = (await session.execute(detail_sql)).first()
+    if row is None:
+        return None
+
+    reason_detail = row.reason_detail or {}
+    fail_reason = reason_detail.get("fail_reason") or "(unknown)"
+    sport = reason_detail.get("sport")
+    title = _anchor_failed_title(
+        provider=row.provider,
+        kalshi_title=(row.kalshi_payload or {}).get("title"),
+        fl_home_name=(row.fl_payload or {}).get("HOME_NAME"),
+        fl_away_name=(row.fl_payload or {}).get("AWAY_NAME"),
+    )
+
+    suggested = await _build_suggested_aliases(
+        session, reason_detail=reason_detail, sport_name=sport,
+    )
+
+    return AnchorFailedDetail(
+        provider=row.provider,
+        provider_record_id=row.provider_record_id,
+        provider_title=title,
+        sport=sport,
+        fail_reason=fail_reason,
+        reason_detail=reason_detail,
+        decided_at=row.decided_at,
+        resolver_version=row.resolver_version,
+        run_id=row.run_id,
+        kalshi_raw_payload=row.kalshi_payload,
+        fl_raw_payload=row.fl_payload,
+        suggested_aliases=suggested,
+    )
+
+
+# How many sp.teams candidates the "Suggest alias" widget surfaces per
+# side. Three is enough for the common typo / variant case; more would
+# clutter the UI without operationally helping.
+SUGGESTED_TEAMS_PER_SIDE: int = 3
+
+
+async def _build_suggested_aliases(
+    session: AsyncSession,
+    *,
+    reason_detail: dict[str, Any],
+    sport_name: str | None,
+) -> dict[str, dict[str, Any]]:
+    """Build the "Suggest alias" widget data per side.
+
+    Returns a dict keyed by side ("home"/"away"). Each entry has:
+      - parsed_name: the provider-supplied name string (what the
+        matcher tried to anchor against)
+      - candidates: list[SuggestedTeam] — top-N closest sp.teams rows
+        within the matcher-classified sport, ordered by trigram
+        similarity DESC.
+
+    Returns an empty dict if the matcher didn't classify a sport
+    (the candidate lookup needs a sport_id). The UI handles the
+    no-suggestions case by showing the parsed names with a note that
+    the operator should pick a team manually.
+    """
+    if not sport_name:
+        return {}
+
+    # Resolve sport_id from sport_name. sp.sports has 17 rows; an
+    # extra query is negligible.
+    sport_id_row = (await session.execute(
+        text("SELECT id FROM sp.sports WHERE name = :name"),
+        {"name": sport_name},
+    )).first()
+    if sport_id_row is None:
+        return {}
+    sport_id = sport_id_row.id
+
+    out: dict[str, dict[str, Any]] = {}
+    for side in ("home", "away"):
+        # The matcher stores the provider-supplied name string in
+        # reason_detail at one of these keys depending on which tier
+        # produced the fail. Alias tier uses _provider_normalized;
+        # fuzzy tier sets _canonical (the StructuredName.raw). Both
+        # are the right thing to alias against — they're what the
+        # provider sent, not the matcher's interpretation.
+        parsed = (
+            reason_detail.get(f"{side}_provider_normalized")
+            or reason_detail.get(f"{side}_canonical")
+        )
+        if not parsed:
+            continue
+        candidates = (await session.execute(
+            text(
+                """
+                SELECT id, canonical_name, country_code,
+                       similarity(canonical_name, :parsed) AS sim
+                FROM sp.teams
+                WHERE sport_id = :sport_id
+                ORDER BY sim DESC
+                LIMIT :limit
+                """
+            ),
+            {
+                "parsed": parsed,
+                "sport_id": sport_id,
+                "limit": SUGGESTED_TEAMS_PER_SIDE,
+            },
+        )).all()
+        out[side] = {
+            "parsed_name": parsed,
+            "candidates": [
+                SuggestedTeam(
+                    team_id=c.id,
+                    canonical_name=c.canonical_name,
+                    country_code=c.country_code,
+                    similarity=float(c.sim or 0.0),
+                )
+                for c in candidates
+            ],
+        }
+    return out
