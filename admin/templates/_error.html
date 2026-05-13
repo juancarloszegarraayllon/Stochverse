@@ -1,0 +1,23 @@
+{# Phase 2F.1 sub-PR #7 (Issue #131) — HTMX error fragment.
+
+   Swapped into the always-present <div id="form-error"> wrapper in
+   _decision_form.html via HX-Reswap: outerHTML + HX-Retarget:
+   #form-error response headers when approve/reject raise
+   ApprovalError on an HTMX request.
+
+   The outer wrapper carries id="form-error" so future swaps can find
+   the target — without it, after one error the id would be gone and
+   subsequent errors would silently fail to target.
+
+   Form state (radio buttons, hidden inputs) lives in the sibling
+   <form> element below and is untouched by this swap. The operator's
+   selection persists across error renders.
+
+   Future enhancements tracked in issues:
+     - #150 — severity-based styling (race-vs-validation differentiation).
+     - #151 — clickable "Reload to see current state" link in the
+       409 partial body.
+   Both deferred to post-day-7 measurement. #}
+<div id="form-error">
+  <div class="error" role="alert">{{ message }}</div>
+</div>
