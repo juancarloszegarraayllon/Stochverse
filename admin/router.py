@@ -307,15 +307,49 @@ def _approval_error_response(
     session: AsyncSession,
 ):
     """Operator's submission was rejected by server-side validation
-    (bad team_id, missing kickoff, concurrent decision, etc.). Render
-    the detail view with the error message at the top of the actions
-    panel so the operator sees what went wrong without losing
-    context.
+    (bad team_id, missing kickoff, concurrent decision, etc.). Branch
+    on the HX-Request header so HTMX clients get a targeted error
+    fragment and no-JS clients get the existing full-page re-render
+    with the error message at the top of the form panel.
+
+    HTMX path (Phase 2F.1 sub-PR #7 / Issue #131):
+      Render _error.html partial with response headers
+      HX-Reswap: outerHTML + HX-Retarget: #form-error. HTMX swaps
+      the partial into the always-present <div id="form-error">
+      wrapper in _decision_form.html, leaving the form (radio
+      buttons, hidden inputs) untouched. Status 200 because HTMX
+      aborts swaps on non-2xx by default — without HX-Request-aware
+      handling, the swap silently fails and the operator sees
+      nothing change (the bug Issue #131 fixed).
+
+    No-JS path (unchanged from sub-PR #3):
+      Re-render review_queue_detail.html with form_error set at the
+      original ApprovalError status code (400 / 404 / 409). Plain
+      browsers see the full page with the form_error block visible
+      at the top of the form.
 
     Returns a coroutine — caller must await.
     """
-    # Defer to a helper that re-loads + re-renders the detail page.
-    async def _render():
+    if _is_htmx_request(request):
+        # HTMX path: small fragment + HX-Reswap/HX-Retarget headers.
+        # No detail re-load needed — the partial only renders the
+        # error message; form state already lives in the browser DOM.
+        async def _render_htmx():
+            return templates.TemplateResponse(
+                request,
+                "_error.html",
+                {"message": error.message},
+                status_code=status.HTTP_200_OK,
+                headers={
+                    "HX-Reswap": "outerHTML",
+                    "HX-Retarget": "#form-error",
+                },
+            )
+        return _render_htmx()
+    # No-JS path: full-page re-render at the error's original status
+    # code. Operator sees the form_error block at the top of the
+    # form (via _decision_form.html's {% if form_error %} branch).
+    async def _render_no_js():
         detail = await queries.get_review_queue_record(session, record_id)
         if detail is None:
             raise HTTPException(
@@ -332,7 +366,7 @@ def _approval_error_response(
             },
             status_code=error.status_code,
         )
-    return _render()
+    return _render_no_js()
 
 
 @router.post("/review-queue/{record_id}/approve")

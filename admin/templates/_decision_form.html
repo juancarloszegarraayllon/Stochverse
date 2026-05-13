@@ -20,9 +20,18 @@
 
 <h3>Candidates ({{ detail.candidate_team_names | length }} unique teams)</h3>
 
-{% if form_error %}
-  <div class="error" role="alert">{{ form_error }}</div>
-{% endif %}
+{# Phase 2F.1 sub-PR #7 (Issue #131): the form-error wrapper is always
+   rendered, empty when no error is present. Gives HTMX a stable swap
+   target for HX-Retarget: #form-error. Without the always-present
+   wrapper, HTMX's first error would fail to find the target and
+   silently abort the swap. _error.html (the partial sent on error)
+   carries the same id="form-error" wrapper so subsequent errors keep
+   finding the target after a swap. #}
+<div id="form-error">
+  {% if form_error %}
+    <div class="error" role="alert">{{ form_error }}</div>
+  {% endif %}
+</div>
 
 <form
   method="post"

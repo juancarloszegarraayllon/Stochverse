@@ -883,9 +883,14 @@ async def reject_record(
         ).bindparams(operator=operator, record_id=record_id))
 
         if result.rowcount == 0:
+            # Refinement 2 (Phase 2F.1 sub-PR #7): aligned with
+            # approve_record's equivalent 409 message which includes
+            # "Reload to see current state." Operators get consistent
+            # recovery guidance across approve vs reject.
             raise ApprovalError(
                 "Concurrent decision detected — another operator "
-                "session decided this record while your form was open.",
+                "session decided this record while your form was open. "
+                "Reload to see current state.",
                 status_code=409,
             )
 
