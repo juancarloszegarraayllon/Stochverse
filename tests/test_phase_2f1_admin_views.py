@@ -678,3 +678,54 @@ class TestReviewQueueIntegration:
         assert team_b.canonical_name in resp.text
         # Collision-style confidence display.
         assert "(collision)" in resp.text
+
+    def test_detail_view_hx_disabled_elt_uses_valid_htmx_selector(self, app, engine):
+        """Regression guard for Issue #132. HTMX's modifier-selector
+        grammar parses `this`, `closest <css>`, `find <css>`, `next`,
+        `previous`, or a global CSS selector — but NOT `this <css>`
+        (a `this`-prefixed descendant selector). Pre-fix the approve
+        form used `hx-disabled-elt="this button[type='submit']"`,
+        which HTMX flagged with a console warning on every form
+        submit and silently degraded the submit-button-disabled UX.
+
+        The fix replaced it with `find button[type='submit']` AND
+        added the same attribute to the reject form for symmetry.
+
+        Negation assertion guards against future template edits that
+        revert to the broken form. Match the FULL broken string
+        exactly (not just the `this` substring) so unrelated future
+        template content containing the word `this` doesn't produce
+        false positives.
+        """
+        # Seed any pending row; the form panel renders on the detail
+        # view regardless of record-specific state.
+        ticker = "TEST-2F1-HX-DISABLED-ELT"
+        self._seed_pending_row(engine, ticker=ticker)
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            record_id = conn.execute(text(
+                "SELECT id FROM sp.review_queue WHERE provider_record_id = :pk"
+            ).bindparams(pk=ticker)).scalar()
+
+        resp = app.get(f"/admin/review-queue/{record_id}")
+        assert resp.status_code == 200
+        body = resp.text
+        # Positive assertion: the corrected selector is present.
+        # Jinja autoescapes attribute values, so `'` in the template
+        # source renders as `&#39;` in HTML attribute context.
+        assert (
+            "hx-disabled-elt=\"find button[type='submit']\"" in body
+            or "hx-disabled-elt=\"find button[type=&#39;submit&#39;]\"" in body
+        ), (
+            "Approve form's hx-disabled-elt must use the HTMX-valid "
+            "'find <css>' selector form. Reverting to 'this <css>' "
+            "would silently degrade the submit-button-disabled UX "
+            "(HTMX parses 'this' alone but not 'this button[...]')."
+        )
+        # Negation assertion: the EXACT broken string must not appear.
+        # Match on the full attribute including value boundaries — not
+        # the `this` substring alone — so unrelated template text using
+        # the word `this` (e.g. `<form hx-confirm="Are you sure about
+        # this?">`) doesn't false-positive.
+        assert "hx-disabled-elt=\"this button[type='submit']\"" not in body
+        assert "hx-disabled-elt=\"this button[type=&#39;submit&#39;]\"" not in body
