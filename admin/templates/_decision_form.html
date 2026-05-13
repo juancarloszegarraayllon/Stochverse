@@ -39,7 +39,7 @@
   hx-post="/admin/review-queue/{{ detail.row.id }}/approve"
   hx-target="#decision-panel"
   hx-swap="outerHTML"
-  hx-disabled-elt="this button[type='submit']"
+  hx-disabled-elt="find button[type='submit']"
   class="decision-form"
 >
   {# Home side. #}
@@ -174,6 +174,7 @@
   hx-post="/admin/review-queue/{{ detail.row.id }}/reject"
   hx-target="#decision-panel"
   hx-swap="outerHTML"
+  hx-disabled-elt="find button[type='submit']"
   hx-confirm="Reject this record? It can be reopened via SQL but the
               UI won't surface it again."
   class="reject-form"
