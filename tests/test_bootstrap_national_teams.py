@@ -444,3 +444,160 @@ class TestBootstrapIntegration:
             f"France's country_code is {row.country_code!r}; expected "
             f"'FRA'. Bootstrap is not writing the alpha-3 to sp.teams."
         )
+
+    # ── Phase 1.5: legacy-row backfill interaction ────────────────
+    #
+    # The 2A.5 legacy bootstrap (scripts/bootstrap_sp_teams.py) seeded
+    # ~90 national-team rows alongside its 17,305 club teams from
+    # public.entities. Those legacy rows have correct canonical_name
+    # + normalized_name but NULL country_code. Naive idempotency
+    # (skip if normalized_name matches existing) would leave them
+    # permanently inconsistent.
+    #
+    # The bootstrap's Phase 1.5 classification adds a third branch:
+    # when normalized_name matches AND existing.country_code IS NULL
+    # AND manifest entry has a country_code, UPDATE the legacy row
+    # to backfill country_code.
+
+    def test_bootstrap_backfills_country_code_on_legacy_row(self, engine):
+        """Pre-seeds a 'France' row with country_code=NULL (the legacy
+        bootstrap's shape). Runs bootstrap. Asserts country_code is
+        now 'FRA'. The row's id (uuid) is preserved — backfill is an
+        UPDATE, not a delete-then-insert."""
+        from sqlalchemy import text
+        # Pre-seed legacy-shaped row (NULL country_code).
+        legacy_uuid = uuid.uuid4()
+        with engine.begin() as conn:
+            soccer_id = conn.execute(text(
+                "SELECT id FROM sp.sports WHERE name = 'Soccer'"
+            )).scalar()
+            conn.execute(text(
+                "INSERT INTO sp.teams "
+                "(id, sport_id, canonical_name, normalized_name, country_code) "
+                "VALUES (:id, :sport_id, 'France', 'france', NULL)"
+            ), {"id": legacy_uuid, "sport_id": soccer_id})
+
+        # Run bootstrap.
+        self._run_bootstrap(dry_run=False)
+
+        # Verify: country_code is now 'FRA' AND uuid is preserved.
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT t.id, t.country_code FROM sp.teams t "
+                "JOIN sp.sports s ON t.sport_id = s.id "
+                "WHERE s.name = 'Soccer' AND t.canonical_name = 'France'"
+            )).first()
+        assert row is not None
+        assert row.country_code == "FRA", (
+            f"Legacy 'France' row's country_code is {row.country_code!r}; "
+            f"expected 'FRA' after bootstrap's backfill UPDATE. "
+            f"Investigate Phase 1.5 classification branch (b) — the "
+            f"existing-with-NULL-country_code → queue_for_backfill path."
+        )
+        assert row.id == legacy_uuid, (
+            "Legacy 'France' row's uuid changed during backfill. "
+            "Bootstrap is doing delete-then-insert instead of UPDATE — "
+            "this breaks any sp.fixtures rows that reference the "
+            "original uuid as home_team_id / away_team_id."
+        )
+
+        # Cleanup.
+        with engine.begin() as conn:
+            conn.execute(text(
+                "DELETE FROM sp.teams WHERE id = :id"
+            ), {"id": legacy_uuid})
+
+    def test_bootstrap_skips_already_complete_row(self, engine):
+        """Pre-seed a row that's already complete (country_code set
+        to the manifest's value). Bootstrap should classify as
+        'already_present', NOT queue a redundant UPDATE.
+
+        Detection: pre-seed France with country_code='FRA'. Run
+        bootstrap. Verify the queued_for_backfill count in the
+        complete-event log is zero for the second run (idempotency
+        property).
+        """
+        from sqlalchemy import text
+        legacy_uuid = uuid.uuid4()
+        with engine.begin() as conn:
+            soccer_id = conn.execute(text(
+                "SELECT id FROM sp.sports WHERE name = 'Soccer'"
+            )).scalar()
+            conn.execute(text(
+                "INSERT INTO sp.teams "
+                "(id, sport_id, canonical_name, normalized_name, country_code) "
+                "VALUES (:id, :sport_id, 'France', 'france', 'FRA')"
+            ), {"id": legacy_uuid, "sport_id": soccer_id})
+
+        # First bootstrap. France should be in already-present.
+        self._run_bootstrap(dry_run=False)
+
+        # Verify the row is unchanged.
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT t.id, t.country_code FROM sp.teams t "
+                "JOIN sp.sports s ON t.sport_id = s.id "
+                "WHERE s.name = 'Soccer' AND t.canonical_name = 'France'"
+            )).first()
+        assert row.id == legacy_uuid
+        assert row.country_code == "FRA"
+
+        # Second bootstrap. Verify France row STILL has the same uuid
+        # (no double-update or delete-and-reinsert).
+        self._run_bootstrap(dry_run=False)
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT t.id, t.country_code FROM sp.teams t "
+                "JOIN sp.sports s ON t.sport_id = s.id "
+                "WHERE s.name = 'Soccer' AND t.canonical_name = 'France'"
+            )).first()
+        assert row.id == legacy_uuid, (
+            "Second-run bootstrap modified the France row's uuid. "
+            "Already-complete rows must be left untouched — branch (c) "
+            "of the classifier."
+        )
+        assert row.country_code == "FRA"
+
+        # Cleanup.
+        with engine.begin() as conn:
+            conn.execute(text(
+                "DELETE FROM sp.teams WHERE id = :id"
+            ), {"id": legacy_uuid})
+
+    def test_bootstrap_dry_run_does_not_backfill(self, engine):
+        """Pre-seed a legacy row (country_code=NULL). Run bootstrap
+        with --dry-run. Verify the row's country_code stays NULL
+        (no UPDATE) but the stdout output indicates the backfill
+        would have happened."""
+        from sqlalchemy import text
+        legacy_uuid = uuid.uuid4()
+        with engine.begin() as conn:
+            soccer_id = conn.execute(text(
+                "SELECT id FROM sp.sports WHERE name = 'Soccer'"
+            )).scalar()
+            conn.execute(text(
+                "INSERT INTO sp.teams "
+                "(id, sport_id, canonical_name, normalized_name, country_code) "
+                "VALUES (:id, :sport_id, 'France', 'france', NULL)"
+            ), {"id": legacy_uuid, "sport_id": soccer_id})
+
+        rc = self._run_bootstrap(dry_run=True)
+        assert rc == 0
+
+        # Row's country_code is STILL NULL (dry-run wrote nothing).
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT country_code FROM sp.teams WHERE id = :id"
+            ), {"id": legacy_uuid}).first()
+        assert row.country_code is None, (
+            f"--dry-run wrote a country_code update to the DB. Got "
+            f"{row.country_code!r}; expected NULL. Bug in the "
+            f"bootstrap script's dry-run branch — UPDATE path is "
+            f"not properly skipped."
+        )
+
+        # Cleanup.
+        with engine.begin() as conn:
+            conn.execute(text(
+                "DELETE FROM sp.teams WHERE id = :id"
+            ), {"id": legacy_uuid})

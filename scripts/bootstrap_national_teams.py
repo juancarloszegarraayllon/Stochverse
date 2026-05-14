@@ -112,23 +112,53 @@ async def bootstrap(dry_run: bool) -> int:
                  sport_id=soccer_sport_id)
 
         # ── Step 2: bulk-load existing Soccer teams ────────────────
-        # Keyed on (sport_id, normalized_name) → uuid. One bulk
-        # SELECT; no per-row lookups during dedup.
+        # Keyed on normalized_name → (uuid, current_country_code).
+        # One bulk SELECT; no per-row lookups during dedup.
+        #
+        # Why we load country_code too (Phase 1.5 — legacy interaction):
+        # the 2A.5 legacy bootstrap (scripts/bootstrap_sp_teams.py)
+        # seeded ~90 national teams alongside the 17,305 club teams
+        # from public.entities. Those legacy rows have correct
+        # canonical_name + normalized_name but NULL country_code.
+        # Naive idempotency (skip if normalized_name in existing)
+        # would leave those rows permanently inconsistent with the
+        # manifest. The fix: when normalized_name matches AND existing
+        # row's country_code IS NULL, queue an UPDATE to backfill it.
+        # Re-runs are still no-ops because the second run sees the
+        # backfilled country_code and routes to the skip path.
         existing_rows = (await session.execute(
             text(
-                "SELECT id, normalized_name FROM sp.teams "
-                "WHERE sport_id = :sport_id"
+                "SELECT id, normalized_name, country_code "
+                "FROM sp.teams WHERE sport_id = :sport_id"
             ),
             {"sport_id": soccer_sport_id},
         )).all()
-        existing_by_normalized: dict[str, uuid.UUID] = {
-            r.normalized_name: r.id for r in existing_rows
+        existing_by_normalized: dict[
+            str, tuple[uuid.UUID, str | None]
+        ] = {
+            r.normalized_name: (r.id, r.country_code)
+            for r in existing_rows
         }
         log.info("bootstrap.national_teams.existing_loaded",
                  count=len(existing_by_normalized))
 
         # ── Step 3: classify manifest entries in Python ────────────
+        #
+        # Three classification branches:
+        #
+        #   (a) Not in existing → queue INSERT (new row).
+        #   (b) In existing AND existing.country_code IS NULL AND
+        #       manifest entry has a country_code → queue UPDATE
+        #       (backfill legacy row's country_code).
+        #   (c) In existing with already-populated country_code (or
+        #       manifest entry has no country_code anyway) → skip.
+        #
+        # Branch (b) is the Phase 1.5 fix for the 2A.5 legacy
+        # bootstrap interaction. Without it, ~90 already-existing
+        # legacy national-team rows would stay country_code=NULL
+        # forever, breaking downstream country_code-based queries.
         teams_to_insert: list[dict] = []
+        teams_to_backfill: list[tuple[uuid.UUID, str]] = []
         already_present_count = 0
         empty_normalized_count = 0  # diagnostic; should never trigger
 
@@ -144,40 +174,82 @@ async def bootstrap(dry_run: bool) -> int:
                     canonical_name=canonical_name,
                 )
                 continue
-            if normalized in existing_by_normalized:
-                already_present_count += 1
+            existing = existing_by_normalized.get(normalized)
+            if existing is None:
+                # Branch (a): new row.
+                teams_to_insert.append({
+                    "id": uuid.uuid4(),
+                    "sport_id": soccer_sport_id,
+                    "canonical_name": canonical_name,
+                    "normalized_name": normalized,
+                    "country_code": country_code,
+                })
                 continue
-            teams_to_insert.append({
-                "id": uuid.uuid4(),
-                "sport_id": soccer_sport_id,
-                "canonical_name": canonical_name,
-                "normalized_name": normalized,
-                "country_code": country_code,
-            })
+            existing_id, existing_country_code = existing
+            if existing_country_code is None and country_code is not None:
+                # Branch (b): backfill country_code on legacy row.
+                teams_to_backfill.append((existing_id, country_code))
+            else:
+                # Branch (c): already present (with country_code or
+                # the manifest entry has none to add).
+                already_present_count += 1
 
         log.info(
             "bootstrap.national_teams.classified",
             queued_for_insert=len(teams_to_insert),
+            queued_for_backfill=len(teams_to_backfill),
             already_present=already_present_count,
             empty_normalized=empty_normalized_count,
         )
 
-        # ── Step 4: insert (skipped under --dry-run) ───────────────
+        # ── Step 4: insert + backfill (skipped under --dry-run) ────
         inserted = 0
+        backfilled = 0
         if dry_run:
-            log.info("bootstrap.national_teams.dry_run_skipping_insert")
-        elif teams_to_insert:
-            # on_conflict_do_nothing on the primary key — same shape
-            # as bootstrap_sp_teams.py. Defends against a freshly-
-            # generated uuid colliding with an existing row's uuid
-            # (vanishingly unlikely but the guard is free) AND
-            # against a concurrent insert from another connection
-            # (also unlikely in practice; bootstrap is a one-shot
-            # operator action).
-            stmt = pg_insert(Team.__table__).values(teams_to_insert)
-            stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
-            result = await session.execute(stmt)
-            inserted = result.rowcount or 0
+            log.info(
+                "bootstrap.national_teams.dry_run_skipping_writes",
+                would_insert=len(teams_to_insert),
+                would_backfill=len(teams_to_backfill),
+            )
+        else:
+            if teams_to_insert:
+                # on_conflict_do_nothing on the primary key — same
+                # shape as bootstrap_sp_teams.py. Defends against a
+                # freshly-generated uuid colliding with an existing
+                # row's uuid (vanishingly unlikely but the guard is
+                # free) AND against a concurrent insert from another
+                # connection (also unlikely in practice; bootstrap
+                # is a one-shot operator action).
+                stmt = pg_insert(Team.__table__).values(teams_to_insert)
+                stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
+                result = await session.execute(stmt)
+                inserted = result.rowcount or 0
+            if teams_to_backfill:
+                # Bulk UPDATE via a single statement per backfill
+                # entry would be N round trips. Use a values list +
+                # FROM clause for a single round trip regardless of
+                # backfill count.
+                await session.execute(
+                    text(
+                        "UPDATE sp.teams "
+                        "SET country_code = v.country_code "
+                        "FROM (VALUES " + ", ".join(
+                            f"(CAST(:id_{i} AS uuid), :code_{i})"
+                            for i in range(len(teams_to_backfill))
+                        ) + ") AS v(id, country_code) "
+                        "WHERE sp.teams.id = v.id "
+                        "AND sp.teams.country_code IS NULL"
+                    ),
+                    {
+                        k: v
+                        for i, (row_id, code) in enumerate(teams_to_backfill)
+                        for k, v in (
+                            (f"id_{i}", str(row_id)),
+                            (f"code_{i}", code),
+                        )
+                    },
+                )
+                backfilled = len(teams_to_backfill)
             await session.commit()
 
         elapsed = time.monotonic() - started
@@ -186,18 +258,34 @@ async def bootstrap(dry_run: bool) -> int:
             dry_run=dry_run,
             elapsed_sec=round(elapsed, 2),
             inserted=inserted,
+            backfilled=backfilled,
             queued_for_insert=len(teams_to_insert),
+            queued_for_backfill=len(teams_to_backfill),
             already_present=already_present_count,
         )
 
         # ── Final stdout summary (operator-facing) ─────────────────
-        verb = "Would insert" if dry_run else "Inserted"
+        #
+        # Three categories per the Phase 1.5 classification:
+        #   - Would insert / Inserted: brand-new rows
+        #   - Would backfill / Backfilled: existing legacy rows
+        #     getting country_code added (Phase 2A.5 bootstrap left
+        #     ~90 national-team rows with country_code=NULL; this
+        #     bootstrap fills them in)
+        #   - Already present: existing rows that need no changes
+        #     (either they already have country_code OR the manifest
+        #     entry itself has no country_code)
+        insert_verb = "Would insert" if dry_run else "Inserted"
+        backfill_verb = "Would backfill" if dry_run else "Backfilled"
         print(f"\nNational-team bootstrap "
               f"{'dry-run' if dry_run else 'complete'} in {elapsed:.1f}s:")
         print(f"  Manifest entries:    {len(NATIONAL_TEAMS_SEED):>4}")
-        print(f"  {verb}:           "
+        print(f"  {insert_verb}:       "
               f"{len(teams_to_insert):>4}"
               f"{' (' + str(inserted) + ' actually committed)' if not dry_run else ''}")
+        print(f"  {backfill_verb}:     "
+              f"{len(teams_to_backfill):>4}"
+              f"{' (' + str(backfilled) + ' actually committed)' if not dry_run else ''}")
         print(f"  Already present:     {already_present_count:>4}")
         if empty_normalized_count:
             print(f"  WARNINGS: {empty_normalized_count} entries "
