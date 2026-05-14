@@ -82,6 +82,25 @@ intra-year for newly-recognized associations):
      PR convention.
   8. Update "Last refreshed" date in this docstring (line ~12 above).
 
+## Section header counts
+
+Member counts in section headers refer to **full FIFA members only**,
+not total confederation affiliates. Several confederations have more
+member associations than FIFA full members:
+
+- AFC: 47 confederation members, 46 FIFA members (Northern Mariana
+  Islands is an AFC member but not a FIFA member as of 2024).
+- CONCACAF: 41 confederation members, 36 FIFA members (five are
+  confederation-only affiliates — French Guiana, Guadeloupe,
+  Martinique, Saint Barthélemy, Bonaire).
+- CAF: 54 FIFA members; Zanzibar is a CAF associate (granted 2017)
+  but not a FIFA member (Tanzania's FIFA membership covers it).
+
+This convention is enforced by the test
+test_manifest_size_in_expected_range which bounds total entries at
+roughly the FIFA membership count (200-225). Total entries here:
+212 = 10 CONMEBOL + 55 UEFA + 54 CAF + 46 AFC + 36 CONCACAF + 11 OFC.
+
 ## Out of scope for Phase 1
 
 - Women's national teams (Issue #155 — canonical-name disambiguation
@@ -233,10 +252,19 @@ NATIONAL_TEAMS_SEED: list[tuple[str, str, str | None]] = [
     ("Tunisia", "TUN", None),
     ("Uganda", "UGA", None),
     ("Zambia", "ZMB", None),
-    ("Zanzibar", "EAZ", "FIFA member since 2017; EAZ is the user-assigned code"),
     ("Zimbabwe", "ZWE", None),
+    # Zanzibar was excluded from this manifest after second-pass review:
+    # CAF granted Zanzibar full CAF membership in 2017, but FIFA does
+    # NOT recognize Zanzibar as a separate member association
+    # (Tanzania's FIFA membership covers it). The header count below
+    # matches FIFA full members only. See module docstring's "Section
+    # header counts" paragraph for the convention.
 
-    # ── AFC (Asian Football Confederation, 47 members) ───────────────
+    # ── AFC (Asian Football Confederation, 46 full FIFA members) ─────
+    # Note: AFC has 47 total member associations; Northern Mariana
+    # Islands was granted AFC full membership in 2020 but is NOT a
+    # FIFA member as of 2024. Excluded from this manifest by the
+    # FIFA-members-only convention.
     ("Afghanistan", "AFG", None),
     ("Australia", "AUS", "moved from OFC to AFC in 2006"),
     ("Bahrain", "BHR", None),
@@ -285,7 +313,13 @@ NATIONAL_TEAMS_SEED: list[tuple[str, str, str | None]] = [
     ("Yemen", "YEM", None),
 
     # ── CONCACAF (Confederation of North, Central American and ───────
-    # ── Caribbean Association Football, 41 members) ─────────────────
+    # ── Caribbean Association Football, 36 full FIFA members) ───────
+    # Note: CONCACAF has 41 total member associations; 5 are
+    # confederation-only affiliates (French Guiana, Guadeloupe,
+    # Martinique, Saint Barthélemy, and Bonaire — French overseas
+    # departments and Dutch Caribbean territories) that participate
+    # in CONCACAF competition but lack FIFA voting status. Excluded
+    # from this manifest by the FIFA-members-only convention.
     ("Anguilla", "AIA", None),
     ("Antigua and Barbuda", "ATG", None),
     ("Aruba", "ABW", None),

@@ -239,11 +239,23 @@ class TestBootstrapIntegration:
         self._purge_bootstrap_rows(engine)
 
     def _purge_bootstrap_rows(self, engine):
-        """Remove any rows the bootstrap created from prior test runs.
-        Identified by (sport_id=Soccer, country_code IS NOT NULL,
-        normalized_name matches manifest). Doesn't disturb legacy
-        bootstrap rows (those have country_code NULL in this test DB
-        per the bootstrap_sp_teams.py reading from earlier today)."""
+        """Removes all manifest-shaped rows from sp.teams before each test.
+
+        Selection criterion: `(sport_id=Soccer, normalized_name IN
+        manifest_set)`. This is broader than just "rows the bootstrap
+        script created" — it would also remove any legacy
+        bootstrap_sp_teams.py rows that share a normalized_name with a
+        manifest entry. In the current test DB this is an empty
+        intersection (legacy bootstrap rows have country_code NULL and
+        don't share names with national teams), but the purge contract
+        is more aggressive than that empirical state suggests.
+
+        Integration tests that intentionally pre-seed rows for
+        verification (e.g.
+        test_bootstrap_preserves_existing_row_with_same_normalized_name)
+        should do their own cleanup explicitly rather than rely on this
+        fixture's scope.
+        """
         from sqlalchemy import text
         from scripts.national_teams_seed import NATIONAL_TEAMS_SEED
         from resolver._normalize import normalize_name
