@@ -126,6 +126,27 @@ class ReviewQueueDetail:
     # template.
     fail_reason: str | None = None
 
+    # ── Phase 2D.5 sub-PR #1: asymmetric anchor-failure routing ──
+    #
+    # routing_shape is the discriminator the template branches on.
+    # Distinct from collision shape (which sets {side}_collision +
+    # colliding_{side}_team_ids); asymmetric rows use these fields
+    # instead. None for collision rows + pre-2D.5 rows.
+    #
+    # When routing_shape == "asymmetric_anchor_failure":
+    #   - asymmetric_failed_side: "home" | "away" — which side
+    #     anchor-failed. Derived from reason_detail's
+    #     {side}_anchor_failed booleans (exactly one is True).
+    #   - asymmetric_failed_side_candidate_team_ids: top-N trigram
+    #     candidates for the failed side, surfaced by the matcher in
+    #     row.candidate_fixtures[1:]. row.candidate_fixtures[0] is the
+    #     anchored side's team_id (operator-side rendering convention).
+    routing_shape: str | None = None
+    asymmetric_failed_side: str | None = None
+    asymmetric_failed_side_candidate_team_ids: list[uuid.UUID] = field(
+        default_factory=list
+    )
+
 
 # ── Query helpers ──────────────────────────────────────────────
 
@@ -475,7 +496,32 @@ async def get_review_queue_record(
     colliding_away = _parse_team_id_list(
         reason_detail.get("colliding_away_team_ids")
     )
-    all_team_ids: list[uuid.UUID] = list(set(colliding_home + colliding_away))
+
+    # Phase 2D.5 sub-PR #1: derive asymmetric-routing fields.
+    # row.candidate_fixtures is a JSONB array of UUID strings; for
+    # asymmetric rows the matcher emits [anchored_team_id, ...top-N
+    # failed-side trigram candidates] (resolver/fuzzy_tier/matcher.py
+    # asymmetric branch). Parse + slice it here so the template can
+    # render the failed-side radio buttons directly.
+    routing_shape = reason_detail.get("routing_shape")
+    asymmetric_failed_side: str | None = None
+    asymmetric_failed_candidates: list[uuid.UUID] = []
+    if routing_shape == "asymmetric_anchor_failure":
+        if reason_detail.get("home_anchor_failed"):
+            asymmetric_failed_side = "home"
+        elif reason_detail.get("away_anchor_failed"):
+            asymmetric_failed_side = "away"
+        # Slice the candidate_fixtures list — index 0 is anchored side,
+        # index 1+ are the failed-side top-N. Defensive: tolerate
+        # malformed/empty lists rather than 500ing the operator's
+        # detail-view fetch.
+        cf_parsed = _parse_team_id_list(row.candidate_fixtures)
+        if len(cf_parsed) >= 2:
+            asymmetric_failed_candidates = cf_parsed[1:]
+
+    all_team_ids: list[uuid.UUID] = list(set(
+        colliding_home + colliding_away + asymmetric_failed_candidates
+    ))
     candidate_names = await load_candidate_team_names(session, all_team_ids)
 
     shaped_row = ReviewQueueRow(
@@ -507,6 +553,9 @@ async def get_review_queue_record(
         colliding_away_team_ids=colliding_away,
         candidate_team_names=candidate_names,
         fail_reason=reason_detail.get("fail_reason"),
+        routing_shape=routing_shape,
+        asymmetric_failed_side=asymmetric_failed_side,
+        asymmetric_failed_side_candidate_team_ids=asymmetric_failed_candidates,
     )
 
 
@@ -577,6 +626,7 @@ def _validate_candidate_team_id(
     side_colliding_ids: list[uuid.UUID],
     side_default_id: uuid.UUID | None,
     side_label: str,
+    asymmetric_candidates: list[uuid.UUID] | None = None,
 ) -> None:
     """Server-side validation that the operator-submitted team_id
     matches the candidate set the matcher surfaced. Raises
@@ -586,7 +636,66 @@ def _validate_candidate_team_id(
     pick from the matcher's candidates — arbitrary team_ids would
     let an attacker (or accidental URL tampering) link a provider
     record to any team they want.
+
+    Three validation modes, checked in this precedence order:
+
+      (1) `asymmetric_candidates is not None` (Phase 2D.5 sub-PR #1
+          asymmetric failed-side) → submitted must be in the
+          asymmetric candidate set (top-N trigram for the failed
+          side). The candidate set is sport-gated upstream by
+          `resolver/fuzzy_tier/matcher.py::_top_n_trigram_candidates`,
+          so this validation is both an in-set check AND a
+          defense-in-depth sport-gate.
+
+      (2) `side_collision=True` → submitted must be in
+          `side_colliding_ids`. Existing collision validation.
+
+      (3) Otherwise (non-collision, non-asymmetric) → submitted
+          must equal `side_default_id` (matcher's single pick).
+          When `side_default_id is None`, validation is a noop —
+          rare; happens for asymmetric anchored side where the
+          matcher's pick IS the operator's only choice. The
+          asymmetric failed-side ALWAYS goes through mode (1);
+          asymmetric anchored side goes through mode (3) with a
+          non-None side_default_id.
+
+    Precedence rationale: in practice a row is either
+    asymmetric-shaped or collision-shaped, never both — the matcher
+    emits one or the other, not both. The defensive precedence
+    ordering here (asymmetric first) covers the hypothetical case
+    where a future code change accidentally sets both shapes on
+    the same row. Asymmetric wins because its discriminator is
+    explicit (`routing_shape` string constant) and the template
+    branches the same way at `admin/templates/_decision_form.html`
+    — keeping validation and rendering consistent prevents a
+    "rendered radio buttons over candidate set A but validated
+    against candidate set B" UX inconsistency.
+
+    Mode (1) additionally guards: `asymmetric_candidates=[]` would
+    silently accept no team_ids; we reject explicitly. Empty
+    candidate set means the matcher's trigram lookup returned zero
+    matches above the similarity floor — the approval form
+    shouldn't have been rendered in that state, and accepting any
+    submission would defeat the in-set check entirely.
     """
+    if asymmetric_candidates is not None:
+        # Phase 2D.5 sub-PR #1: asymmetric failed-side validation
+        # (highest precedence — explicit discriminator wins).
+        if not asymmetric_candidates:
+            raise ApprovalError(
+                f"{side_label}_team_id={submitted} cannot be validated: "
+                f"asymmetric {side_label} side has no candidate set. "
+                "Operator should reject this record rather than approve."
+            )
+        if submitted not in asymmetric_candidates:
+            raise ApprovalError(
+                f"{side_label}_team_id={submitted} is not in the "
+                f"matcher's asymmetric candidate set for the "
+                f"{side_label} (failed) side "
+                f"({len(asymmetric_candidates)} candidates). "
+                "Refusing to link to an arbitrary team."
+            )
+        return
     if side_collision:
         if submitted not in side_colliding_ids:
             raise ApprovalError(
@@ -595,16 +704,16 @@ def _validate_candidate_team_id(
                 f"({len(side_colliding_ids)} candidates). "
                 "Refusing to link to an arbitrary team."
             )
-    else:
-        # Non-collision: matcher picked a specific team. Operator
-        # submission must match it.
-        if side_default_id is not None and submitted != side_default_id:
-            raise ApprovalError(
-                f"{side_label}_team_id={submitted} doesn't match the "
-                f"matcher's selected {side_label}_team_id={side_default_id}. "
-                "Non-collision records have a single candidate; "
-                "operator can approve as-is or reject."
-            )
+        return
+    # Non-collision, non-asymmetric: matcher picked a specific team.
+    # Operator submission must match it.
+    if side_default_id is not None and submitted != side_default_id:
+        raise ApprovalError(
+            f"{side_label}_team_id={submitted} doesn't match the "
+            f"matcher's selected {side_label}_team_id={side_default_id}. "
+            "Non-collision records have a single candidate; "
+            "operator can approve as-is or reject."
+        )
 
 
 async def approve_record(
@@ -722,12 +831,31 @@ async def approve_record(
         rd_away = detail.reason_detail.get("away_team_id")
         default_home = uuid.UUID(rd_home) if rd_home else None
         default_away = uuid.UUID(rd_away) if rd_away else None
+
+        # Phase 2D.5 sub-PR #1: asymmetric routing thread-through.
+        # Per-side asymmetric_candidates is set only for the failed
+        # side of an asymmetric record. The anchored side falls
+        # through to standard non-collision validation (single
+        # candidate, must match matcher's pick).
+        asym_home_candidates: list[uuid.UUID] | None = None
+        asym_away_candidates: list[uuid.UUID] | None = None
+        if detail.routing_shape == "asymmetric_anchor_failure":
+            if detail.asymmetric_failed_side == "home":
+                asym_home_candidates = (
+                    detail.asymmetric_failed_side_candidate_team_ids
+                )
+            elif detail.asymmetric_failed_side == "away":
+                asym_away_candidates = (
+                    detail.asymmetric_failed_side_candidate_team_ids
+                )
+
         _validate_candidate_team_id(
             home_team_id,
             side_collision=detail.home_collision,
             side_colliding_ids=detail.colliding_home_team_ids,
             side_default_id=default_home,
             side_label="home",
+            asymmetric_candidates=asym_home_candidates,
         )
         _validate_candidate_team_id(
             away_team_id,
@@ -735,6 +863,7 @@ async def approve_record(
             side_colliding_ids=detail.colliding_away_team_ids,
             side_default_id=default_away,
             side_label="away",
+            asymmetric_candidates=asym_away_candidates,
         )
 
         # Step 1: ensure_fixture (find-or-create). Per Q1 (a): operator

@@ -42,10 +42,43 @@
   hx-disabled-elt="find button[type='submit']"
   class="decision-form"
 >
-  {# Home side. #}
+  {# Home side. Three possible shapes per Phase 2D.5 sub-PR #1:
+
+       1. Asymmetric failed side (routing_shape="asymmetric_anchor_failure"
+          AND asymmetric_failed_side=="home"): radio buttons over
+          asymmetric_failed_side_candidate_team_ids (top-N trigram).
+       2. Collision (home_collision): existing radio buttons over
+          colliding_home_team_ids.
+       3. Single-pick: existing hidden input from reason_detail.home_team_id.
+
+     Asymmetric checked first because its discriminator is the routing_shape
+     string constant, distinct from collision flags. A row is either
+     asymmetric-shaped or collision-shaped, never both — the matcher emits
+     one or the other. The defensive precedence ordering (asymmetric first)
+     covers the hypothetical case where a future code change accidentally
+     sets both shapes on the same row. THIS PRECEDENCE MUST MATCH the
+     validation precedence at admin/queries.py::_validate_candidate_team_id
+     — if they diverge, the UI renders one candidate set but validation
+     checks against another, and operator submissions get rejected for
+     unclear reasons.
+
+     LOAD-BEARING UPSTREAM INVARIANT (see resolver/fuzzy_tier/matcher.py
+     asymmetric routing emission): asymmetric_failed_side_candidate_team_ids
+     is derived from row.candidate_fixtures[1:] — slice [0] is the
+     anchored side, [1:] are the failed-side top-N trigram candidates.
+     Reordering candidate_fixtures upstream would corrupt this rendering
+     silently. The matcher's emission site comments the invariant. #}
+  {% set home_asymmetric_failed = (
+    detail.routing_shape == "asymmetric_anchor_failure"
+    and detail.asymmetric_failed_side == "home"
+  ) %}
   <fieldset class="candidate-side">
     <legend>
-      {% if detail.home_collision %}
+      {% if home_asymmetric_failed %}
+        Home — anchor failed; pick from
+        {{ detail.asymmetric_failed_side_candidate_team_ids | length }}
+        trigram candidate{{ '' if detail.asymmetric_failed_side_candidate_team_ids | length == 1 else 's' }}
+      {% elif detail.home_collision %}
         Home — choose from
         {{ detail.colliding_home_team_ids | length }}
         colliding candidate{{ '' if detail.colliding_home_team_ids | length == 1 else 's' }}
@@ -53,7 +86,31 @@
         Home — matcher selected
       {% endif %}
     </legend>
-    {% if detail.home_collision %}
+    {% if home_asymmetric_failed %}
+      <ul class="candidate-list">
+        {% for tid in detail.asymmetric_failed_side_candidate_team_ids %}
+          {% set team = detail.candidate_team_names.get(tid) %}
+          <li>
+            <label class="radio-row">
+              <input type="radio" name="home_team_id" value="{{ tid }}"
+                {% if loop.first %}checked{% endif %}
+                required>
+              {% if team %}
+                <span class="team-name">{{ team.canonical_name }}</span>
+                <span class="team-meta">
+                  ({{ team.country_code or "no country" }} &middot;
+                  <span class="ticker">{{ team.team_id }}</span>)
+                </span>
+              {% else %}
+                <span class="muted">
+                  (team {{ tid }} not found in sp.teams — possibly deleted)
+                </span>
+              {% endif %}
+            </label>
+          </li>
+        {% endfor %}
+      </ul>
+    {% elif detail.home_collision %}
       <ul class="candidate-list">
         {% set default_home = detail.reason_detail.get("home_team_id") %}
         {% for tid in detail.colliding_home_team_ids %}
@@ -101,10 +158,18 @@
     {% endif %}
   </fieldset>
 
-  {# Away side. #}
+  {# Away side. Same three-shape branching as home side. #}
+  {% set away_asymmetric_failed = (
+    detail.routing_shape == "asymmetric_anchor_failure"
+    and detail.asymmetric_failed_side == "away"
+  ) %}
   <fieldset class="candidate-side">
     <legend>
-      {% if detail.away_collision %}
+      {% if away_asymmetric_failed %}
+        Away — anchor failed; pick from
+        {{ detail.asymmetric_failed_side_candidate_team_ids | length }}
+        trigram candidate{{ '' if detail.asymmetric_failed_side_candidate_team_ids | length == 1 else 's' }}
+      {% elif detail.away_collision %}
         Away — choose from
         {{ detail.colliding_away_team_ids | length }}
         colliding candidate{{ '' if detail.colliding_away_team_ids | length == 1 else 's' }}
@@ -112,7 +177,31 @@
         Away — matcher selected
       {% endif %}
     </legend>
-    {% if detail.away_collision %}
+    {% if away_asymmetric_failed %}
+      <ul class="candidate-list">
+        {% for tid in detail.asymmetric_failed_side_candidate_team_ids %}
+          {% set team = detail.candidate_team_names.get(tid) %}
+          <li>
+            <label class="radio-row">
+              <input type="radio" name="away_team_id" value="{{ tid }}"
+                {% if loop.first %}checked{% endif %}
+                required>
+              {% if team %}
+                <span class="team-name">{{ team.canonical_name }}</span>
+                <span class="team-meta">
+                  ({{ team.country_code or "no country" }} &middot;
+                  <span class="ticker">{{ team.team_id }}</span>)
+                </span>
+              {% else %}
+                <span class="muted">
+                  (team {{ tid }} not found in sp.teams — possibly deleted)
+                </span>
+              {% endif %}
+            </label>
+          </li>
+        {% endfor %}
+      </ul>
+    {% elif detail.away_collision %}
       <ul class="candidate-list">
         {% set default_away = detail.reason_detail.get("away_team_id") %}
         {% for tid in detail.colliding_away_team_ids %}

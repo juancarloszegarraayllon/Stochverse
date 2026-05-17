@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from rapidfuzz import fuzz
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..alias_tier import (
@@ -105,6 +106,148 @@ KICKOFF_DRIFT_SEC = 60 * 60
 
 # Exact-match ratio for team-path collision tiebreaker.
 EXACT_MATCH_RATIO = 1.0
+
+
+# ── Asymmetric anchor-failure routing (Phase 2D.5 sub-PR #1) ────
+
+
+# Discriminator string written into reason_detail["routing_shape"]
+# when an asymmetric anchor failure routes to REVIEW_QUEUE. Admin
+# template branches on this constant. Pinned by test
+# tests/test_phase_2d5_asymmetric_routing.py::ASYMMETRIC_ROUTING_SHAPE.
+ASYMMETRIC_ANCHOR_FAILURE_ROUTING_SHAPE = "asymmetric_anchor_failure"
+
+
+# Top-N failed-side trigram candidates surfaced for the operator.
+# Matches admin/queries.py:SUGGESTED_TEAMS_PER_SIDE convention so the
+# review-queue detail view's anchored-side suggestions and the
+# failed-side asymmetric candidates render at consistent breadth.
+ASYMMETRIC_FAILED_SIDE_TOP_N = 3
+
+
+# Minimum trigram similarity for a failed-side candidate to surface.
+# Matches admin/queries.py:SUGGESTED_TEAMS_MIN_SIMILARITY. Below this
+# the candidate is noise — operators are better served by zero
+# candidates than by spurious ones.
+ASYMMETRIC_FAILED_SIDE_MIN_SIMILARITY = 0.30
+
+
+# Kalshi prop-market vocabulary. Records where EITHER parsed_name's
+# colon-suffix (or the entire name) matches an entry here are
+# excluded from asymmetric routing and stay routed to no_match.
+#
+# Production-validated against the day-7 retrospective sample
+# (2026-05-17). Vocabulary covers Baseball / MMA / Basketball /
+# Soccer / Hockey / Football / Esports prop markets in active use
+# on Kalshi as of seeding.
+#
+# Architectural followup tracked in #160: prop markets are
+# structurally outside the head-to-head matcher's design contract.
+# Proper resolution is ingestion-layer filtering or primary-market
+# attachment via event_ticker, not heuristic enhancement. Until
+# that lands, this vocabulary needs quarterly review as Kalshi
+# introduces new prop types — fail-open by design (unknown
+# segments route through to operators rather than getting filtered
+# silently), so vocabulary gaps surface as one rejection per new
+# prop type.
+KALSHI_PROP_MARKET_SEGMENTS: frozenset[str] = frozenset({
+    # Baseball props
+    "First Inning Run",
+    "Team Total",
+    "First 5 Spread",
+    "First 5 Innings Total",
+    "First 5 Innings",
+    "Total Runs",
+    "Strikeouts",
+    "Hits",
+    "Extra Innings",
+    # MMA props
+    "Method of Victory",
+    "Round of Finish",
+    "Round of Victory",
+    "Method of Finish",
+    "Go the Distance",
+    # Basketball props
+    "First Half Winner",
+    "First Half Spread",
+    "First Half Total",
+    "Second Half Winner",
+    "Second Half Spread",
+    "Second Half Total",
+    "Double Doubles",
+    "Triple Doubles",
+    "Three Pointers",
+    "Rebounds",
+    "Points Leader",
+    "Blocks",
+    # Soccer props
+    "Total Goals",
+    "BTTS",
+    "To Advance",
+    # Hockey props
+    "Overtime",
+    "Assists",
+    "Points",
+    "First Goal",
+    "Player Goals",
+    "Total Points",
+    # Football props
+    "4th TD",
+    # Esports props
+    "Total Maps",
+})
+
+
+def _looks_like_kalshi_prop_market(parsed_name: str) -> bool:
+    """Vocabulary-based prop-market detection on a single parsed name.
+
+    Two shapes match:
+      - The entire parsed_name is a prop segment (e.g., "Overtime"
+        when the parser places the prop segment in one slot and the
+        team name in the other).
+      - The substring after the first colon is a prop segment
+        (e.g., "Colorado: Hits" — substring after ':' is "Hits").
+
+    Strings without a colon AND not equal to a vocabulary entry
+    return False. NHL playoff-series titles like "Game 3: Vegas"
+    return False because "Game 3" is not in the vocabulary.
+
+    Per #160: this is a precision-optimized heuristic gating an
+    architectural workaround. Failopen on unknown segments — they
+    reach operators rather than getting filtered silently.
+    """
+    if not parsed_name:
+        return False
+    if parsed_name in KALSHI_PROP_MARKET_SEGMENTS:
+        return True
+    if ":" not in parsed_name:
+        return False
+    _, _, after_colon = parsed_name.partition(":")
+    return after_colon.strip() in KALSHI_PROP_MARKET_SEGMENTS
+
+
+def _should_exclude_from_asymmetric_routing(
+    provider: str,
+    home_parsed: str,
+    away_parsed: str,
+) -> bool:
+    """Bilateral prop-market check for the asymmetric routing branch.
+
+    Per production sampling (#160), Kalshi parser places prop
+    segments inconsistently — sometimes in home slot, sometimes in
+    away slot, sometimes both. Check BOTH parsed names regardless
+    of which side anchor-failed.
+
+    Provider-gated on "kalshi" — FL records with colons in team
+    names (rare, but the parser preserves them) stay in scope for
+    asymmetric routing.
+    """
+    if provider != "kalshi":
+        return False
+    return (
+        _looks_like_kalshi_prop_market(home_parsed)
+        or _looks_like_kalshi_prop_market(away_parsed)
+    )
 
 
 # ── Side-level intermediate ────────────────────────────────────
@@ -233,12 +376,98 @@ class FuzzyTierMatcher:
         reason_detail["home_canonical"] = home_match.canonical_name
         reason_detail["away_canonical"] = away_match.canonical_name
 
-        # Anchor failure
-        if home_match.anchor_failed or away_match.anchor_failed:
-            reason_detail["home_anchor_failed"] = home_match.anchor_failed
-            reason_detail["away_anchor_failed"] = away_match.anchor_failed
-            return self._no_match(
-                reason_detail, fail_reason="fuzzy_no_team_resemblance",
+        # Anchor failure — three sub-branches per Phase 2D.5 sub-PR #1:
+        #
+        #   (i)  Both sides failed (symmetric) — no operator-actionable
+        #        signal. Continue routing to no_match. Baseline
+        #        behavior, no change from pre-2D.5.
+        #
+        #   (ii) Exactly one side failed (asymmetric) + bilateral Kalshi
+        #        prop-market check matches — record is a prop market,
+        #        not a real fixture. Stay routed to no_match with the
+        #        asymmetric_excluded forensic marker. See #160 for the
+        #        architectural followup (prop markets shouldn't be in
+        #        the head-to-head matcher at all).
+        #
+        #   (iii) Exactly one side failed (asymmetric) + not excluded —
+        #         real operator-actionable record. Route to review_queue
+        #         with routing_shape set + failed-side top-N trigram
+        #         candidates surfaced. Anchored side single-pick, failed
+        #         side radio buttons (template branches in sub-PR follow-on).
+        home_failed = home_match.anchor_failed
+        away_failed = away_match.anchor_failed
+        if home_failed or away_failed:
+            reason_detail["home_anchor_failed"] = home_failed
+            reason_detail["away_anchor_failed"] = away_failed
+
+            # Kalshi prop-market exclusion (bilateral) — applied
+            # FIRST regardless of symmetric/asymmetric. Prop markets
+            # can present either as symmetric anchor-failure (both
+            # sides carry prop suffixes that defeat anchor matching)
+            # or asymmetric (prop segment on one side anchors against
+            # a team coincidentally, or fails). The forensic marker
+            # is meaningful in both cases.
+            if _should_exclude_from_asymmetric_routing(
+                signal.provider, home_struct.raw, away_struct.raw,
+            ):
+                reason_detail["asymmetric_excluded"] = "kalshi_prop_market"
+                return self._no_match(
+                    reason_detail, fail_reason="fuzzy_no_team_resemblance",
+                )
+
+            # (i) Symmetric — preserve baseline no_match.
+            if home_failed and away_failed:
+                return self._no_match(
+                    reason_detail, fail_reason="fuzzy_no_team_resemblance",
+                )
+
+            # (ii) Asymmetric — route to review_queue.
+            reason_detail["routing_shape"] = (
+                ASYMMETRIC_ANCHOR_FAILURE_ROUTING_SHAPE
+            )
+            if home_failed:
+                anchored_team_id = away_match.team_id
+                failed_parsed = home_struct.raw
+            else:
+                anchored_team_id = home_match.team_id
+                failed_parsed = away_struct.raw
+            reason_detail["home_team_id"] = (
+                str(home_match.team_id) if home_match.team_id else None
+            )
+            reason_detail["away_team_id"] = (
+                str(away_match.team_id) if away_match.team_id else None
+            )
+            failed_side_candidates = await self._top_n_trigram_candidates(
+                session,
+                sport_id=sport_id,
+                parsed_name=failed_parsed,
+                n=ASYMMETRIC_FAILED_SIDE_TOP_N,
+            )
+            # LOAD-BEARING INVARIANT — do not reorder without updating
+            # downstream consumers:
+            #
+            #   candidate_fixtures[0]  is the anchored side's team_id
+            #                          (matcher's high-confidence pick).
+            #   candidate_fixtures[1:] are the failed side's top-N
+            #                          trigram candidates (DESC by
+            #                          similarity).
+            #
+            # The admin queries layer (admin/queries.py:
+            # get_review_queue_record) slices [1:] for the failed-side
+            # candidate list, and the template (admin/templates/
+            # _decision_form.html) renders these as radio buttons.
+            # Reversing the order, prepending another value, or omitting
+            # the anchored team_id will silently corrupt the admin UI
+            # AND defeat the asymmetric-validation security gate
+            # (admin/queries.py:_validate_candidate_team_id).
+            candidate_fixtures = [anchored_team_id] + failed_side_candidates
+            return MatchResult(
+                fixture_id=None,
+                confidence=0.0,
+                reason_code=ReasonCode.REVIEW_QUEUE,
+                reason_detail=reason_detail,
+                resolver_version=RESOLVER_VERSION,
+                candidate_fixtures=candidate_fixtures,
             )
 
         reason_detail["home_team_id"] = (
@@ -560,6 +789,51 @@ class FuzzyTierMatcher:
             if struct is not None:
                 return struct
         return None
+
+    async def _top_n_trigram_candidates(
+        self,
+        session: AsyncSession,
+        *,
+        sport_id: int,
+        parsed_name: str,
+        n: int,
+    ) -> list[uuid.UUID]:
+        """pg_trgm-backed top-N similarity lookup against sp.teams for
+        the failed-side of an asymmetric anchor failure.
+
+        Mirrors admin/queries.py's SUGGESTED_TEAMS query shape — same
+        sport_id gate, same minimum-similarity floor, same DESC
+        ordering. Operator UX is consistent across the anchor-failed
+        suggest-alias surface and the asymmetric review_queue
+        candidate list.
+
+        Returns a possibly-empty list — low-coverage sports may have
+        zero candidates clearing the floor for a given parsed_name.
+        Zero candidates is acceptable; the operator sees the failed
+        parsed_name and can either alias-add a new team or reject
+        the record.
+        """
+        if not parsed_name:
+            return []
+        rows = (await session.execute(
+            text(
+                """
+                SELECT id
+                FROM sp.teams
+                WHERE sport_id = :sport_id
+                  AND similarity(canonical_name, :parsed) >= :min_sim
+                ORDER BY similarity(canonical_name, :parsed) DESC
+                LIMIT :limit
+                """
+            ),
+            {
+                "sport_id": sport_id,
+                "parsed": parsed_name,
+                "min_sim": ASYMMETRIC_FAILED_SIDE_MIN_SIMILARITY,
+                "limit": n,
+            },
+        )).all()
+        return [r.id for r in rows]
 
     async def _check_corroboration(
         self,

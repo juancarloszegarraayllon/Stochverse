@@ -281,10 +281,22 @@ class TestTeamFuzzy:
 
     @pytest.mark.asyncio
     async def test_cross_team_near_miss_rejected_at_85_threshold(self):
-        """'Manchester United' vs 'Manchester City' — character
-        ratio is below 0.85 (different last words). Anchor fails;
-        no_match. Per design B.1: stricter than 2C.3's 0.78
-        token-set because character-level is statistically noisier."""
+        """'Manchester United' vs 'Manchester City' — character ratio
+        is below 0.85 (different last words). Anchor fails for the
+        home side. Per design B.1: stricter than 2C.3's 0.78 token-set
+        because character-level is statistically noisier.
+
+        Routing per Phase 2D.5 sub-PR #1: home anchor fails, away
+        anchors against PSG cleanly → asymmetric anchor failure →
+        REVIEW_QUEUE with routing_shape set. Pre-2D.5 this routed to
+        no_match; post-2D.5 the asymmetric case is operator-actionable
+        (the away-side anchor narrows the fixture lookup) and surfaces
+        through the review_queue with top-N candidates for the failed
+        home side. The test still verifies what it always verified —
+        the 0.85 threshold fires for `Liverpool FC` against the
+        Manchester candidates — but the downstream routing is now the
+        2D.5 review_queue path rather than no_match.
+        """
         united = _tid()
         city = _tid()
         psg = _tid()
@@ -297,8 +309,15 @@ class TestTeamFuzzy:
         # Provider sends a name that doesn't match either Manchester team
         sig = _signal(home_raw="Liverpool FC", away_raw="PSG")
         result = await m.match(_session_with_corroboration(False), sig)
-        assert result.reason_code == ReasonCode.NO_MATCH
-        assert result.reason_detail["fail_reason"] == "fuzzy_no_team_resemblance"
+        # Anchor failure on home side fires as expected.
+        assert result.reason_detail["home_anchor_failed"] is True
+        assert result.reason_detail["away_anchor_failed"] is False
+        # Asymmetric → REVIEW_QUEUE with routing_shape.
+        assert result.reason_code == ReasonCode.REVIEW_QUEUE
+        assert (
+            result.reason_detail.get("routing_shape")
+            == "asymmetric_anchor_failure"
+        )
 
     @pytest.mark.asyncio
     async def test_exact_match_wins_in_team_path(self):
