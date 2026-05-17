@@ -53,7 +53,21 @@
 
      Asymmetric checked first because its discriminator is the routing_shape
      string constant, distinct from collision flags. A row is either
-     asymmetric-shaped or collision-shaped, never both. #}
+     asymmetric-shaped or collision-shaped, never both — the matcher emits
+     one or the other. The defensive precedence ordering (asymmetric first)
+     covers the hypothetical case where a future code change accidentally
+     sets both shapes on the same row. THIS PRECEDENCE MUST MATCH the
+     validation precedence at admin/queries.py::_validate_candidate_team_id
+     — if they diverge, the UI renders one candidate set but validation
+     checks against another, and operator submissions get rejected for
+     unclear reasons.
+
+     LOAD-BEARING UPSTREAM INVARIANT (see resolver/fuzzy_tier/matcher.py
+     asymmetric routing emission): asymmetric_failed_side_candidate_team_ids
+     is derived from row.candidate_fixtures[1:] — slice [0] is the
+     anchored side, [1:] are the failed-side top-N trigram candidates.
+     Reordering candidate_fixtures upstream would corrupt this rendering
+     silently. The matcher's emission site comments the invariant. #}
   {% set home_asymmetric_failed = (
     detail.routing_shape == "asymmetric_anchor_failure"
     and detail.asymmetric_failed_side == "home"

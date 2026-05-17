@@ -268,11 +268,22 @@ class TestAsymmetricRouting:
         in candidate_fixtures. Anchored side contributes its single
         matched team_id. Total len(candidate_fixtures) is bounded by
         the failed-side top_n + anchored side's 1 = 4 max, fewer if
-        the failed-side trigram lookup returns fewer than 3."""
+        the failed-side trigram lookup returns fewer than 3.
+
+        LOAD-BEARING INVARIANT: candidate_fixtures[0] is the anchored
+        team_id. The admin queries layer slices [1:] for failed-side
+        candidates and the template renders them as radio buttons. A
+        reorder would silently corrupt the admin UI AND defeat the
+        asymmetric-validation security gate. This test pins the [0]
+        position as a sentinel — if you intentionally reorder, also
+        update admin/queries.py:get_review_queue_record's slice + the
+        template's per-side rendering AND update this test.
+        """
         anchored_id = _tid()
         # Seed enough teams that the trigram lookup can return 3.
         # (Implementation will run a real similarity() query; for the
-        # scaffold we just need to assert the candidate_fixtures shape.)
+        # mocked unit test we just need to assert the candidate_fixtures
+        # shape and the [0]-position invariant.)
         ci = _candidate_index(
             ("baseball", "HawksTestAlpha", anchored_id),
             ("baseball", "HawksTestBeta", _tid()),
@@ -290,10 +301,17 @@ class TestAsymmetricRouting:
         result = await m.match(_session_no_corroboration(), sig)
         assert result.reason_code == ReasonCode.REVIEW_QUEUE
         assert result.reason_detail.get("routing_shape") == ASYMMETRIC_ROUTING_SHAPE
-        # candidate_fixtures non-empty; at minimum the anchored side's
-        # team_id surfaces. Failed-side top-3 lookup populates the rest.
+        # Non-empty (at minimum the anchored team_id surfaces).
         assert len(result.candidate_fixtures) >= 1
-        assert anchored_id in result.candidate_fixtures
+        # POSITION-PINNED INVARIANT: anchored team is at index [0].
+        assert result.candidate_fixtures[0] == anchored_id, (
+            f"candidate_fixtures[0] must be the anchored team_id "
+            f"({anchored_id}). Got {result.candidate_fixtures[0]}. "
+            "If this fails, downstream consumers (admin/queries.py "
+            "asymmetric_failed_side_candidate_team_ids derivation + "
+            "_decision_form.html template + asymmetric validation) "
+            "all silently corrupt."
+        )
 
     # ── Kalshi prop-market exclusion (bilateral vocab check) ──
 
@@ -803,6 +821,114 @@ class TestAsymmetricReviewQueueDetail:
                 f"attacker pair ({anchored_id}/{attacker_id}). "
                 f"Validation should have prevented ensure_fixture call."
             )
+
+    def test_approve_asymmetric_rejects_when_candidate_set_empty(
+        self, engine, app,
+    ):
+        """Empty-set validation edge case. If the matcher's trigram
+        lookup returned zero candidates above the similarity floor
+        (low-coverage sport, exotic parsed name), the asymmetric
+        candidate list is `[]`. The approval form shouldn't have been
+        rendered in that state — but if a form submission arrives
+        anyway (operator URL-tampering, racing the form render,
+        cached old form), validation must explicitly reject rather
+        than silently fall through to "no candidates = accept any
+        UUID".
+
+        Pre-fix: `_validate_candidate_team_id` had no explicit
+        handling for `asymmetric_candidates=[]`. The `submitted not in
+        []` check would always be True (`raise ApprovalError`), but
+        only by accident — the security depended on truthiness of an
+        empty list. Now explicitly rejected with a distinct error
+        message that distinguishes "you picked the wrong UUID" from
+        "this record never had any candidates to pick from."
+
+        This test pins the explicit-rejection behavior so a refactor
+        that combines the empty-set check into the in-set check (or
+        accidentally inverts the logic) doesn't reintroduce a silent
+        acceptance path."""
+        from sqlalchemy import text
+
+        anchored_canonical = "HawksTestEmptyCandSet"
+        anchored_id = self._seed_basketball_team(engine, anchored_canonical)
+        # The operator's "submitted" UUID — a real team_id in sp.teams.
+        # Empty-candidate set means it could be ANY team_id; we use a
+        # legitimate one to prove the empty-set check kicks in
+        # regardless of submitted's validity.
+        attacker_id = self._seed_basketball_team(
+            engine, f"{_TEST_MARKER}-EMPTY-CANDIDATE-ATTACKER",
+        )
+
+        # Seed an asymmetric review_queue row with an EMPTY candidate
+        # list (only the anchored team_id, no failed-side candidates).
+        # This is the "matcher's trigram lookup returned zero results"
+        # production shape.
+        pk = f"{_TEST_MARKER}-SEC-EMPTY"
+        record_id = uuid.uuid4()
+        reason_detail = {
+            "provider": "kalshi",
+            "provider_record_id": pk,
+            "sport": "Basketball",
+            "routing_shape": ASYMMETRIC_ROUTING_SHAPE,
+            "home_anchor_failed": False,
+            "away_anchor_failed": True,
+            "home_provider_normalized": anchored_canonical,
+            "away_provider_normalized": "ZzqxFakeExoticUnknownTeam",
+            "home_canonical": anchored_canonical,
+            "away_canonical": "",
+            "home_team_id": str(anchored_id),
+            "away_team_id": None,
+        }
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO sp.review_queue "
+                "(id, provider, provider_record_id, provider_title, "
+                " candidate_fixtures, confidence, status, "
+                " rejection_count, created_at, reason_detail) "
+                "VALUES (:id, 'kalshi', :pk, :title, "
+                "        CAST(:cf AS jsonb), 0.0, 'pending', "
+                "        0, NOW(), CAST(:rd AS jsonb))"
+            ), {
+                "id": record_id,
+                "pk": pk,
+                "title": f"{anchored_canonical} vs ZzqxFakeExoticUnknownTeam",
+                # candidate_fixtures = [anchored_id] only. Failed-side
+                # candidates list is EMPTY ([1:] slice is []).
+                "cf": json.dumps([str(anchored_id)]),
+                "rd": json.dumps(reason_detail),
+            })
+
+        resp = app.post(
+            f"/admin/review-queue/{record_id}/approve",
+            data={
+                "home_team_id": str(anchored_id),
+                "away_team_id": str(attacker_id),  # any UUID — empty
+                                                    # set must reject
+                                                    # regardless of
+                                                    # submitted's
+                                                    # validity
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code >= 400, (
+            f"Empty-candidate-set security regression: validation "
+            f"accepted submission despite asymmetric candidate set "
+            f"being empty. status_code={resp.status_code} "
+            f"body={resp.text[:500]}"
+        )
+
+        # State unchanged.
+        with engine.begin() as conn:
+            row = conn.execute(text(
+                "SELECT status FROM sp.review_queue WHERE id = :id"
+            ), {"id": record_id}).first()
+            assert row is not None
+            assert row.status == "pending"
+            fixture_count = conn.execute(text(
+                "SELECT COUNT(*) AS n FROM sp.fixtures "
+                "WHERE home_team_id = :h AND away_team_id = :a"
+            ), {"h": anchored_id, "a": attacker_id}).first()
+            assert fixture_count.n == 0
 
     def test_approve_asymmetric_rejects_team_id_from_different_sport(
         self, engine, app,

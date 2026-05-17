@@ -443,7 +443,23 @@ class FuzzyTierMatcher:
                 parsed_name=failed_parsed,
                 n=ASYMMETRIC_FAILED_SIDE_TOP_N,
             )
-            # Anchored team first (operator-side rendering convention).
+            # LOAD-BEARING INVARIANT — do not reorder without updating
+            # downstream consumers:
+            #
+            #   candidate_fixtures[0]  is the anchored side's team_id
+            #                          (matcher's high-confidence pick).
+            #   candidate_fixtures[1:] are the failed side's top-N
+            #                          trigram candidates (DESC by
+            #                          similarity).
+            #
+            # The admin queries layer (admin/queries.py:
+            # get_review_queue_record) slices [1:] for the failed-side
+            # candidate list, and the template (admin/templates/
+            # _decision_form.html) renders these as radio buttons.
+            # Reversing the order, prepending another value, or omitting
+            # the anchored team_id will silently corrupt the admin UI
+            # AND defeat the asymmetric-validation security gate
+            # (admin/queries.py:_validate_candidate_team_id).
             candidate_fixtures = [anchored_team_id] + failed_side_candidates
             return MatchResult(
                 fixture_id=None,

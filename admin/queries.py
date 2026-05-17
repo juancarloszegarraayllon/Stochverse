@@ -637,12 +637,9 @@ def _validate_candidate_team_id(
     let an attacker (or accidental URL tampering) link a provider
     record to any team they want.
 
-    Three validation modes:
+    Three validation modes, checked in this precedence order:
 
-      (1) `side_collision=True` → submitted must be in
-          `side_colliding_ids`. Existing collision validation.
-
-      (2) `asymmetric_candidates is not None` (Phase 2D.5 sub-PR #1
+      (1) `asymmetric_candidates is not None` (Phase 2D.5 sub-PR #1
           asymmetric failed-side) → submitted must be in the
           asymmetric candidate set (top-N trigram for the failed
           side). The candidate set is sport-gated upstream by
@@ -650,38 +647,40 @@ def _validate_candidate_team_id(
           so this validation is both an in-set check AND a
           defense-in-depth sport-gate.
 
+      (2) `side_collision=True` → submitted must be in
+          `side_colliding_ids`. Existing collision validation.
+
       (3) Otherwise (non-collision, non-asymmetric) → submitted
           must equal `side_default_id` (matcher's single pick).
           When `side_default_id is None`, validation is a noop —
           rare; happens for asymmetric anchored side where the
           matcher's pick IS the operator's only choice. The
-          asymmetric failed-side ALWAYS goes through mode (2);
+          asymmetric failed-side ALWAYS goes through mode (1);
           asymmetric anchored side goes through mode (3) with a
           non-None side_default_id.
 
-    Modes (1) and (2) are mutually exclusive (a record is either
-    collision-shaped or asymmetric-shaped, not both). If both flags
-    were set, mode (1) takes precedence — collision is the older
-    semantic and the caller shouldn't be setting both. Mode (2)
-    additionally guards: asymmetric_candidates=[] would silently
-    accept no team_ids; we make that explicit.
+    Precedence rationale: in practice a row is either
+    asymmetric-shaped or collision-shaped, never both — the matcher
+    emits one or the other, not both. The defensive precedence
+    ordering here (asymmetric first) covers the hypothetical case
+    where a future code change accidentally sets both shapes on
+    the same row. Asymmetric wins because its discriminator is
+    explicit (`routing_shape` string constant) and the template
+    branches the same way at `admin/templates/_decision_form.html`
+    — keeping validation and rendering consistent prevents a
+    "rendered radio buttons over candidate set A but validated
+    against candidate set B" UX inconsistency.
+
+    Mode (1) additionally guards: `asymmetric_candidates=[]` would
+    silently accept no team_ids; we reject explicitly. Empty
+    candidate set means the matcher's trigram lookup returned zero
+    matches above the similarity floor — the approval form
+    shouldn't have been rendered in that state, and accepting any
+    submission would defeat the in-set check entirely.
     """
-    if side_collision:
-        if submitted not in side_colliding_ids:
-            raise ApprovalError(
-                f"{side_label}_team_id={submitted} is not in the "
-                f"matcher's {side_label} collision set "
-                f"({len(side_colliding_ids)} candidates). "
-                "Refusing to link to an arbitrary team."
-            )
-        return
     if asymmetric_candidates is not None:
-        # Phase 2D.5 sub-PR #1: asymmetric failed-side validation.
-        # Empty candidate set is a structural invariant violation —
-        # if the matcher routed to review_queue with no failed-side
-        # candidates, the operator shouldn't have been offered an
-        # approval form at all. Reject explicitly rather than silently
-        # accepting any UUID.
+        # Phase 2D.5 sub-PR #1: asymmetric failed-side validation
+        # (highest precedence — explicit discriminator wins).
         if not asymmetric_candidates:
             raise ApprovalError(
                 f"{side_label}_team_id={submitted} cannot be validated: "
@@ -694,6 +693,15 @@ def _validate_candidate_team_id(
                 f"matcher's asymmetric candidate set for the "
                 f"{side_label} (failed) side "
                 f"({len(asymmetric_candidates)} candidates). "
+                "Refusing to link to an arbitrary team."
+            )
+        return
+    if side_collision:
+        if submitted not in side_colliding_ids:
+            raise ApprovalError(
+                f"{side_label}_team_id={submitted} is not in the "
+                f"matcher's {side_label} collision set "
+                f"({len(side_colliding_ids)} candidates). "
                 "Refusing to link to an arbitrary team."
             )
         return
