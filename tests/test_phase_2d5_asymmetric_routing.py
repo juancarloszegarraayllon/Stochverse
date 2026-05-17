@@ -719,3 +719,289 @@ class TestAsymmetricReviewQueueDetail:
             f"Expected status='approved' after approval submission, "
             f"got status={row.status!r}"
         )
+
+
+# ══════════════════════════════════════════════════════════════
+# Matcher-level integration test: real pg_trgm trigram lookup
+# ══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.skipif(
+    not INTEGRATION_DB,
+    reason="SP_INTEGRATION_DB not set — real-trigram top-N lookup needs real Postgres.",
+)
+class TestAsymmetricRoutingRealTrigram:
+    """Matcher-level integration test: real pg_trgm-backed top-N lookup
+    against sp.teams. Mocked unit tests pin routing-decision logic;
+    this test pins three load-bearing properties of the failed-side
+    candidate lookup that mocks can't honestly cover:
+
+      (1) **Sport-gated**: cross-sport candidates are filtered out by
+          the sport_id predicate. Without this, NBA teams could surface
+          as suggestions for an MLB record's failed side.
+
+      (2) **Order-preserved**: trigram similarity DESC ordering survives
+          the round-trip through SQLAlchemy. Operators see best matches
+          first; a silent reordering bug would degrade UX without
+          breaking correctness assertions.
+
+      (3) **Bounded count**: LIMIT 3 is enforced. Tolerates low-coverage
+          sports returning fewer than 3 (zero candidates is acceptable
+          when no team in the same sport clears the similarity floor).
+
+    Real Postgres + real pg_trgm is the right test surface — mocking
+    similarity() would test the mock, not the matcher.
+    """
+
+    _LOCAL_MARKER = "TEST-2D5-TRIGRAM"
+
+    @pytest.fixture
+    def engine(self):
+        from sqlalchemy import create_engine
+        url = INTEGRATION_DB
+        if "+asyncpg" in url:
+            url = url.replace("+asyncpg", "")
+        eng = create_engine(url)
+        yield eng
+        eng.dispose()
+
+    @pytest.fixture(autouse=True)
+    def setup_schema(self, engine):
+        result = subprocess.run(
+            ["alembic", "upgrade", "head"],
+            cwd=REPO_ROOT, capture_output=True, text=True,
+            env={**os.environ, "DATABASE_URL": INTEGRATION_DB},
+        )
+        assert result.returncode == 0, (
+            f"alembic upgrade head failed:\n{result.stdout}\n{result.stderr}"
+        )
+        self._purge_test_data(engine)
+        yield
+        self._purge_test_data(engine)
+
+    def _purge_test_data(self, engine):
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text(
+                "DELETE FROM sp.teams WHERE canonical_name LIKE :marker"
+            ), {"marker": f"{self._LOCAL_MARKER}%"})
+
+    def _seed_team(
+        self, engine, *, sport_name: str, canonical_name: str,
+    ) -> uuid.UUID:
+        from sqlalchemy import text
+        team_id = uuid.uuid4()
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO sp.teams "
+                "(id, sport_id, canonical_name, normalized_name, country_code) "
+                "SELECT :id, s.id, :canonical, :normalized, 'US' "
+                "FROM sp.sports s WHERE s.name = :sport_name"
+            ), {
+                "id": team_id, "canonical": canonical_name,
+                "normalized": canonical_name.lower(),
+                "sport_name": sport_name,
+            })
+        return team_id
+
+    def _sport_id(self, engine, sport_name: str) -> int:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            row = conn.execute(text(
+                "SELECT id FROM sp.sports WHERE name = :name"
+            ), {"name": sport_name}).first()
+        assert row is not None, f"sp.sports missing {sport_name!r}"
+        return row.id
+
+    @pytest.mark.asyncio
+    async def test_asymmetric_review_queue_top_3_candidates_real_trigram(
+        self, engine, monkeypatch,
+    ):
+        """Setup: away side anchors against `<MARKER>-Tigers`; home side
+        is `<MARKER>-Tigres-Lookalike` (close trigram to several seeded
+        Baseball candidates). Cross-sport decoys in Basketball must NOT
+        surface; Baseball candidates must surface DESC by similarity;
+        result count is bounded 1..3.
+        """
+        from sqlalchemy import text
+
+        marker = self._LOCAL_MARKER
+
+        # ── Step 1: seed teams ────────────────────────────────────
+        # Anchored side (Baseball): the away_raw will match this.
+        anchored_id = self._seed_team(
+            engine, sport_name="Baseball",
+            canonical_name=f"{marker}-Tigers",
+        )
+        # Failed-side candidates (Baseball): close trigram matches to
+        # the home_raw "<marker>-Tigres-Lookalike". Trigram overlap on
+        # "tig"+"igr" shingles. Seed 4 — top-3 LIMIT must drop the
+        # weakest.
+        cand_strong = self._seed_team(
+            engine, sport_name="Baseball",
+            canonical_name=f"{marker}-Tigres-Real",
+        )
+        cand_mid = self._seed_team(
+            engine, sport_name="Baseball",
+            canonical_name=f"{marker}-Tigris-Variant",
+        )
+        cand_weak = self._seed_team(
+            engine, sport_name="Baseball",
+            canonical_name=f"{marker}-Tigwood-Distant",
+        )
+        cand_weakest = self._seed_team(
+            engine, sport_name="Baseball",
+            canonical_name=f"{marker}-Tiglet-Faintest",
+        )
+
+        # Cross-sport decoy (Basketball): canonical_name shares high
+        # trigram overlap with the failed-side parsed name. The
+        # sport_id predicate MUST filter this out — if it surfaces in
+        # candidate_fixtures we have a cross-sport leak.
+        decoy_id = self._seed_team(
+            engine, sport_name="Basketball",
+            canonical_name=f"{marker}-Tigres-CrossSport-Decoy",
+        )
+
+        # ── Step 2: build matcher with real DB-backed CandidateIndex
+        monkeypatch.setenv("DATABASE_URL", INTEGRATION_DB)
+        import sys
+        for mod in list(sys.modules):
+            if mod == "db" or mod.startswith("resolver"):
+                del sys.modules[mod]
+
+        from db import async_session  # noqa: E402
+        from resolver import (  # noqa: E402
+            FuzzyTierMatcher,
+            FixtureSignal,
+            ReasonCode,
+            TeamCandidate,
+        )
+        from resolver.alias_tier import CandidateIndex  # noqa: E402
+
+        # Build sport-id map from sp.sports.
+        baseball_sport_id = self._sport_id(engine, "Baseball")
+        basketball_sport_id = self._sport_id(engine, "Basketball")
+        sport_map = {
+            "Baseball": baseball_sport_id, "baseball": baseball_sport_id,
+            "Basketball": basketball_sport_id, "basketball": basketball_sport_id,
+        }
+
+        # CandidateIndex.refresh loads from sp.teams. Use real async
+        # session.
+        ci = CandidateIndex()
+        async with async_session() as session:
+            await ci.refresh(session)
+
+        m = FuzzyTierMatcher(
+            candidates=ci, sport_id_by_code_or_name=sport_map,
+        )
+
+        # ── Step 3: build signal where home anchor-fails, away anchors
+        signal = FixtureSignal(
+            provider="kalshi",
+            provider_record_id=f"{marker}-REAL-TRIGRAM",
+            sport="Baseball",
+            home_team_candidates=[TeamCandidate(
+                raw=f"{marker}-Tigres-Lookalike",  # close trigram —
+                                                    # anchor-fails team
+                                                    # path (no fuzz.ratio
+                                                    # ≥ 0.85 to any seeded
+                                                    # team) but matches
+                                                    # several via trigram
+                                                    # similarity ≥ 0.30.
+                normalized=f"{marker}-tigres-lookalike".lower(),
+                kind="name", weight=0.9,
+            )],
+            away_team_candidates=[TeamCandidate(
+                raw=f"{marker}-Tigers",  # anchors against the seeded
+                                          # Baseball team via exact match.
+                normalized=f"{marker}-tigers".lower(),
+                kind="name", weight=0.9,
+            )],
+            kickoff_at=datetime(2026, 5, 17, 18, tzinfo=timezone.utc),
+            kickoff_confidence=1.0,
+        )
+
+        # ── Step 4: call matcher
+        async with async_session() as session:
+            result = await m.match(session, signal)
+
+        # ── Step 5: assert routing
+        assert result.reason_code == ReasonCode.REVIEW_QUEUE, (
+            f"Expected REVIEW_QUEUE for real-trigram asymmetric, got "
+            f"{result.reason_code} (detail={result.reason_detail})"
+        )
+        assert (
+            result.reason_detail.get("routing_shape")
+            == ASYMMETRIC_ROUTING_SHAPE
+        )
+        assert result.reason_detail["home_anchor_failed"] is True
+        assert result.reason_detail["away_anchor_failed"] is False
+
+        candidates = list(result.candidate_fixtures)
+
+        # ── Property 1: anchored team FIRST in candidate_fixtures
+        # (operator-side rendering convention).
+        assert candidates[0] == anchored_id, (
+            f"Anchored team must be first in candidate_fixtures. "
+            f"Got candidates[0]={candidates[0]}, expected "
+            f"anchored_id={anchored_id}"
+        )
+
+        failed_candidates = candidates[1:]
+
+        # ── Property 2: bounded count (1..3, LIMIT 3 enforced)
+        assert 1 <= len(failed_candidates) <= 3, (
+            f"Failed-side candidates must be 1..3 (LIMIT 3, allow "
+            f"low-coverage sports). Got {len(failed_candidates)}: "
+            f"{failed_candidates}"
+        )
+
+        # ── Property 3: sport-gated (no cross-sport leak)
+        assert decoy_id not in failed_candidates, (
+            f"Cross-sport decoy {decoy_id} (Basketball) must NOT "
+            f"surface in Baseball-sport failed-side candidates. "
+            f"sport_id predicate not enforced: leak detected."
+        )
+        with engine.begin() as conn:
+            cand_sport_rows = conn.execute(text(
+                "SELECT id, sport_id FROM sp.teams "
+                "WHERE id = ANY(CAST(:ids AS uuid[]))"
+            ), {"ids": [str(c) for c in failed_candidates]}).all()
+        for r in cand_sport_rows:
+            assert r.sport_id == baseball_sport_id, (
+                f"Failed-side candidate {r.id} sport_id={r.sport_id}, "
+                f"expected Baseball ({baseball_sport_id}). Cross-sport "
+                f"leak."
+            )
+
+        # ── Property 4: order-preserved (DESC similarity)
+        # Re-run the trigram similarity query server-side and verify
+        # the matcher's ordering matches.
+        failed_parsed = signal.home_team_candidates[0].raw
+        with engine.begin() as conn:
+            scored = conn.execute(text(
+                "SELECT id, similarity(canonical_name, :name) AS sim "
+                "FROM sp.teams "
+                "WHERE id = ANY(CAST(:ids AS uuid[])) "
+                "ORDER BY similarity(canonical_name, :name) DESC"
+            ), {
+                "name": failed_parsed,
+                "ids": [str(c) for c in failed_candidates],
+            }).all()
+        expected_order = [r.id for r in scored]
+        assert list(failed_candidates) == expected_order, (
+            f"Failed-side candidates must be ordered by similarity "
+            f"DESC. Matcher returned {failed_candidates}; expected "
+            f"{expected_order} (re-scored against seeded teams)."
+        )
+
+        # ── Strong-candidate sanity check: the closest-trigram seeded
+        # team must surface as the top failed-side candidate.
+        assert failed_candidates[0] == cand_strong, (
+            f"Highest-similarity candidate {cand_strong} "
+            f"({marker}-Tigres-Real) should rank first for "
+            f"failed_parsed={failed_parsed!r}. Got "
+            f"{failed_candidates[0]}."
+        )
