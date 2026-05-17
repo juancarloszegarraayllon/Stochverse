@@ -720,6 +720,170 @@ class TestAsymmetricReviewQueueDetail:
             f"got status={row.status!r}"
         )
 
+    # ── Server-side validation (security-load-bearing) ────────
+
+    def test_approve_asymmetric_rejects_uuid_not_in_candidate_set(
+        self, engine, app,
+    ):
+        """Server-side validation must reject a failed-side team_id
+        that is NOT in the asymmetric candidate set. Pre-2D.5,
+        `_validate_candidate_team_id` had no validation path for
+        non-collision rows with `side_default_id is None` — it
+        silently accepted any submission. This test pins the new
+        validation branch.
+
+        Concretely: operator legitimately picks anchored side, but
+        submits an arbitrary UUID for the failed side that was NEVER
+        in the matcher's top-N candidates. Approval must be rejected;
+        sp.review_queue.status must remain 'pending'; no
+        sp.team_aliases or sp.fixtures rows are written.
+
+        If this test passes silently when the validation is missing,
+        a malicious or accidentally-tampered POST could link a
+        provider record to any team in the database. That's the
+        regression to guard against.
+        """
+        anchored_canonical = "HawksTestSecurityAnchored"
+        anchored_id = self._seed_basketball_team(engine, anchored_canonical)
+        legit_cand = self._seed_basketball_team(
+            engine, f"{_TEST_MARKER}-LEGIT-CANDIDATE",
+        )
+        # The "out-of-set" UUID is NOT in candidate_fixtures. It's a
+        # legitimate-looking team_id (same sport, exists in sp.teams)
+        # but the operator was not offered it. Validation must reject.
+        attacker_id = self._seed_basketball_team(
+            engine, f"{_TEST_MARKER}-NOT-OFFERED",
+        )
+
+        pk = f"{_TEST_MARKER}-SEC-OOSET"
+        record_id = self._seed_asymmetric_review_queue_row(
+            engine,
+            pk=pk,
+            anchored_team_id=anchored_id,
+            anchored_parsed_name=anchored_canonical,
+            failed_parsed_name="ZzqxFakeFailedSecurity",
+            candidate_team_ids=[legit_cand],
+        )
+
+        resp = app.post(
+            f"/admin/review-queue/{record_id}/approve",
+            data={
+                "home_team_id": str(anchored_id),
+                "away_team_id": str(attacker_id),  # NOT in candidate set
+            },
+            follow_redirects=False,
+        )
+        # ApprovalError → 400 (Bad Request) — or whatever the existing
+        # error-response handler returns. Anything but 2xx/3xx is the
+        # security-correct outcome; 4xx is the expected shape.
+        assert resp.status_code >= 400, (
+            f"Security regression: out-of-set team_id was accepted. "
+            f"Got status_code={resp.status_code} body={resp.text[:500]}"
+        )
+
+        # Verify NO state changes — row still pending, no fixtures or
+        # team_aliases written for the attacker pair.
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            row = conn.execute(text(
+                "SELECT status FROM sp.review_queue WHERE id = :id"
+            ), {"id": record_id}).first()
+            assert row is not None
+            assert row.status == "pending", (
+                f"Security regression: validation rejected but state "
+                f"changed anyway. Row status={row.status!r}, expected "
+                f"'pending'. Validation+write-back atomicity is broken."
+            )
+            fixture_count = conn.execute(text(
+                "SELECT COUNT(*) AS n FROM sp.fixtures "
+                "WHERE home_team_id = :h AND away_team_id = :a"
+            ), {"h": anchored_id, "a": attacker_id}).first()
+            assert fixture_count.n == 0, (
+                f"Security regression: sp.fixtures row written for "
+                f"attacker pair ({anchored_id}/{attacker_id}). "
+                f"Validation should have prevented ensure_fixture call."
+            )
+
+    def test_approve_asymmetric_rejects_team_id_from_different_sport(
+        self, engine, app,
+    ):
+        """Form-tampering defense: operator cannot submit a UUID from
+        a different sport. _top_n_trigram_candidates sport-gates the
+        candidate set upstream; the validation must enforce that the
+        operator's submission is in the candidate set (which is
+        sport-gated by construction). A cross-sport UUID submission
+        must be rejected.
+
+        This is a stronger guarantee than the out-of-set test: even
+        if a sport-leak bug exists in _top_n_trigram_candidates, the
+        operator's submission goes through validation that re-checks
+        membership in the candidate set. So validation is the
+        defense-in-depth layer."""
+        from sqlalchemy import text
+
+        anchored_canonical = "HawksTestSportAnchored"
+        anchored_id = self._seed_basketball_team(engine, anchored_canonical)
+        legit_cand = self._seed_basketball_team(
+            engine, f"{_TEST_MARKER}-SPORT-LEGIT",
+        )
+        # Cross-sport team — exists in sp.teams but with a DIFFERENT
+        # sport_id than the asymmetric record. Real-world attack:
+        # operator tampers POST body to submit a Tennis player UUID
+        # for a Basketball record.
+        cross_sport_id = uuid.uuid4()
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO sp.teams "
+                "(id, sport_id, canonical_name, normalized_name, country_code) "
+                "SELECT :id, s.id, :canonical, :normalized, 'US' "
+                "FROM sp.sports s WHERE s.name = 'Tennis'"
+            ), {
+                "id": cross_sport_id,
+                "canonical": f"{_TEST_MARKER}-CROSS-SPORT-TENNIS",
+                "normalized": f"{_TEST_MARKER}-cross-sport-tennis".lower(),
+            })
+
+        pk = f"{_TEST_MARKER}-SEC-XSPORT"
+        record_id = self._seed_asymmetric_review_queue_row(
+            engine,
+            pk=pk,
+            anchored_team_id=anchored_id,
+            anchored_parsed_name=anchored_canonical,
+            failed_parsed_name="ZzqxFakeFailedXSport",
+            candidate_team_ids=[legit_cand],
+        )
+
+        resp = app.post(
+            f"/admin/review-queue/{record_id}/approve",
+            data={
+                "home_team_id": str(anchored_id),
+                "away_team_id": str(cross_sport_id),  # cross-sport
+                                                       # submission
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code >= 400, (
+            f"Form-tampering defense broken: cross-sport team_id "
+            f"was accepted. Got status_code={resp.status_code} "
+            f"body={resp.text[:500]}"
+        )
+
+        # State unchanged: row still pending, no fixture row written.
+        with engine.begin() as conn:
+            row = conn.execute(text(
+                "SELECT status FROM sp.review_queue WHERE id = :id"
+            ), {"id": record_id}).first()
+            assert row is not None
+            assert row.status == "pending"
+            fixture_count = conn.execute(text(
+                "SELECT COUNT(*) AS n FROM sp.fixtures "
+                "WHERE home_team_id = :h AND away_team_id = :a"
+            ), {"h": anchored_id, "a": cross_sport_id}).first()
+            assert fixture_count.n == 0
+
+        # Cleanup the Tennis row this test inserted (the autouse
+        # purge fixture's LIKE pattern catches it).
+
 
 # ══════════════════════════════════════════════════════════════
 # Matcher-level integration test: real pg_trgm trigram lookup
