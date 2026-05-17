@@ -6,6 +6,179 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-17
+
+### Phase 2F.1.5 day-7 retrospective + 2D.4 three-tier resolver review
+
+First day-7 retrospective in the Phase 2F program. The 2F.1.5 (operator-throughput) and 2D.4 (three-tier resolver) retrospectives fold into the same session — same `sp.resolution_log` queries surface both retrospectives' findings.
+
+### Session shape and limitations
+
+Operator (jcz) did not drive the review queue between PR #156 production apply (2026-05-14 19:30 UTC) and today's session — Friday/Saturday used for non-engineering work per standing instructions.
+
+This means 2F.1.5 retrospective measures **resolver-side data only**. Operator-throughput data (UI friction, per-record decision time, approve/reject distribution) is structurally absent. Two pending approvals exist in `sp.review_queue`; both are pre-launch test records, not real operator work. Operator-driven validation deferred to follow-up session and begins concurrent with Priority A development.
+
+### Volume reality
+
+- **22,619 unique records** over 7 days (2026-05-11 to 2026-05-17)
+- **~3,231 records/day raw** — approximately 3.2× the design doc's ~1,000/day estimate
+- Provider split: FlashLive 67.4% (15,250), Kalshi 32.6% (7,369)
+
+After filtering Golf single-player records (out-of-scope by design — see Finding 2): 19,313 records/week, ~2,759/day, about 2.8× design estimate. Still meaningfully above estimate but in a believable range.
+
+### Resolution rate reality
+
+Latest decision per unique `provider_record_id`:
+
+| Outcome | Records | % | Notes |
+|---|---|---|---|
+| `no_match` | 13,059 | 57.7% | Largest bucket; further decomposed below |
+| strict tier clean | 5,149 | 22.8% | All clean matches come from strict |
+| `review_queue` routed | 4,312 | 19.1% | Reaching operators correctly |
+| alias tier clean | 91 | 0.4% | Almost zero |
+| fuzzy tier clean | 8 | 0.04% | Essentially zero |
+
+**Key observation**: alias and fuzzy tiers produce 99 total clean matches over 7 days. The system runs almost entirely on strict tier. Alias coverage is genuinely thin; fuzzy threshold is conservative enough that most fuzzy decisions go to `review_queue` rather than auto-resolve.
+
+### sp.review_queue state
+
+- **4,822 pending records** waiting for operator decisions
+- **2 approved records** total ever (test records from pre-launch operator development)
+- **0 rejected records**
+
+At design-assumption 240 records/day operator capacity, current backlog alone takes ~20 days to clear. Daily inflow of new review_queue records is ~616/day (4,312 over 7 days). Daily deficit at sustainable capacity: ~376/day, growing.
+
+### The no_match bucket decomposed
+
+| Fail reason | Records | % of no_match |
+|---|---|---|
+| `fuzzy_no_team_resemblance` | 6,696 | 51.3% |
+| `structural_normalize_failed` | 3,306 | 19.8% (100% Golf single-player) |
+| `deferred_to_2d` | 1,789 | 13.7% (NOT a bug — see Finding 3) |
+| `sport_not_classified` | 958 | 7.3% |
+| `alias_no_team_resemblance` | 793 | 6.1% |
+| `below_review_threshold` | 228 | 1.7% |
+
+### Findings inside the no_match bucket
+
+#### Finding 1 — `fuzzy_no_team_resemblance` has three distinct subgroups (most important finding)
+
+The 6,696 records in this bucket aren't homogeneous:
+
+**Both sides anchor-failed: 5,024 (74.7%)** — genuine coverage gaps. Sport breakdown: Baseball 19.6%, Tennis 19.1%, Handball 11.8%, MMA 7.9%, Basketball 6.8%, Darts 5.6%, Rugby Union 5.1%, Cricket 4.3%, Boxing 3.9%, Snooker 3.7%, Soccer 3.6%, Aussie Rules 3.2%, others. Need actual data work (player rosters, alias expansion, threshold tuning).
+
+**Asymmetric records: 1,705 by initial slice, 2,051 by separate breakdown** — one side anchored cleanly, other didn't. Further decomposed via heuristic on `provider_normalized LIKE '%:%'`:
+
+- **~89.6% (1,837) are real asymmetric records** that should route to operators
+- **~10.4% (214) are Kalshi prop-bet markets** ("Colorado: First Inning Run", "Shakhtar: First Half Winner") — structural artifacts where the "away" field contains a market-segment label, not a team/player name
+
+Sport patterns within real asymmetric:
+
+- **Tennis surname-only failures**: Kalshi sends surname-only tickers (e.g., "Rogers" vs "Kalieva"); `sp.teams` has the full-name entry for one player ("Elvina Kalieva") but not the other. The trigram threshold can't bridge "Rogers" to "Sloane Rogers" at 0.30.
+- **Baseball prop markets and minor-league failures**: NY Mets + "Colorado: Hits" / "Colorado: First Inning Run" pattern dominates the sampled Baseball asymmetric records. Real minor-league coverage gaps exist (e.g., "Club 360" / "Glitch FC" Soccer minor league).
+- **Soccer minor-league failures**: Real two-team games where one team has a coverage gap (e.g., "Club 360" matched / "Glitch FC" not matched).
+
+#### Finding 2 — `structural_normalize_failed` is fully characterized
+
+100% of 3,306 records are Golf with `is_personal=true`. Golf data flowing through head-to-head matcher; normalizer correctly identifies single-competitor records and reports `away_normalize_succeeded: false` because there is no away side. This is a **product gap, not a bug**. Decision needed: filter out at ingestion, or build single-competitor resolver path. Not immediate priority.
+
+#### Finding 3 — `deferred_to_2d` is NOT a bug (correction from initial framing)
+
+Initial framing during session was wrong. Investigation revealed: the three tiers (strict, alias, fuzzy) all run on every record in the same orchestrated pass with the same `run_id`. Three rows get written, ~6 microseconds apart. The `DISTINCT ON (provider_record_id) ORDER BY decided_at DESC` query was picking the alias-tier `deferred_to_2d` row as the "latest" decision because alias's timestamp is the latest of the three (the cron's alias-then-fuzzy execution order produces alias-tier rows with later microsecond timestamps than the fuzzy-tier row written immediately before, even though fuzzy's decision is the operationally meaningful one).
+
+In reality, the fuzzy tier IS processing these records — they're getting routed to `review_queue` or another no_match category. The 1,789 records appearing as "ending at deferred_to_2d" are actually getting their final decision from the fuzzy tier; the alias row is just the chronologically-last log entry.
+
+**Verification**: sampled 49 of these records' fuzzy-tier decisions — all 49 with fuzzy `review_queue` decisions are present in `sp.review_queue`. System routing is working correctly.
+
+No `deferred_to_2d` bug exists. Worth noting in the logging layer's display semantics — the `deferred_to_2d` label is confusing if you're querying "latest decision per record" — but the system itself is functioning correctly. The Priority A item that the session initially identified ("fix `deferred_to_2d` routing") was disqualified by this investigation; the actual Priority A is the asymmetric routing intervention.
+
+### Country-name collision pattern (pre-registered from PR #156)
+
+Confirmed in production data. The Senegal/France record (`KXWCGAME-26JUN16FRASEN`) now routes to alias-tier `review_queue` with 5 candidate France-named teams. Same pattern likely affects other country bootstraps when matched against legacy club data. **Not a regression** — exactly the operational consequence pre-registered in PR #156's Phase 2 verification.
+
+### Operational impact framing
+
+System processes 22,619 records/week with these outcomes:
+
+- ~26.7% cleanly resolved (against non-Golf denominator of 19,313)
+- ~22.3% routed to operators for review (4,312 / 19,313)
+- ~40% genuinely unhandled with current coverage and matcher design
+
+The matcher is doing more than half its job. The bottleneck isn't matcher quality — it's a combination of:
+
+1. Coverage gaps in `sp.teams` and `sp.team_aliases` for individual-athlete sports
+2. Asymmetric records being correctly identified as failures but not surfaced to operators
+3. Operator throughput unverified (no real operator work yet)
+
+### Concrete next-step priorities
+
+#### Priority A — Route real asymmetric records to review_queue
+
+**Records affected**: 1,837 currently dropped at `no_match`, should be operator-actionable.
+
+**Why first**: highest leverage of the immediate options. Records exist, one side resolved cleanly (so the operator has anchoring context), the other side has a parsed name available. The collision review surface shipped this week handles exactly this shape — operator clicks the unmatched player/team's name, gets fuzzy candidates, picks correct match or adds alias.
+
+**Scope**: resolver decision logic change. When fuzzy tier completes with `home_anchor_failed XOR away_anchor_failed = true` and at least one canonical resolved, route to `review_queue` instead of `no_match`. Pre-filter out Kalshi prop-market shape (`provider_normalized` contains `:` — heuristic, refine in scope doc).
+
+**Estimated**: 1-2 days including tests + verification.
+
+**Direct effect**: ~1,837 records per week (~262/day) become operator-actionable. Reduces "real unhandled" volume by ~24%.
+
+#### Priority B — Coverage work for individual-athlete sports
+
+**Records affected**: ~5,024 both-failed records, dominated by Baseball (1,318), Tennis (1,281), Handball (790), MMA (531), Basketball (454), Boxing (265).
+
+**Why not first**: larger scope, requires data curation per sport. Specifically:
+
+- **Tennis**: surname-only Kalshi tickers vs full-name canonicals — needs surname-aware matching OR per-player alias generation
+- **Baseball**: minor-league teams likely the gap (similar shape to legacy Soccer roster)
+- **MMA/Boxing**: individual fighter coverage similar to PR #156 national-teams shape
+- **Handball**: lower-priority coverage gap
+
+**Estimated**: Multi-PR effort spread over weeks. Tennis is probably the natural first sub-target given the volume and shape.
+
+#### Priority C — Operator-driven validation
+
+The honest gap: 4,822 records sit in `review_queue` waiting for any operator. Until someone actually drives the queue, we don't know:
+
+- Whether the UI is fast enough for sustained operator throughput
+- Where friction points exist (which the design doc anticipated would surface during 2F.1.5)
+- Whether the country-name collision pattern is fast to resolve in practice or slow
+
+This isn't engineering work — it's product validation work. But it has to happen, and the longer we ship matcher improvements without testing the operator surface against real records, the more we're building features without feedback.
+
+**Concrete plan**: start driving the queue concurrently with Priority A development. ~15-20 minutes/day, beginning Monday 2026-05-18.
+
+### Out of scope this week — but worth pinning
+
+- **Golf coverage path** (3,306 records). Either filter at ingestion or build single-competitor resolver. Product decision needed. Not urgent.
+- **Kalshi prop-bet handling** (214 records, plus likely more not in the asymmetric bucket). Ingestion-layer filtering or primary-market-attachment strategy.
+- **Threshold tuning for Tennis surname-only matching** (Issue #142 territory). Once Tennis coverage work has data, threshold-tuning becomes a real conversation.
+- **`sport_not_classified` diagnosis** (958 records). Likely small slice but unexplored.
+- **`alias_no_team_resemblance` vs `fuzzy_no_team_resemblance`** (793 records). Investigation deferred — likely same shape as fuzzy bucket.
+
+### Carried items still active
+
+The three day-7 prep observations from PR #156's Phase 2 verification:
+
+1. **Dry-run gating as structural safety pattern** — confirmed valuable, name explicitly in next PROJECT_STATE entry. Phase 1.5 backfill catch on PR #156 was a real-world instance.
+2. **2A.5 ↔ 2F latent-state class of bug** — instance found and fixed via Phase 1.5 backfill in PR #156.
+3. **Country-name collision pattern** — materialized in production, behaving as pre-registered. Not a regression.
+
+### Engineering observations from today's session
+
+- The `deferred_to_2d` wrong-turn was caught only because of the "do both" instinct earlier in the session pushing through to investigate rather than declaring victory at a non-bug. Worth pinning as a class-of-observation: **latest-decision-per-record queries against multi-tier resolver logs can mask the operationally meaningful decision when tier writes are microseconds apart.** Future analysis queries should either filter by `resolver_version` or use a different aggregation strategy.
+- The **Kalshi prop-bet pattern** wasn't anticipated by the design doc and didn't surface in PR #156's smoke tests because national-team records don't have prop markets. Worth filing as tech-debt issue: "Kalshi prop-bet records flow through head-to-head matcher producing structural false-failures."
+- The **Golf product gap** (3,306 records / 14.6% of weekly volume) is the largest single category of records the matcher wasn't designed for. Worth a product decision before next planning cycle.
+
+### Decision artifact
+
+Immediate work begins on **Priority A — asymmetric record routing**. Scope doc cycle with Claude Code starts today, implementation begins as soon as scope is approved. No artificial pacing — operator has bandwidth and prioritizes this.
+
+Operator-driven validation (Priority C) layered in concurrently — ~15-20 min/day starting Monday 2026-05-18.
+
+---
+
 ## Session — 2026-05-12
 
 ### Phase 2F.0.1 + 2F.1 closeout — pg_trgm migration, anchor_failed surface hardening, sub-PR #4 production smoke completed (✅)
