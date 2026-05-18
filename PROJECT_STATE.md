@@ -16,7 +16,7 @@ Decision captured today during the Phase 2 verification cycle. Architecture doc 
 
 **Preservation steps to execute before Phase 5 deletion lands:**
 
-1. **Tag the pre-deletion commit** in the main repo (e.g., `v3-legacy-archive`). One git command, zero ongoing cost. Tag is durable in main repo history.
+1. **Tag the pre-deletion commit** in the main repo as `v3-legacy-archive`. One git command, zero ongoing cost. Tag is durable in main repo history.
 2. **Push current state to a sibling repo** `stochverse-legacy` on GitHub. Use GitHub's archive-repository feature to mark it read-only — one click; signals "preserved, not maintained" without ambiguity.
 3. **Final `pg_dump` of legacy entity tables** before they are removed per architecture doc §5.5: `public.entities`, `public.entity_aliases`, `public.game_scores`, and any other legacy tables being consolidated. Store in object storage with clear naming (e.g., `legacy-public-entities-final-YYYY-MM-DD.sql.gz`). Aligns with §9.9 backup practices.
 4. **Add a "Legacy backend reference" section to the main repo's README** pointing at the preservation paths:
