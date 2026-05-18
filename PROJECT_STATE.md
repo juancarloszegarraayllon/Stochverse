@@ -8,6 +8,30 @@ next session. Treat it as the project's running journal.
 
 ## Session — 2026-05-18
 
+### Queue depth at 66x §7.5 alert threshold — α finding (headline)
+
+Production query 2026-05-18 measured **6,654 pending records in `sp.review_queue`**:
+
+| Reference | Value | Multiple |
+|---|---|---|
+| Architecture doc §7.5 steady-state target | <20 | — |
+| Architecture doc §7.5 alert threshold | >100 | — |
+| **Current pending depth** | **6,654** | **333x target, 66x alert** |
+
+Add rate: ~660-740/day per recent operator-validation cycle (Sunday's day-7 retrospective + today's reframing).
+
+Per architecture doc §7.5: a pending-queue depth above the alert threshold indicates **"a problem with the resolver, not the reviewer's pace."** Throughput-side interventions (faster operator decisions, UI improvements, multi-operator workflow) do not address the root cause when the resolver's inflow exceeds plausible operator throughput by orders of magnitude.
+
+**Implication:** this is a Phase 2 architectural sub-track, not a throughput problem. Tracked separately as **#163** (filed today). Not a fix-design conversation for today-scope — needs separate planning. Investigation order would start with decomposing the 6,654 by routing tier (alias-tier collisions vs fuzzy-tier review_queue vs others) and by failure pattern.
+
+**How it surfaced:** during investigation of Issue #162 (admin detail-view NULL-kickoff conflation, originally framed as "34 zombie records"). A verification query intended to size #162's affected scope returned `6,654 pending` — the total queue depth, not a NULL-kickoff subset. The misframing-evolution is preserved in #162's body; #162 has been rescoped strictly to the NULL-kickoff approval hard-block (β), with the queue-depth finding (α) moved to #163.
+
+**Not in scope of this finding:**
+
+- Any specific fix proposal — investigation needed first.
+- Speculation about which Phase 2 sub-PR addresses this. Coverage work (Handball/Snooker bootstrap) may or may not be related; needs investigation, not assumption.
+- Connection to operator-throughput findings. The §7.5 quote explicitly disentangles them.
+
 ### Phase 5 decision — pair decommission with explicit legacy preservation
 
 Decision captured today during the Phase 2 verification cycle. Architecture doc §11.6 (Phase 5 Decommission) currently calls for full deletion of the legacy backend code from the active codebase. Discussion today identified the gap: full deletion eliminates the ability to reference how the old system worked, which has legitimate diagnostic value (debugging regressions in v4 that may have been handled differently in v3; explaining historical schema choices; recovery from edge cases the new system doesn't yet cover). Keeping the legacy code in-tree alongside v4 was rejected — that creates the exact dual-system maintenance burden Phase 5 is meant to resolve.
