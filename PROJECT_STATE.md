@@ -6,6 +6,43 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-18
+
+### Phase 5 decision — pair decommission with explicit legacy preservation
+
+Decision captured today during the Phase 2 verification cycle. Architecture doc §11.6 (Phase 5 Decommission) currently calls for full deletion of the legacy backend code from the active codebase. Discussion today identified the gap: full deletion eliminates the ability to reference how the old system worked, which has legitimate diagnostic value (debugging regressions in v4 that may have been handled differently in v3; explaining historical schema choices; recovery from edge cases the new system doesn't yet cover). Keeping the legacy code in-tree alongside v4 was rejected — that creates the exact dual-system maintenance burden Phase 5 is meant to resolve.
+
+**Resolution:** Phase 5 deletion proceeds as planned, paired with explicit preservation steps that capture pre-deletion state in clearly-separated, read-only form. Active codebase gets cleaned up; legacy stays browseable indefinitely as diagnostic reference.
+
+**Preservation steps to execute before Phase 5 deletion lands:**
+
+1. **Tag the pre-deletion commit** in the main repo (e.g., `v3-legacy-archive`). One git command, zero ongoing cost. Tag is durable in main repo history.
+2. **Push current state to a sibling repo** `stochverse-legacy` on GitHub. Use GitHub's archive-repository feature to mark it read-only — one click; signals "preserved, not maintained" without ambiguity.
+3. **Final `pg_dump` of legacy entity tables** before they are removed per architecture doc §5.5: `public.entities`, `public.entity_aliases`, `public.game_scores`, and any other legacy tables being consolidated. Store in object storage with clear naming (e.g., `legacy-public-entities-final-YYYY-MM-DD.sql.gz`). Aligns with §9.9 backup practices.
+4. **Add a "Legacy backend reference" section to the main repo's README** pointing at the preservation paths:
+   - Git tag in main repo
+   - Archived sibling repo URL
+   - Object storage location of final `pg_dump`
+
+**Explicit non-goals — what this preservation is NOT:**
+
+- Not a permanently-running legacy endpoint. That would defeat the architectural cleanup per §8.1 deprecation policy.
+- Not an extension of the v3 deprecation window beyond the 60-day floor in §8.1.
+- Not a soft-rollback mechanism. Phase 3's 14-day dual-running window is the rollback path; this preservation is for diagnostic reference only, with no runtime role.
+
+**Document changes when Phase 5 planning begins (weeks out, after Phase 3 cutover stable at 100% traffic for 14+ days):**
+
+- Architecture doc §11.6 amended to list the four preservation steps as preconditions before deletion proceeds.
+- Architecture doc changelog v1.5 entry. Proposed language:
+
+  > **v1.5 — Phase 5 preservation steps.** Date: [Phase 5 planning date]. Author: decision pass during Phase 2 verification cycle on 2026-05-18. Phase 5 decommission (§11.6) is paired with explicit preservation steps — git tag, archived sibling repo, final `pg_dump` of legacy data tables, README pointer — to address the legitimate "see how the old system worked" diagnostic need without compromising the architectural cleanup. Preservation is for reference use only, not as a running fallback. §11.6 updated to list the preservation steps as preconditions before deletion proceeds.
+
+**Why log this decision today rather than at Phase 5 planning:**
+
+Per architecture doc §16.3 (Document maintenance): "Update it as decisions are made, open questions are resolved... The worst outcome is a document that no one trusts because it has drifted from reality." This decision emerged from today's session while reasoning is fresh. Capturing it now prevents it from being lost or re-litigated when Phase 5 planning starts. No code changes today — execution waits for the Phase 5 trigger (Phase 3 cutover complete + v4 stable at 100% traffic for 14+ days). Decision ratifies as architecture doc v1.5 amendment when Phase 5 planning begins.
+
+---
+
 ## Session — 2026-05-17
 
 ### Phase 2F.1.5 day-7 retrospective + 2D.4 three-tier resolver review
