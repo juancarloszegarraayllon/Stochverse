@@ -32,6 +32,54 @@ Per architecture doc §7.5: a pending-queue depth above the alert threshold indi
 - Speculation about which Phase 2 sub-PR addresses this. Coverage work (Handball/Snooker bootstrap) may or may not be related; needs investigation, not assumption.
 - Connection to operator-throughput findings. The §7.5 quote explicitly disentangles them.
 
+### Phase 2 priority reorder — measurement before tuning before coverage
+
+Today's α finding (queue depth 6,654 at 66x §7.5 alert threshold) combined with the broader Phase 2 trajectory crystallized that the current Phase 2 sub-track ordering needs revision. The architecture doc §7.5 framing is unambiguous about where the corrective lever sits:
+
+> "If the queue is consistently growing despite review effort, the resolver thresholds are wrong. The fix is upstream (adjust confidence scoring, add aliases preemptively, tighten matching tiers), not downstream (more reviewer hours)."
+
+Throughput-side interventions (multi-operator workflow, faster UI, more decision hours) would solve the wrong problem. Coverage work alone (KBL → Handball → 5-sport cohort) is one upstream lever among several, and it's a **blind lever without measurement** — three measurement-infrastructure deliverables from the architecture doc are currently underbuilt; without them, resolver tuning happens without ground truth on whether changes improve or regress accuracy.
+
+#### Track A — Measurement infrastructure (~1-2 weeks)
+
+1. **Daily diff infrastructure (§11.3).** Currently unbuilt. Script runs both the legacy main.py Tier 1-4 pairing and the new resolver against the last 24h of production data, writes comparison report. Operator looks at disagreements only (~10 min/day). Captures per-record confidence scores alongside the agree/disagree flag, so distribution analysis falls out as a side product. The existing `make dry-run-alias-tier` / `make dry-run-fuzzy-tier` targets (Makefile:42-46) become Track B calibration aids — not Track A regular jobs.
+
+2. **Test corpus extraction (§12.1).** Overdue from end of Phase 1. ~100 cases from accumulated `raw_archive`, classified into canary / regression / active-edge per §12.1. Becomes the regression test suite for every resolver change. Without this, threshold tuning is risky because changes can't be validated against historical edge cases.
+
+3. **Re-resolution loop scope verification + visibility (§7.7).** Two parts:
+   - **(a) Scope verification.** Determine whether the loop retries pending `sp.review_queue` records on every cron pass or only resolves newly-arrived ones. This determines whether the accumulated 6,654 records drain automatically as thresholds improve, or whether backlog drainage is a separate problem requiring its own plan. We want to know which world we're in before completing Track A.
+   - **(b) Operator-facing visibility.** Surface "how many records did your last approval retroactively re-resolve?" to the operator. Compound-impact signal — makes individual approvals feel high-leverage when operator sees the downstream effect.
+
+#### Track B — Resolver tuning (~1-2 weeks, informed by Track A)
+
+1. Threshold calibration using daily diff data + `dry-run-*-tier` output.
+2. Alias-density audit using corpus diagnostics.
+3. Coverage-gap prioritization using rejection-reason analytics.
+
+#### Track C — Coverage expansion (runs alongside Track B)
+
+- **KBL bootstrap** (today's Track 2 work). Methodology pilot for the 5-sport zero-coverage cohort (Handball / Snooker / Volleyball / Rugby League / Golf from Sunday's findings). Low risk, scope unchanged from today's scope doc; runs in its own tempo independent of Track A/B timing.
+- **Handball + 5-sport cohort** after KBL ships and the workflow template is proven.
+
+#### Track D — Lower priority, parked
+
+- **Issue #162 NULL-kickoff fix (β scope).** Runs after the β measurement query (posted as comment on #162) lands and the actual subset size is known. Premature without measurement.
+
+#### Target outcome
+
+- **Inflow rate drops to <100/day** (below §7.5 alert threshold) once Track A + Track B land.
+- **Queue depth follows** according to re-resolution loop scope — verified during Track A priority 3.
+- **Backlog drainage is a separate problem** to scope after re-resolution loop behavior is verified during Track A. The 6,654 accumulated records don't auto-clear from threshold tuning alone unless the re-resolution loop retries them.
+- At <20/day inflow + stable backlog state, queue is at §7.5 steady-state. Phase 3 cutover becomes feasible.
+
+#### What this reorder does NOT change
+
+- KBL bootstrap scope doc (today's Track 2 work) — proceeds as planned. Track C is independent of Track A/B timing.
+- Phase 5 preservation decision — separate decision capture; today's third entry.
+- Issue #163 framing — α is the finding; this entry is the response.
+
+Decision logged 2026-05-18 during today's Track 1 closure cycle.
+
 ### Phase 5 decision — pair decommission with explicit legacy preservation
 
 Decision captured today during the Phase 2 verification cycle. Architecture doc §11.6 (Phase 5 Decommission) currently calls for full deletion of the legacy backend code from the active codebase. Discussion today identified the gap: full deletion eliminates the ability to reference how the old system worked, which has legitimate diagnostic value (debugging regressions in v4 that may have been handled differently in v3; explaining historical schema choices; recovery from edge cases the new system doesn't yet cover). Keeping the legacy code in-tree alongside v4 was rejected — that creates the exact dual-system maintenance burden Phase 5 is meant to resolve.
