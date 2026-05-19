@@ -237,6 +237,22 @@ KBL_TEAMS_SEED: list[tuple[str, str, tuple[str, ...], str | None]] = [
         "KOR",
         (
             "Goyang Sono Skygunners",        # 2025-26 official full
+            "Goyang Skygunners",             # Production-observed form
+                                              # (Kalshi). Verified
+                                              # 2026-05-19 via DISTINCT
+                                              # team_form query against
+                                              # sp.resolution_log for
+                                              # KXKBL% records — all
+                                              # 3 historical records
+                                              # use this 2-token form
+                                              # (Kalshi omits sponsor
+                                              # 'Sono' in ticker
+                                              # generation). Without
+                                              # this alias the
+                                              # verification target
+                                              # (3 → 0 pending KBL
+                                              # records) would not
+                                              # land.
             "고양 소노 스카이거너스",            # Hangul full (F3 confirmed)
         ),
         "UPDATE-branch — existing sp.teams row needs country_code='KOR' "
@@ -244,7 +260,13 @@ KBL_TEAMS_SEED: list[tuple[str, str, tuple[str, ...], str | None]] = [
         "#156 precedent); current 2025-26 official 'Goyang Sono Skygunners' "
         "lives as alias. Daemyung Sono Group sponsor since 2023-24. "
         "Predecessor names (Goyang Carrot-Day One Jumpers, Goyang Orion "
-        "Orions) NOT seeded — out-of-scope per 2025-26 frame.",
+        "Orions) NOT seeded — out-of-scope per 2025-26 frame. "
+        "Production-data check (2026-05-19) showed Kalshi uses 'Goyang "
+        "Skygunners' (no sponsor) in KBL tickers; that empirically-verified "
+        "form is included as alias. Other 8 teams have no Kalshi history "
+        "yet — speculative short-forms deferred per observe-then-react "
+        "discipline; §7.7 daily cron will retroactively improve queue "
+        "records when aliases are added.",
     ),
     (
         "KCC Egis",
