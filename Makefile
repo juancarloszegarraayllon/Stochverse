@@ -6,7 +6,7 @@
 # (e.g., a Neon branch for migration testing).
 export DATABASE_URL ?= postgresql+asyncpg://dev:dev@localhost:5432/sports_dev
 
-.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions bootstrap-national-teams backfill-sp-fl-events-sport-id resolver-pass-kalshi resolver-pass-fl dry-run-alias-tier dry-run-fuzzy-tier investigate-corroboration-gap vendor-htmx alias-add
+.PHONY: help dev down clean psql migrate migrate-new migrate-down test test-corpus seed replay backfill-fl bootstrap-sp-teams bootstrap-sp-competitions bootstrap-national-teams bootstrap-kbl backfill-sp-fl-events-sport-id resolver-pass-kalshi resolver-pass-fl dry-run-alias-tier dry-run-fuzzy-tier investigate-corroboration-gap vendor-htmx alias-add
 
 help:
 	@echo "SP Architecture dev targets:"
@@ -33,6 +33,8 @@ help:
 	@echo "  make bootstrap-sp-competitions ARGS=\"--dry-run\""
 	@echo "  make bootstrap-national-teams  # men's senior Soccer national teams (Issue #136)"
 	@echo "  make bootstrap-national-teams ARGS=\"--dry-run\""
+	@echo "  make bootstrap-kbl             # Korean Basketball League team coverage (Phase 2C pilot)"
+	@echo "  make bootstrap-kbl ARGS=\"--dry-run\""
 	@echo "  make backfill-sp-fl-events-sport-id  # populate sp.fl_events.sport_id (Phase 2A.7)"
 	@echo "  make backfill-sp-fl-events-sport-id ARGS=\"--skip-backfill\""
 	@echo "  make resolver-pass-kalshi      # Phase 2B strict matcher pass over sp.kalshi_markets"
@@ -116,6 +118,9 @@ bootstrap-sp-competitions:
 
 bootstrap-national-teams:
 	python scripts/bootstrap_national_teams.py $(ARGS)
+
+bootstrap-kbl:
+	python scripts/bootstrap_kbl.py $(ARGS)
 
 backfill-sp-fl-events-sport-id:
 	python scripts/backfill_sp_fl_events_sport_id.py $(ARGS)
