@@ -431,6 +431,21 @@ class FuzzyTierMatcher:
             else:
                 anchored_team_id = home_match.team_id
                 failed_parsed = away_struct.raw
+            # Guard: personal-path matcher can return anchor_failed=False
+            # with team_id=None when a surname matches multiple candidates
+            # (collision case in _find_personal_match). Without this guard
+            # the asymmetric branch constructs candidate_fixtures =
+            # [None, ...top_n], which fails MatchResult's pydantic
+            # validation (candidate_fixtures: list[UUID]) and crashes the
+            # resolver. Fall through to no_match — same behavior as
+            # pre-PR-#161 for the collision-with-asymmetric-routing case.
+            # Issue #170: this was crashing all Tennis (ITF/ATP/Challenger)
+            # records + likely MMA/Boxing via the same personal-path code.
+            if anchored_team_id is None:
+                return self._no_match(
+                    reason_detail,
+                    fail_reason="fuzzy_collision_no_anchor",
+                )
             reason_detail["home_team_id"] = (
                 str(home_match.team_id) if home_match.team_id else None
             )

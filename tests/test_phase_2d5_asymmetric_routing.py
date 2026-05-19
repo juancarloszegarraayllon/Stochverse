@@ -464,6 +464,151 @@ class TestAsymmetricRouting:
         )
         assert result.reason_detail.get("routing_shape") == ASYMMETRIC_ROUTING_SHAPE
 
+    # ── Issue #170 fix — None-anchor collision guard ──────────────
+    #
+    # Pre-fix bug: when one side anchor-fails AND the other side has a
+    # collision (anchor_failed=False, team_id=None, multiple matching
+    # candidates), the asymmetric branch picked the collision-side's
+    # team_id (None) as anchored_team_id, then constructed
+    # candidate_fixtures = [None, ...top_n], which crashed MatchResult's
+    # pydantic validation (candidate_fixtures: list[UUID]).
+    #
+    # Production impact: this crashed all Tennis records (ITF Men/Women,
+    # ATP, ATP Challenger) because the personal-path matcher's collision
+    # case is hit frequently for surname-anchored Tennis player names
+    # (e.g., "Wang" matching multiple Wangs). Likely also MMA + Boxing
+    # via the same personal-path code. Issue #170 carried the systemic
+    # framing.
+    #
+    # Fix: guard at resolver/fuzzy_tier/matcher.py asymmetric branch —
+    # if anchored_team_id is None, fall through to no_match with
+    # fail_reason="fuzzy_collision_no_anchor". Restores pre-PR-#161
+    # behavior for the collision-with-asymmetric-routing case.
+    #
+    # Tests below use team-path collision (two Basketball teams with
+    # identical canonical_names → exact-match-collision returns
+    # anchor_failed=False, team_id=None). The guard's code path is the
+    # same regardless of personal-path or team-path; the production
+    # crashes were personal-path but the guard's behavior is uniform.
+
+    @pytest.mark.asyncio
+    async def test_home_failed_away_collision_returns_no_match_not_crash(self):
+        """Issue #170 reproduction: home anchor-fails (no candidates),
+        away has team-path collision (2 candidates with identical
+        canonical → both exact-match → collision). Pre-fix this crashed
+        the resolver via pydantic ValidationError on
+        candidate_fixtures.0 being None. Post-fix routes to no_match
+        with the new fail_reason.
+
+        Production observation was personal-path (Tennis); the guard's
+        code path is identical for team-path. This test exercises the
+        guard via team-path for unit-test infrastructure simplicity.
+        """
+        # Two Basketball teams with identical canonical → collision on
+        # any provider input that exact-matches "FooCollideTarget".
+        collide_a = _tid()
+        collide_b = _tid()
+        ci = _candidate_index(
+            ("basketball", "FooCollideTarget", collide_a),
+            ("basketball", "FooCollideTarget", collide_b),
+        )
+        m = FuzzyTierMatcher(
+            candidates=ci, sport_id_by_code_or_name=_SPORT_MAP,
+        )
+        sig = _signal(
+            sport="Basketball",
+            home_raw="ZzqxNonexistentName",  # anchor-fails (no candidates)
+            away_raw="FooCollideTarget",      # exact-match collision
+                                               # → anchor_failed=False,
+                                               #   team_id=None
+        )
+        # Pre-fix: this raised pydantic ValidationError. Post-fix:
+        # returns a clean MatchResult with no_match.
+        result = await m.match(_session_no_corroboration(), sig)
+        assert result.reason_code == ReasonCode.NO_MATCH, (
+            f"Issue #170 fix: collision-with-asymmetric should route "
+            f"to no_match, not crash or route to review_queue. Got "
+            f"{result.reason_code}."
+        )
+        assert result.reason_detail["fail_reason"] == "fuzzy_collision_no_anchor"
+        # Routing_shape is set on the asymmetric branch BEFORE the
+        # guard fires (the guard sits below routing_shape assignment).
+        # That's acceptable since the no_match reason_code makes the
+        # downstream consumers ignore the routing_shape key.
+        # Asserting the routing_shape value pins the matcher's emission
+        # contract so future refactors don't accidentally drop it.
+        assert result.reason_detail.get("routing_shape") == ASYMMETRIC_ROUTING_SHAPE
+        # The collision-side anchor failure is the diagnostic forensic
+        # data — operator-facing analytics can distinguish this from
+        # the generic fuzzy_no_team_resemblance no_match shape.
+
+    @pytest.mark.asyncio
+    async def test_away_failed_home_collision_returns_no_match_not_crash(self):
+        """Mirror of the above: away anchor-fails, home has team-path
+        collision. Same guard, different side."""
+        collide_a = _tid()
+        collide_b = _tid()
+        ci = _candidate_index(
+            ("basketball", "BarCollideTarget", collide_a),
+            ("basketball", "BarCollideTarget", collide_b),
+        )
+        m = FuzzyTierMatcher(
+            candidates=ci, sport_id_by_code_or_name=_SPORT_MAP,
+        )
+        sig = _signal(
+            sport="Basketball",
+            home_raw="BarCollideTarget",      # exact-match collision
+            away_raw="ZzqxNonexistentName",   # anchor-fails
+        )
+        result = await m.match(_session_no_corroboration(), sig)
+        assert result.reason_code == ReasonCode.NO_MATCH
+        assert result.reason_detail["fail_reason"] == "fuzzy_collision_no_anchor"
+        assert result.reason_detail.get("routing_shape") == ASYMMETRIC_ROUTING_SHAPE
+
+    @pytest.mark.asyncio
+    async def test_asymmetric_with_valid_anchor_still_routes_review_queue(self):
+        """Regression test for the fix: when the anchored side has a
+        valid team_id (the normal asymmetric case), the guard MUST NOT
+        fire. The record routes to review_queue with the
+        asymmetric_anchor_failure routing_shape — pre-PR-#161-revert
+        behavior preserved.
+
+        This pins that the guard is narrowly-scoped (None team_id only)
+        and doesn't accidentally regress the asymmetric routing
+        improvement for genuinely-anchored cases.
+        """
+        # Single clean Basketball team → away anchors to it exactly,
+        # no collision.
+        anchored_id = _tid()
+        ci = _candidate_index(
+            ("basketball", "CleanAnchoredTeam", anchored_id),
+        )
+        m = FuzzyTierMatcher(
+            candidates=ci, sport_id_by_code_or_name=_SPORT_MAP,
+        )
+        sig = _signal(
+            sport="Basketball",
+            home_raw="ZzqxNonexistentName",  # anchor-fails
+            away_raw="CleanAnchoredTeam",     # exact match → anchored
+                                               # cleanly with non-None
+                                               # team_id
+        )
+        result = await m.match(_session_no_corroboration(), sig)
+        # Asymmetric routing still fires — guard didn't accidentally
+        # catch this case.
+        assert result.reason_code == ReasonCode.REVIEW_QUEUE, (
+            f"Issue #170 fix regression: asymmetric routing with valid "
+            f"anchor should still route to review_queue. Got "
+            f"{result.reason_code}."
+        )
+        assert result.reason_detail.get("routing_shape") == ASYMMETRIC_ROUTING_SHAPE
+        # fail_reason should NOT be set on the review_queue branch
+        # (only fires on no_match paths).
+        assert result.reason_detail.get("fail_reason") != "fuzzy_collision_no_anchor"
+        # Anchored team_id is in candidate_fixtures[0] per the
+        # load-bearing invariant.
+        assert result.candidate_fixtures[0] == anchored_id
+
 
 # ══════════════════════════════════════════════════════════════
 # Admin integration tests (SP_INTEGRATION_DB-gated)
