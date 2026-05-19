@@ -11,7 +11,7 @@ Extends PR #156's test surface with alias-path coverage:
   - Three-branch classifier on sp.teams (INSERT / BACKFILL / SKIP)
   - Sponsor-prefixed alias distinctiveness verification
   - Hangul preservation through normalize_name
-  - bootstrap_kbl source-value verification
+  - bootstrap_league_coverage source-value verification
 """
 from __future__ import annotations
 
@@ -171,12 +171,14 @@ class TestManifestShape:
             "update this test alongside the seed."
         )
 
-    def test_alias_source_value_is_bootstrap_kbl(self):
-        """Source-value pin (Q3 decision). If operator overrode during
-        PR review, update both this test and the seed file's
-        KBL_ALIAS_SOURCE constant + bootstrap_kbl.py references."""
+    def test_alias_source_value_is_bootstrap_league_coverage(self):
+        """Source-value pin (Q3 decision). Generic value reused across
+        the 5-sport cohort (Handball / Snooker / Volleyball / Rugby
+        League / Golf / Darts). If a future bootstrap diverges to a
+        per-bootstrap source value, this test should NOT be changed
+        for KBL — the divergent bootstrap files its own constant."""
         from scripts.kbl_seed import KBL_ALIAS_SOURCE
-        assert KBL_ALIAS_SOURCE == "bootstrap_kbl"
+        assert KBL_ALIAS_SOURCE == "bootstrap_league_coverage"
 
     def test_aliases_dedup_correctly_after_normalization(self):
         """Within a single team's alias tuple, no two aliases should
@@ -296,12 +298,13 @@ class TestKblBootstrapIntegration:
         from scripts.kbl_seed import KBL_TEAMS_SEED
         kbl_canonicals = [c for c, _, _, _ in KBL_TEAMS_SEED]
         with engine.begin() as conn:
-            # Also delete any aliases written under the bootstrap_kbl
-            # source value (defensive — FK CASCADE should handle this
-            # via team deletion, but explicit cleanup for cases where
-            # the team row predates KBL bootstrap).
+            # Also delete any aliases written under the
+            # bootstrap_league_coverage source value (defensive — FK
+            # CASCADE should handle this via team deletion, but
+            # explicit cleanup for cases where the team row predates
+            # the KBL bootstrap).
             conn.execute(text(
-                "DELETE FROM sp.team_aliases WHERE source = 'bootstrap_kbl'"
+                "DELETE FROM sp.team_aliases WHERE source = 'bootstrap_league_coverage'"
             ))
             # Delete KBL teams. Match on canonical_name (catches
             # newly-inserted rows) OR (country_code='KOR' AND
@@ -341,7 +344,7 @@ class TestKblBootstrapIntegration:
         with engine.begin() as conn:
             row = conn.execute(text(
                 "SELECT COUNT(*) AS n FROM sp.team_aliases "
-                "WHERE source = 'bootstrap_kbl'"
+                "WHERE source = 'bootstrap_league_coverage'"
             )).first()
         return row.n
 
@@ -401,7 +404,7 @@ class TestKblBootstrapIntegration:
         with engine.begin() as conn:
             alias_rows = conn.execute(text(
                 "SELECT alias, source FROM sp.team_aliases "
-                "WHERE team_id = :tid AND source = 'bootstrap_kbl'"
+                "WHERE team_id = :tid AND source = 'bootstrap_league_coverage'"
             ), {"tid": legacy_id}).all()
         alias_strings = {r.alias for r in alias_rows}
         assert "Goyang Sono Skygunners" in alias_strings, (
@@ -432,9 +435,9 @@ class TestKblBootstrapIntegration:
         assert self._count_kbl_teams(engine) == 0
         assert self._count_kbl_aliases(engine) == 0
 
-    def test_alias_source_is_bootstrap_kbl_on_inserted_rows(self, engine):
+    def test_alias_source_is_bootstrap_league_coverage_on_inserted_rows(self, engine):
         """Every alias the bootstrap writes carries
-        source='bootstrap_kbl'. Critical for analytics: distinguishes
+        source='bootstrap_league_coverage'. Critical for analytics: distinguishes
         bootstrap-seeded aliases from operator-added ones."""
         from sqlalchemy import text
         result = self._run_bootstrap()
@@ -448,8 +451,8 @@ class TestKblBootstrapIntegration:
                 "                  WHERE name = 'Basketball')"
             )).all()
         sources = {r.source for r in rows}
-        assert "bootstrap_kbl" in sources
+        assert "bootstrap_league_coverage" in sources
         # No other sources should appear (test setup purges everything).
-        assert sources == {"bootstrap_kbl"}, (
+        assert sources == {"bootstrap_league_coverage"}, (
             f"Unexpected alias sources on KBL teams: {sources!r}"
         )

@@ -115,25 +115,27 @@ guard in the bootstrap won't fire on Hangul-only aliases.
 
 ## `sp.team_aliases.source` value (Q3 decision)
 
-This bootstrap uses `KBL_ALIAS_SOURCE = "bootstrap_kbl"`. New value
-not in the existing source enum comment in sp_models.py:193 (which
-lists 'kalshi', 'fl', 'polymarket', 'oddsapi', 'manual_review',
-'human_curated'). Rationale:
+This bootstrap uses `KBL_ALIAS_SOURCE = "bootstrap_league_coverage"`.
+New value not in the existing source enum comment in
+sp_models.py:193 (which lists 'kalshi', 'fl', 'polymarket',
+'oddsapi', 'manual_review', 'human_curated'). Rationale:
 
-  - Per-bootstrap source values support clean analytics: "how many
-    records did the KBL bootstrap resolve over the last 7 days?"
-    distinguishable from operator-added aliases or future bootstraps.
-  - Future bootstraps in the 5-sport coverage cohort (Handball,
-    Snooker, Volleyball, Rugby League, Golf) can use either
-    per-sport source values ('bootstrap_handball', etc.) or a
-    generic 'bootstrap_league_coverage'; that decision is deferred
-    to those bootstraps' scope docs.
-
-Operator should confirm this convention at PR review before merge.
-If a different convention is preferred (e.g., 'human_curated' to
-match existing enum, or 'bootstrap_league_coverage' as a generic),
-this constant + all references in scripts/bootstrap_kbl.py and
-tests/test_bootstrap_kbl.py update together.
+  - **Generic across the 5-sport cohort.** The same source value
+    is reused by Handball / Snooker / Volleyball / Rugby League /
+    Golf / Darts bootstraps as they ship. Per-bootstrap source
+    values ('bootstrap_kbl', 'bootstrap_handball', etc.) were
+    considered and rejected — too specific for the analytics use
+    case.
+  - **Analytics use case.** The reason we want a non-default
+    source value at all is to distinguish bootstrap-seeded
+    aliases from operator-added (manual_review, human_curated)
+    and from provider-discovered (kalshi, fl, polymarket,
+    oddsapi). One generic label covers that distinction without
+    over-tagging.
+  - **Forward compatibility.** Future tooling that wants to count
+    or audit "bootstrap-seeded aliases across the entire coverage
+    program" gets a single WHERE-clause value to filter on, not a
+    union across N per-bootstrap labels.
 
 ## Re-curation runbook
 
@@ -167,7 +169,7 @@ intra-decade; new-season rosters published ~September each year):
         FROM sp.teams t
         JOIN sp.sports s ON t.sport_id = s.id
         LEFT JOIN sp.team_aliases ta ON ta.team_id = t.id
-              AND ta.source = 'bootstrap_kbl'
+              AND ta.source = 'bootstrap_league_coverage'
         WHERE s.name = 'Basketball' AND t.country_code = 'KOR'
         GROUP BY t.canonical_name, t.country_code
         ORDER BY t.canonical_name;`
@@ -213,7 +215,7 @@ from __future__ import annotations
 # Source value for sp.team_aliases.source on this bootstrap's writes.
 # See module docstring "Q3 decision" section for rationale + operator
 # override path.
-KBL_ALIAS_SOURCE = "bootstrap_kbl"
+KBL_ALIAS_SOURCE = "bootstrap_league_coverage"
 
 
 # Format: (canonical_name, country_code, aliases_tuple, notes).
@@ -264,11 +266,17 @@ KBL_TEAMS_SEED: list[tuple[str, str, tuple[str, ...], str | None]] = [
         "Anyang JeongKwanJang Red Boosters",
         "KOR",
         (
-            # Three distinct romanizations of 정관장 (sponsor-only,
-            # multi-token via Anyang prefix per distinctiveness constraint):
+            # Three distinct romanizations of 정관장, compound-token form
+            # (sponsor-only, multi-token via Anyang prefix per
+            # distinctiveness constraint):
             "Anyang JeongKwanJang",
             "Anyang JungKwanJang",
             "Anyang Cheongkwanjang",
+            # Wikipedia's 6-token space-separated form. Normalizes
+            # distinctly from "Anyang JungKwanJang" because the inner
+            # whitespace survives normalize_name (token count = 4 in
+            # the normalized form vs 2 for the compound forms).
+            "Anyang Jung Kwan Jang",
             # Legacy sponsor brand (pre-2023 rebrand):
             "Anyang KGC",
             # Hangul full (F3 confirmed):
@@ -281,10 +289,10 @@ KBL_TEAMS_SEED: list[tuple[str, str, tuple[str, ...], str | None]] = [
         ),
         "INSERT-branch. Rebranded from 'Anyang KGC' in 2023 (sponsor moved "
         "from KGC corporate brand to Jeonggwanjang ginseng product brand; "
-        "both belong to Korea Ginseng Corporation). Three distinct "
-        "romanizations of 정관장 covered (jeongkwanjang / jungkwanjang / "
-        "cheongkwanjang). Legacy 'Anyang KGC' retained for older market "
-        "records.",
+        "both belong to Korea Ginseng Corporation). Four distinct "
+        "normalized romanizations of 정관장 covered (jeongkwanjang / "
+        "jungkwanjang / cheongkwanjang / 'jung kwan jang' 6-token form). "
+        "Legacy 'Anyang KGC' retained for older market records.",
     ),
     (
         "Wonju DB Promy",

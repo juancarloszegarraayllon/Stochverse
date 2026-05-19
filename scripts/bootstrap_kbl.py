@@ -20,7 +20,8 @@ two structural extensions:
      new alias / SKIP existing alias. Runs as a second sequential
      pass after team-row writes resolve, per team. Keyed on
      (team_id, alias_normalized, source) — the source value is
-     'bootstrap_kbl' per Q3 decision (see kbl_seed.py docstring).
+     'bootstrap_league_coverage' per Q3 decision (see kbl_seed.py
+     docstring — generic value reused across the 5-sport cohort).
 
 The (team_id, alias_normalized, source) tuple has a UNIQUE
 constraint on (alias_normalized, source) via the sp_models.py
