@@ -131,25 +131,21 @@ Components:
 
 Risk of sequential approach (Deliverable 2 alone for 2-3 days): we can't classify individual records as "new-better" vs "old-better" until Deliverable 1 lands. Acceptable — population-level metrics in Deliverable 2 are enough to drive Phase 2 priorities.
 
-### Standalone diagnostic — Re-resolution loop scope (§7.7 verification, RUN NOW)
+### Standalone diagnostic — Re-resolution loop scope (§7.7 verification — RESOLVED)
 
-**This is NOT part of either deliverable. Run as a one-off SQL query during scope-doc cycle.**
+**Finding X RESOLVED: H1 confirmed.** Operator ran the discriminator query on 2026-05-20. Result: all 30 sampled pending review_queue records showed ~36 `sp.resolution_log` entries each post-queue-creation — exactly the 3-tiers × ~12-days pattern. Records from May 9-10 (~11 days old) have 33-36 retry attempts. **The cron re-processes pending review_queue records daily across all three tiers (strict → alias → fuzzy).**
 
-The question: does the daily cron re-process records already in `sp.review_queue` with `status='pending'`, or does it skip them?
+Implications for Track A design:
 
-The answer drives:
+- **Backlog drainage is automatic.** Tennis dedup post-merge: the 1,866 Tennis review_queue records get re-evaluation chances daily without a separate drainage script. Baseline-shift annotation models "dedup event causes discontinuous metric jump" rather than "gradual shift as new records arrive."
+- **KBL morning test is meaningful.** The 2 pending KBL records WILL be re-evaluated tonight against the now-populated bootstrap aliases. Tomorrow's queue-depth measurement reflects real resolver behavior, not an "already-queued records skipped" artifact.
+- **Retry traffic dominates `sp.resolution_log` writes.** Pending review_queue depth × 3 tiers × daily cron = retry-traffic write rate. With current ~6,654 pending depth × 3 × 365 days ≈ **~7.3M rows/year just from retries**, before counting newly-arrived records. §6.5 archival (Issue #164) becomes a Phase 2 dependency, not deferred maintenance. See §12 risk row.
 
-- Tomorrow morning's KBL empirical interpretation (do the 2 existing KBL records get re-evaluated against the new aliases or not?)
-- Whether Tennis dedup auto-drains the backlog or requires its own re-resolution sweep
-- Whether Track A's baseline-shift annotation needs to model "dedup event clears existing backlog" or "dedup event affects only new records going forward"
-
-Discriminator query (operator-runs-prod):
+Discriminator query (for future reference / re-verification cycles):
 
 ```sql
 -- Does the cron re-process pending review_queue records?
--- If a record's provider_record_id has BOTH a review_queue entry
--- (status='pending') AND a fresh resolution_log row from the
--- most recent cron, the cron re-processed it.
+-- Verified 2026-05-20: yes, all 3 tiers, daily.
 SELECT
   COUNT(DISTINCT rq.provider_record_id) AS reprocessed,
   COUNT(DISTINCT rq2.provider_record_id) AS pending_not_reprocessed
@@ -163,12 +159,12 @@ LEFT JOIN sp.resolution_log rl ON (
 )
 LEFT JOIN sp.review_queue rq2 ON (
   rq2.id = rq.id
-  AND rl.provider_record_id IS NULL  -- excluded from the reprocessed set
+  AND rl.provider_record_id IS NULL
 )
 WHERE rq.status = 'pending';
 ```
 
-Folds into Track A scope doc as **Finding X** before scope-doc PR opens. Affects §7 measurement-target wording and Deliverable 2's baseline-shift annotation semantics.
+Affects §7 measurement-target wording (`sp.resolution_log` row-volume tracking added) and Deliverable 2's baseline-shift annotation semantics (events cause discontinuous metric jumps, not gradual shifts).
 
 ## 6. Output format (Q1 resolution)
 
@@ -196,8 +192,11 @@ Five metrics from yesterday's table, plus three operator-throughput additions pe
 | **Per-sport queue depth** | rows in `sp.review_queue` where `status='pending'`, grouped by `reason_detail->>'sport'` |
 | **Average time-in-queue** | per-sport median + p95 of `(NOW() - created_at)` for pending review_queue records |
 | **Abandonment rate** | per-sport fraction of review_queue records that age beyond N days without operator action (N TBD, default 14) |
+| **`sp.resolution_log` row volume per cron run** | partitioned by `reason_code` (strict / alias / fuzzy / no_match / review_queue / crash). Tells us the §6.5 archival sizing requirement (per Finding X retry-traffic finding — ~7.3M rows/year extrapolated from current pending depth). |
 
 The bottom three feed Phase 2E operator-throughput design. Capturing them in Track A's first pass saves a separate workstream when Phase 2E begins; cost-incremental given the data source overlap.
+
+The `sp.resolution_log` row-volume metric (added post-Finding X) addresses the retry-traffic finding: every pending review_queue record produces ~3 resolution_log rows per daily cron (one per tier consulted). Track A measures the rate to inform archival cron frequency for Issue #164 (§6.5).
 
 Gross (unfiltered) rate is reported alongside scope-filtered, but framed explicitly as "raw" with operator attention directed at scope-filtered.
 
@@ -279,8 +278,7 @@ Total operator commitment: ~3-4 hours one-off (scope review + PR reviews + day-1
 | Cron writes succeed but rendered report shows stale data (cache, race) | Render script reads `sp.daily_diff_reports` ordered by `report_date DESC`; explicit "data through report_date X" header in markdown output |
 | Scope-filter rules drift (NON_SPORT decision changes, new prop-market vocabulary entries) | Filter rules versioned via a constant in `daily_diff.py`; baseline-shift event logged when version changes. Reports include the filter-version they ran against. |
 | Measurement infrastructure outlives its useful life and accumulates maintenance debt | Hard 6-10 week lifespan committed in §14; deprecation runbook part of scope. |
-
-## 13. What this is NOT
+| **`sp.resolution_log` unbounded growth from retry traffic** (NEW post-Finding X) | Current pending review_queue depth ~6,654 × 3 tiers × daily cron ≈ ~7.3M rows/year just from retries, before counting newly-arrived records. Mitigation: §6.5 archival via Issue #164 — promoted from "deferred maintenance" to "Phase 2 dependency" per Finding X. Track A's `sp.resolution_log` row-volume metric (§7) informs archival cron sizing. Track A is not blocked on §6.5 landing first (storage cost is incremental over 6-10 weeks), but Phase 3 cutover IS blocked on §6.5 because the retry-traffic pattern persists post-Phase-3 absent archival. |
 
 - **NOT a metrics platform.** No Grafana, no Datadog. Operator reads SQL output and rendered markdown.
 - **NOT a tuning automation.** Operator looks at trends and makes tuning calls. Track A surfaces signal; humans decide.
@@ -341,28 +339,35 @@ Classification gates per the §12 risk mitigation:
 - Records where legacy and new resolvers disagree get explicit operator classification.
 - Cases versioned under `tests/corpus/<sport-class>/<sport>_<case-id>.json` mirroring architecture doc §12.1.
 
-## Finding X — Re-resolution loop scope (PENDING diagnostic result)
+## Finding X — Re-resolution loop scope (RESOLVED 2026-05-20: H1 confirmed)
 
-To be filled when operator runs the §5 standalone diagnostic. Affects §7 measurement-target wording and Deliverable 2 baseline-shift annotation semantics.
+Operator ran the §5 discriminator query on 2026-05-20. **All 30 sampled pending review_queue records showed ~36 `sp.resolution_log` entries each post-queue-creation** — the 3-tiers × ~12-days pattern. Records from May 9-10 (~11 days old) have 33-36 retry attempts.
 
-Expected discriminator outcomes:
+**The cron re-processes pending review_queue records daily across all three tiers (strict → alias → fuzzy).** H1 confirmed.
 
-| Outcome | Implication |
-|---|---|
-| **Cron re-processes all pending records** | Tennis dedup auto-drains the existing backlog. Track A's baseline-shift event for "dedup ship" expected to show large day-over-day metric jump. |
-| **Cron processes only newly-arrived records** | Tennis dedup affects only new records going forward. Existing backlog stays in `sp.review_queue` until a separate drainage workstream addresses it. Track A's baseline-shift event expected to show gradual rather than discontinuous shift. |
-| **Partial / conditional re-processing** | Mixed behavior. Document the conditions, design accordingly. |
+| Outcome | Confirmed | Implication |
+|---|---|---|
+| **Cron re-processes all pending records** | ✅ **CONFIRMED** | Tennis dedup auto-drains the existing backlog. Track A's baseline-shift event for "dedup ship" models discontinuous metric jumps. KBL morning test will work as designed — the 2 pending records WILL be re-evaluated against the now-populated bootstrap aliases tonight. |
+| ~~Cron processes only newly-arrived records~~ | ❌ ruled out | n/a |
+| ~~Partial / conditional re-processing~~ | ❌ ruled out | n/a |
 
-This finding folds into PR #169's PROJECT_STATE 2026-05-19 entry under the §7.7 cadence note (currently v1.5 amendment item #4).
+### Three downstream implications (folded into the scope doc above)
+
+1. **Backlog drainage is automatic** for Tennis dedup, KBL re-resolution, and any future bootstrap-or-coverage event. No separate drainage workstream needed.
+2. **`sp.resolution_log` retry traffic dominates writes.** Pending review_queue depth × 3 tiers × daily cron ≈ ~7.3M rows/year just from retries. New §7 measurement target (`sp.resolution_log` row volume per cron run by reason_code) added. New §12 risk row added (retry-traffic unbounded growth). §6.5 archival per Issue #164 promoted from "deferred maintenance" to "Phase 3 cutover prerequisite."
+3. **v1.5 amendment pile implications** (folded into PR #169's PROJECT_STATE 2026-05-19 entry — operator call on whether to revise PR #169 now or fold into the day-21 entry):
+   - Item #3 (§6.5 archival via Issue #164) — more urgent. Phase 2 dependency, not deferred maintenance.
+   - Item #5 (audit-stream separation) — refined. Operator approvals don't write resolution_log, BUT cron retry writes DO. Different streams have different growth pressures.
+   - Item #6 (fixture-construction routing shape) — refined. The 2 pending KBL records have each been re-attempted 36 times despite the routing-shape blocker. Worth dedicated investigation when Track A surfaces per-record retry-count distribution.
 
 ## 18. Status
 
-**Scope-doc state**: draft pending Finding X diagnostic result + operator review. Locks open questions Q1-Q6.
+**Scope-doc state**: Finding X resolved, ready for operator review + merge. All open questions Q1-Q6 locked.
 
 **Next actions**:
-1. Operator runs Finding X diagnostic, folds result into §5 + this section.
-2. Operator reviews scope doc; comments / refinements during PR cycle.
-3. PR opens against main; merge gates: operator approval + this doc reaches PR-ready state.
+1. ✅ Operator runs Finding X diagnostic — RESOLVED 2026-05-20, H1 confirmed.
+2. Operator reviews scope doc on PR #175; comments / refinements during PR cycle.
+3. Scope-doc PR marked ready-for-review (from DRAFT) and merges to main.
 4. Deliverable 2 work starts Wednesday (2026-05-21) after scope doc merges.
 5. Deliverable 1 work starts ~2-3 days after Deliverable 2 ships (Friday/Saturday).
 
