@@ -614,23 +614,153 @@ async def _pattern_d_pre_flight() -> int:
 # ── Measurement targets (per PR #175 §7) ───────────────────────
 
 
-async def _measure(window_start: datetime, window_end: datetime) -> dict:
-    """Run the measurement pass against the 24h window.
+async def _build_matcher(session):
+    """Construct a TieredMatcher with strict + alias + fuzzy tiers.
 
-    Returns a dict matching the sp.daily_diff_reports.metrics JSONB
-    column shape. Schema:
+    Mirrors scripts/run_resolver_pass.py:main bootstrap steps. Extracted
+    here so the measurement loop stands up an identical resolver stack
+    without duplicating the load_all calls inline.
+    """
+    from resolver import (
+        AliasResolver, AliasTierMatcher, CandidateIndex,
+        CompetitionResolver, FuzzyTierMatcher, StrictMatcher,
+        TieredMatcher,
+    )
+
+    aliases = await AliasResolver.load_all(session)
+    sport_rows = (await session.execute(
+        text("SELECT id, code, name FROM sp.sports")
+    )).all()
+    sport_id_by_code_or_name: dict[str, int] = {}
+    for row in sport_rows:
+        sport_id_by_code_or_name[row.code] = row.id
+        sport_id_by_code_or_name[row.name] = row.id
+
+    competitions = await CompetitionResolver.load_all(session)
+    candidate_index = await CandidateIndex.load_all(session)
+
+    strict = StrictMatcher(
+        aliases=aliases,
+        sport_id_by_code_or_name=sport_id_by_code_or_name,
+        competitions=competitions,
+    )
+    alias = AliasTierMatcher(
+        candidates=candidate_index,
+        sport_id_by_code_or_name=sport_id_by_code_or_name,
+    )
+    fuzzy = FuzzyTierMatcher(
+        candidates=candidate_index,
+        sport_id_by_code_or_name=sport_id_by_code_or_name,
+    )
+    return TieredMatcher(strict=strict, alias=alias, fuzzy=fuzzy)
+
+
+async def _resolve_record(
+    *, matcher, extractor, raw_payload: dict,
+    sport_name: str | None, provider: str, session,
+) -> dict:
+    """Run extract_signal + matcher.match on one record.
+
+    Returns a row-shaped dict for aggregate_per_sport_metrics():
+        {"reason_code": str, "reason_detail": {"sport": str, ...}}
+
+    Synthetic reason_codes (not in ReasonCode enum):
+      - 'signal_extraction_skipped' — extract_signal returned None
+      - 'crash' — extract_signal or matcher raised
+    """
+    try:
+        if provider == "fl":
+            signal = extractor.extract_signal(raw_payload, sport=sport_name)
+        else:
+            signal = extractor.extract_signal(raw_payload)
+    except Exception:
+        return {
+            "reason_code": "crash",
+            "reason_detail": {"sport": sport_name or ""},
+        }
+
+    if signal is None:
+        return {
+            "reason_code": "signal_extraction_skipped",
+            "reason_detail": {"sport": sport_name or ""},
+        }
+
+    try:
+        tier_results = await matcher.match(session, signal)
+    except Exception:
+        return {
+            "reason_code": "crash",
+            "reason_detail": {"sport": signal.sport or sport_name or ""},
+        }
+
+    if not tier_results:
+        return {
+            "reason_code": "no_match",
+            "reason_detail": {"sport": signal.sport or sport_name or ""},
+        }
+
+    final = tier_results[-1]
+    detail = dict(final.reason_detail) if final.reason_detail else {}
+    # The matcher's reason_detail doesn't reliably carry the sport
+    # tag; thread the signal's sport through so per-sport aggregation
+    # works regardless of which tier produced the final result.
+    detail.setdefault("sport", signal.sport or sport_name or "")
+    return {
+        "reason_code": final.reason_code.value,
+        "reason_detail": detail,
+    }
+
+
+# Window SQL — fresh reads against the provider tables. No filter on
+# fixture_id: we measure the resolver's output against EVERY record
+# ingested in the window, regardless of whether the production cron
+# already resolved it. The matcher is deterministic given the data
+# (architecture P5); running it twice yields the same result. This
+# gives a baseline measurement that doesn't depend on cron timing.
+_KALSHI_WINDOW_SQL = (
+    "SELECT km.ticker AS pk, km.raw_payload "
+    "FROM sp.kalshi_markets km "
+    "WHERE km.last_seen_at >= :window_start "
+    "  AND km.last_seen_at < :window_end "
+    "ORDER BY km.last_seen_at DESC"
+)
+
+_FL_WINDOW_SQL = (
+    "SELECT fle.fl_event_id AS pk, fle.raw_payload, s.name AS sport_name "
+    "FROM sp.fl_events fle "
+    "LEFT JOIN sp.sports s ON s.id = fle.sport_id "
+    "WHERE fle.last_seen_at >= :window_start "
+    "  AND fle.last_seen_at < :window_end "
+    "ORDER BY fle.last_seen_at DESC"
+)
+
+_REVIEW_QUEUE_SQL = (
+    "SELECT rq.status, rq.created_at, "
+    "       COALESCE(rq.reason_detail->>'sport', '') AS sport "
+    "FROM sp.review_queue rq "
+    "WHERE rq.status = 'pending'"
+)
+
+_RESOLUTION_LOG_WINDOW_SQL = (
+    "SELECT reason_code FROM sp.resolution_log "
+    "WHERE decided_at >= :window_start "
+    "  AND decided_at < :window_end"
+)
+
+
+async def _measure(
+    window_start: datetime, window_end: datetime,
+) -> tuple[dict, int]:
+    """Run the measurement pass against the window.
+
+    Returns (metrics_dict, total_records_scanned). The metrics dict
+    matches the sp.daily_diff_reports.metrics JSONB column shape:
 
     {
       "scope_filtered": {
         "auto_apply_rate_overall": float,
         "auto_apply_rate_per_sport": {sport: float, ...},
-        "per_tier_rate_per_sport": {
-          sport: {
-            "strict": int, "alias": int, "fuzzy": int,
-            "no_match": int, "review_queue": int, "crash": int,
-          },
-          ...
-        },
+        "per_tier_rate_per_sport": {sport: {bucket: int, ...}, ...},
         "personal_path_rate": float,
         "team_path_rate": float,
       },
@@ -652,12 +782,134 @@ async def _measure(window_start: datetime, window_end: datetime) -> dict:
       },
     }
 
-    The eight measurement targets from PR #175 §7 + the
-    resolution_log row-volume target added post-Finding X.
-
-    SCAFFOLD: implementation lands in subsequent commit.
+    Eight measurement targets from PR #175 §7 + resolution_log
+    row-volume from Finding X (2026-05-20).
     """
-    raise NotImplementedError("Measurement pass — pending implementation")
+    from resolver import KalshiResolverModule, FLResolverModule
+
+    if async_session is None:
+        raise RuntimeError("async_session unavailable; cannot measure.")
+
+    log = get_logger("daily_diff")
+    bind = {"window_start": window_start, "window_end": window_end}
+
+    # ── Step 1: bootstrap matcher + fetch window records ──
+    async with async_session() as session:
+        matcher = await _build_matcher(session)
+        kalshi_rows = (await session.execute(
+            text(_KALSHI_WINDOW_SQL), bind,
+        )).all()
+        fl_rows = (await session.execute(
+            text(_FL_WINDOW_SQL), bind,
+        )).all()
+        queue_rows = (await session.execute(text(_REVIEW_QUEUE_SQL))).all()
+        log_rows = (await session.execute(
+            text(_RESOLUTION_LOG_WINDOW_SQL), bind,
+        )).all()
+
+    log.info(
+        "daily_diff.window_loaded",
+        kalshi=len(kalshi_rows),
+        fl=len(fl_rows),
+        queue=len(queue_rows),
+        resolution_log=len(log_rows),
+    )
+
+    kalshi_extractor = KalshiResolverModule()
+    fl_extractor = FLResolverModule()
+
+    # ── Step 2: classify + resolve per record ──
+    # Each record runs in its own session so a single matcher crash
+    # doesn't poison subsequent reads (mirrors run_resolver_pass.py's
+    # 2D.3.1 per-record transaction discipline).
+    scope_aggregator_rows: list[dict] = []
+    non_sport = 0
+    prop_market = 0
+    signal_skipped = 0
+    overall_records = 0
+    overall_auto_apply = 0
+
+    async with async_session() as session:
+        for row in kalshi_rows:
+            overall_records += 1
+            raw = row.raw_payload or {}
+            record = {"raw_payload": raw}
+            classification = classify_record("kalshi", record)
+            if classification == ScopeClassification.NON_SPORT:
+                non_sport += 1
+                continue
+            if classification == ScopeClassification.PROP_MARKET:
+                prop_market += 1
+                continue
+            resolved = await _resolve_record(
+                matcher=matcher, extractor=kalshi_extractor,
+                raw_payload=raw, sport_name=None,
+                provider="kalshi", session=session,
+            )
+            rc = resolved["reason_code"]
+            if rc == "signal_extraction_skipped":
+                signal_skipped += 1
+                continue
+            if rc in _AUTO_APPLY_REASON_CODES:
+                overall_auto_apply += 1
+            scope_aggregator_rows.append(resolved)
+
+        for row in fl_rows:
+            overall_records += 1
+            raw = row.raw_payload or {}
+            classification = classify_record("fl", {"raw_payload": raw})
+            # FL only emits HEAD_TO_HEAD today (per classify_fl_record);
+            # the branch stays for future cohorts that add FL filters.
+            if classification == ScopeClassification.NON_SPORT:
+                non_sport += 1
+                continue
+            if classification == ScopeClassification.PROP_MARKET:
+                prop_market += 1
+                continue
+            resolved = await _resolve_record(
+                matcher=matcher, extractor=fl_extractor,
+                raw_payload=raw, sport_name=row.sport_name,
+                provider="fl", session=session,
+            )
+            rc = resolved["reason_code"]
+            if rc == "signal_extraction_skipped":
+                signal_skipped += 1
+                continue
+            if rc in _AUTO_APPLY_REASON_CODES:
+                overall_auto_apply += 1
+            scope_aggregator_rows.append(resolved)
+
+    # ── Step 3: aggregate via pure functions ──
+    scope_filtered = aggregate_per_sport_metrics(scope_aggregator_rows)
+
+    queue_dicts = [
+        {"sport": r.sport, "status": r.status, "created_at": r.created_at}
+        for r in queue_rows
+    ]
+    queue_metrics = aggregate_queue_metrics(
+        queue_dicts, now=window_end,
+    )
+
+    log_dicts = [{"reason_code": r.reason_code} for r in log_rows]
+    log_volume = aggregate_resolution_log_volume(log_dicts)
+
+    metrics = {
+        "scope_filtered": scope_filtered,
+        "raw": {
+            # Unfiltered = overall_auto_apply / all records (including
+            # NON_SPORT + PROP_MARKET + signal_extraction_skipped).
+            # Scope_filtered.auto_apply_rate_overall excludes those.
+            "auto_apply_rate_overall_unfiltered": _safe_rate(
+                overall_auto_apply, overall_records,
+            ),
+            "signal_extraction_skipped": signal_skipped,
+            "non_sport_filtered_out": non_sport,
+            "prop_market_filtered_out": prop_market,
+        },
+        "queue": queue_metrics,
+        "resolution_log_volume_per_cron": log_volume,
+    }
+    return metrics, overall_records
 
 
 async def _write_report(
@@ -665,16 +917,47 @@ async def _write_report(
     window_end: datetime,
     metrics: dict,
     total_records: int,
-) -> None:
+    report_date,
+) -> int:
     """Write one row to sp.daily_diff_reports.
 
     Unique constraint on report_date enforces idempotency — re-running
-    on the same day fails fast with exit code 4 rather than producing
-    duplicate rows.
-
-    SCAFFOLD: implementation lands in subsequent commit.
+    on the same day raises IntegrityError, which the caller converts
+    to exit code 4.
     """
-    raise NotImplementedError("Report write — pending implementation")
+    import json
+    from sqlalchemy.exc import IntegrityError
+
+    if async_session is None:
+        raise RuntimeError("async_session unavailable; cannot write report.")
+
+    sql = text(
+        "INSERT INTO sp.daily_diff_reports "
+        "  (report_date, window_start, window_end, total_records_scanned, "
+        "   metrics, scope_filter_version, report_json, "
+        "   legacy_comparison_present) "
+        "VALUES "
+        "  (:report_date, :window_start, :window_end, :total, "
+        "   CAST(:metrics AS jsonb), :scope_filter_version, "
+        "   CAST(:report_json AS jsonb), :legacy_present)"
+    )
+
+    async with async_session() as session:
+        try:
+            async with session.begin():
+                await session.execute(sql, {
+                    "report_date": report_date,
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "total": total_records,
+                    "metrics": json.dumps(metrics),
+                    "scope_filter_version": SCOPE_FILTER_VERSION,
+                    "report_json": json.dumps({}),
+                    "legacy_present": False,
+                })
+        except IntegrityError:
+            return 4
+    return 0
 
 
 # ── Entry point ────────────────────────────────────────────────
@@ -712,11 +995,49 @@ async def daily_diff(
         scope_filter_version=SCOPE_FILTER_VERSION,
     )
 
-    # Measurement + write — implementation in subsequent commits.
-    raise NotImplementedError(
-        "daily_diff main loop — scaffold-first commit; "
-        "implementation in subsequent commits on this branch."
+    # Measurement pass.
+    metrics, total_records = await _measure(window_start, window_end)
+
+    # Empty window — surface as exit code 5 per the docstring contract.
+    # Caller is the Railway cron; an empty window means upstream
+    # ingestion failed to supply data and the operator should
+    # investigate rather than silently write a zero-row report.
+    if total_records == 0:
+        print(
+            "WARN: daily_diff window contained zero records. "
+            "Skipping write to sp.daily_diff_reports.",
+            file=sys.stderr,
+        )
+        log.warning(
+            "daily_diff.empty_window",
+            window_start=window_start.isoformat(),
+            window_end=window_end.isoformat(),
+        )
+        return 5
+
+    # report_date = window_end's UTC date.
+    write_rc = await _write_report(
+        window_start=window_start,
+        window_end=window_end,
+        metrics=metrics,
+        total_records=total_records,
+        report_date=window_end.date(),
     )
+    if write_rc != 0:
+        log.warning(
+            "daily_diff.write_failed",
+            exit_code=write_rc,
+            report_date=window_end.date().isoformat(),
+        )
+        return write_rc
+
+    log.info(
+        "daily_diff.done",
+        total_records=total_records,
+        elapsed_seconds=round(time.monotonic() - started, 2),
+        auto_apply_rate=metrics["scope_filtered"]["auto_apply_rate_overall"],
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
