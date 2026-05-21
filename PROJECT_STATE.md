@@ -94,6 +94,8 @@ Issue filing this session with the measured numbers prominently in the body.
 
 ### Phase 2 work-in-progress state
 
+> **[Updated by end-of-day append: PR #180 opened with empirical-validation findings; PR #179 opened (DRAFT) carrying the full Track A Deliverable 2 implementation arc.]** See the appended sections below for the implementation timeline and first-measurement findings.
+
 - **PR #175 merged** — Phase 2 Track A scope doc on main as of `10d4b65`. Measurement substrate's design committed; Deliverable 2 build starts today.
 - **Track A Deliverable 2 scaffolding** — landed this session on branch `claude/track-a-deliverable-2-daily-diff` (commit `9b2323c`). Migration `c4d9e2a1b3f7` for `sp.daily_diff_reports` + `sp.baseline_shifts`, `scripts/daily_diff.py` skeleton with Pattern D pre-flight check, `scripts/render_daily_diff_report.py`, 26 test stubs, Makefile targets. DRAFT PR forthcoming. Can develop locally despite Railway hobby builds paused; cron-deploy gated until Railway resumes.
 - **Track A Deliverable 1 (legacy extraction)** — ~2-3 days after D2 ships. Higher-risk per scope doc §5 (touches main.py production code). Dual-purpose: serves Track A measurement substrate AND architecture doc §11.6 Phase 5 decommission preparation per v1.5 amendment.
@@ -128,6 +130,131 @@ The pile, ordered by emergence:
 1. **Orphan review_queue Issue follow-up** — once Issue is filed today, operator runs the runner-side cleanup design discussion for the eventual fix PR. Not blocking; Track A Deliverable 2 takes priority.
 2. **Track A Deliverable 2 PR review** — DRAFT PR forthcoming from today's scaffolding work. Migration + script + tests, no Railway dependency.
 3. **Optional**: cross-sport duplication audit (yesterday's deferred item) — provides Tennis dedup workstream's actual scope numbers if/when Tennis dedup work begins.
+
+### Track A Deliverable 2 — IMPLEMENTATION COMPLETE + EMPIRICALLY VALIDATED
+
+Six-step implementation arc landed on branch `claude/track-a-deliverable-2-daily-diff` (PR #179 DRAFT). Each step shipped as a single reviewable commit:
+
+| Step | Commit | Scope |
+|---|---|---|
+| 1 (scaffold + migration `c4d9e2a1b3f7`) | `9b2323c` (merged via #177) | Migration + script skeletons + 26 test stubs |
+| 2 | `b6ca38d` | Scope-filter classification (NON_SPORT, prop-market, head-to-head) |
+| 3 | `4ba72f5` | Per-sport metric aggregation (3 pure functions) |
+| 4 | `e7fd82c` | Pattern D pre-flight (redesigned for Neon) |
+| 5 | `b8739b8` | `_measure` loop + `_write_report` + main wiring |
+| 6 | `775a55a` | Confidence histogram + render script + integration test bodies |
+| Refactor | `6bec829` | `auto_apply_rate` → `matcher_capability_rate` rename + path-rate headline-promote |
+
+**Migration `c4d9e2a1b3f7` applied to production** via Neon web console chunked-apply (4 single-statement chunks; multi-statement BEGIN/COMMIT block misexecuted as COMMIT-only — Pattern E origin). `sp.daily_diff_reports` + `sp.baseline_shifts` live, alembic head at `c4d9e2a1b3f7`.
+
+**Pattern D redesign for Neon**: scope-doc proposal used `inet_server_addr()` as the endpoint discriminator. Operator pre-flight confirmed Neon returns `169.254.254.254` (link-local proxy) — identical across branches, useless as a discriminator. Real signal: `current_database()` + `DATABASE_URL` hostname substring match against `EXPECTED_PRODUCTION_DB_HOST`. Implemented in `_check_pattern_d_endpoint` (pure function, no live-DB dependency for tests).
+
+**First measurement run** (production, 2026-05-21 evening):
+- 17,996 records scanned across 13.4 minutes
+- Exit 0, one row written to `sp.daily_diff_reports` (`report_date = 2026-05-21`)
+- Pattern D pre-flight passed against production endpoint
+- Render script produces clean markdown output
+
+### First measurement findings reshape Phase 2 framings
+
+The empirical data invalidates several day-21-morning framings and re-prioritizes the Phase 2 sequence.
+
+**Headline metrics** (scope_filter_version v0.1.0 — schema renamed to v0.2.0 post-validation):
+
+| Metric | Value | Note |
+|---|---:|---|
+| Matcher-capability rate (scope-filtered) | **48.4%** | Headline metric |
+| Matcher-capability rate (unfiltered) | 27.9% | Includes NON_SPORT / prop-market / signal-extraction-skipped |
+| Team-path rate | **70.2%** | Scope-filtered, sports not in INDIVIDUAL_SPORT_CODES |
+| Personal-path rate | **12.3%** | Tennis/MMA/Boxing/Golf/Snooker/Darts |
+
+**Reframings forced by the data:**
+
+1. **Tennis matcher-capability is 24.1%, not 0%.** The day-20 framing ("Tennis at 0%") was based on the production cron's *incremental* apply rate — which only counts newly-resolved records per pass. Daily-diff measures *capability* — re-runs the matcher against all records including already-resolved ones. Tennis dedup's expected impact is therefore "lift collision-routed records from review_queue to strict," not "create capability from zero." The lever exists but is smaller-magnitude than the previous framing implied.
+
+2. **Soccer (85.2%) and Baseball (78.0%) are the highest-leverage threshold-tuning targets.** Already performing well; the remaining 15-22% gap is the most concentrated source of auto-apply rate lift available.
+
+3. **5-sport bootstrap cohort priority — Golf first.** Golf produces 1,371 `no_match` rows/day, far the largest single-sport opportunity. Cohort sequencing: Golf (1,371) > Handball (253) > Rugby Union (108) > Snooker (80) > Rugby League (60) > Volleyball (2, too small). The Volleyball bootstrap may not be worth a dedicated cycle.
+
+4. **NON_SPORT scope-filter doing real work**: 7,629 / 17,996 (42%) of records filtered as out-of-scope. Issue #174's framing empirically validated — NON_SPORT is a denominator-hygiene issue, not a noise-floor issue.
+
+5. **Confidence histogram is bimodal**: 5,016 records at 0.95-1.00, 211 at 0.70-0.85, **zero** at 0.85-0.95. Records either clearly match or fall to the review_queue band — there is no soft middle. Empirically validates the §7.5 v1.5 amendment three-population framing: clear matches, collision-routed records, and the corroboration-ceiling residual are distinct populations, not a continuous distribution.
+
+6. **`sp.resolution_log` volume**: 87% `no_match` writes (58,225 of 67,109 per cron pass). §6.5 archival urgency confirmed — Issue #164 promotion to Phase 2 dependency is correct, and the magnitude is now empirically grounded.
+
+### Pattern D + Pattern E methodology refinements (PR #167 `bfb1044`)
+
+Two operational findings from today's apply landed on PR #167 as same-PR refinements rather than spawning follow-up PRs:
+
+- **Pattern D refinement** — platform-aware endpoint check (URL hostname over `inet_server_addr()`). The scope-doc proposal's SQL signal was Neon-naive; the empirically-grounded check is in `scripts/daily_diff.py:_check_pattern_d_endpoint`. For non-Neon platforms, `inet_server_addr()` may still work — the discriminative signal is platform-specific. Future operators applying Pattern D to a new platform must empirically validate which signal varies between branches before relying on it.
+- **Pattern E (new)** — verify DDL apply via structural EXISTS / COUNT check, not return-status alone. Neon web console SQL editor reported "Statement executed successfully" when pasting a multi-statement BEGIN/COMMIT block but executed only the final COMMIT statement. Recovery: chunked into 4 single-statement applies, each verified via EXISTS check. Two lessons captured — tool-specific (Neon console quirk) and pattern-general (never trust return-status alone for DDL).
+
+Patterns D + E complement each other: D ensures the apply targets the right database; E ensures the apply actually landed. Both mechanical, both ~5-second checks, both with order-of-magnitude cost asymmetry vs. silent-failure recovery.
+
+### Metric naming refinement (PR #179 `6bec829`)
+
+The first measurement's 48.4% rate immediately collided semantically with the production cron's 0.37% incremental rate from day-20 morning — same name (`auto_apply_rate`), different populations. The conflation produced a real interpretation bug during result review.
+
+**Rename + version bump:**
+
+- `scope_filtered.auto_apply_rate_overall` → `scope_filtered.matcher_capability_rate_overall`
+- `scope_filtered.auto_apply_rate_per_sport` → `scope_filtered.matcher_capability_rate_per_sport`
+- `raw.auto_apply_rate_overall_unfiltered` → `raw.matcher_capability_rate_overall_unfiltered`
+- `SCOPE_FILTER_VERSION` v0.1.0 → v0.2.0
+
+The metric measures what the matcher *could* auto-apply given today's records (**capability**), distinct from the production cron's apply rate which measures newly-resolved records per pass (**incremental**). The two are conceptually different and must not be conflated in dashboards or operator discussions.
+
+**v0.1.0 row preservation**: the row written today retains its v0.1.0 schema (key names `auto_apply_rate_*`). Not backfilled. Render script falls back to v0.1.0 keys when reading rows stamped v0.1.0 — historical readers consult the version stamp. Smaller diff, cleaner provenance.
+
+**Headline-promote**: Team-path and Personal-path rates moved into the window-summary table (was: latest-only section). Today's 5.7× gap between the two populations (70.2% / 12.3%) is operationally significant and day-over-day comparison should track its evolution as Tennis dedup + Golf bootstrap land.
+
+**Column-name caveat**: `sp.daily_diff_reports.scope_filter_version` is slightly imprecise — it now stamps metrics-schema changes too, not just scope-filter-rule changes. Column rename deferred until there's another reason to touch the table; would balloon the rename diff.
+
+### Phase 2 sequencing locked at end-of-day-21
+
+Empirical data forces re-prioritization. End-of-day-21 sequencing:
+
+| Priority | Workstream | Driver |
+|---|---|---|
+| **Tomorrow (day-22)** | Tennis dedup OR Golf bootstrap scoping | Golf is biggest leverage per today's data (1,371 no_match/day) |
+| **This week** | NON_SPORT scope-filter design | Issue #174 — 42% of records confirmed out-of-scope |
+| **Next week** | 5-sport bootstrap cohort kickoff | Golf first per data; Handball/Snooker/Rugby Union/Rugby League follow |
+| **Concurrent** | §6.5 archival design | 58,225 no_match retries/day; Issue #164 |
+
+**Tennis dedup is no longer the obvious next move.** The day-20 framing positioned it as the highest-impact Phase 2 work because the 0% Tennis framing implied capability creation. Today's 24.1% measurement reframes it as a marginal-improvement lever — still worth doing, but Golf's 1,371-per-day no_match volume is materially larger leverage per engineer-day.
+
+### v1.5 amendment pile (end-of-day-21 refinements)
+
+The pile, updated for today's empirical findings:
+
+1. **Neon migration (§10.1 + §11.2 + §14)** — unchanged
+2. **§7.4 corroboration model** — unchanged
+3. **§6.5 archival job status (#164)** — **URGENCY CONFIRMED EMPIRICALLY**. 58,225 no_match writes/day measured; the §6.5 archival is now a Phase 2 dependency with empirical sizing, not deferred maintenance.
+4. **§7.7 cadence** — unchanged
+5. **audit-stream separation for operator approvals** — unchanged
+6. **alias-tier and fuzzy-tier don't consult `sp.team_aliases`** — unchanged (replacement landed this morning)
+7. **§7.5 sport-class distinction** — **EMPIRICALLY VALIDATED** by today's bimodal histogram (zero records in the 0.85-0.95 band; clear separation between auto-apply and review_queue populations).
+8. **NEW — matcher-capability vs incremental-apply distinction**: production cron measures incremental-apply rate (newly-resolved records per pass); Track A daily-diff measures matcher-capability rate (all records re-run against fresh matcher). These are conceptually distinct measurements of different things; the v1.5 amendment captures the distinction so future dashboards / metrics discussions don't conflate them. Empirical surface area: today's 0.37% (incremental) vs 48.4% (capability) — same word "auto_apply" naming two populations, must be disambiguated in schema + docs + discussions.
+
+Pile expanded from 7 to 8 items.
+
+### PR state at end-of-day-21
+
+- **PR #167** — KBL methodology + Patterns A/B/C/D/E (`bfb1044` adds D refinement + E). Open, awaiting review.
+- **PR #169** — 2026-05-19 entry. Merged this morning.
+- **PR #175** — Track A scope doc. Merged.
+- **PR #176** — Day-21 entry (morning). Merged this morning.
+- **PR #177** — Track A Deliverable 2 scaffold. Merged.
+- **PR #178** — Orphan `review_queue` Issue filed.
+- **PR #179 (DRAFT)** — Track A Deliverable 2 implementation arc. Open, awaiting operator review.
+- **PR #180** — this day-21 supplement append (Option α per end-of-day decision).
+
+### Pending — operator-side, day-22 morning (revised end-of-day)
+
+1. **PR #179 review + merge** — Track A Deliverable 2 implementation arc. Operator merge approves the implementation; Railway cron config follows after hobby-build resume.
+2. **Phase 2 next-workstream decision** — Tennis dedup vs Golf bootstrap scoping. Today's data points to Golf; operator picks based on broader prioritization context.
+3. **PR #167 review** — Pattern D/E methodology doc. Ready for operator merge consideration.
+4. **§6.5 archival design** — Issue #164 promoted to active design work given today's 58K no_match/day measurement.
 
 ---
 
