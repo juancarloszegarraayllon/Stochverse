@@ -6,6 +6,110 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-21
+
+### KBL bootstrap pilot — EMPIRICALLY VALIDATED end-to-end
+
+Both pending KBL records resolved overnight via tonight's 02:15 UTC Kalshi cron pass. The bootstrap methodology pilot landed correctly on production (2026-05-20 after Pattern D wrong-endpoint recovery), and the resolver auto-applied the records using the new aliases:
+
+| Record | Resolution | Notes |
+|---|---|---|
+| `KXKBLGAME-26MAY100330GOYEGI` | `reason_code='strict'`, `fixture_id=e5f11624-5ffb-43d7-ac29-b848424fff00` | "Goyang Skygunners" alias → Goyang Sono team_id via strict-tier AliasIndex |
+| `KXKBLGAME-26MAY130600EGIGOY` | `reason_code='strict'`, `fixture_id=c06ee663-52ee-437d-8c31-96e677f592b6` | Same pattern, sides swapped |
+
+End-to-end flow confirmed:
+
+1. ✅ Bootstrap aliases applied to production (post-Pattern-D recovery, 2026-05-20 13:53 UTC)
+2. ✅ Strict-tier `AliasIndex` (`resolver/aliases.py`) contains `"goyang skygunners"` → Goyang Sono team_id mapping
+3. ✅ `ensure_fixture()` created `sp.fixtures` rows tonight via strict-tier auto-apply path
+4. ✅ `fixture_id` propagated to `sp.kalshi_markets`
+5. ✅ Records resolved with `reason_code='strict'`, `fail_reason=null`
+
+**The KBL methodology pilot is empirically complete and successful.** The 5-sport zero-coverage cohort (Handball, Snooker, Volleyball, Rugby League, Golf) can proceed with the validated methodology — Patterns A + B + C + D all confirmed as institutional knowledge.
+
+### Methodology cohort — 4 patterns validated
+
+The KBL pilot produced four named methodological patterns now captured in `docs/bootstraps/kbl-2025-26.md` (PR #167):
+
+- **Pattern A** — Production-data verification via `sp.resolution_log` is mandatory before bootstrap merge. Caught the "Goyang Skygunners" Kalshi-form-vs-official-form alias gap that authoritative-source curation missed.
+- **Pattern B** — Observe-then-react over pre-seed-speculate for unproven aliases. Kept the seed manifest focused on empirically-verified provider forms; deferred speculation for the 8 KBL teams without Kalshi history.
+- **Pattern C** — Clear bytecode before invoking diagnostic scripts against production from local Python. Surfaced during the Tennis ValidationError verification cycle; saved hours of misdiagnosis after stale `__pycache__` produced false-positive crashes.
+- **Pattern D** — Verify connection endpoint matches the expected branch before any database write operation. Surfaced via the 2026-05-19 wrong-Neon-branch apply; added as Step 4 of the standard apply runbook. Sub-pattern extends to read paths (verify-endpoint-before-read for measurement scripts; PR #167 commit `aa95a36`).
+
+Four patterns × five future bootstraps = ~20 known-risk-classes pre-emptively closed. ROI on the pattern documentation is materially positive even before the cohort bootstraps start.
+
+### Architectural finding (v1.5 amendment #6 REPLACED, 2026-05-21)
+
+Yesterday's v1.5 amendment item #6 (review_queue routing on fixture-construction failure) was misdiagnosed. `admin/queries.py:769-871` `approve_record()` confirms `ensure_fixture()` runs at OPERATOR APPROVAL time, not at routing time. `review_queue.candidate_fixtures` carrying team UUIDs (not fixture UUIDs) is designed behavior — the operator approval flow creates the fixture row at approve time. **Item #6 removed from v1.5 pile.**
+
+**New v1.5 amendment #6 replacement, surfaced during today's KBL diagnostic:**
+
+> **Alias-tier and fuzzy-tier matchers use a `CandidateIndex` built from `sp.teams.canonical_name` only; they do NOT consult `sp.team_aliases`.** Only the strict tier has access to aliases via the separate `AliasIndex` (`resolver/aliases.py:64-84`). Bootstrap aliases are therefore narrow-purpose: they only help records that successfully reach strict-tier's alias lookup step.
+>
+> Records that fail strict-tier due to upstream gates (`kickoff_confidence` < 0.85, `sport_not_classified`, etc.) get zero benefit from bootstrap aliases regardless of coverage completeness.
+>
+> KBL pilot validated this path end-to-end: bootstrap-applied "Goyang Skygunners" alias → strict-tier AliasIndex hit → `ensure_fixture()` → fixture_id propagated. The pilot's success specifically routes through strict-tier; alias-tier and fuzzy-tier never see the alias.
+>
+> **Implications for future bootstraps** (Handball/Snooker/Volleyball/Rugby League/Golf): aliases will only help records that pass strict-tier's prerequisite gates. If a sport has consistent kickoff-confidence issues OR `sport_not_classified` issues, bootstrap aliases won't recover those records. Per-sport empirical verification (Pattern A) of strict-tier reach is mandatory before assuming aliases will land.
+
+v1.5 amendment pile still at 7 items (item #6 replaced, not added).
+
+### Orphan review_queue rows — new pattern discovered (separate Issue forthcoming)
+
+The 2-pending KBL queue-depth this morning turned out to be a separate concern from the resolution status:
+
+- Both KBL records have `fixture_id` populated (strict-tier resolved them)
+- Both still have `sp.review_queue` rows with `status='pending'`
+- `review_queue.created_at` shows May 9-12 (pre-bootstrap timestamps; rows from earlier failed resolution attempts)
+- The post-PR-#108 runner uses `ON CONFLICT DO NOTHING WHERE status='pending'` for idempotency on INSERT, but there's NO inverse — no mechanism that UPDATE-clears a pending review_queue row when strict-tier later auto-applies the record.
+
+**Structural property of the architecture:** every record that EVER routed to review_queue AND later auto-applied carries an orphan row indefinitely. Affects every sport, not just KBL.
+
+**Probable scope:** Issue #163's queue depth of 6,654 likely contains meaningful orphan inflation. PR #161's asymmetric routing + PR #171's Tennis fix both changed routing behavior — records that routed to review_queue pre-fix and resolve cleanly post-fix would carry orphan rows.
+
+**Fix shape (deferred until Track A measurement substrate ships):** runner-side cleanup option (cleanest) — when strict tier auto-applies, runner UPDATE-clears matching review_queue row to `status='auto_resolved'`. ~10 LOC in `scripts/run_resolver_pass.py` + one-shot backfill for existing orphans.
+
+Issue filing planned for today (operator runs orphan discriminator query first to populate scope numbers in the Issue body).
+
+### Phase 2 work-in-progress state
+
+- **PR #175 merged** — Phase 2 Track A scope doc on main as of `10d4b65`. Measurement substrate's design committed; Deliverable 2 build starts today.
+- **Track A Deliverable 2 scaffolding** — starts today (this session). Migration for `sp.daily_diff_reports` + `sp.baseline_shifts`, `scripts/daily_diff.py` skeleton with Pattern D pre-flight check, `scripts/render_daily_diff_report.py`, test stubs. Can develop locally despite Railway hobby builds paused; cron-deploy gated until Railway resumes.
+- **Track A Deliverable 1 (legacy extraction)** — ~2-3 days after D2 ships. Higher-risk per scope doc §5 (touches main.py production code). Dual-purpose: serves Track A measurement substrate AND architecture doc §11.6 Phase 5 decommission preparation per v1.5 amendment.
+- **Tennis dedup workstream** — pending Track A measurement substrate per yesterday's priority sequence. ~457 high-confidence + ~263 candidate-verification merges; 3-5 days design + script + tests + verification.
+
+### v1.5 amendment pile (refined per today's findings)
+
+The pile, ordered by emergence:
+
+1. **Neon migration (§10.1 + §11.2 + §14)** — unchanged
+2. **§7.4 corroboration model (binary vs accumulating per-provider)** — unchanged
+3. **§6.5 archival job status (#164)** — **PROMOTED** per yesterday's Finding X to Phase 2 dependency, not deferred maintenance. ~7.3M rows/year retry traffic confirms urgency.
+4. **§7.7 cadence** — unchanged (continuous-loop vs daily-cron doc-vs-code reconciliation)
+5. **audit-stream separation for operator approvals** — **REFINED** per yesterday's Finding X. Operator approvals don't write `resolution_log`, but cron retry writes DO. Different streams have different growth pressures.
+6. **REPLACED 2026-05-21**: alias-tier and fuzzy-tier matchers don't consult `sp.team_aliases` — only strict tier does, via separate `AliasIndex`. Bootstrap aliases narrow-purpose. (Previous #6 fixture-construction routing shape was misdiagnosed; REMOVED.)
+7. **§7.5 sport-class distinction (refined re-refined 2026-05-20)** — three populations: (a) true cross-format duplicates, (b) common-surname distinct-player collisions, (c) corroboration-ceiling residual. Unchanged from yesterday.
+
+### Issues filed today
+
+- **Forthcoming**: Orphan review_queue rows pattern — Issue body draft ready; needs operator's orphan-discriminator-query result to populate scope numbers before filing.
+
+### PR state at end-of-session-so-far
+
+- **PR #167** — KBL methodology doc + Patterns A/B/C/D + sub-pattern. Open. Patterns validated by KBL pilot success.
+- **PR #169 (DRAFT)** — 2026-05-19 PROJECT_STATE entry. Open. v1.5 refinements deferred to today's entry per the day-19 decision; v1.5 amendment pile updated above to reflect those refinements.
+- **PR #175 (MERGED)** — Track A scope doc.
+- **2026-05-18 PROJECT_STATE entries** — branch `claude/project-state-2026-05-18-phase5-decision`, no PR opened.
+- **This entry (2026-05-21)** — DRAFT PR forthcoming for operator review.
+
+### Pending — operator-side, day-22 morning
+
+1. **Orphan review_queue Issue follow-up** — once Issue is filed today, operator runs the runner-side cleanup design discussion for the eventual fix PR. Not blocking; Track A Deliverable 2 takes priority.
+2. **Track A Deliverable 2 PR review** — DRAFT PR forthcoming from today's scaffolding work. Migration + script + tests, no Railway dependency.
+3. **Optional**: cross-sport duplication audit (yesterday's deferred item) — provides Tennis dedup workstream's actual scope numbers if/when Tennis dedup work begins.
+
+---
+
 ## Session — 2026-05-17
 
 ### Phase 2F.1.5 day-7 retrospective + 2D.4 three-tier resolver review
