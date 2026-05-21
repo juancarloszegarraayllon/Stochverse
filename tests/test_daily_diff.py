@@ -18,6 +18,7 @@ Test categories per PR #175's scope doc:
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -230,43 +231,191 @@ class TestScopeFilterClassification:
 
 
 class TestPerSportMetrics:
-    """Per PR #175 §7 measurement targets — per-sport breakdowns."""
+    """Per PR #175 §7 measurement targets — per-sport breakdowns.
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+    Q-A (approved): pure-function tests on mock dicts shaped like
+        {"reason_code": str, "reason_detail": {"sport": str}}
+    Q-B (approved): pure-function tests on synthetic
+        {"created_at": dt, "sport": str, "status": str}
+    dicts for queue metrics; integration test for the SQL→dict
+    conversion lives in TestDailyDiffIntegration (Step 6).
+    """
+
     def test_per_sport_auto_apply_rate_calculated(self):
         """Auto-apply count / scope-filtered denominator, partitioned
         by reason_detail->>'sport'."""
-        pass
+        from scripts.daily_diff import aggregate_per_sport_metrics
+        rows = [
+            # Tennis: 2 auto-apply (strict + fuzzy), 2 non-auto (review + no_match)
+            {"reason_code": "strict",       "reason_detail": {"sport": "tennis"}},
+            {"reason_code": "fuzzy",        "reason_detail": {"sport": "tennis"}},
+            {"reason_code": "review_queue", "reason_detail": {"sport": "tennis"}},
+            {"reason_code": "no_match",     "reason_detail": {"sport": "tennis"}},
+            # Soccer: 3 auto-apply (alias × 3), 1 review_queue
+            {"reason_code": "alias",        "reason_detail": {"sport": "Soccer"}},
+            {"reason_code": "alias",        "reason_detail": {"sport": "Soccer"}},
+            {"reason_code": "alias",        "reason_detail": {"sport": "Soccer"}},
+            {"reason_code": "review_queue", "reason_detail": {"sport": "Soccer"}},
+        ]
+        result = aggregate_per_sport_metrics(rows)
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+        # Overall: 5 auto-apply / 8 total = 0.625
+        assert result["auto_apply_rate_overall"] == pytest.approx(0.625)
+
+        # Per-sport: tennis 2/4 = 0.5; Soccer 3/4 = 0.75
+        assert result["auto_apply_rate_per_sport"]["tennis"] == pytest.approx(0.5)
+        assert result["auto_apply_rate_per_sport"]["Soccer"] == pytest.approx(0.75)
+
     def test_per_tier_resolution_rate_calculated(self):
         """strict / alias / fuzzy / no_match / review_queue / crash
         breakdown per sport."""
-        pass
+        from scripts.daily_diff import (
+            aggregate_per_sport_metrics, PER_TIER_BUCKETS,
+        )
+        rows = [
+            {"reason_code": "strict",       "reason_detail": {"sport": "Baseball"}},
+            {"reason_code": "alias",        "reason_detail": {"sport": "Baseball"}},
+            {"reason_code": "fuzzy",        "reason_detail": {"sport": "Baseball"}},
+            {"reason_code": "no_match",     "reason_detail": {"sport": "Baseball"}},
+            {"reason_code": "review_queue", "reason_detail": {"sport": "Baseball"}},
+            # 'crash' is a synthetic bucket — not a ReasonCode enum
+            # member; the measurement script tags raised invocations.
+            {"reason_code": "crash",        "reason_detail": {"sport": "Baseball"}},
+        ]
+        result = aggregate_per_sport_metrics(rows)
+        tiers = result["per_tier_rate_per_sport"]["Baseball"]
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+        # All six bucket keys present, each with count 1.
+        assert set(tiers.keys()) == set(PER_TIER_BUCKETS)
+        for bucket in PER_TIER_BUCKETS:
+            assert tiers[bucket] == 1, (
+                f"Bucket {bucket!r} should have 1 row, got {tiers[bucket]}"
+            )
+
+        # 'crash' rows must NOT count toward auto-apply.
+        # 3 auto-apply (strict + alias + fuzzy) / 6 total = 0.5.
+        assert result["auto_apply_rate_per_sport"]["Baseball"] == pytest.approx(0.5)
+
     def test_personal_path_vs_team_path_distinction(self):
         """Aggregated by INDIVIDUAL_SPORT_CODES membership.
-        Personal-path = Tennis + MMA + Boxing.
+        Personal-path = tennis/mma/boxing/golf/snooker/darts.
         Team-path = everything else."""
-        pass
+        from scripts.daily_diff import aggregate_per_sport_metrics
+        rows = [
+            # Personal-path: tennis + mma + golf.
+            # Tennis: 1 auto-apply, 1 review_queue
+            {"reason_code": "strict",       "reason_detail": {"sport": "tennis"}},
+            {"reason_code": "review_queue", "reason_detail": {"sport": "tennis"}},
+            # MMA: 1 fuzzy (auto-apply)
+            {"reason_code": "fuzzy",        "reason_detail": {"sport": "mma"}},
+            # Golf: 1 no_match
+            {"reason_code": "no_match",     "reason_detail": {"sport": "golf"}},
+            # Team-path: Soccer + Baseball + Hockey.
+            # Soccer: 2 alias (auto-apply)
+            {"reason_code": "alias",        "reason_detail": {"sport": "Soccer"}},
+            {"reason_code": "alias",        "reason_detail": {"sport": "Soccer"}},
+            # Baseball: 1 no_match
+            {"reason_code": "no_match",     "reason_detail": {"sport": "Baseball"}},
+            # Hockey: 1 review_queue
+            {"reason_code": "review_queue", "reason_detail": {"sport": "Hockey"}},
+        ]
+        result = aggregate_per_sport_metrics(rows)
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+        # Personal: 4 total, 2 auto-apply (tennis strict + mma fuzzy)
+        assert result["personal_path_rate"] == pytest.approx(2 / 4)
+        # Team: 4 total, 2 auto-apply (2 Soccer alias)
+        assert result["team_path_rate"] == pytest.approx(2 / 4)
+
+        # Case-insensitive INDIVIDUAL_SPORT_CODES membership.
+        rows_mixed_case = [
+            {"reason_code": "strict", "reason_detail": {"sport": "Tennis"}},
+            {"reason_code": "strict", "reason_detail": {"sport": "TENNIS"}},
+        ]
+        result2 = aggregate_per_sport_metrics(rows_mixed_case)
+        assert result2["personal_path_rate"] == pytest.approx(1.0)
+        assert result2["team_path_rate"] == 0.0  # empty cohort → 0
+
     def test_queue_depth_per_sport(self):
-        """Pending review_queue rows, grouped by sport."""
-        pass
+        """Pending review_queue rows, grouped by sport. Non-pending
+        statuses (approved / rejected) don't contribute to depth."""
+        from scripts.daily_diff import aggregate_queue_metrics
+        now = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
+        rows = [
+            {"sport": "tennis",  "status": "pending",  "created_at": now - timedelta(hours=1)},
+            {"sport": "tennis",  "status": "pending",  "created_at": now - timedelta(hours=2)},
+            {"sport": "tennis",  "status": "approved", "created_at": now - timedelta(hours=3)},
+            {"sport": "Soccer",  "status": "pending",  "created_at": now - timedelta(hours=1)},
+            {"sport": "Soccer",  "status": "rejected", "created_at": now - timedelta(hours=4)},
+        ]
+        result = aggregate_queue_metrics(rows, now=now)
+        # Only status='pending' counts.
+        assert result["depth_per_sport"] == {"tennis": 2, "Soccer": 1}
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
     def test_time_in_queue_per_sport(self):
-        """Median + p95 of (NOW() - created_at) for pending records,
-        per sport."""
-        pass
+        """Median + p95 of (now - created_at) for pending records,
+        in seconds, per sport."""
+        from scripts.daily_diff import aggregate_queue_metrics
+        now = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
+        # Tennis: 5 pending rows aged 1/2/3/4/5 hours
+        rows = [
+            {"sport": "tennis", "status": "pending",
+             "created_at": now - timedelta(hours=h)}
+            for h in (1, 2, 3, 4, 5)
+        ]
+        result = aggregate_queue_metrics(rows, now=now)
+        # Median of [1h, 2h, 3h, 4h, 5h] = 3h = 10800s
+        assert result["median_time_in_queue_per_sport"]["tennis"] == pytest.approx(3 * 3600)
+        # p95 nearest-rank: idx = round(0.95 * 4) = 4 → 5h = 18000s
+        assert result["p95_time_in_queue_per_sport"]["tennis"] == pytest.approx(5 * 3600)
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
     def test_abandonment_rate_per_sport(self):
-        """Per-sport fraction of pending records aging >N days
+        """Per-sport fraction of pending records aging beyond N days
         without operator action (default N=14)."""
-        pass
+        from scripts.daily_diff import aggregate_queue_metrics
+        now = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
+        rows = [
+            # tennis: 2 pending, 1 abandoned (>14d), 1 fresh (1d)
+            {"sport": "tennis", "status": "pending",
+             "created_at": now - timedelta(days=20)},
+            {"sport": "tennis", "status": "pending",
+             "created_at": now - timedelta(days=1)},
+            # Soccer: 1 pending, 1 fresh — 0 abandonment
+            {"sport": "Soccer", "status": "pending",
+             "created_at": now - timedelta(days=5)},
+            # Approved row past threshold — doesn't count (status filter)
+            {"sport": "Soccer", "status": "approved",
+             "created_at": now - timedelta(days=30)},
+        ]
+        result = aggregate_queue_metrics(rows, now=now)
+        assert result["abandonment_rate_per_sport"]["tennis"] == pytest.approx(0.5)
+        assert result["abandonment_rate_per_sport"]["Soccer"] == 0.0
+
+        # Custom threshold: with abandonment_days=3, the 5d-old Soccer
+        # row counts as abandoned.
+        result_strict = aggregate_queue_metrics(rows, now=now, abandonment_days=3)
+        assert result_strict["abandonment_rate_per_sport"]["Soccer"] == pytest.approx(1.0)
+
+    def test_empty_input_safe(self):
+        """Empty iterable inputs return zero-valued metrics rather
+        than raising ZeroDivisionError. Per-sport buckets can legit-
+        imately be empty (no Tennis records today, etc.)."""
+        from scripts.daily_diff import (
+            aggregate_per_sport_metrics, aggregate_queue_metrics,
+        )
+        now = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
+
+        per_sport = aggregate_per_sport_metrics([])
+        assert per_sport["auto_apply_rate_overall"] == 0.0
+        assert per_sport["auto_apply_rate_per_sport"] == {}
+        assert per_sport["per_tier_rate_per_sport"] == {}
+        assert per_sport["personal_path_rate"] == 0.0
+        assert per_sport["team_path_rate"] == 0.0
+
+        queue = aggregate_queue_metrics([], now=now)
+        assert queue["depth_per_sport"] == {}
+        assert queue["median_time_in_queue_per_sport"] == {}
+        assert queue["p95_time_in_queue_per_sport"] == {}
+        assert queue["abandonment_rate_per_sport"] == {}
 
 
 # ══════════════════════════════════════════════════════════════

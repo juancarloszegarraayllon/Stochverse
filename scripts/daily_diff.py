@@ -89,7 +89,10 @@ import asyncio
 import os
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from statistics import median
+from typing import Iterable
 
 # Make project root importable when invoked as `python scripts/...`.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -98,7 +101,9 @@ from sqlalchemy import text  # noqa: E402
 
 from db import async_session  # noqa: E402
 from observability import get_logger  # noqa: E402
+from resolver.alias_tier import INDIVIDUAL_SPORT_CODES  # noqa: E402
 from resolver.fuzzy_tier.matcher import KALSHI_PROP_MARKET_SEGMENTS  # noqa: E402
+from resolver.types import ReasonCode  # noqa: E402
 
 
 # ── Scope-filter version stamp ─────────────────────────────────
@@ -224,6 +229,213 @@ def classify_record(provider: str, record: dict) -> str:
     raise ValueError(
         f"Unknown provider {provider!r}; expected 'kalshi' or 'fl'."
     )
+
+
+# ── Per-sport metric aggregation (pure functions) ──────────────
+
+
+# Reason codes that count as auto-apply (confidence >= threshold).
+# Mirrors the runner's auto_apply branch — kept here as a frozenset for
+# fast membership tests in the aggregation hot loop. CORROBORATION is
+# included for completeness even though Phase 2 doesn't emit it yet;
+# Deliverable 1's cross-provider pass will.
+_AUTO_APPLY_REASON_CODES: frozenset[str] = frozenset({
+    ReasonCode.STRICT.value,
+    ReasonCode.ALIAS.value,
+    ReasonCode.FUZZY.value,
+    ReasonCode.CORROBORATION.value,
+})
+
+
+# Per-tier buckets stamped into metrics.scope_filtered.per_tier_rate_per_sport.
+# 'crash' is NOT a ReasonCode enum member — the measurement script tags
+# rows whose matcher invocation raised with this synthetic value, so the
+# crash-rate-per-sport target from PR #175 §7 is observable.
+PER_TIER_BUCKETS: tuple[str, ...] = (
+    "strict", "alias", "fuzzy",
+    "no_match", "review_queue", "crash",
+)
+
+
+# Default abandonment threshold per scope doc §7. Configurable via
+# aggregate_queue_metrics(abandonment_days=...).
+DEFAULT_ABANDONMENT_DAYS: int = 14
+
+
+def _safe_rate(numerator: int, denominator: int) -> float:
+    """Division that returns 0.0 when the denominator is zero.
+
+    Per-sport buckets can legitimately be empty (no Tennis records in
+    today's window, etc.) — that should report 0.0, not ZeroDivisionError.
+    """
+    return numerator / denominator if denominator else 0.0
+
+
+def _percentile(values: list[float], p: float) -> float:
+    """Nearest-rank percentile for small samples.
+
+    Python's statistics.quantiles assumes ≥2 samples; queue sizes per
+    sport are often 1-5 in dev, so we use nearest-rank to avoid raising
+    on edge cases. Returns 0.0 for empty input.
+    """
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = max(0, min(len(ordered) - 1, int(round(p * (len(ordered) - 1)))))
+    return ordered[idx]
+
+
+def aggregate_per_sport_metrics(rows: Iterable[dict]) -> dict:
+    """Aggregate resolution_log-like rows into per-sport metrics.
+
+    Pure function: takes an iterable of dicts shaped
+        {"reason_code": str, "reason_detail": {"sport": str, ...}}
+    and returns the scope_filtered sub-section of metrics.
+
+    Crashes: rows tagged with reason_code='crash' contribute to the
+    'crash' bucket in per_tier_rate_per_sport but NOT to auto-apply
+    (a crash isn't an applied resolution).
+
+    Empty / missing sport in reason_detail bucketed under the literal
+    '' key — surfacing this is intentional. Pre-Phase-3 some legacy
+    rows have no sport tag; the render script highlights '' so the
+    population stays visible until it's eliminated upstream.
+    """
+    per_sport_tiers: dict[str, dict[str, int]] = defaultdict(
+        lambda: {b: 0 for b in PER_TIER_BUCKETS}
+    )
+    per_sport_total: dict[str, int] = defaultdict(int)
+    per_sport_auto_apply: dict[str, int] = defaultdict(int)
+
+    total = 0
+    auto_apply_total = 0
+    personal_total = 0
+    personal_auto_apply = 0
+    team_total = 0
+    team_auto_apply = 0
+
+    for row in rows:
+        rc = (row.get("reason_code") or "").strip()
+        detail = row.get("reason_detail") or {}
+        sport = (detail.get("sport") or "").strip()
+
+        total += 1
+        per_sport_total[sport] += 1
+        if rc in PER_TIER_BUCKETS:
+            per_sport_tiers[sport][rc] += 1
+
+        is_auto_apply = rc in _AUTO_APPLY_REASON_CODES
+        if is_auto_apply:
+            auto_apply_total += 1
+            per_sport_auto_apply[sport] += 1
+
+        # Personal-path = INDIVIDUAL_SPORT_CODES membership
+        # (tennis/mma/boxing/golf/snooker/darts). Empty sport falls
+        # into team-path by default.
+        is_personal = sport.lower() in INDIVIDUAL_SPORT_CODES
+        if is_personal:
+            personal_total += 1
+            if is_auto_apply:
+                personal_auto_apply += 1
+        else:
+            team_total += 1
+            if is_auto_apply:
+                team_auto_apply += 1
+
+    return {
+        "auto_apply_rate_overall": _safe_rate(auto_apply_total, total),
+        "auto_apply_rate_per_sport": {
+            sport: _safe_rate(
+                per_sport_auto_apply[sport], per_sport_total[sport]
+            )
+            for sport in per_sport_total
+        },
+        "per_tier_rate_per_sport": {
+            sport: dict(per_sport_tiers[sport]) for sport in per_sport_total
+        },
+        "personal_path_rate": _safe_rate(personal_auto_apply, personal_total),
+        "team_path_rate": _safe_rate(team_auto_apply, team_total),
+    }
+
+
+def aggregate_queue_metrics(
+    rows: Iterable[dict],
+    *,
+    now: datetime,
+    abandonment_days: int = DEFAULT_ABANDONMENT_DAYS,
+) -> dict:
+    """Aggregate review_queue-like rows into per-sport queue metrics.
+
+    Input rows: dicts shaped
+        {"sport": str, "created_at": datetime, "status": str}
+    Only rows with status='pending' contribute. Other statuses
+    ('approved', 'rejected') represent terminal queue exits and are
+    not queue depth.
+
+    All time values are in seconds (float). Median + p95 computed via
+    nearest-rank to avoid raising on single-element sport buckets.
+
+    abandonment_days: pending rows aging beyond this threshold count
+    toward abandonment_rate_per_sport. Default 14 per scope doc §7.
+    """
+    per_sport_ages: dict[str, list[float]] = defaultdict(list)
+    per_sport_depth: dict[str, int] = defaultdict(int)
+    per_sport_abandoned: dict[str, int] = defaultdict(int)
+
+    abandon_threshold = timedelta(days=abandonment_days)
+
+    for row in rows:
+        if row.get("status") != "pending":
+            continue
+        sport = (row.get("sport") or "").strip()
+        created_at = row["created_at"]
+        age = now - created_at
+        per_sport_depth[sport] += 1
+        per_sport_ages[sport].append(age.total_seconds())
+        if age >= abandon_threshold:
+            per_sport_abandoned[sport] += 1
+
+    return {
+        "depth_per_sport": dict(per_sport_depth),
+        "median_time_in_queue_per_sport": {
+            sport: float(median(ages)) if ages else 0.0
+            for sport, ages in per_sport_ages.items()
+        },
+        "p95_time_in_queue_per_sport": {
+            sport: _percentile(ages, 0.95)
+            for sport, ages in per_sport_ages.items()
+        },
+        "abandonment_rate_per_sport": {
+            sport: _safe_rate(
+                per_sport_abandoned[sport], per_sport_depth[sport]
+            )
+            for sport in per_sport_depth
+        },
+    }
+
+
+def aggregate_resolution_log_volume(rows: Iterable[dict]) -> dict:
+    """Count resolution_log rows per reason_code + overall total.
+
+    Per Finding X (2026-05-20): cron re-processes pending records daily
+    across all 3 tiers, producing high retry traffic. This aggregation
+    surfaces the per-reason-code mix so §6.5 archival sizing (Issue #164)
+    has empirical inputs.
+
+    Input rows: {"reason_code": str}. Empty / missing reason_code
+    bucketed under '' (parallel to per-sport handling — surface the
+    null population).
+    """
+    by_reason_code: dict[str, int] = defaultdict(int)
+    total = 0
+    for row in rows:
+        rc = (row.get("reason_code") or "").strip()
+        by_reason_code[rc] += 1
+        total += 1
+    return {
+        "by_reason_code": dict(by_reason_code),
+        "total": total,
+    }
 
 
 # ── Pattern D pre-flight ───────────────────────────────────────
