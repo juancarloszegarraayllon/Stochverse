@@ -88,30 +88,140 @@ class TestScopeFilterClassification:
       - All others → counted in scope-filtered metrics
     """
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
     def test_non_sport_record_filtered_out(self):
         """Record with empty _sport field → filter classification
         returns 'non_sport_filtered_out'."""
-        pass
+        from scripts.daily_diff import (
+            classify_record, ScopeClassification,
+        )
+        # Empty _sport: oil prices, crypto, politics, weather records
+        # (Issue #174's NON_SPORT population, ~56% of unresolved Kalshi).
+        record = {
+            "raw_payload": {
+                "_sport": "",
+                "title": "Brent crude oil > $80 by end of Q2",
+            },
+        }
+        assert classify_record("kalshi", record) == ScopeClassification.NON_SPORT
+        assert ScopeClassification.NON_SPORT == "non_sport_filtered_out"
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+        # Missing _sport entirely (defensive — older records may not
+        # have the field at all).
+        record_missing = {"raw_payload": {"title": "..."}}
+        assert classify_record("kalshi", record_missing) == ScopeClassification.NON_SPORT
+
+        # Whitespace-only _sport — still non-sport.
+        record_whitespace = {"raw_payload": {"_sport": "   ", "title": "..."}}
+        assert classify_record("kalshi", record_whitespace) == ScopeClassification.NON_SPORT
+
     def test_kalshi_prop_market_filtered_out(self):
         """Record with prop-market vocabulary match → filter
         classification returns 'prop_market_filtered_out'."""
-        pass
+        from scripts.daily_diff import (
+            classify_record, ScopeClassification,
+        )
+        # "Colorado Rockies vs Arizona Diamondbacks: Hits" — suffix
+        # "Hits" is in KALSHI_PROP_MARKET_SEGMENTS.
+        record = {
+            "raw_payload": {
+                "_sport": "Baseball",
+                "title": "Colorado Rockies vs Arizona Diamondbacks: Hits",
+            },
+        }
+        assert classify_record("kalshi", record) == ScopeClassification.PROP_MARKET
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+        # Other prop-market shapes from the vocabulary.
+        for suffix in [
+            "First Inning Run", "Strikeouts", "Total Runs",
+            "Method of Victory", "Triple Doubles", "BTTS",
+            "Overtime", "First Goal", "Total Maps", "4th TD",
+        ]:
+            record = {
+                "raw_payload": {
+                    "_sport": "Baseball",
+                    "title": f"Team A vs Team B: {suffix}",
+                },
+            }
+            assert classify_record("kalshi", record) == ScopeClassification.PROP_MARKET, (
+                f"Vocabulary entry {suffix!r} should classify as prop_market"
+            )
+
     def test_head_to_head_record_counted(self):
         """Standard head-to-head record → counted in scope-filtered
         metrics."""
-        pass
+        from scripts.daily_diff import (
+            classify_record, ScopeClassification,
+        )
+        # Standard team-vs-team title, no prop suffix.
+        record = {
+            "raw_payload": {
+                "_sport": "Soccer",
+                "title": "Manchester United vs Chelsea",
+            },
+        }
+        assert classify_record("kalshi", record) == ScopeClassification.HEAD_TO_HEAD
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+        # NHL playoff-series shape — colon present but "Game 3" not
+        # in vocabulary, so passes scope filter as head-to-head.
+        # (Issue #160 precision-precedent: "Game N: TeamName" must
+        # NOT get filtered.)
+        record_playoff = {
+            "raw_payload": {
+                "_sport": "Hockey",
+                "title": "Anaheim Ducks vs Game 3: Vegas",
+            },
+        }
+        assert classify_record("kalshi", record_playoff) == ScopeClassification.HEAD_TO_HEAD
+
+        # FL records — all classified as head-to-head per
+        # classify_fl_record's design.
+        fl_record = {"raw_payload": {"some_fl_field": "value"}}
+        assert classify_record("fl", fl_record) == ScopeClassification.HEAD_TO_HEAD
+
     def test_signal_extraction_skipped_counted_separately(self):
         """Record where ingestion failed to extract a FixtureSignal
         → counted in raw.signal_extraction_skipped, NOT in
-        scope_filtered denominator."""
-        pass
+        scope_filtered denominator.
+
+        SIGNAL_EXTRACTION_SKIPPED is layered on AFTER the pre-parser
+        classification (during the parser-run phase). The constant
+        is exposed for downstream aggregation but classify_record()
+        does NOT return it — that's by design per the scope-filter-
+        is-pure-pre-parser-function semantic.
+
+        This test pins the constant value + the contract that
+        classify_record() returns one of HEAD_TO_HEAD / NON_SPORT /
+        PROP_MARKET (never SIGNAL_EXTRACTION_SKIPPED).
+        """
+        from scripts.daily_diff import (
+            classify_record, ScopeClassification,
+        )
+        assert ScopeClassification.SIGNAL_EXTRACTION_SKIPPED == "signal_extraction_skipped"
+
+        # classify_record() never returns SIGNAL_EXTRACTION_SKIPPED.
+        # Sample a representative set of records that pass / fail
+        # scope filter; none should yield SIGNAL_EXTRACTION_SKIPPED.
+        for record in [
+            {"raw_payload": {"_sport": "", "title": "..."}},  # NON_SPORT
+            {"raw_payload": {"_sport": "Baseball", "title": "T1 vs T2: Hits"}},  # PROP_MARKET
+            {"raw_payload": {"_sport": "Soccer", "title": "T1 vs T2"}},  # HEAD_TO_HEAD
+        ]:
+            result = classify_record("kalshi", record)
+            assert result != ScopeClassification.SIGNAL_EXTRACTION_SKIPPED, (
+                f"classify_record() must not return SIGNAL_EXTRACTION_SKIPPED; "
+                f"that label is for the parser-run-phase aggregation layer only. "
+                f"Got {result!r} for record {record!r}."
+            )
+
+    def test_unknown_provider_raises(self):
+        """Defensive: passing an unknown provider raises ValueError.
+        Catches typos / future provider additions that haven't been
+        wired into classify_record's dispatch."""
+        from scripts.daily_diff import classify_record
+        with pytest.raises(ValueError, match="Unknown provider"):
+            classify_record("polymarket", {"raw_payload": {}})
+        with pytest.raises(ValueError, match="Unknown provider"):
+            classify_record("oddsapi", {"raw_payload": {}})
 
 
 # ══════════════════════════════════════════════════════════════

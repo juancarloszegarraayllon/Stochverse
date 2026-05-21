@@ -1,7 +1,5 @@
 """Phase 2 Track A Deliverable 2: daily-diff measurement script.
 
-SCAFFOLD COMMIT — implementation lands in subsequent commits on this branch.
-
 Per PR #175's scope doc, this script:
 
   1. Verifies connection endpoint matches production (Pattern D
@@ -9,10 +7,12 @@ Per PR #175's scope doc, this script:
   2. Pulls last 24h of records from sp.kalshi_markets + sp.fl_events
      (fresh reads, not joins against existing sp.resolution_log per
      scope doc §4).
-  3. Runs the resolver's TieredMatcher against each record.
-  4. Classifies outcomes per scope doc §7 measurement targets.
-  5. Writes one row to sp.daily_diff_reports.
-  6. (Deliverable 1, future): also runs the legacy Tier 1-4 resolver
+  3. Classifies each record via scope-filter rules (NON_SPORT,
+     prop-market vocabulary per Issue #160, head-to-head).
+  4. Runs the resolver's TieredMatcher against in-scope records.
+  5. Aggregates outcomes per scope doc §7 measurement targets.
+  6. Writes one row to sp.daily_diff_reports.
+  7. (Deliverable 1, future): also runs the legacy Tier 1-4 resolver
      for AGREE/disagree comparison.
 
 Per scope doc §9, scheduled at 02:30 UTC via Railway cron — 15-min
@@ -61,6 +61,26 @@ that drift undetected. Same cost-asymmetry as Pattern D's write-path
 version: 5-second pre-flight prevents hours-to-days of misdirection.
 
 See PR #175 §10 for the full Pattern D framing.
+
+## Scope-filter classification (per PR #175 §7, Issues #160 + #174)
+
+Records are classified pre-parser into four buckets:
+
+  - HEAD_TO_HEAD — in scope; counted in scope_filtered denominator
+    + further processed by TieredMatcher
+  - NON_SPORT — empty _sport field on Kalshi (Issue #174); filtered
+    out of scope_filtered denominator
+  - PROP_MARKET — Kalshi market title carries a prop-market segment
+    per the KALSHI_PROP_MARKET_SEGMENTS vocabulary (Issue #160);
+    filtered out
+  - SIGNAL_EXTRACTION_SKIPPED — record passed scope filter, but
+    parser failed to produce a FixtureSignal. Counted separately
+    in raw.signal_extraction_skipped (NOT in scope_filtered
+    denominator).
+
+Scope-filter logic is pure-function on the raw record. Determined
+at pre-parser stage. SIGNAL_EXTRACTION_SKIPPED is layered on later
+during parser-run phase.
 """
 from __future__ import annotations
 
@@ -78,6 +98,7 @@ from sqlalchemy import text  # noqa: E402
 
 from db import async_session  # noqa: E402
 from observability import get_logger  # noqa: E402
+from resolver.fuzzy_tier.matcher import KALSHI_PROP_MARKET_SEGMENTS  # noqa: E402
 
 
 # ── Scope-filter version stamp ─────────────────────────────────
@@ -90,6 +111,121 @@ from observability import get_logger  # noqa: E402
 SCOPE_FILTER_VERSION = "v0.1.0"
 
 
+# ── Scope-filter classification constants ──────────────────────
+
+
+class ScopeClassification:
+    """Classification labels for the scope-filter pre-parser stage.
+
+    Module-level constants pinned by the test suite. Don't rename
+    without updating the metrics shape in sp.daily_diff_reports.metrics
+    and the render script's section labels.
+    """
+
+    HEAD_TO_HEAD = "head_to_head"
+    NON_SPORT = "non_sport_filtered_out"
+    PROP_MARKET = "prop_market_filtered_out"
+    # Layered on later; not returned by pre-parser classify_record().
+    # Listed here as the canonical constant for downstream aggregation
+    # to reference.
+    SIGNAL_EXTRACTION_SKIPPED = "signal_extraction_skipped"
+
+
+def _looks_like_prop_market_title(title: str) -> bool:
+    """Detect Kalshi prop-market titles via the rpartition-after-colon
+    heuristic against KALSHI_PROP_MARKET_SEGMENTS.
+
+    Distinct from resolver/fuzzy_tier/matcher.py:_looks_like_kalshi_prop_market,
+    which operates on individual parsed names AFTER the title is split
+    into home/away. This operates on the raw market title pre-parser.
+
+    Examples:
+      "Colorado Rockies vs Arizona Diamondbacks: Hits"
+          rpartition(':')[2].strip() = "Hits" → in vocab → True
+
+      "Anaheim vs Game 3: Vegas"  (NHL playoff-series record)
+          rpartition(':')[2].strip() = "Vegas" → not in vocab → False
+
+      "Manchester United vs Chelsea"  (no colon)
+          → False
+
+    Fail-open: titles whose suffix-after-colon isn't in the vocabulary
+    flow through as head-to-head. Per Issue #160, new prop types reach
+    operators rather than getting silently filtered.
+    """
+    if not title or ':' not in title:
+        return False
+    _, _, suffix = title.rpartition(':')
+    return suffix.strip() in KALSHI_PROP_MARKET_SEGMENTS
+
+
+def classify_kalshi_record(record: dict) -> str:
+    """Classify a Kalshi record for scope-filter purposes.
+
+    Inspects the raw_payload's _sport field + market title. Returns
+    one of ScopeClassification.{NON_SPORT, PROP_MARKET, HEAD_TO_HEAD}.
+
+    Pure function — no DB calls, no parser invocation. Deterministic
+    on the input record.
+
+    Args:
+        record: dict-like with `raw_payload` key (JSONB content as
+            dict). Minimum shape:
+              {"raw_payload": {"_sport": str, "title": str, ...}}
+
+    Returns:
+        Classification label string. Caller stores this in the
+        metrics aggregation per scope_filter_version.
+
+    Order of checks:
+      1. NON_SPORT (empty _sport) — fastest discriminator
+      2. PROP_MARKET (vocabulary match on title) — string check
+      3. HEAD_TO_HEAD (default, in-scope)
+    """
+    raw = record.get("raw_payload") or {}
+    sport = (raw.get("_sport") or "").strip()
+    if not sport:
+        return ScopeClassification.NON_SPORT
+    title = raw.get("title") or ""
+    if _looks_like_prop_market_title(title):
+        return ScopeClassification.PROP_MARKET
+    return ScopeClassification.HEAD_TO_HEAD
+
+
+def classify_fl_record(record: dict) -> str:
+    """Classify a FL record for scope-filter purposes.
+
+    FL ingestion (per ingestion/fl.py) only writes sport events to
+    sp.fl_events; NON_SPORT filtering isn't needed. FL doesn't carry
+    Kalshi-style prop markets, so PROP_MARKET filtering doesn't apply.
+
+    All FL records pass scope filter as HEAD_TO_HEAD. Future FL out-of-
+    scope categories (e.g., bench-clearing-brawl prop markets if FL
+    ever ingests those) would extend this function.
+    """
+    return ScopeClassification.HEAD_TO_HEAD
+
+
+def classify_record(provider: str, record: dict) -> str:
+    """Dispatch to provider-specific scope-filter classifier.
+
+    Single entry point for the measurement pass's classification
+    step. Each record from sp.kalshi_markets / sp.fl_events runs
+    through this function before reaching the parser stage.
+
+    SIGNAL_EXTRACTION_SKIPPED is NOT returned by this function —
+    that classification is determined later, when the parser runs
+    against records that passed scope filter as HEAD_TO_HEAD.
+    """
+    if provider == "kalshi":
+        return classify_kalshi_record(record)
+    if provider == "fl":
+        return classify_fl_record(record)
+    raise ValueError(
+        f"Unknown provider {provider!r}; expected 'kalshi' or 'fl'."
+    )
+
+
 # ── Pattern D pre-flight ───────────────────────────────────────
 
 
@@ -100,7 +236,7 @@ def _pattern_d_pre_flight() -> int:
     with EXPECTED_PRODUCTION_ENDPOINT set; local dev uses
     DAILY_DIFF_ALLOW_NON_PRODUCTION=1 to bypass.
 
-    SCAFFOLD: implementation lands in subsequent commit.
+    SCAFFOLD: implementation lands in subsequent commit (Step 4).
     """
     raise NotImplementedError("Pattern D pre-flight — pending implementation")
 
