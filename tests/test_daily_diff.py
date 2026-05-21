@@ -36,39 +36,126 @@ INTEGRATION_DB = os.environ.get("SP_INTEGRATION_DB", "").strip()
 class TestPatternDPreFlight:
     """Verify-endpoint-before-read sub-pattern per PR #167 commit aa95a36.
 
-    Three test cases:
-      - Endpoint matches expected → returns 0
-      - Endpoint mismatch + DAILY_DIFF_ALLOW_NON_PRODUCTION unset → returns 3
-      - Endpoint mismatch + DAILY_DIFF_ALLOW_NON_PRODUCTION=1 → returns 0
+    Refined 2026-05-21: inet_server_addr() returns Neon's link-local
+    proxy (169.254.254.254) — useless as a branch discriminator.
+    Replaced with current_database() + DATABASE_URL hostname substring
+    match against EXPECTED_PRODUCTION_DB_HOST.
+
+    Test surface is the pure-function _check_pattern_d_endpoint() —
+    no DB roundtrip needed.
     """
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+    PROD_URL = (
+        "postgresql://u:p@ep-fragrant-frog-ak3esp11.us-east-2.aws.neon.tech"
+        ":5432/neondb"
+    )
+    DEV_URL = (
+        "postgresql://u:p@ep-dev-branch-xyz123.us-east-2.aws.neon.tech"
+        ":5432/neondb"
+    )
+
     def test_endpoint_match_passes(self):
-        """When inet_server_addr() matches EXPECTED_PRODUCTION_ENDPOINT,
-        pre-flight returns 0."""
-        # from scripts.daily_diff import _pattern_d_pre_flight
-        # ...
-        pass
+        """current_database() = expected AND URL hostname contains
+        the expected branch endpoint substring → returns 0."""
+        from scripts.daily_diff import _check_pattern_d_endpoint
+        rc, msg = _check_pattern_d_endpoint(
+            self.PROD_URL,
+            "neondb",
+            expected_db_name="neondb",
+            expected_db_host="ep-fragrant-frog-ak3esp11",
+            allow_non_production=False,
+        )
+        assert rc == 0, f"Expected pass; got {rc} ({msg})"
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
     def test_endpoint_mismatch_fails_without_override(self):
-        """When inet_server_addr() doesn't match expected AND
-        DAILY_DIFF_ALLOW_NON_PRODUCTION is unset, pre-flight returns 3."""
-        pass
+        """URL hostname does NOT contain the expected branch endpoint
+        substring AND allow_non_production=False → returns 3.
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+        Catches accidental runs against a dev branch of the same Neon
+        project."""
+        from scripts.daily_diff import _check_pattern_d_endpoint
+        rc, msg = _check_pattern_d_endpoint(
+            self.DEV_URL,
+            "neondb",
+            expected_db_name="neondb",
+            expected_db_host="ep-fragrant-frog-ak3esp11",
+            allow_non_production=False,
+        )
+        assert rc == 3
+        assert "ep-fragrant-frog-ak3esp11" in msg
+
+        # Also fails if current_database() mismatches even when host
+        # matches (e.g., dev DB on the production branch).
+        rc2, msg2 = _check_pattern_d_endpoint(
+            self.PROD_URL,
+            "scratch_db",
+            expected_db_name="neondb",
+            expected_db_host="ep-fragrant-frog-ak3esp11",
+            allow_non_production=False,
+        )
+        assert rc2 == 3
+        assert "scratch_db" in msg2
+
     def test_endpoint_mismatch_passes_with_override(self):
-        """When DAILY_DIFF_ALLOW_NON_PRODUCTION=1, pre-flight returns 0
-        regardless of endpoint mismatch."""
-        pass
+        """DAILY_DIFF_ALLOW_NON_PRODUCTION truthy short-circuits to
+        success regardless of endpoint mismatch — for local-dev."""
+        from scripts.daily_diff import _check_pattern_d_endpoint
+        rc, msg = _check_pattern_d_endpoint(
+            self.DEV_URL,
+            "totally_wrong_db",
+            expected_db_name="neondb",
+            expected_db_host="ep-fragrant-frog-ak3esp11",
+            allow_non_production=True,
+        )
+        assert rc == 0
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
     def test_expected_production_endpoint_unset_fails(self):
-        """When EXPECTED_PRODUCTION_ENDPOINT is unset AND
-        DAILY_DIFF_ALLOW_NON_PRODUCTION is unset, pre-flight returns 3.
-        Forces operator to either set the expected endpoint OR
-        explicitly opt out via the local-dev flag."""
-        pass
+        """EXPECTED_PRODUCTION_DB_HOST or EXPECTED_PRODUCTION_DB_NAME
+        unset AND allow_non_production=False → returns 3. Forces
+        operator to either set both OR explicitly opt out via the
+        local-dev flag (fail-closed default)."""
+        from scripts.daily_diff import _check_pattern_d_endpoint
+
+        # Host unset
+        rc1, msg1 = _check_pattern_d_endpoint(
+            self.PROD_URL, "neondb",
+            expected_db_name="neondb", expected_db_host=None,
+            allow_non_production=False,
+        )
+        assert rc1 == 3
+        assert "EXPECTED_PRODUCTION" in msg1
+
+        # DB name unset
+        rc2, _ = _check_pattern_d_endpoint(
+            self.PROD_URL, "neondb",
+            expected_db_name=None, expected_db_host="ep-fragrant",
+            allow_non_production=False,
+        )
+        assert rc2 == 3
+
+        # Both unset
+        rc3, _ = _check_pattern_d_endpoint(
+            self.PROD_URL, "neondb",
+            expected_db_name=None, expected_db_host=None,
+            allow_non_production=False,
+        )
+        assert rc3 == 3
+
+    def test_database_url_missing_fails(self):
+        """DATABASE_URL=None (or empty) with allow_non_production=False
+        → returns 3. Defensive check — daily_diff()'s exit-code-1
+        path handles a missing engine, but the pre-flight should
+        surface DATABASE_URL absence with the same exit-3 semantic
+        as other Pattern D failures."""
+        from scripts.daily_diff import _check_pattern_d_endpoint
+        rc, msg = _check_pattern_d_endpoint(
+            None, "neondb",
+            expected_db_name="neondb",
+            expected_db_host="ep-fragrant-frog-ak3esp11",
+            allow_non_production=False,
+        )
+        assert rc == 3
+        assert "DATABASE_URL" in msg
 
 
 # ══════════════════════════════════════════════════════════════

@@ -93,6 +93,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Iterable
+from urllib.parse import urlparse
 
 # Make project root importable when invoked as `python scripts/...`.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -441,16 +442,173 @@ def aggregate_resolution_log_volume(rows: Iterable[dict]) -> dict:
 # ── Pattern D pre-flight ───────────────────────────────────────
 
 
-def _pattern_d_pre_flight() -> int:
+# Pattern D pre-flight design (refined 2026-05-21):
+#
+# Original scope doc proposal used inet_server_addr() as the endpoint
+# signal. Empirically (operator pre-flight against production)
+# inet_server_addr() returns 169.254.254.254 on Neon — the link-local
+# proxy address, not a meaningful branch discriminator. The real
+# discriminator is the DATABASE_URL hostname (e.g.,
+# ep-fragrant-frog-ak3esp11.us-east-2.aws.neon.tech).
+#
+# Refined check:
+#   1. SELECT current_database() — must equal EXPECTED_PRODUCTION_DB_NAME
+#      (default 'neondb'). Catches accidentally running against a
+#      non-Neon DB.
+#   2. DATABASE_URL hostname must contain EXPECTED_PRODUCTION_DB_HOST
+#      substring (e.g., the branch endpoint ID). Catches accidentally
+#      running against a dev branch of the same Neon project.
+#
+# Both env vars must be set for the check to run. If either is unset,
+# pre-flight fails closed (operator must opt out via
+# DAILY_DIFF_ALLOW_NON_PRODUCTION=1).
+PATTERN_D_DEFAULT_DB_NAME = "neondb"
+
+
+def _check_pattern_d_endpoint(
+    database_url: str | None,
+    current_database_value: str,
+    *,
+    expected_db_name: str | None,
+    expected_db_host: str | None,
+    allow_non_production: bool,
+) -> tuple[int, str]:
+    """Pure-function core of Pattern D pre-flight.
+
+    Returns (exit_code, message) — 0 + "ok" on pass, 3 + reason on
+    fail. Factored out so tests don't need a live DB connection.
+
+    Args:
+        database_url: the actual DATABASE_URL env var value (or None
+            if unset; that's an exit-3 condition on its own unless
+            the override is set).
+        current_database_value: result of `SELECT current_database();`
+            against the connected DB.
+        expected_db_name: EXPECTED_PRODUCTION_DB_NAME env var value.
+        expected_db_host: EXPECTED_PRODUCTION_DB_HOST env var value
+            (hostname substring, e.g. 'ep-fragrant-frog-ak3esp11').
+        allow_non_production: DAILY_DIFF_ALLOW_NON_PRODUCTION truthy.
+
+    Local-dev opt-out (allow_non_production=True) short-circuits to
+    success regardless of the other inputs. Production cron sets
+    EXPECTED_PRODUCTION_DB_NAME + EXPECTED_PRODUCTION_DB_HOST and
+    leaves DAILY_DIFF_ALLOW_NON_PRODUCTION unset.
+    """
+    if allow_non_production:
+        return 0, (
+            "Pattern D pre-flight bypassed via "
+            "DAILY_DIFF_ALLOW_NON_PRODUCTION=1 (local-dev mode)."
+        )
+
+    if not expected_db_name or not expected_db_host:
+        return 3, (
+            "Pattern D pre-flight: EXPECTED_PRODUCTION_DB_NAME and/or "
+            "EXPECTED_PRODUCTION_DB_HOST not set. Production cron must "
+            "configure both; set DAILY_DIFF_ALLOW_NON_PRODUCTION=1 for "
+            "local-dev runs."
+        )
+
+    if not database_url:
+        return 3, "Pattern D pre-flight: DATABASE_URL not set."
+
+    if current_database_value != expected_db_name:
+        return 3, (
+            f"Pattern D pre-flight: current_database()="
+            f"{current_database_value!r} does not match expected "
+            f"{expected_db_name!r}. Refusing to run against a non-"
+            f"production database."
+        )
+
+    # URL hostname substring match. Use urlparse to extract hostname
+    # so e.g. user:pass@host:port DATABASE_URLs don't false-match
+    # against credential substrings.
+    try:
+        parsed = urlparse(database_url)
+        hostname = (parsed.hostname or "")
+    except (ValueError, AttributeError):
+        return 3, (
+            f"Pattern D pre-flight: DATABASE_URL is not a parseable URL."
+        )
+
+    if expected_db_host not in hostname:
+        return 3, (
+            f"Pattern D pre-flight: DATABASE_URL hostname "
+            f"{hostname!r} does not contain expected "
+            f"{expected_db_host!r}. Refusing to run against a non-"
+            f"production branch endpoint."
+        )
+
+    return 0, "ok"
+
+
+async def _pattern_d_pre_flight() -> int:
     """Verify connection endpoint matches expected production endpoint.
 
-    Returns 0 on success, 3 on mismatch. Operator runs production cron
-    with EXPECTED_PRODUCTION_ENDPOINT set; local dev uses
-    DAILY_DIFF_ALLOW_NON_PRODUCTION=1 to bypass.
+    Returns 0 on success, 3 on mismatch. See _check_pattern_d_endpoint()
+    for the pure-function check logic.
 
-    SCAFFOLD: implementation lands in subsequent commit (Step 4).
+    Production cron sets EXPECTED_PRODUCTION_DB_NAME +
+    EXPECTED_PRODUCTION_DB_HOST. Local dev sets
+    DAILY_DIFF_ALLOW_NON_PRODUCTION=1.
+
+    Per scope doc §10 + KBL methodology doc Pattern D (read-path
+    sub-pattern): runs BEFORE any production data read. Cost-asymmetry:
+    5-second check prevents hours-to-days of misdirected measurement.
     """
-    raise NotImplementedError("Pattern D pre-flight — pending implementation")
+    log = get_logger("daily_diff")
+
+    allow_non_production = (
+        os.environ.get("DAILY_DIFF_ALLOW_NON_PRODUCTION", "").strip() == "1"
+    )
+
+    # Bypass entire SQL roundtrip when opt-out is set.
+    if allow_non_production:
+        rc, msg = _check_pattern_d_endpoint(
+            os.environ.get("DATABASE_URL"), "",
+            expected_db_name=None, expected_db_host=None,
+            allow_non_production=True,
+        )
+        log.info("daily_diff.pattern_d.bypass", message=msg)
+        return rc
+
+    expected_db_name = (
+        os.environ.get("EXPECTED_PRODUCTION_DB_NAME", "").strip()
+        or PATTERN_D_DEFAULT_DB_NAME
+    )
+    expected_db_host = (
+        os.environ.get("EXPECTED_PRODUCTION_DB_HOST", "").strip() or None
+    )
+    database_url = os.environ.get("DATABASE_URL")
+
+    if async_session is None:
+        print(
+            "ERROR: Pattern D pre-flight: async_session unavailable "
+            "(DATABASE_URL not set or engine init failed).",
+            file=sys.stderr,
+        )
+        return 3
+
+    async with async_session() as session:
+        result = await session.execute(text("SELECT current_database();"))
+        current_database_value = result.scalar_one()
+
+    rc, msg = _check_pattern_d_endpoint(
+        database_url, current_database_value,
+        expected_db_name=expected_db_name,
+        expected_db_host=expected_db_host,
+        allow_non_production=False,
+    )
+    if rc == 0:
+        log.info(
+            "daily_diff.pattern_d.ok",
+            current_database=current_database_value,
+            expected_db_name=expected_db_name,
+            expected_db_host=expected_db_host,
+        )
+    else:
+        log.error("daily_diff.pattern_d.fail", message=msg)
+        print(f"ERROR: {msg}", file=sys.stderr)
+    return rc
 
 
 # ── Measurement targets (per PR #175 §7) ───────────────────────
@@ -532,7 +690,7 @@ async def daily_diff(
 
     # Pattern D pre-flight first — any failure here exits before
     # touching production data.
-    preflight_rc = _pattern_d_pre_flight()
+    preflight_rc = await _pattern_d_pre_flight()
     if preflight_rc != 0:
         return preflight_rc
 
