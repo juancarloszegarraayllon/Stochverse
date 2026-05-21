@@ -63,18 +63,39 @@ The 2-pending KBL queue-depth this morning turned out to be a separate concern f
 - `review_queue.created_at` shows May 9-12 (pre-bootstrap timestamps; rows from earlier failed resolution attempts)
 - The post-PR-#108 runner uses `ON CONFLICT DO NOTHING WHERE status='pending'` for idempotency on INSERT, but there's NO inverse — no mechanism that UPDATE-clears a pending review_queue row when strict-tier later auto-applies the record.
 
-**Structural property of the architecture:** every record that EVER routed to review_queue AND later auto-applied carries an orphan row indefinitely. Affects every sport, not just KBL.
+**Structural property of the architecture:** every record that EVER routed to review_queue AND later auto-applied carries an orphan row indefinitely. Affects every sport in principle.
 
-**Probable scope:** Issue #163's queue depth of 6,654 likely contains meaningful orphan inflation. PR #161's asymmetric routing + PR #171's Tennis fix both changed routing behavior — records that routed to review_queue pre-fix and resolve cleanly post-fix would carry orphan rows.
+**Measured scope (operator-run discriminator query, 2026-05-21):**
 
-**Fix shape (deferred until Track A measurement substrate ships):** runner-side cleanup option (cleanest) — when strict tier auto-applies, runner UPDATE-clears matching review_queue row to `status='auto_resolved'`. ~10 LOC in `scripts/run_resolver_pass.py` + one-shot backfill for existing orphans.
+| Provider | Orphan count | Pending total | Orphan rate |
+|---|---|---|---|
+| Kalshi | 36 | 4,456 | 0.8% |
+| FL | 0 | 3,996 | 0% |
+| **Total** | **36** | **8,452** | **0.4%** |
 
-Issue filing planned for today (operator runs orphan discriminator query first to populate scope numbers in the Issue body).
+**The orphan pattern is Kalshi-only and very narrow.** Initial hypothesis ("Issue #163's 6,654 queue depth likely contains meaningful orphan inflation") was wrong — measurement shows orphans contribute only 0.4% of pending depth. #163's 6,654-pending figure is NOT meaningfully inflated by orphans; the pending population represents genuine pending records.
+
+**Probable provenance of the 36 Kalshi orphans** (informal hypothesis, low-priority verification deferred):
+
+- 2 are the KBL records that resolved tonight via strict-tier bootstrap alias.
+- ~34 others likely from PR #171's Tennis ValidationError fix + PR #161's asymmetric routing fix — records that previously crashed or mis-routed, then resolved on subsequent cron passes after the fixes shipped. Per-record provenance verification is a small follow-up later in the week, not urgent.
+
+**Kalshi-vs-FL asymmetry** (36 vs 0) suggests FL's resolver path has different review_queue routing semantics. Maybe FL's strict-tier runs differently, or FL's review_queue insertion gate is stricter. **Worth a small follow-up investigation** — doesn't block Track A or any current work.
+
+**Fix shape (deferred until Track A measurement substrate ships):** runner-side cleanup option (cleanest) — when strict tier auto-applies, runner UPDATE-clears matching review_queue row to `status='auto_resolved'`. ~10 LOC in `scripts/run_resolver_pass.py` + one-shot backfill for the existing 36 orphans.
+
+**Reframed implications:**
+
+- Track A measurement substrate doesn't need elaborate orphan handling. Simple pending-vs-resolved distinction suffices. Orphan classification could be a Track A follow-up metric if useful.
+- Issue framing shifts from "structural inflation of #163" to "small data-integrity cleanup with operational hygiene value." Still worth filing for completeness.
+- 5 remaining sport bootstraps proceed with confidence — methodology validated, orphan accumulation is bounded at ~0.4% of pending depth.
+
+Issue filing this session with the measured numbers prominently in the body.
 
 ### Phase 2 work-in-progress state
 
 - **PR #175 merged** — Phase 2 Track A scope doc on main as of `10d4b65`. Measurement substrate's design committed; Deliverable 2 build starts today.
-- **Track A Deliverable 2 scaffolding** — starts today (this session). Migration for `sp.daily_diff_reports` + `sp.baseline_shifts`, `scripts/daily_diff.py` skeleton with Pattern D pre-flight check, `scripts/render_daily_diff_report.py`, test stubs. Can develop locally despite Railway hobby builds paused; cron-deploy gated until Railway resumes.
+- **Track A Deliverable 2 scaffolding** — landed this session on branch `claude/track-a-deliverable-2-daily-diff` (commit `9b2323c`). Migration `c4d9e2a1b3f7` for `sp.daily_diff_reports` + `sp.baseline_shifts`, `scripts/daily_diff.py` skeleton with Pattern D pre-flight check, `scripts/render_daily_diff_report.py`, 26 test stubs, Makefile targets. DRAFT PR forthcoming. Can develop locally despite Railway hobby builds paused; cron-deploy gated until Railway resumes.
 - **Track A Deliverable 1 (legacy extraction)** — ~2-3 days after D2 ships. Higher-risk per scope doc §5 (touches main.py production code). Dual-purpose: serves Track A measurement substrate AND architecture doc §11.6 Phase 5 decommission preparation per v1.5 amendment.
 - **Tennis dedup workstream** — pending Track A measurement substrate per yesterday's priority sequence. ~457 high-confidence + ~263 candidate-verification merges; 3-5 days design + script + tests + verification.
 
@@ -92,7 +113,7 @@ The pile, ordered by emergence:
 
 ### Issues filed today
 
-- **Forthcoming**: Orphan review_queue rows pattern — Issue body draft ready; needs operator's orphan-discriminator-query result to populate scope numbers before filing.
+- **Orphan review_queue rows pattern** — to be filed this session, body carrying the measured numbers (36 Kalshi orphans / 0.8% of Kalshi pending; 0 FL orphans; 0.4% total orphan rate across both providers). Framed as data-integrity hygiene, not measurement-blocking. Issue # added here when filing completes.
 
 ### PR state at end-of-session-so-far
 
