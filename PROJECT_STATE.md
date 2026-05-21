@@ -131,6 +131,215 @@ The pile, ordered by emergence:
 
 ---
 
+## Session — 2026-05-19
+
+> **Forward reference (added during 2026-05-21 day-21 cycle):** This entry's "v1.5 amendment pile" section below proposes item #6 (review_queue routing on fixture-construction failure) which was subsequently identified as misdiagnosed during the 2026-05-21 KBL empirical-validation cycle. The misdiagnosed item is REMOVED from the pile and REPLACED with the alias-tier-and-fuzzy-tier-don't-consult-sp.team_aliases finding per the 2026-05-21 entry. Read this entry as a point-in-time record of day-19 framing; the day-21 entry holds the corrections.
+
+### Track C — KBL bootstrap shipped + applied to production (validation deferred)
+
+Phase 2C methodology pilot for the 5-sport zero-coverage cohort (Handball, Snooker, Volleyball, Rugby League, Golf — surfaced 2026-05-17). Korean Basketball League as the league-level pilot at 10 teams. Extended PR #156's national-teams bootstrap pattern with an aliases-write dimension.
+
+**Scope shipped (PR #166, merged at 23dc495 / 15:38 UTC):**
+
+- `scripts/kbl_seed.py` — 10-team manifest, 4-tuple `(canonical, country, aliases, notes)` format. F1/F2/F3 decisions encoded.
+- `scripts/bootstrap_kbl.py` — three-branch team classifier (INSERT new / BACKFILL country_code / SKIP) + parallel alias classifier (INSERT new alias / SKIP existing). Mirrors PR #156's idempotency discipline.
+- `tests/test_bootstrap_kbl.py` — 13 manifest-shape unit tests (always run) + 5 integration tests (SP_INTEGRATION_DB-gated).
+- `docs/bootstraps/kbl-2025-26.md` — methodology template for cohort reference.
+- `Makefile` — `bootstrap-kbl` target mirroring `bootstrap-national-teams`.
+
+**Three F-decisions resolved during scope cycle:**
+
+- **F1 — Canonical_name policy: mirror PR #156 precedent.** UPDATE-branch teams (Goyang Sono, KCC Egis) keep legacy canonicals; current 2025-26 official forms live as aliases. Avoids drift with FL's §9.3 canonical_name authority.
+- **F2 — Anyang rebrand alias coverage: 6 distinct normalized aliases.** Coverage spans JeongKwanJang / JungKwanJang / Cheongkwanjang / 6-token Wikipedia form / KGC legacy / Hangul full. Wikipedia 6-token form was added during PR #166 review.
+- **F3 — Hangul coverage: partial v1 (3 of 10 teams).** Production query returned 0 Hangul-containing rows for current KBL records; partial coverage is operationally sufficient. Remaining 7 teams tracked at #165.
+
+**Post-review fix during PR #166 review (commit 23dc495):**
+
+Operator's pre-merge production-data verification via DISTINCT `team_form` query against `sp.resolution_log` for `KXKBL%` records found Kalshi uses the 2-token "City Nickname" form (`Goyang Skygunners`), not the 3-token official (`Goyang Sono Skygunners`). Seed manifest was missing the empirical form. Surgical addition (1 alias, total grew 20 → 21).
+
+This finding produced two Phase 2C cohort patterns now documented at `docs/bootstraps/kbl-2025-26.md` (PR #167, follow-up to #166):
+
+- **Pattern A — pre-merge production-data verification is mandatory.** "The provider's actual generated form trumps the team's official name for alias coverage purposes." Authoritative-source curation (NamuWiki, Wikipedia) does not always capture provider-specific ticker-generation patterns.
+- **Pattern B — observe-then-react over pre-seed-speculate for unproven aliases.** Teams with no historical provider records ship with authoritative-source aliases only; speculative short-forms risk cross-league collisions. §7.7 daily cron's re-resolution behavior provides retroactive coverage.
+
+**Production apply attempt (2026-05-19, 15:50 UTC) — LANDED ON WRONG BRANCH:**
+
+```
+KBL bootstrap complete in 4.0s:
+  Teams Inserted:      8
+  Teams Backfilled:    2  (Goyang Sono + KCC Egis got country_code='KOR')
+  Aliases Inserted:   21
+```
+
+Bootstrap script reported clean success. But the apply landed on the `bootstrap-test` Neon branch (endpoint `ep-square-wave-akhp46h0`) instead of production (endpoint `ep-fragrant-frog-ak3esp11`). The `DATABASE_URL` env var pointed at the wrong endpoint at apply time. **Production state remained pre-apply for ~16 hours.** Discovery + recovery covered in the 2026-05-20 session entry.
+
+**Re-apply against production (2026-05-20, after wrong-endpoint discovery):**
+
+```
+KBL bootstrap complete in 3.8s:
+  Teams Inserted:      8 (8 actually committed)
+  Teams Backfilled:    2 (2 actually committed)
+  Aliases Inserted:   21 (21 actually committed)
+```
+
+Endpoint sanity check pre-apply confirmed `ep-fragrant-frog-ak3esp11` (production). All 10 KBL teams now in production `sp.teams` with `country_code='KOR'`. 21 aliases in `sp.team_aliases` with `source='bootstrap_league_coverage'`.
+
+**Validation deferred to the 02:15 UTC Kalshi cron pass following the re-apply (i.e., the night of 2026-05-20 → morning of 2026-05-21).** The 2026-05-19 → 2026-05-20 cron (run_id `a7836f51-49e0-443f-9ce9-1338e27b6b49`) ran against pre-apply production state — no KBL aliases were visible. Empirical KBL test moves to the day-21 morning.
+
+**Pattern D (added to PR #167 at commit `c6f5b93`):** captures the methodological learning. Wrong-endpoint apply is a class of silent-success-against-wrong-DB error that costs hours-to-days of misdirection. Pre-flight `SELECT current_database(), current_schema(), inet_server_addr();` is now step 4 of the apply runbook in `docs/bootstraps/kbl-2025-26.md`.
+
+**Three pending-verification scenarios for tomorrow morning's queue-depth query:**
+
+```sql
+SELECT COUNT(*) FROM sp.review_queue
+WHERE provider_record_id LIKE 'KXKBL%' AND status = 'pending';
+```
+
+| Result | Interpretation | Phase 2 implication |
+|---|---|---|
+| 0 records | Bootstrap empirically validated; alias-tier alone resolved the 3 pending KBL records | Continue Track A measurement infrastructure as planned |
+| 1-2 records | Partial validation; some records' fixture-construction worked | Investigate which records auto-resolved + why others didn't |
+| 2 records (unchanged) | Finding 2 below (candidate_fixtures = team UUIDs) explains the persistence: fixture-construction is the blocker, not team-matching | Phase 2 priority shifts toward fixture-construction debugging alongside Track A |
+
+All three outcomes are informative. Result drives where Phase 2 priority lands next.
+
+### Three architectural findings surfaced during KBL apply cycle
+
+These are orthogonal to KBL itself — surfaced during the diagnostic queries that traced KBL state. Worth pinning separately since each has Phase 2 implications larger than any single bootstrap.
+
+**Plus a fourth finding (Tennis resolver crash, Issue #170 → PR #171) that emerged in the late-afternoon 10K-record pass — discovered + fixed + verified same day. Captured below the three architectural findings alongside the methodological learning the verification cycle produced (Pattern C).**
+
+#### Finding 1 — 0% auto-apply rate on 100-record manual pass (HALT CRITERIA EXCEEDED)
+
+The manual resolver pass at 15:37 UTC scanned 100 non-KBL records and **auto-resolved zero**. Consistent with the day's aggregate 87.5% no_match rate, but starker at sample level. Halt-criteria warning fired (coverage <60% threshold triggers extraction review per the parallel-run discipline).
+
+**Initially hypothesized as partially explained by Finding 4** (Tennis crashes dragging the rate to zero by exception). **Falsified by post-fix measurement**: after PR #171 deployed + verified, a fresh `--limit 500` sample returned `crashes=0` AND `auto_applies=0`. The 0% auto-apply rate is **structurally independent** of the Tennis crash bug.
+
+**Implication: this is now confirmed as an independent Phase 2 puzzle.** Hypothesis ranking from yesterday's PROJECT_STATE entry remains valid (threshold drift, corroboration degradation, alias-thinness, all-three) and a fourth hypothesis emerged: **34% signal_extraction_skipped** in the same 500-record sample is upstream of everything else. If half the records can't produce a FixtureSignal, the auto-apply denominator is roughly half what the morning's aggregate assumed.
+
+**Implication: this is still bigger than any single bootstrap, even after accounting for Tennis crashes.** Coverage expansion via league/sport bootstraps addresses the long tail; the strict + alias + fuzzy tier auto-apply rate at the head of the distribution is independently degraded. Track A daily-diff infrastructure becomes more urgent — it's the only mechanism that surfaces auto-apply regression / improvement per resolver change.
+
+Worth a dedicated investigation cycle alongside (not after) Track A. Hypotheses to discriminate (Tennis crash exclusion factor applied):
+- Threshold calibration drift (auto-apply threshold too high for current production score distribution)
+- Corroboration-rate degradation (cross-provider corroboration finding fewer matches than the +0.30 boost assumes)
+- Alias-tier coverage thinness compounding (Sunday's "91 clean alias matches over 7 days" finding generalized to broader records)
+- All three combined
+
+The §6.5 archival gap (#164) and broken-loop scoping (Track A priority 3) sit upstream of this finding; clean measurement requires both. Putting them in Track A priorities was correct.
+
+#### Finding 2 — `review_queue.candidate_fixtures` contains team UUIDs, not fixture UUIDs
+
+Diagnostic check on the existing pending KBL records found `candidate_fixtures` populated with team UUIDs (`8beb6b11-...` = Goyang Sono, `00907265-...` = KCC Egis), not fixture UUIDs. This suggests the resolver identified teams correctly but couldn't construct a canonical `sp.fixtures` row from team-pair + kickoff.
+
+Architectural implication for review_queue write semantics: the routing decision to `review_queue` fires when teams match but no fixture exists yet, NOT only when teams don't match. This is a distinct routing shape from collision (multiple team candidates) and asymmetric (one side anchored, one didn't). Whether this is the intended §7.5 design or an emergent behavior worth distinguishing in the admin UI is a Phase 2 question.
+
+**Operational consequence:** if the 3 pending KBL records' actual blocker is fixture-construction (not team-matching), the bootstrap's aliases won't help them auto-promote even with tonight's cron. New KBL records arriving with kickoff data present should auto-resolve cleanly via the new aliases; the existing 3 records may stay pending until fixture-construction is fixed for them.
+
+This finding interacts with Issue #162 β (NULL-kickoff approval hard-block) but is distinct: #162 fires at approval time; this finding affects routing time. Worth surfacing the relationship at the next §7.5 admin-UI work cycle.
+
+#### Finding 3 — Operator approvals don't write to `sp.resolution_log`
+
+The "approved" KBL record (May 9 game) reached `status='approved'` via the admin UI's review_queue.status change path, NOT via resolver auto-promotion. The `review_queue` table and `resolution_log` are separate audit streams. Operator approvals update `review_queue.status` + write `sp.team_aliases` (per `approve_record()`) but **do not** write a corresponding `sp.resolution_log` row.
+
+Implication for §7.5 admin UI architecture and downstream analytics:
+- "How many records reached resolved state in the last 7 days?" requires a UNION across `resolution_log` (resolver-side decisions) + `review_queue` (operator-side decisions). The current dry-run-*-tier and corroboration-gap diagnostics query only `resolution_log` — they under-count by the operator-approval rate.
+- The day-7 retrospective on 2026-05-17 noted "2 approved records total ever (test records)" — the count came from `review_queue.status = 'approved'`. That's the right count, but verifying it required knowing about the audit-stream separation.
+- When Track A daily-diff infrastructure builds, the "did the new resolver agree with the old on this record?" comparison needs both audit streams as input — otherwise diffs miss operator-decision outcomes entirely.
+
+Not a bug per se — both streams are intentional. But the audit-stream separation deserves explicit documentation. A v1.5 architecture-doc amendment item.
+
+#### Finding 4 — Tennis ValidationError discovered systemic, fix shipped + verified same day (#170 closed, #171 merged)
+
+Late-afternoon manual 10K-record pass (run_id `14a94404-9183-4da6-8669-2f0ac84d631b`) revealed that the morning's ValidationError filed as #168 (initially framed as a single record's edge case) was systemic across all Tennis Kalshi record patterns:
+
+- `KXITFWMATCH-*` (ITF Women's Tennis)
+- `KXITFMATCH-*` (ITF Tennis)
+- `KXATPMATCH-*` (ATP Tennis)
+- `KXATPCHALLENGERMATCH-*` (ATP Challenger)
+
+All four crashed with identical error shape: `candidate_fixtures.0 UUID input should be a string, bytes or UUID object [input_value=None]`.
+
+**Root cause:** PR #161's asymmetric-routing branch constructed `candidate_fixtures = [anchored_team_id] + failed_side_candidates` without guarding against `anchored_team_id=None`. The personal-path matcher's collision case returns `_SideMatch(anchor_failed=False, team_id=None, collision=True)`. When this state co-occurred with anchor-failure on the OTHER side (asymmetric anchor failure + collision on the anchored side), the asymmetric branch picked the collision-side's None team_id as `anchored_team_id`, then pydantic validation rejected the list.
+
+**Production scope** (operator scope-data queries during evening cycle):
+- 3,279 records currently affected: Tennis 3,003 + UFC 238 + Boxing 38
+- 46,505 crashes over 7 days; ~6,643/day; ~13% of all daily resolver decisions
+- Each crashing record retried 41-44 times across daily crons over ~6 weeks
+
+**Fix shipped + verified same day:** PR #171 (~7 LOC defensive guard + 3 unit tests) merged at e08bccf, Railway auto-deployed, verified locally via `--limit 500` sample showing crashes=0. Issue #170 closed by PR #171; #168 closed as duplicate of #170 preserving the specific reproduction record provenance.
+
+#### Methodological learning — stale-bytecode false-positive scare (Pattern C)
+
+PR #171 verification cycle produced a ~2-3h diagnostic detour. The `--limit 500` sample initially returned 30 crashes even after Railway confirmed PR #171 was deployed. The crashes had identical shape to pre-fix — same field path (`candidate_fixtures.0`), same error class (pydantic ValidationError), same affected ticker patterns (ITFW, ITFM, ATPChallenger).
+
+Initial hypothesis was a second unguarded MatchResult construction site. An exhaustive code-site audit of all 6 `candidate_fixtures=` constructions across `resolver/` showed none should produce None per the matcher's `_SideMatch` invariants and `CandidateTeam.team_id` non-Optional typing. The audit-says-safe-but-observation-says-crash mismatch was the signal to test environmental causes.
+
+**Resolution:** `find resolver -name "__pycache__" -exec rm -rf {} +` followed by re-running `--limit 500` against the same production data — crash count dropped from 30 to 0 with no other change. The local Python had been loading stale compiled bytecode from a previous run.
+
+**Pattern C** captured in `docs/bootstraps/kbl-2025-26.md` (commit `1dfcbd4` on PR #167's branch). Cost-asymmetry pinned: environmental diagnosis ~30 seconds; code-site diagnosis multiple message exchanges + potential wrong-site patches. **Always test environmental causes (pyc, venv, deploy) before code causes when the bug shape is "audit says one thing, observation says another."**
+
+Issue #172 filed for the complementary script-side process improvement: stderr warning + docstring guidance in `scripts/run_resolver_pass.py` for `--run-mode standalone` invocations.
+
+### Phase 2 priority order — Track A regains #1 priority
+
+Yesterday's PROJECT_STATE 2026-05-18 entry proposed inserting Track Z (Tennis crash containment) above Track A measurement infrastructure if the Tennis crash were still active. **Track Z's work is done.** PR #171 verified, production deploy clean, tonight's 02:15 UTC scheduled Kalshi cron will run cleanly.
+
+**Priority order back to yesterday's framing:**
+
+- **Track A (top priority):** Measurement infrastructure (daily diff, test corpus, re-resolution loop scope). Tomorrow morning's Phase 2 planning starts here.
+- **Track B (informed by Track A):** Resolver tuning.
+- **Track C (alongside Track B):** Coverage expansion (KBL pilot done; Handball next).
+- **Track D (parked):** Issue #162 β NULL-kickoff (34 records, low urgency).
+
+Track A is more urgent than yesterday's framing suggested because of two findings from today that are independent of the Tennis crash:
+- **0% auto-apply rate** observed in two separate 500-record post-fix samples. Cannot be explained by Tennis crashes (which are resolved). Independent Phase 2 puzzle.
+- **34% signal_extraction_skipped** observed in the same 500-record sample. Upstream of matching entirely — half the records can't even produce a FixtureSignal. Track A diff infrastructure measuring matching quality on un-extracted records would be measuring noise.
+
+### v1.5 architecture-doc amendment pile (now 4 items)
+
+The pile, ordered by emergence:
+
+1. **Neon migration (§10.1 + §11.2 + §14)** — production runs on Neon Launch plan; architecture doc still says "Postgres provider — Railway-managed (Phase 0–1) → Neon evaluation at end of Phase 1." Doc-drift from Phase 1 evaluation outcome.
+2. **§7.4 corroboration model (binary vs accumulating per-provider)** — code implements binary boolean has_corroboration with fixed +0.30/+0.20 bonus; doc describes "+0.05 per additional provider agreeing." Reconcile (either implement the doc behavior or update the doc to match code).
+3. **§6.5 archival job status (#164)** — job never shipped; storage growth unbounded. Either implement (Track A prerequisite per Issue #164's lean) or document as deferred-to-Phase-X with explicit deferral rationale.
+4. **§7.7 cadence (daily cron vs continuous 5-10 min loop)** — code implements daily cron only (FL 02:00, Kalshi 02:15 per railway.toml); doc describes continuous 5-10 min loop. Reserved `live` mode in run_resolver_pass.py:151-152 marks where it would live; Phase 2E.
+5. **NEW (today): audit-stream separation for operator approvals (Finding 3 above)** — document that `sp.resolution_log` captures resolver-side decisions only; `sp.review_queue.status` captures operator-side decisions; both are intentional but the asymmetry is non-obvious for analytics work.
+6. **NEW (today): review_queue routing on fixture-construction failure (Finding 2 above)** — document the third routing shape distinct from collision + asymmetric: "teams identified but fixture not yet constructible." Whether this is intentional or emergent behavior is itself a v1.5 question.
+
+Plus the two from yesterday's 2026-05-18 entry (Phase 5 preservation steps + Neon migration § cited there).
+
+### Deferred cleanups
+
+- **Test constants `_BASEBALL_SPORT_ID = 3` / `_BASKETBALL_SPORT_ID = 7` in `tests/test_phase_2d5_asymmetric_routing.py`** (PR #161 era). Production has Basketball=3, not Baseball=3; the constant names mislead future readers. Lean: replace with obviously-synthetic values (`_TEAM_PATH_SPORT_ID = 901`, `_PERSONAL_PATH_SPORT_ID = 902`). Fix during whatever test file gets touched next adjacent to these constants. Not blocking, not an Issue.
+
+### Issues filed today
+
+- **#164** — §6.5 archival job not implemented; storage growth unbounded
+- **#165** — KBL Hangul follow-up for remaining 7 teams (filed alongside PR #166)
+- **#168** — Resolver pydantic ValidationError on KXITFWMATCH-26MAY19FERBAR. Initial isolated-record framing. **Closed as duplicate of #170** after the 10K-pass evening session revealed the systemic shape.
+- **#170 (P1)** — Systemic Tennis resolver ValidationError, `candidate_fixtures[0] is None`, crashed every pass. **Closed by PR #171** (defensive guard at the asymmetric branch).
+- **#172** — `run_resolver_pass.py --run-mode standalone` should add stderr warning + docstring guidance about clearing `__pycache__` before invocation. Captures the script-side complement to Pattern C's operator-side discipline.
+
+### PR state at end of session
+
+- **PR #166** — KBL bootstrap (Phase 2C). Merged at 23dc495 / 15:38 UTC. Apply attempt at 15:50 UTC landed on wrong Neon branch (`bootstrap-test`); production-re-applied on 2026-05-20 after wrong-endpoint discovery. See Pattern D + day-20 entry.
+- **PR #167** — Docs follow-up for KBL methodology. Patterns A + B initially; Pattern C added at commit `1dfcbd4` (stale-bytecode diagnostic discipline) during today's late-evening cycle. Open.
+- **PR #169 (DRAFT)** — This 2026-05-19 PROJECT_STATE entry. Reframed to scenario-A after `--limit 500` post-`__pycache__`-clear confirmed PR #171's fix is correct as-is.
+- **PR #171** — Tennis ValidationError guard. Merged + Railway-auto-deployed + verified via `--limit 500` (crashes=0). Closes #170.
+- **PR for 2026-05-18 PROJECT_STATE entries** — branch `claude/project-state-2026-05-18-phase5-decision` carries 4 commits (α queue-depth finding, priority reorder, Phase 5 preservation, Phase 5 tag pin). No PR opened yet.
+
+### Pending — operator-side, tomorrow morning
+
+1. **KBL queue-depth verification (this morning's deferred test).** Run `SELECT COUNT(*) FROM sp.review_queue WHERE provider_record_id LIKE 'KXKBL%' AND status='pending';`. Three scenarios documented in the KBL bootstrap section drive Phase 2 next-priority interpretation. Result is informative regardless of which scenario lands.
+2. **Tonight's 02:15 UTC Kalshi cron health check.** Pull `sp.resolver_runs` row. Verify `crashes` is at or near zero — confirms PR #171's fix landed in production cleanly (the locally-verified `crashes=0` was against production DB, but tonight's cron is the empirical real-cron-pass confirmation). Optionally count new `fail_reason="fuzzy_collision_no_anchor"` rows in `sp.resolution_log` for the previously-crashing population now routing cleanly.
+3. **Track A start.** Daily-diff infrastructure scope doc cycle. The 0% auto-apply rate finding + 34% signal_extraction_skipped finding both need Track A measurement infrastructure to characterize cleanly.
+4. **Review PR #167** (docs follow-up; now includes Pattern C) and merge if approved.
+5. **Review PR #169** (this PROJECT_STATE entry) and merge if approved.
+6. **Investigate `resolver-cron-fl` deploy failure at b1a46867** (Railway). Surfaced during today's late-evening Railway dashboard exploration. Doesn't affect tonight's Kalshi cron — separate service. Tomorrow when fresh.
+6. **Decide ordering** of 2026-05-18 PROJECT_STATE PR open vs #169 merge — file header conflict possible if both merge separately.
+
+---
+
 ## Session — 2026-05-17
 
 ### Phase 2F.1.5 day-7 retrospective + 2D.4 three-tier resolver review
