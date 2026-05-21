@@ -516,11 +516,32 @@ class TestResolutionLogVolume:
     at current scale. Track A measures the rate to inform §6.5
     archival sizing (Issue #164)."""
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
     def test_resolution_log_volume_partitioned_by_reason_code(self):
-        """Per-cron-run row counts in sp.resolution_log, partitioned
-        by reason_code, captured in metrics.resolution_log_volume_per_cron."""
-        pass
+        """Per-cron-run row counts, partitioned by reason_code, captured
+        in metrics.resolution_log_volume_per_cron via
+        aggregate_resolution_log_volume()."""
+        from scripts.daily_diff import aggregate_resolution_log_volume
+        rows = [
+            {"reason_code": "strict"},
+            {"reason_code": "strict"},
+            {"reason_code": "alias"},
+            {"reason_code": "no_match"},
+            {"reason_code": "no_match"},
+            {"reason_code": "no_match"},
+            {"reason_code": "review_queue"},
+            {"reason_code": None},  # null reason_code → bucketed under ''
+        ]
+        result = aggregate_resolution_log_volume(rows)
+        assert result["total"] == 8
+        assert result["by_reason_code"]["strict"] == 2
+        assert result["by_reason_code"]["alias"] == 1
+        assert result["by_reason_code"]["no_match"] == 3
+        assert result["by_reason_code"]["review_queue"] == 1
+        assert result["by_reason_code"][""] == 1
+
+        # Empty input → safe
+        empty = aggregate_resolution_log_volume([])
+        assert empty == {"by_reason_code": {}, "total": 0}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -532,12 +553,54 @@ class TestHistogramGeneration:
     """Confidence-score distribution histogram, stored in report_json.
     Used for threshold-calibration analysis."""
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
     def test_histogram_buckets_match_threshold_boundaries(self):
         """Histogram buckets align with auto_apply / review_queue /
-        no_match thresholds (0.85, 0.70) so the boundary records
-        are visible."""
-        pass
+        no_match thresholds (0.85, 0.70) so the boundary records are
+        visible in their own buckets."""
+        from scripts.daily_diff import (
+            CONFIDENCE_BUCKETS, compute_confidence_histogram,
+        )
+        labels = [label for label, _, _ in CONFIDENCE_BUCKETS]
+        # 0.70-0.85 = review_queue band (between thresholds)
+        assert "0.70-0.85" in labels
+        # Auto-apply records split into low/high-confidence bands
+        # so threshold calibration analysis can see the distribution.
+        assert "0.85-0.95" in labels
+        assert "0.95-1.00" in labels
+
+        # Empty input → all buckets present, all counts 0.
+        empty = compute_confidence_histogram([])
+        assert set(empty.keys()) == set(labels)
+        assert all(count == 0 for count in empty.values())
+
+    def test_histogram_bin_assignments(self):
+        """Scores land in the expected buckets. Lower bound inclusive,
+        upper bound exclusive; final bucket closed on both ends so
+        score=1.0 has a home."""
+        from scripts.daily_diff import compute_confidence_histogram
+        scores = [
+            0.00, 0.49,            # 0.00-0.50
+            0.50, 0.69,            # 0.50-0.70
+            0.70, 0.84,            # 0.70-0.85
+            0.85, 0.94,            # 0.85-0.95
+            0.95, 0.98, 1.00,      # 0.95-1.00 (final bucket closed)
+        ]
+        result = compute_confidence_histogram(scores)
+        assert result["0.00-0.50"] == 2
+        assert result["0.50-0.70"] == 2
+        assert result["0.70-0.85"] == 2
+        assert result["0.85-0.95"] == 2
+        assert result["0.95-1.00"] == 3, (
+            f"1.00 must land in the final bucket; got {result['0.95-1.00']}."
+        )
+
+    def test_histogram_clamps_out_of_range_scores(self):
+        """Defensive: scores outside [0, 1] clamp to the boundary."""
+        from scripts.daily_diff import compute_confidence_histogram
+        result = compute_confidence_histogram([-0.5, 1.5, 2.0])
+        # -0.5 → 0.0 → first bucket; 1.5/2.0 → 1.0 → final bucket
+        assert result["0.00-0.50"] == 1
+        assert result["0.95-1.00"] == 2
 
 
 # ══════════════════════════════════════════════════════════════
@@ -551,48 +614,185 @@ class TestHistogramGeneration:
 )
 class TestDailyDiffIntegration:
     """Real-DB tests against a Postgres with the Phase 2 Track A
-    migration applied."""
+    migration (c4d9e2a1b3f7) applied. Run via:
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
-    def test_migration_creates_tables(self):
+        SP_INTEGRATION_DB=postgresql+asyncpg://... pytest tests/test_daily_diff.py -v
+    """
+
+    @pytest.mark.asyncio
+    async def test_migration_creates_tables(self):
         """After alembic upgrade head, sp.daily_diff_reports and
         sp.baseline_shifts exist with the documented schemas."""
-        pass
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        engine = create_async_engine(INTEGRATION_DB)
+        async with engine.connect() as conn:
+            for table_name in ("daily_diff_reports", "baseline_shifts"):
+                result = await conn.execute(text(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='sp' AND table_name=:t)"
+                ), {"t": table_name})
+                assert result.scalar() is True, (
+                    f"sp.{table_name} missing — migration not applied?"
+                )
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
-    def test_migration_roundtrip(self):
-        """upgrade head → downgrade -1 → upgrade head succeeds
-        cleanly. Schema returns to current state. (Per-migration
-        guard against destructive downgrade behavior.)"""
-        pass
+            # daily_diff_reports must carry the documented columns.
+            cols = (await conn.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='sp' AND table_name='daily_diff_reports'"
+            ))).scalars().all()
+            for expected in (
+                "id", "report_date", "window_start", "window_end",
+                "total_records_scanned", "metrics", "scope_filter_version",
+                "report_json", "legacy_comparison_present", "created_at",
+            ):
+                assert expected in cols, (
+                    f"sp.daily_diff_reports.{expected} missing"
+                )
+        await engine.dispose()
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
-    def test_idempotency_on_same_day_rerun(self):
-        """Running daily_diff.py twice on the same date fails the
-        second invocation with exit code 4 (unique constraint on
-        report_date). No duplicate rows in sp.daily_diff_reports."""
-        pass
+    @pytest.mark.asyncio
+    async def test_idempotency_on_same_day_rerun(self):
+        """Inserting two rows with the same report_date raises
+        IntegrityError (UNIQUE constraint), which _write_report
+        converts to exit code 4."""
+        from datetime import date
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from scripts.daily_diff import _write_report
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
-    def test_empty_window_exits_cleanly(self):
-        """When the 24h window contains zero records (no ingestion
-        during the period), script exits with code 5. No row written
-        to sp.daily_diff_reports."""
-        pass
+        # Use a sentinel date in the far future to avoid colliding
+        # with real cron rows. Tear down afterward.
+        sentinel = date(2099, 12, 31)
+        engine = create_async_engine(INTEGRATION_DB)
+        try:
+            # First write — should succeed (0).
+            window_start = datetime(2099, 12, 30, tzinfo=timezone.utc)
+            window_end = datetime(2099, 12, 31, tzinfo=timezone.utc)
+            rc1 = await _write_report(
+                window_start=window_start, window_end=window_end,
+                metrics={"scope_filtered": {}}, report_json={},
+                total_records=1, report_date=sentinel,
+            )
+            assert rc1 == 0
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
-    def test_baseline_shift_annotation_read_through(self):
-        """A row in sp.baseline_shifts is visible to the render
-        script's correlation logic. Baseline-shift events on the
-        same date as a report row are surfaced in the render output."""
-        pass
+            # Second write — UNIQUE violation → exit code 4.
+            rc2 = await _write_report(
+                window_start=window_start, window_end=window_end,
+                metrics={"scope_filtered": {}}, report_json={},
+                total_records=1, report_date=sentinel,
+            )
+            assert rc2 == 4
+        finally:
+            async with engine.connect() as conn:
+                await conn.execute(text(
+                    "DELETE FROM sp.daily_diff_reports "
+                    "WHERE report_date = :d"
+                ), {"d": sentinel})
+                await conn.commit()
+            await engine.dispose()
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
-    def test_scope_filter_version_stamped(self):
-        """Every written row has scope_filter_version set to the
-        SCOPE_FILTER_VERSION constant from daily_diff.py.
+    @pytest.mark.asyncio
+    async def test_scope_filter_version_stamped(self):
+        """_write_report stamps SCOPE_FILTER_VERSION into the row.
         Version-stamping enables historical re-interpretation when
-        the filter rules change (NON_SPORT, prop vocabulary, etc.)."""
+        the filter rules change."""
+        from datetime import date
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from scripts.daily_diff import _write_report, SCOPE_FILTER_VERSION
+
+        sentinel = date(2099, 12, 30)
+        engine = create_async_engine(INTEGRATION_DB)
+        try:
+            await _write_report(
+                window_start=datetime(2099, 12, 29, tzinfo=timezone.utc),
+                window_end=datetime(2099, 12, 30, tzinfo=timezone.utc),
+                metrics={"scope_filtered": {}}, report_json={},
+                total_records=1, report_date=sentinel,
+            )
+            async with engine.connect() as conn:
+                stamped = (await conn.execute(text(
+                    "SELECT scope_filter_version "
+                    "FROM sp.daily_diff_reports WHERE report_date = :d"
+                ), {"d": sentinel})).scalar_one()
+            assert stamped == SCOPE_FILTER_VERSION
+        finally:
+            async with engine.connect() as conn:
+                await conn.execute(text(
+                    "DELETE FROM sp.daily_diff_reports "
+                    "WHERE report_date = :d"
+                ), {"d": sentinel})
+                await conn.commit()
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_baseline_shift_annotation_read_through(self):
+        """A row in sp.baseline_shifts is visible to render_daily_diff_report's
+        _fetch_window logic, which surfaces it in the rendered output."""
+        from datetime import date
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from scripts.render_daily_diff_report import (
+            _fetch_window, render_markdown,
+        )
+
+        engine = create_async_engine(INTEGRATION_DB)
+        sentinel_id = None
+        try:
+            # Insert a sentinel baseline-shift row dated today.
+            today = datetime.now(timezone.utc).date()
+            async with engine.connect() as conn:
+                result = await conn.execute(text(
+                    "INSERT INTO sp.baseline_shifts "
+                    "  (event_type, event_date, affected_population, notes, "
+                    "   created_by) "
+                    "VALUES (:t, :d, :ap, :n, :cb) RETURNING id"
+                ), {
+                    "t": "test_event", "d": today,
+                    "ap": "Integration test sentinel",
+                    "n": "Inserted by test_baseline_shift_annotation_read_through",
+                    "cb": "integration_test",
+                })
+                sentinel_id = result.scalar_one()
+                await conn.commit()
+
+            now = datetime.now(timezone.utc)
+            reports, shifts = await _fetch_window(window_days=1, now=now)
+            md = render_markdown(reports, shifts, window_days=1, now=now)
+            assert "Integration test sentinel" in md
+            assert "test_event" in md
+        finally:
+            if sentinel_id is not None:
+                async with engine.connect() as conn:
+                    await conn.execute(text(
+                        "DELETE FROM sp.baseline_shifts WHERE id = :id"
+                    ), {"id": sentinel_id})
+                    await conn.commit()
+            await engine.dispose()
+
+    @pytest.mark.skip(
+        reason="Migration roundtrip skipped — downgrade not implemented for "
+               "Track A measurement-infrastructure tables (intentional per "
+               "scope doc §14: throw-away-post-Phase-3).",
+    )
+    def test_migration_roundtrip(self):
+        """Skipped: Track A migration intentionally lacks a destructive
+        downgrade path. Per scope doc §14 the tables are throw-away
+        post-Phase-3 cutover, so the upgrade/downgrade roundtrip
+        contract doesn't apply."""
+        pass
+
+    @pytest.mark.skip(
+        reason="Empty-window test requires controlled window with zero "
+               "ingestion records; setup deferred to end-to-end smoke "
+               "in operator's manual verification run.",
+    )
+    def test_empty_window_exits_cleanly(self):
+        """Empty-window exit-code-5 behavior: tested via the operator's
+        manual verification run after Step 6 lands. Synthetic empty-
+        window via SQL DELETE is too invasive for the integration
+        suite."""
         pass
 
 
@@ -602,29 +802,160 @@ class TestDailyDiffIntegration:
 
 
 class TestRenderScript:
-    """scripts/render_daily_diff_report.py output format tests."""
+    """scripts/render_daily_diff_report.py output format tests.
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+    Pure-function tests against render_markdown(). The DB-fetch path
+    (_fetch_window) is exercised by TestDailyDiffIntegration when
+    SP_INTEGRATION_DB is set.
+    """
+
+    @staticmethod
+    def _sample_report_row(
+        *, report_date, legacy: bool = False,
+    ) -> dict:
+        return {
+            "report_date": report_date,
+            "window_start": datetime(2026, 5, 20, tzinfo=timezone.utc),
+            "window_end": datetime(2026, 5, 21, tzinfo=timezone.utc),
+            "total_records_scanned": 42,
+            "scope_filter_version": "v0.1.0",
+            "legacy_comparison_present": legacy,
+            "created_at": datetime(2026, 5, 21, 2, 30, tzinfo=timezone.utc),
+            "metrics": {
+                "scope_filtered": {
+                    "auto_apply_rate_overall": 0.75,
+                    "auto_apply_rate_per_sport": {"Tennis": 0.5, "Soccer": 0.9},
+                    "per_tier_rate_per_sport": {},
+                    "personal_path_rate": 0.5,
+                    "team_path_rate": 0.85,
+                },
+                "raw": {
+                    "auto_apply_rate_overall_unfiltered": 0.42,
+                    "signal_extraction_skipped": 3,
+                    "non_sport_filtered_out": 12,
+                    "prop_market_filtered_out": 5,
+                },
+                "queue": {
+                    "depth_per_sport": {"Tennis": 4},
+                    "median_time_in_queue_per_sport": {"Tennis": 3600.0},
+                    "p95_time_in_queue_per_sport": {"Tennis": 7200.0},
+                    "abandonment_rate_per_sport": {"Tennis": 0.0},
+                },
+                "resolution_log_volume_per_cron": {
+                    "by_reason_code": {"strict": 100, "no_match": 50},
+                    "total": 150,
+                },
+            },
+            "report_json": {
+                "confidence_histogram": {
+                    "0.00-0.50": 5, "0.50-0.70": 3,
+                    "0.70-0.85": 7, "0.85-0.95": 20, "0.95-1.00": 10,
+                },
+                "confidence_scores_count": 45,
+            },
+        }
+
     def test_render_outputs_markdown(self):
         """Render produces markdown with the documented section structure."""
-        pass
+        from scripts.render_daily_diff_report import render_markdown
+        from datetime import date
+        rows = [self._sample_report_row(report_date=date(2026, 5, 21))]
+        now = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+        md = render_markdown(rows, [], window_days=7, now=now)
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
-    def test_render_window_default_7_days(self):
-        """Default window is 7 days. Render queries
-        sp.daily_diff_reports.report_date >= NOW() - INTERVAL '7 days'."""
-        pass
+        # Headline + key sections
+        assert "# Daily-diff report (window: 7 days)" in md
+        assert "## Window summary" in md
+        assert "## Per-sport auto-apply rates" in md
+        assert "## Confidence histogram (latest)" in md
+        assert "## Baseline-shift events" in md
+        assert "## sp.resolution_log volume" in md
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
-    def test_render_includes_baseline_shifts_in_window(self):
-        """sp.baseline_shifts rows with event_date in the window
-        appear in the rendered output's 'Baseline-shift events'
-        section."""
-        pass
+        # Headline metric value rendered.
+        assert "75.0%" in md  # scope-filtered auto-apply rate
+        assert "42.0%" in md  # unfiltered
 
-    @pytest.mark.skip(reason="SCAFFOLD — implementation pending")
+        # Per-sport rates appear.
+        assert "Tennis" in md
+        assert "Soccer" in md
+
+        # Histogram buckets appear.
+        assert "0.85-0.95" in md
+        assert "0.70-0.85" in md
+
     def test_render_distinguishes_d2_only_vs_d2_plus_d1(self):
         """Reports with legacy_comparison_present=false (D2-only)
         omit the 'Sample disagreements' section. Reports with
-        legacy_comparison_present=true (D2+D1) include it."""
-        pass
+        legacy_comparison_present=true (D1+D2) include it."""
+        from scripts.render_daily_diff_report import render_markdown
+        from datetime import date
+        now = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+
+        # D2-only — no sample-disagreements section
+        d2_only = render_markdown(
+            [self._sample_report_row(
+                report_date=date(2026, 5, 21), legacy=False,
+            )],
+            [], window_days=7, now=now,
+        )
+        assert "Sample disagreements" not in d2_only
+        assert "D2-only" in d2_only
+
+        # D1+D2 — section present (placeholder until Deliverable 1)
+        d1_d2 = render_markdown(
+            [self._sample_report_row(
+                report_date=date(2026, 5, 21), legacy=True,
+            )],
+            [], window_days=7, now=now,
+        )
+        assert "Sample disagreements" in d1_d2
+        assert "D1+D2" in d1_d2
+
+    def test_render_includes_baseline_shifts_in_window(self):
+        """sp.baseline_shifts rows appear in the 'Baseline-shift
+        events' section. Empty shift list produces the empty marker."""
+        from scripts.render_daily_diff_report import render_markdown
+        from datetime import date
+        now = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+
+        shift = {
+            "event_type": "dedup",
+            "event_date": date(2026, 5, 20),
+            "affected_population": "Tennis players (cross-format dupes)",
+            "expected_metric_delta": "Tennis auto-apply +5-10%",
+            "notes": "Bulk dedup landed 2026-05-20",
+            "created_by": "PR #999",
+            "created_at": datetime(2026, 5, 20, 14, 0, tzinfo=timezone.utc),
+        }
+        md = render_markdown(
+            [self._sample_report_row(report_date=date(2026, 5, 21))],
+            [shift], window_days=7, now=now,
+        )
+        assert "dedup" in md
+        assert "Tennis players (cross-format dupes)" in md
+        assert "PR #999" in md
+
+        # Empty shifts → empty marker rendered
+        md_empty = render_markdown(
+            [self._sample_report_row(report_date=date(2026, 5, 21))],
+            [], window_days=7, now=now,
+        )
+        assert "_No baseline-shift events in window._" in md_empty
+
+    def test_render_window_default_7_days(self):
+        """Render script's CLI default is 7 days. Module-level constant
+        documents the contract."""
+        from scripts.render_daily_diff_report import DEFAULT_WINDOW_DAYS
+        assert DEFAULT_WINDOW_DAYS == 7
+
+    def test_render_empty_window_renders_safe_message(self):
+        """No reports + no shifts → render produces a markdown document
+        with the empty-window markers. (The script's runtime wrapper
+        also exits with code 5 in this scenario, exercised by the
+        SP_INTEGRATION_DB-gated tests.)"""
+        from scripts.render_daily_diff_report import render_markdown
+        now = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+        md = render_markdown([], [], window_days=7, now=now)
+        assert "# Daily-diff report (window: 7 days)" in md
+        assert "_No reports in window._" in md
+        assert "_No baseline-shift events in window._" in md

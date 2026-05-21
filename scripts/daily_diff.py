@@ -263,6 +263,54 @@ PER_TIER_BUCKETS: tuple[str, ...] = (
 DEFAULT_ABANDONMENT_DAYS: int = 14
 
 
+# Confidence-score histogram bucket boundaries.
+#
+# Aligned to the resolver's auto_apply (0.85) and review_queue (0.70)
+# thresholds so the boundary records are visible in their own buckets:
+#   [0.00, 0.50)  — clear miss territory
+#   [0.50, 0.70)  — near-miss but below review_queue floor
+#   [0.70, 0.85)  — currently routed to review_queue
+#   [0.85, 0.95)  — auto-applied, low-confidence end
+#   [0.95, 1.00]  — auto-applied, high-confidence (strict + corroboration)
+#
+# Bucket labels match the lower bound. The render script + threshold-
+# calibration analysis read these labels directly; renaming requires a
+# scope_filter_version bump.
+CONFIDENCE_BUCKETS: tuple[tuple[str, float, float], ...] = (
+    ("0.00-0.50", 0.00, 0.50),
+    ("0.50-0.70", 0.50, 0.70),
+    ("0.70-0.85", 0.70, 0.85),  # review_queue band
+    ("0.85-0.95", 0.85, 0.95),  # auto-apply low-confidence band
+    ("0.95-1.00", 0.95, 1.00),  # auto-apply high-confidence band
+)
+
+
+def compute_confidence_histogram(scores: Iterable[float]) -> dict[str, int]:
+    """Bin a sequence of confidence scores into the CONFIDENCE_BUCKETS.
+
+    Pure function. Returns a dict of {bucket_label: count}. All buckets
+    appear in the result even when their count is zero — the render
+    script renders a complete profile rather than a sparse one.
+
+    Scores outside [0, 1] are silently clamped to the bucket boundary
+    (defensive against floating-point drift); a score exactly 1.0 lands
+    in the final bucket via the half-open lower-bound semantic.
+    """
+    counts: dict[str, int] = {label: 0 for label, _, _ in CONFIDENCE_BUCKETS}
+    for raw_score in scores:
+        score = max(0.0, min(1.0, float(raw_score)))
+        for label, lo, hi in CONFIDENCE_BUCKETS:
+            # Final bucket is closed on the right; others half-open.
+            if label == CONFIDENCE_BUCKETS[-1][0]:
+                if lo <= score <= hi:
+                    counts[label] += 1
+                    break
+            elif lo <= score < hi:
+                counts[label] += 1
+                break
+    return counts
+
+
 def _safe_rate(numerator: int, denominator: int) -> float:
     """Division that returns 0.0 when the denominator is zero.
 
@@ -708,6 +756,7 @@ async def _resolve_record(
     return {
         "reason_code": final.reason_code.value,
         "reason_detail": detail,
+        "confidence": float(final.confidence),
     }
 
 
@@ -823,6 +872,7 @@ async def _measure(
     # doesn't poison subsequent reads (mirrors run_resolver_pass.py's
     # 2D.3.1 per-record transaction discipline).
     scope_aggregator_rows: list[dict] = []
+    confidence_scores: list[float] = []
     non_sport = 0
     prop_market = 0
     signal_skipped = 0
@@ -853,6 +903,8 @@ async def _measure(
             if rc in _AUTO_APPLY_REASON_CODES:
                 overall_auto_apply += 1
             scope_aggregator_rows.append(resolved)
+            if "confidence" in resolved:
+                confidence_scores.append(resolved["confidence"])
 
         for row in fl_rows:
             overall_records += 1
@@ -878,6 +930,8 @@ async def _measure(
             if rc in _AUTO_APPLY_REASON_CODES:
                 overall_auto_apply += 1
             scope_aggregator_rows.append(resolved)
+            if "confidence" in resolved:
+                confidence_scores.append(resolved["confidence"])
 
     # ── Step 3: aggregate via pure functions ──
     scope_filtered = aggregate_per_sport_metrics(scope_aggregator_rows)
@@ -909,13 +963,22 @@ async def _measure(
         "queue": queue_metrics,
         "resolution_log_volume_per_cron": log_volume,
     }
-    return metrics, overall_records
+
+    # report_json carries non-metric supplementary data: confidence
+    # histogram (for threshold-calibration analysis), placeholder for
+    # Deliverable-1's sample disagreements + legacy comparison.
+    report_json = {
+        "confidence_histogram": compute_confidence_histogram(confidence_scores),
+        "confidence_scores_count": len(confidence_scores),
+    }
+    return metrics, report_json, overall_records
 
 
 async def _write_report(
     window_start: datetime,
     window_end: datetime,
     metrics: dict,
+    report_json: dict,
     total_records: int,
     report_date,
 ) -> int:
@@ -952,7 +1015,7 @@ async def _write_report(
                     "total": total_records,
                     "metrics": json.dumps(metrics),
                     "scope_filter_version": SCOPE_FILTER_VERSION,
-                    "report_json": json.dumps({}),
+                    "report_json": json.dumps(report_json),
                     "legacy_present": False,
                 })
         except IntegrityError:
@@ -996,7 +1059,7 @@ async def daily_diff(
     )
 
     # Measurement pass.
-    metrics, total_records = await _measure(window_start, window_end)
+    metrics, report_json, total_records = await _measure(window_start, window_end)
 
     # Empty window — surface as exit code 5 per the docstring contract.
     # Caller is the Railway cron; an empty window means upstream
@@ -1020,6 +1083,7 @@ async def daily_diff(
         window_start=window_start,
         window_end=window_end,
         metrics=metrics,
+        report_json=report_json,
         total_records=total_records,
         report_date=window_end.date(),
     )
