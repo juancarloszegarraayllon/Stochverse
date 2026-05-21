@@ -113,7 +113,7 @@ The pile, ordered by emergence:
 
 ### Issues filed today
 
-- **Orphan review_queue rows pattern** — to be filed this session, body carrying the measured numbers (36 Kalshi orphans / 0.8% of Kalshi pending; 0 FL orphans; 0.4% total orphan rate across both providers). Framed as data-integrity hygiene, not measurement-blocking. Issue # added here when filing completes.
+- **#178** — Orphan `sp.review_queue` rows when subsequent cron pass auto-applies. Body carries measured numbers (36 Kalshi orphans / 0.8% of Kalshi pending; 0 FL orphans; 0.4% total orphan rate). Framed as data-integrity hygiene, not measurement-blocking. Track D parked; fix-shape decision committed (Option 1 — runner-side cleanup ~10 LOC). Implementation scheduled after Track A Deliverable 2 ships.
 
 ### PR state at end-of-session-so-far
 
