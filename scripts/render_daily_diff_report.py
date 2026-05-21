@@ -89,43 +89,60 @@ def render_markdown(
         out.append("")
     else:
         out.append(
-            "| Report date | Records | Auto-apply (scope-filtered) "
-            "| Auto-apply (unfiltered) | Scope filter version | Mode |"
+            "| Report date | Records | Matcher capability "
+            "(scope-filtered) | Matcher capability (unfiltered) "
+            "| Team-path | Personal-path | Scope filter version | Mode |"
         )
-        out.append("|---|---:|---:|---:|---|---|")
+        out.append("|---|---:|---:|---:|---:|---:|---|---|")
         for r in report_rows:
             metrics = r.get("metrics") or {}
             scope = metrics.get("scope_filtered", {})
             raw = metrics.get("raw", {})
             mode = "D1+D2" if r.get("legacy_comparison_present") else "D2-only"
+            # v0.2.0 keys with v0.1.0 fallback so historical rows still
+            # render. SCOPE_FILTER_VERSION version log documents the
+            # rename. Pre-v0.2.0 rows used auto_apply_rate_* names.
+            scoped_rate = scope.get(
+                "matcher_capability_rate_overall",
+                scope.get("auto_apply_rate_overall", 0.0),
+            )
+            unfiltered_rate = raw.get(
+                "matcher_capability_rate_overall_unfiltered",
+                raw.get("auto_apply_rate_overall_unfiltered", 0.0),
+            )
+            team_rate = scope.get("team_path_rate", 0.0)
+            personal_rate = scope.get("personal_path_rate", 0.0)
             out.append(
                 f"| {r['report_date']} "
                 f"| {r['total_records_scanned']} "
-                f"| {scope.get('auto_apply_rate_overall', 0.0):.1%} "
-                f"| {raw.get('auto_apply_rate_overall_unfiltered', 0.0):.1%} "
+                f"| {scoped_rate:.1%} "
+                f"| {unfiltered_rate:.1%} "
+                f"| {team_rate:.1%} "
+                f"| {personal_rate:.1%} "
                 f"| {r.get('scope_filter_version', '?')} "
                 f"| {mode} |"
             )
         out.append("")
 
-    # ── Per-sport auto-apply rates (latest only) ──
-    out.append("## Per-sport auto-apply rates (latest)")
+    # ── Per-sport matcher-capability rates (latest only) ──
+    out.append("## Per-sport matcher-capability rates (latest)")
     out.append("")
     if not report_rows:
         out.append("_No data._")
         out.append("")
     else:
         latest = report_rows[0]
-        per_sport = (
-            (latest.get("metrics") or {})
-            .get("scope_filtered", {})
-            .get("auto_apply_rate_per_sport", {})
+        scope_latest = (latest.get("metrics") or {}).get("scope_filtered", {})
+        # v0.2.0 key with v0.1.0 fallback for historical rows.
+        per_sport = scope_latest.get(
+            "matcher_capability_rate_per_sport",
+            scope_latest.get("auto_apply_rate_per_sport", {}),
         )
         if not per_sport:
             out.append("_No per-sport data in latest report._")
             out.append("")
         else:
-            out.append("| Sport | Auto-apply rate |")
+            out.append("| Sport | Matcher capability |")
             out.append("|---|---:|")
             for sport, rate in sorted(per_sport.items()):
                 label = sport or "(empty sport tag)"
@@ -142,7 +159,7 @@ def render_markdown(
         if personal is not None or team is not None:
             out.append("## Personal vs team path (latest)")
             out.append("")
-            out.append("| Path | Auto-apply rate |")
+            out.append("| Path | Matcher capability |")
             out.append("|---|---:|")
             out.append(f"| Personal (tennis/mma/boxing/golf/snooker/darts) "
                        f"| {personal or 0.0:.1%} |")

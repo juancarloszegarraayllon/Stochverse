@@ -347,11 +347,11 @@ class TestPerSportMetrics:
         result = aggregate_per_sport_metrics(rows)
 
         # Overall: 5 auto-apply / 8 total = 0.625
-        assert result["auto_apply_rate_overall"] == pytest.approx(0.625)
+        assert result["matcher_capability_rate_overall"] == pytest.approx(0.625)
 
         # Per-sport: tennis 2/4 = 0.5; Soccer 3/4 = 0.75
-        assert result["auto_apply_rate_per_sport"]["tennis"] == pytest.approx(0.5)
-        assert result["auto_apply_rate_per_sport"]["Soccer"] == pytest.approx(0.75)
+        assert result["matcher_capability_rate_per_sport"]["tennis"] == pytest.approx(0.5)
+        assert result["matcher_capability_rate_per_sport"]["Soccer"] == pytest.approx(0.75)
 
     def test_per_tier_resolution_rate_calculated(self):
         """strict / alias / fuzzy / no_match / review_queue / crash
@@ -381,7 +381,7 @@ class TestPerSportMetrics:
 
         # 'crash' rows must NOT count toward auto-apply.
         # 3 auto-apply (strict + alias + fuzzy) / 6 total = 0.5.
-        assert result["auto_apply_rate_per_sport"]["Baseball"] == pytest.approx(0.5)
+        assert result["matcher_capability_rate_per_sport"]["Baseball"] == pytest.approx(0.5)
 
     def test_personal_path_vs_team_path_distinction(self):
         """Aggregated by INDIVIDUAL_SPORT_CODES membership.
@@ -492,8 +492,8 @@ class TestPerSportMetrics:
         now = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
 
         per_sport = aggregate_per_sport_metrics([])
-        assert per_sport["auto_apply_rate_overall"] == 0.0
-        assert per_sport["auto_apply_rate_per_sport"] == {}
+        assert per_sport["matcher_capability_rate_overall"] == 0.0
+        assert per_sport["matcher_capability_rate_per_sport"] == {}
         assert per_sport["per_tier_rate_per_sport"] == {}
         assert per_sport["personal_path_rate"] == 0.0
         assert per_sport["team_path_rate"] == 0.0
@@ -823,14 +823,14 @@ class TestRenderScript:
             "created_at": datetime(2026, 5, 21, 2, 30, tzinfo=timezone.utc),
             "metrics": {
                 "scope_filtered": {
-                    "auto_apply_rate_overall": 0.75,
-                    "auto_apply_rate_per_sport": {"Tennis": 0.5, "Soccer": 0.9},
+                    "matcher_capability_rate_overall": 0.75,
+                    "matcher_capability_rate_per_sport": {"Tennis": 0.5, "Soccer": 0.9},
                     "per_tier_rate_per_sport": {},
                     "personal_path_rate": 0.5,
                     "team_path_rate": 0.85,
                 },
                 "raw": {
-                    "auto_apply_rate_overall_unfiltered": 0.42,
+                    "matcher_capability_rate_overall_unfiltered": 0.42,
                     "signal_extraction_skipped": 3,
                     "non_sport_filtered_out": 12,
                     "prop_market_filtered_out": 5,
@@ -866,14 +866,21 @@ class TestRenderScript:
         # Headline + key sections
         assert "# Daily-diff report (window: 7 days)" in md
         assert "## Window summary" in md
-        assert "## Per-sport auto-apply rates" in md
+        assert "## Per-sport matcher-capability rates" in md
         assert "## Confidence histogram (latest)" in md
         assert "## Baseline-shift events" in md
         assert "## sp.resolution_log volume" in md
 
         # Headline metric value rendered.
-        assert "75.0%" in md  # scope-filtered auto-apply rate
+        assert "75.0%" in md  # scope-filtered matcher-capability rate
         assert "42.0%" in md  # unfiltered
+
+        # Window-summary table includes Team-path + Personal-path columns
+        # (headline-promote per 2026-05-21 empirical findings).
+        assert "Team-path" in md
+        assert "Personal-path" in md
+        assert "85.0%" in md  # team_path_rate from fixture
+        assert "50.0%" in md  # personal_path_rate from fixture
 
         # Per-sport rates appear.
         assert "Tennis" in md
@@ -882,6 +889,41 @@ class TestRenderScript:
         # Histogram buckets appear.
         assert "0.85-0.95" in md
         assert "0.70-0.85" in md
+
+    def test_render_falls_back_to_v0_1_0_keys(self):
+        """Historical rows written under scope_filter_version v0.1.0
+        used auto_apply_rate_* key names. Render falls back so old
+        rows still display rather than rendering 0.0%."""
+        from scripts.render_daily_diff_report import render_markdown
+        from datetime import date
+        legacy_row = {
+            "report_date": date(2026, 5, 21),
+            "window_start": datetime(2026, 5, 20, tzinfo=timezone.utc),
+            "window_end": datetime(2026, 5, 21, tzinfo=timezone.utc),
+            "total_records_scanned": 17996,
+            "scope_filter_version": "v0.1.0",
+            "legacy_comparison_present": False,
+            "created_at": datetime(2026, 5, 21, 2, 30, tzinfo=timezone.utc),
+            "metrics": {
+                "scope_filtered": {
+                    "auto_apply_rate_overall": 0.484,
+                    "auto_apply_rate_per_sport": {"Soccer": 0.852},
+                    "personal_path_rate": 0.123,
+                    "team_path_rate": 0.702,
+                },
+                "raw": {"auto_apply_rate_overall_unfiltered": 0.279},
+            },
+            "report_json": {},
+        }
+        now = datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc)
+        md = render_markdown([legacy_row], [], window_days=7, now=now)
+        # v0.1.0 rates render via fallback path.
+        assert "48.4%" in md
+        assert "27.9%" in md
+        assert "70.2%" in md
+        assert "12.3%" in md
+        # Version stamp visible so reader knows which schema.
+        assert "v0.1.0" in md
 
     def test_render_distinguishes_d2_only_vs_d2_plus_d1(self):
         """Reports with legacy_comparison_present=false (D2-only)

@@ -111,10 +111,24 @@ from resolver.types import ReasonCode  # noqa: E402
 
 
 # Bumped when scope-filter rules change (NON_SPORT filter rule per
-# Issue #174, prop-market vocabulary additions per Issue #160, etc.).
-# Stamped into sp.daily_diff_reports.scope_filter_version so historical
-# reports can be re-interpreted post-rule-change.
-SCOPE_FILTER_VERSION = "v0.1.0"
+# Issue #174, prop-market vocabulary additions per Issue #160, etc.)
+# AND when the metrics-JSONB schema changes shape (key renames, new
+# top-level fields, etc.). Stamped into sp.daily_diff_reports.scope_filter_version
+# so historical readers can interpret old rows against the schema that
+# wrote them.
+#
+# Version log:
+#   v0.1.0 — initial schema (2026-05-21, commit 775a55a)
+#   v0.2.0 — rename auto_apply_rate_* → matcher_capability_rate_*
+#            (2026-05-21 post-empirical-validation, this commit). The
+#            metric measures what the matcher COULD auto-apply given
+#            today's records, distinct from the production cron's
+#            INCREMENTAL apply rate (newly-resolved records only).
+#            Per-record reason_codes (strict/alias/fuzzy as "auto-apply
+#            tiers") are unchanged — only the aggregate metric names
+#            move. v0.1.0 rows retain their original key names; readers
+#            dispatch on the version stamp.
+SCOPE_FILTER_VERSION = "v0.2.0"
 
 
 # ── Scope-filter classification constants ──────────────────────
@@ -392,8 +406,13 @@ def aggregate_per_sport_metrics(rows: Iterable[dict]) -> dict:
                 team_auto_apply += 1
 
     return {
-        "auto_apply_rate_overall": _safe_rate(auto_apply_total, total),
-        "auto_apply_rate_per_sport": {
+        # Renamed from auto_apply_rate_* in v0.2.0 — see SCOPE_FILTER_VERSION
+        # version log. The METRIC name now disambiguates from the
+        # production cron's incremental_apply_rate (newly-resolved records
+        # per pass). The underlying reason_codes (strict/alias/fuzzy as
+        # auto-apply tiers) are unchanged.
+        "matcher_capability_rate_overall": _safe_rate(auto_apply_total, total),
+        "matcher_capability_rate_per_sport": {
             sport: _safe_rate(
                 per_sport_auto_apply[sport], per_sport_total[sport]
             )
@@ -803,18 +822,19 @@ async def _measure(
     """Run the measurement pass against the window.
 
     Returns (metrics_dict, total_records_scanned). The metrics dict
-    matches the sp.daily_diff_reports.metrics JSONB column shape:
+    matches the sp.daily_diff_reports.metrics JSONB column shape
+    (v0.2.0 stamped via SCOPE_FILTER_VERSION):
 
     {
       "scope_filtered": {
-        "auto_apply_rate_overall": float,
-        "auto_apply_rate_per_sport": {sport: float, ...},
+        "matcher_capability_rate_overall": float,
+        "matcher_capability_rate_per_sport": {sport: float, ...},
         "per_tier_rate_per_sport": {sport: {bucket: int, ...}, ...},
         "personal_path_rate": float,
         "team_path_rate": float,
       },
       "raw": {
-        "auto_apply_rate_overall_unfiltered": float,
+        "matcher_capability_rate_overall_unfiltered": float,
         "signal_extraction_skipped": int,
         "non_sport_filtered_out": int,
         "prop_market_filtered_out": int,
@@ -952,8 +972,8 @@ async def _measure(
         "raw": {
             # Unfiltered = overall_auto_apply / all records (including
             # NON_SPORT + PROP_MARKET + signal_extraction_skipped).
-            # Scope_filtered.auto_apply_rate_overall excludes those.
-            "auto_apply_rate_overall_unfiltered": _safe_rate(
+            # scope_filtered.matcher_capability_rate_overall excludes those.
+            "matcher_capability_rate_overall_unfiltered": _safe_rate(
                 overall_auto_apply, overall_records,
             ),
             "signal_extraction_skipped": signal_skipped,
@@ -1099,7 +1119,9 @@ async def daily_diff(
         "daily_diff.done",
         total_records=total_records,
         elapsed_seconds=round(time.monotonic() - started, 2),
-        auto_apply_rate=metrics["scope_filtered"]["auto_apply_rate_overall"],
+        matcher_capability_rate=(
+            metrics["scope_filtered"]["matcher_capability_rate_overall"]
+        ),
     )
     return 0
 
