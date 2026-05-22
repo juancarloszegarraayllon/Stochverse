@@ -6,6 +6,125 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-22
+
+### Day-22 morning baseline + daily-diff day-over-day
+
+Reality check (operator-side, pre-work):
+
+| Metric | Value | Note |
+|---|---|---|
+| `review_queue` depth | 8,661 (was 8,452) | +209 overnight; normal new arrivals |
+| `daily_diff_reports` rows | 1 | Yesterday's manual run; Railway cron still paused |
+| Last `resolution_log` write | 2026-05-22 02:45 UTC | Last night's Kalshi cron ran cleanly |
+| `alembic_version` | `c4d9e2a1b3f7` | Track A migration head |
+
+Daily-diff manual run today (env vars caught missing by Pattern D pre-flight — exactly the catch class it's designed for):
+
+| Metric | Day-21 | Day-22 | Δ |
+|---|---:|---:|---:|
+| Records scanned | 17,996 | 15,661 | -2,335 (likely weekday/weekend population shift) |
+| Matcher-capability rate (scope-filtered) | 48.4% | **51.0%** | +2.6pp |
+
+n=2 is too small to call this a stable band — two data points that happen to be close. Real stability assessment needs a week of measurements. The 2.6pp rate lift is plausibly explained by the smaller denominator (some sports' records didn't arrive overnight), not a real capability improvement.
+
+### Golf pivot — bootstrap framing was wrong; scope-filter extension is the right tool
+
+Day-21 evening framed Golf as the biggest single-sport bootstrap candidate in the 5-sport zero-coverage cohort (1,371 no_match/day, largest single-sport opportunity). Day-22 morning survey + Pattern A discriminator queries empirically reframed this:
+
+**Survey verdict** (codebase read, `outcome_shapes.py:200-208` + `kalshi_identity.py` + `KALSHI_AUDIT.md §4`): Golf records on Kalshi are structurally tournament-prop-only. Every series base (KXPGATOUR, KXPGAR1LEAD, KXPGAMAKECUT, KXPGA3BALL, etc.) attaches sub-markets to a `(tournament_handle, year)` identity. The Kalshi resolver returns `None` at signal extraction for non-per_fixture records (`resolver/kalshi.py:150-152`); these records never reach the matcher.
+
+**Pattern A empirical queries** (operator-side, production):
+
+| Query | Result | Implication |
+|---|---|---|
+| Q1 (series-ticker breakdown, 24h) | KXPGA3BALL = 49, KXPGAH2H = 1, others 1-4 each | Tournament-prop dominance confirmed; H2H is edge-case rare |
+| Q2 (resolution_log Golf-rows) | **Zero rows** | Production cron writes nothing for Golf — never enters resolver accounting |
+| Q3 (suffix vocabulary harvest) | 17 colon-suffix prop categories | Vocabulary locks deterministically |
+
+Q2 result is significant standalone: Day-21's "1,371 no_match" framing was wrong on the source. The number came from daily-diff's synthetic `signal_extraction_skipped` classification, not from production `sp.resolution_log`. Golf records never enter the production cron's accounting at all.
+
+**Outcome**: PR #181 ships the scope-filter extension. 5-sport bootstrap cohort priority reshuffles — Handball (253/day, team-coverage) becomes the new biggest bootstrap candidate. Volleyball dropped from the cohort (2/day, too small).
+
+### Three substantive findings (day-22)
+
+**Finding 1 — Pattern F (sibling to Pattern A): bootstrap-methodology forks at INDIVIDUAL_SPORT_CODES.**
+
+Today's Golf pivot proves the fork exists. For each future cohort sport, the operator now has a forced gating question: "are records H2H matchups or tournament-prop markets?" The Pattern A query discipline needs to extend to answer this question *before* scope-doc commit, not after seed-content discovery.
+
+- **Team-path sports** (sports NOT in `INDIVIDUAL_SPORT_CODES`): KBL/Handball/Snooker/Rugby Union/Rugby League follow the KBL methodology (team-coverage bootstrap).
+- **Personal-path sports** (`INDIVIDUAL_SPORT_CODES` = {tennis, mma, boxing, golf, snooker, darts}): require the H2H-vs-prop discrimination gate *before* committing to a methodology shape. Outcomes branch:
+  - H2H-dominant → player-coverage bootstrap (different methodology, untested).
+  - Tournament-prop-dominant → scope-filter extension (Issue #160 pattern).
+  - Mixed → both, scoped per series-ticker subset.
+
+**Pattern F is a sibling to Pattern A, not a sub-pattern.** Pattern A is content-stage discipline (production-data verification before assuming alias completeness). Pattern F is meta-discipline (methodology-shape discrimination before scope-doc commit). Different epistemic layers; naming as siblings keeps the conceptual map clean. To land in PR #167 as Pattern F.
+
+**Finding 2 — Pattern A.2: discovery-before-commit at multiple granularities.**
+
+Same epistemic shape as Pattern A's pre-merge production-data verification, applied at the scope-doc-shape granularity rather than the seed-content granularity. Today's Golf finding is the worked example: ~15 minutes of code survey caught what would have been days of wasted player-bootstrap scoping. The methodology framing is "discovery before commit, at every stage of granularity" — pre-scope-doc for methodology shape, pre-merge for seed content. Same Pattern A discipline, layered.
+
+To land in PR #167 as a Pattern A.2 sub-bullet under the existing Pattern A.
+
+**Finding 3 — daily-diff vs production-cron reason_code semantic alignment.**
+
+Q2's zero-row result confirmed a real gap. Track A's day-over-day comparisons require explicit understanding:
+
+- Production cron writes NOTHING to `sp.resolution_log` for records where the resolver returns `None` at extract_signal (Kalshi non-per_fixture, FL records without sport_id).
+- Daily-diff classifies the same records as `signal_extraction_skipped` via its synthetic counter (`scripts/daily_diff.py:_resolve_record`).
+- Comparing daily-diff's classification against production `resolution_log` requires this gap to be explicit, or future operators / dashboards will read "Golf no_match = 1,371/day" out of daily-diff and try to reconcile it against `resolution_log` where the rows don't exist.
+
+**Ownership**: small follow-up PR (Claude Code drafts) extends `scripts/daily_diff.py` module docstring to document the synthetic-reason_code semantics + the production-cron asymmetry. Track A scope doc (PR #175) is already merged — annotation as inline comment-in-code rather than a second scope-doc supplement keeps the doc-touch surface minimal.
+
+### Scope-filter extension PR — PR #181
+
+Diff shape: 3 files, ~150 lines.
+
+- `resolver/fuzzy_tier/matcher.py` — 17 Golf entries appended to `KALSHI_PROP_MARKET_SEGMENTS`.
+- `scripts/daily_diff.py` — `SCOPE_FILTER_VERSION` v0.2.0 → v0.3.0.
+- `tests/test_daily_diff.py` — 2 new tests, both green.
+
+**Intentional out-of-scope** (test-pinned):
+- Multi-player matchup props (KXPGA3BALL "Smith/Jones/Brown", 2-ball "Smith vs Jones") — no colon-suffix, needs series-ticker-base filter; KXPGA3BALL is 49/24h of unfiltered records. Separate workstream if/when operator wants to filter.
+- Tournament-outright shapes ("PGA Tour Championship Winner") — no colon; same disposition.
+- KXPGAH2H per-fixture records (1/24h) — intentionally left open for a future personal-path Golf bootstrap if it ever makes sense; filtering now would prematurely close the door.
+
+**Expected baseline-shift on merge**: ~1,371 records/day shift from `raw.signal_extraction_skipped` → `raw.prop_market_filtered_out`. Scope-filtered denominator tightens; headline matcher-capability rate rises ~2-3pp (51.0% → ~53-54%). First real test of the Track A `sp.baseline_shifts` annotation mechanism — operator inserts an annotation row at ship time so the day-23 rate jump is operator-attributable.
+
+### v1.5 amendment pile (end-of-day-22 refinements)
+
+The pile, updated for today's findings:
+
+1. **Neon migration** — unchanged
+2. **§7.4 corroboration model** — unchanged
+3. **§6.5 archival job status (#164)** — unchanged (urgency confirmed yesterday)
+4. **§7.7 cadence** — unchanged
+5. **audit-stream separation for operator approvals** — unchanged
+6. **alias-tier and fuzzy-tier don't consult `sp.team_aliases`** — unchanged
+7. **§7.5 sport-class distinction** — unchanged (empirically validated yesterday)
+8. **matcher-capability vs incremental-apply distinction** — unchanged (Track A measurement substrate semantic)
+9. **NEW — daily-diff vs production-cron reason_code semantic gap**: production cron writes nothing for resolver-returns-None records; daily-diff synthesizes `signal_extraction_skipped`. Documented this session per Finding 3; doc-only fix scheduled.
+
+Pile expanded from 8 to 9 items.
+
+### PR state at end-of-day-22
+
+- **PR #167** — KBL methodology + Patterns A/B/C/D/E. Open. Pending Pattern F (sibling) + Pattern A.2 (sub-bullet) additions per Findings 1+2.
+- **PR #179** — Track A Deliverable 2 implementation arc. **Merged this morning.**
+- **PR #180** — Day-21 supplement append. **Merged this morning.**
+- **PR #181** — Golf scope-filter extension (v0.3.0). Open; awaiting operator review + merge + baseline_shifts annotation.
+- **PR #182** — this day-22 entry (Option α: separate small PR off main, mirroring Day-21 supplement pattern).
+
+### Pending — next, operator review
+
+1. **PR #181 review + merge + baseline_shifts annotation** — Golf scope-filter extension. Operator inserts the suggested `sp.baseline_shifts` row at merge time.
+2. **Next daily-diff measurement** — verify baseline-shift prediction: Golf records land in `prop_market_filtered_out`, headline rate rises to ~53-54%.
+3. **PR #167 review** — Pattern D/E methodology doc + Pattern F (new sibling) + Pattern A.2 (sub-bullet) additions per Findings 1+2. Operator's call whether to fold Findings 1+2 into the existing PR or open a follow-up.
+4. **Handball bootstrap pre-scope discovery** — new biggest single-sport bootstrap leverage (253/day) per Day-22 cohort reshuffle. Apply Pattern A.2 (pre-scope discovery) AND Pattern F (H2H-vs-prop discrimination) before scope-doc commit. Handball is team-path (not in INDIVIDUAL_SPORT_CODES) so the H2H gate likely passes, but the discipline applies regardless.
+5. **Doc-only fix for Finding 3** — Claude Code drafts small follow-up PR extending `scripts/daily_diff.py` module docstring with daily-diff vs production-cron reason_code semantic gap.
+
+---
+
 ## Session — 2026-05-21
 
 ### KBL bootstrap pilot — EMPIRICALLY VALIDATED end-to-end
