@@ -234,6 +234,74 @@ class TestScopeFilterClassification:
                 f"Vocabulary entry {suffix!r} should classify as prop_market"
             )
 
+    def test_golf_prop_market_filtered_out(self):
+        """Golf tournament-prop records filter out via the Day-22
+        vocabulary extension.
+
+        Per Day-22 survey: Kalshi Golf is structurally tournament-prop-
+        only — no per-fixture H2H ticker exists. These records were
+        previously counted in raw.signal_extraction_skipped (Kalshi
+        resolver returns None at signal extraction for non-per_fixture
+        records). With the v0.3.0 vocabulary extension, suffix-after-
+        colon matches against the Golf entries route them to
+        raw.prop_market_filtered_out instead.
+        """
+        from scripts.daily_diff import (
+            classify_record, ScopeClassification,
+        )
+        # Canonical Golf prop suffixes from outcome_shapes.py:200-208
+        # + KALSHI_AUDIT.md §4.
+        for suffix in [
+            "Hole-in-One",
+            "Top 5 Finishers",
+            "Top 10 Finishers",
+            "Top 20 Finishers",
+            "Round 1 Top 5 Finishers",
+            "Round 1 Top 10 Finishers",
+            "Playoff",
+            "To Make the Cut",
+            "Golf Majors in 2026",
+        ]:
+            record = {
+                "raw_payload": {
+                    "_sport": "Golf",
+                    "title": f"PGA Tour Championship: {suffix}",
+                },
+            }
+            assert classify_record("kalshi", record) == ScopeClassification.PROP_MARKET, (
+                f"Golf vocabulary entry {suffix!r} should classify as prop_market"
+            )
+
+    def test_golf_no_colon_records_stay_signal_extraction_skipped(self):
+        """Golf records WITHOUT a colon in the title (e.g., tournament-
+        outright-winner shapes like "PGA Tour Championship Winner")
+        do NOT match the rpartition-after-colon heuristic and flow
+        through to the matcher. Kalshi's resolver returns None for
+        non-per_fixture records, so they land in
+        raw.signal_extraction_skipped — same disposition as before the
+        v0.3.0 vocabulary extension.
+
+        This test pins the scope-filter's narrowness: the vocabulary
+        extension covers the colon-suffix shape only. Tournament-
+        outright shapes need a separate intervention (series-ticker
+        filter or non-per_fixture-aware classification) — out of scope
+        for this PR.
+        """
+        from scripts.daily_diff import (
+            classify_record, ScopeClassification,
+        )
+        record = {
+            "raw_payload": {
+                "_sport": "Golf",
+                "title": "PGA Tour Championship Winner",
+            },
+        }
+        # Not PROP_MARKET — flows through as HEAD_TO_HEAD per the
+        # scope filter. The matcher then returns None at extract_signal
+        # (resolver/kalshi.py:150-152), counting as
+        # raw.signal_extraction_skipped in the daily-diff aggregation.
+        assert classify_record("kalshi", record) == ScopeClassification.HEAD_TO_HEAD
+
     def test_head_to_head_record_counted(self):
         """Standard head-to-head record → counted in scope-filtered
         metrics."""

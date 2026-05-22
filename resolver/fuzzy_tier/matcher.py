@@ -195,6 +195,34 @@ KALSHI_PROP_MARKET_SEGMENTS: frozenset[str] = frozenset({
     "4th TD",
     # Esports props
     "Total Maps",
+    # Golf props (added 2026-05-22 per Day-22 survey finding +
+    # KALSHI_AUDIT.md §4 + outcome_shapes.py:200-208).
+    #
+    # Golf is structurally tournament-prop-only on Kalshi: no per-fixture
+    # H2H ticker exists; every series base (KXPGATOUR, KXPGAR1LEAD,
+    # KXPGAMAKECUT, etc.) attaches sub-markets to a (tournament_handle,
+    # year) identity. These records never reach the matcher — the
+    # Kalshi resolver returns None at signal extraction for
+    # non-per_fixture records (resolver/kalshi.py:150-152). Adding them
+    # to the scope-filter vocabulary moves them from
+    # raw.signal_extraction_skipped into raw.prop_market_filtered_out,
+    # tightening the scope-filtered denominator for matcher-capability
+    # measurement.
+    #
+    # Canonical entries from outcome_shapes.py:200-208. Operator's
+    # Query 3 (suffix-vocabulary harvest from production Kalshi titles)
+    # may surface additional variants — extend this section when those
+    # entries land. Fail-open semantics preserve operator visibility on
+    # any new prop type Kalshi introduces.
+    "Hole-in-One",
+    "Top 5 Finishers",
+    "Top 10 Finishers",
+    "Top 20 Finishers",
+    "Round 1 Top 5 Finishers",
+    "Round 1 Top 10 Finishers",
+    "Playoff",
+    "To Make the Cut",
+    "Golf Majors in 2026",
 })
 
 

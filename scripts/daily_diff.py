@@ -120,15 +120,24 @@ from resolver.types import ReasonCode  # noqa: E402
 # Version log:
 #   v0.1.0 — initial schema (2026-05-21, commit 775a55a)
 #   v0.2.0 — rename auto_apply_rate_* → matcher_capability_rate_*
-#            (2026-05-21 post-empirical-validation, this commit). The
-#            metric measures what the matcher COULD auto-apply given
-#            today's records, distinct from the production cron's
-#            INCREMENTAL apply rate (newly-resolved records only).
-#            Per-record reason_codes (strict/alias/fuzzy as "auto-apply
-#            tiers") are unchanged — only the aggregate metric names
-#            move. v0.1.0 rows retain their original key names; readers
+#            (2026-05-21 post-empirical-validation). The metric measures
+#            what the matcher COULD auto-apply given today's records,
+#            distinct from the production cron's INCREMENTAL apply rate
+#            (newly-resolved records only). Per-record reason_codes
+#            (strict/alias/fuzzy as "auto-apply tiers") are unchanged —
+#            only the aggregate metric names move. v0.1.0 rows retain
+#            their original key names; readers
 #            dispatch on the version stamp.
-SCOPE_FILTER_VERSION = "v0.2.0"
+#   v0.3.0 — Golf prop-market vocabulary added to
+#            KALSHI_PROP_MARKET_SEGMENTS per Day-22 survey finding
+#            (resolver/fuzzy_tier/matcher.py). Records previously
+#            counted in raw.signal_extraction_skipped (~1,371/day per
+#            Day-21 measurement) shift to raw.prop_market_filtered_out;
+#            the scope-filtered denominator tightens, headline
+#            matcher-capability rate rises a few percentage points.
+#            Baseline-shift event annotated in sp.baseline_shifts at
+#            ship time so the rate jump is operator-attributable.
+SCOPE_FILTER_VERSION = "v0.3.0"
 
 
 # ── Scope-filter classification constants ──────────────────────
