@@ -234,6 +234,105 @@ class TestScopeFilterClassification:
                 f"Vocabulary entry {suffix!r} should classify as prop_market"
             )
 
+    def test_golf_prop_market_filtered_out(self):
+        """Golf tournament-prop records filter out via the Day-22
+        vocabulary extension.
+
+        Per Day-22 survey: Kalshi Golf is structurally tournament-prop-
+        only — no per-fixture H2H ticker exists. These records were
+        previously counted in raw.signal_extraction_skipped (Kalshi
+        resolver returns None at signal extraction for non-per_fixture
+        records). With the v0.3.0 vocabulary extension, suffix-after-
+        colon matches against the Golf entries route them to
+        raw.prop_market_filtered_out instead.
+        """
+        from scripts.daily_diff import (
+            classify_record, ScopeClassification,
+        )
+        # Canonical Golf prop suffixes from outcome_shapes.py:200-208
+        # + KALSHI_AUDIT.md §4 + Pattern A Q3 vocabulary harvest
+        # (Day-22).
+        for suffix in [
+            "Hole-in-One",
+            "Top 5 Finishers",
+            "Top 10 Finishers",
+            "Top 20 Finishers",
+            "Round 1 Top 5 Finishers",
+            "Round 1 Top 10 Finishers",
+            "Playoff",
+            "To Make the Cut",
+            "Golf Majors in 2026",
+            # Q3 vocabulary harvest additions
+            "Cut Line",
+            "Eagle in Round 1",
+            "Round 1 Scores", "Round 2 Scores",
+            "Round 3 Scores", "Round 4 Scores",
+            "Round 1 Hole Scores", "Round 2 Hole Scores",
+            "Round 3 Hole Scores", "Round 4 Hole Scores",
+        ]:
+            record = {
+                "raw_payload": {
+                    "_sport": "Golf",
+                    "title": f"PGA Tour Championship: {suffix}",
+                },
+            }
+            assert classify_record("kalshi", record) == ScopeClassification.PROP_MARKET, (
+                f"Golf vocabulary entry {suffix!r} should classify as prop_market"
+            )
+
+    def test_golf_no_colon_records_stay_signal_extraction_skipped(self):
+        """Golf records WITHOUT a colon in the title (e.g., tournament-
+        outright-winner shapes like "PGA Tour Championship Winner",
+        multi-player matchup shapes like "Smith vs Jones" from
+        KXPGAH2H or "Smith/Jones/Brown" from KXPGA3BALL) do NOT match
+        the rpartition-after-colon heuristic and flow through to the
+        matcher. Kalshi's resolver returns None for non-per_fixture
+        records, so they land in raw.signal_extraction_skipped — same
+        disposition as before the v0.3.0 vocabulary extension.
+
+        This test pins the scope-filter's narrowness: the vocabulary
+        extension covers the colon-suffix shape only. Tournament-
+        outright shapes and multi-player matchup shapes need a separate
+        intervention (series-ticker-base filter or non-per_fixture-
+        aware classification) — out of scope for this PR.
+
+        Pattern A Q1 result (Day-22) shows KXPGA3BALL dominates at 49
+        records/24h while KXPGAH2H carries 1 record/24h. The KXPGAH2H
+        path is intentionally left open for a future personal-path
+        Golf bootstrap; KXPGA3BALL is the bigger out-of-scope-but-
+        unfiltered population that may motivate a series-ticker
+        filter follow-up.
+        """
+        from scripts.daily_diff import (
+            classify_record, ScopeClassification,
+        )
+        # Tournament-outright (no colon)
+        outright = {
+            "raw_payload": {
+                "_sport": "Golf",
+                "title": "PGA Tour Championship Winner",
+            },
+        }
+        assert classify_record("kalshi", outright) == ScopeClassification.HEAD_TO_HEAD
+
+        # KXPGAH2H per-fixture (no colon) — intentionally unfiltered
+        h2h = {
+            "raw_payload": {
+                "_sport": "Golf",
+                "title": "Smith vs Jones",
+            },
+        }
+        assert classify_record("kalshi", h2h) == ScopeClassification.HEAD_TO_HEAD
+
+        # KXPGA3BALL multi-player matchup (no colon)
+        triple = {
+            "raw_payload": {
+                "_sport": "Golf",
+                "title": "Smith/Jones/Brown",
+            },
+        }
+        assert classify_record("kalshi", triple) == ScopeClassification.HEAD_TO_HEAD
+
     def test_head_to_head_record_counted(self):
         """Standard head-to-head record → counted in scope-filtered
         metrics."""

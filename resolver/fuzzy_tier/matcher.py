@@ -195,6 +195,66 @@ KALSHI_PROP_MARKET_SEGMENTS: frozenset[str] = frozenset({
     "4th TD",
     # Esports props
     "Total Maps",
+    # Golf props (added 2026-05-22 per Day-22 survey finding +
+    # KALSHI_AUDIT.md §4 + outcome_shapes.py:200-208 + Pattern A
+    # Query 3 harvest from production Kalshi titles).
+    #
+    # Golf is structurally tournament-prop-only on Kalshi: no per-fixture
+    # H2H ticker exists with meaningful volume (KXPGAH2H = 1 record
+    # in the Q1 24h window). Every other series base (KXPGATOUR,
+    # KXPGAR1LEAD, KXPGAMAKECUT, KXPGA3BALL, etc.) attaches sub-markets
+    # to a (tournament_handle, year) identity. The Kalshi resolver
+    # returns None at signal extraction for non-per_fixture records
+    # (resolver/kalshi.py:150-152), so these never reach the matcher.
+    #
+    # Pattern A Q2 result (Day-22): zero rows in sp.resolution_log
+    # against Golf records — production cron writes nothing when the
+    # resolver returns None. Daily-diff classifies these as
+    # raw.signal_extraction_skipped via its synthetic reason_code.
+    # Adding these entries moves them to raw.prop_market_filtered_out
+    # in the scope-filter pre-stage, tightening the scope-filtered
+    # denominator.
+    #
+    # Out of scope for this vocabulary extension:
+    #   - Multi-player matchup props (KXPGA3BALL "Smith/Jones/Brown",
+    #     2-ball "Smith vs Jones") — no colon-suffix pattern, rpartition
+    #     heuristic doesn't catch them. They continue to land in
+    #     signal_extraction_skipped. A series-ticker-base filter is
+    #     the right mechanism if/when operator wants to filter these.
+    #   - Tournament-outright shapes ("PGA Tour Championship Winner")
+    #     without a colon — same reason; same disposition.
+    #   - KXPGAH2H per-fixture records (1/window) — architecturally
+    #     these are the records a future personal-path Golf bootstrap
+    #     would consume; intentionally NOT filtered so the path stays
+    #     open. Operator's call later whether Golf gets a player
+    #     bootstrap or stays scope-filtered forever.
+    #
+    # Round X enumeration covers Round 1-4 (Golf is 4 rounds). If
+    # production titles use other forms (e.g., "Final Round" instead
+    # of "Round 4"), operator extends here. Fail-open semantics
+    # preserve operator visibility on any new prop type Kalshi
+    # introduces.
+    "Hole-in-One",
+    "Top 5 Finishers",
+    "Top 10 Finishers",
+    "Top 20 Finishers",
+    "Round 1 Top 5 Finishers",
+    "Round 1 Top 10 Finishers",
+    "Playoff",
+    "To Make the Cut",
+    "Golf Majors in 2026",
+    # Q3 additions (Day-22 Pattern A vocabulary harvest):
+    "Cut Line",
+    "Eagle in Round 1",
+    # Round-X enumeration (Round 1-4 covers a 4-round event)
+    "Round 1 Scores",
+    "Round 2 Scores",
+    "Round 3 Scores",
+    "Round 4 Scores",
+    "Round 1 Hole Scores",
+    "Round 2 Hole Scores",
+    "Round 3 Hole Scores",
+    "Round 4 Hole Scores",
 })
 
 
