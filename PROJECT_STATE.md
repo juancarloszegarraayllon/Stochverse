@@ -6,6 +6,184 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-25
+
+### Day-25 morning baseline
+
+Reality check (operator-side, pre-work):
+
+| Metric | Value | Note |
+|---|---|---|
+| `review_queue` depth | 8,724 (was 8,661 day-22) | +63 over 3 days; slow growth |
+| `daily_diff_reports` rows | 2 | No cron wired yet; Sat+Sun measurements missed |
+| `baseline_shifts` count | 2 | Golf scope-filter (day-22) + ingestion incident (day-25, written 13:51:50 UTC, id `7c11e66b`) |
+| Last `resolution_log` write | 2026-05-25 02:47 UTC | This morning's cron ran cleanly |
+| `alembic_version` | `c4d9e2a1b3f7` | Track A migration head |
+
+**No daily-diff measurements Sat/Sun.** Railway cron not yet wired; manual runs only. Today's manual run produced stale data (see ingestion incident below) — **Day-26 is the first clean post-incident measurement**, and the first valid test of the Day-22 Golf scope-filter baseline-shift prediction (48.4%/51.0% → predicted ~53-54% post-Golf-filter).
+
+### Day-22 deferred: Handball + Rugby Union cohort pivots (completed Friday, captured here)
+
+Day-22 supplement (PR #182, merged) captured the Golf pivot and three findings (Pattern F, Pattern A.2, reason_code alignment). The Handball + Rugby Union pre-scope discovery that followed was completed Friday afternoon but not documented — captured here.
+
+**Handball pre-scope discovery result:**
+
+| Step | Result |
+|---|---|
+| Pattern A Q1 (provider attribution) | FL-only: 1,019 distinct/24h, zero Kalshi |
+| Pattern A Q2 (variant capture, 7d) | ~50 distinct teams; dominated by Eastern European amateur/women's lower-division |
+| Q3 (existing sp.teams) | Zero pre-existing — true zero-start |
+| Pattern G diagnostic — top-tier vs long-tail | Top 11 pairs at records_in_7d=2 (cron-duplicate of same match); only 2 of ~30 visible pairs were top-tier |
+| Q6 (manifest reachability) | **0/224 records** reachable against 47-team top-tier manifest |
+
+Verdict: Handball's daily volume (~253/day) is structurally long-tail-dominated. Top-tier matches (Bundesliga, ASOBAL, Lidl Starligue) appear at weekly cadence (~2 records/7d per pair) and are buried under daily-cadence amateur/semi-pro. Bootstrap value is near-zero — curating 200+ long-tail teams for diminishing per-team leverage is not tractable.
+
+**Rugby Union pre-scope discovery result:**
+
+| Step | Result |
+|---|---|
+| Pattern A Q1 (provider attribution) | FL-only: 474 distinct/24h, zero Kalshi |
+| Pattern G diagnostic | Same long-tail dominance pattern as Handball |
+| Team-name signal | Predominantly Kazakhstan/Belarus/Russia/Indonesia/Greece — NOT top-tier (URC, Top 14, English Premiership, Super Rugby) |
+| Sport-classification flag | Several team names look like futsal/indoor (Asahan, Cosmo JNE, Bintang Timur Surabaya) — possible FL sport-mapping misclassification (Issue #183 filed) |
+
+Verdict: same as Handball. Long-tail dominance structural; possible sport-misclassification inflating the no_match count further.
+
+**Architectural finding confirmed: sport_id partition makes bare-token aliases safe across sports.** `resolver/aliases.py:51,111` (AliasIndex) and `resolver/alias_tier/candidates.py:106` (CandidateIndex) both key lookups by `(normalized, sport_id)`. Cross-sport name collisions (e.g., "Barcelona" in Football vs Handball) are architecturally impossible at the matcher layer. The KBL F2 alias-distinctiveness rule was about within-sport collision (Egis Körmend vs KCC Egis, both Basketball sport_id=3), not cross-sport. Handball manifest v2 adopted bare-token aliases matching FL's actual provider-forms accordingly.
+
+**Corroboration ceiling for FL-only sports (v1.5 amendment #10):** alias-tier and fuzzy-tier cap at 0.70 confidence without cross-provider corroboration (strict-tier = 0.98, alias-tier max = 0.50+0.20+0.30 corroboration = 1.00, but without corroboration max = 0.70 = review_queue). For FL-only sports, only strict-tier alias hits auto-apply. Bootstrap value is gated on strict-tier coverage — alias completeness matters MORE for FL-only sports.
+
+### Day-22 deferred: Pattern G validated + v1.5 amendment #11 locked
+
+**Pattern G — bootstrap-cohort 3-step diagnostic** (draft captured in conversation, text below for historical record):
+
+> Apply a 3-step diagnostic before committing to bootstrap-cohort prioritization:
+> 1. **Daily volume** — sport's records/day in the no_match + signal_extraction_skipped population.
+> 2. **Top-tier vs long-tail split** — multi-day variant capture. Count distinct team-pairs over 7-day window. If top-N pairs are all records_in_7d ≤ 2 (cron duplicates of same match, not recurring matches), long-tail dominates.
+> 3. **Reachability of top-tier manifest** — draft starter manifest from Q2-surfaced provider-forms (not general-knowledge canonicals — Pattern A.1 discipline), run Q6-shape reachability check against last-24h records.
+
+**Empirical case studies:**
+
+| Sport | Step 1 | Step 2 | Step 3 | Verdict |
+|---|---|---|---|---|
+| Golf | 1,371/day | N/A (tournament-prop, not H2H) | N/A | Scope-filter extension, not bootstrap (PR #181) |
+| Handball | 1,019 distinct/day (FL-only) | Long-tail dominant; top-tier at weekly cadence, buried | 0/224 reachable against 47-team manifest | Dropped from bootstrap priorities |
+| Rugby Union | 474 distinct/day (FL-only) | Long-tail dominant + possible FL sport-misclassification | Diagnostic halted at Step 2 | Dropped |
+
+**v1.5 amendment #11 (locked):** "Bootstrap leverage ≠ total-daily-volume. Daily-diff measures combined top-tier + long-tail population; bootstrap value is gated on top-tier reachability. Pre-scope discovery (Pattern A.2 / Pattern G) must run a 3-step diagnostic before bootstrap commit. Long-tail-dominated sports may not be addressable via bootstrap at all — per-team curation cost rises while per-team leverage drops."
+
+**5-sport cohort framing dropped.** The Day-17 5-sport zero-coverage cohort (Handball, Snooker, Volleyball, Rugby League, Golf) was based on combined-volume signal. Three of five have now been empirically rejected (Golf: tournament-prop scope-filter, Handball: long-tail-dominated, Rugby Union: same). Snooker (80/day) and Rugby League (60/day) are almost certainly the same pattern — diagnostic halted per operator decision to stop pre-checking and pivot away entirely.
+
+**Phase 2 next-workstream pivot:** Tennis dedup locked as next primary workstream. Three reasons:
+1. Known scope (~457-720 cross-format pairs, bounded engineer-time)
+2. Empirical foundation already laid (Day-20 investigation, Phase 2D.5 prerequisite)
+3. Largest single-sport review_queue (4,613 records); dedup lifts collision-routed records into auto-apply
+
+### Day-25 ingestion incident — diagnosis arc
+
+**Timeline:**
+
+| Event | Timestamp (UTC) |
+|---|---|
+| Kalshi REST ingestion dies | 2026-05-22 ~16:54 (Thursday) |
+| FL Phase 1B ingestion dies | 2026-05-23 ~14:07 (Friday) |
+| Weekend: both providers stale | Sat-Sun |
+| Day-25 morning: detected via pre-work baseline check | 2026-05-25 ~13:00 |
+| First Railway redeploy: FL restored, Kalshi still dead | 2026-05-25 ~13:18 |
+| Second Railway redeploy: Kalshi restored | 2026-05-25 ~13:48 |
+| Both providers writing fresh records | 2026-05-25 ~13:48 |
+
+**Key diagnosis finding: supervision infrastructure already existed but didn't prevent the outage.** `ingestion/base.py:supervise()` (lines 269-319) catches exceptions, logs with traceback, restarts with exponential backoff. `ingestion/runner.py:start_all_ingestion()` wires both FL and Kalshi under supervision. The infrastructure was correct per architecture v1.3 §6.1.
+
+**Root cause chain:**
+
+1. Ingestion task crashes (original cause unknown — lost in Railway log rotation)
+2. `supervise()` catches exception, restarts task with backoff ✓ (working as designed)
+3. Restarted task calls `pg_try_advisory_lock` (session-scoped, `ingestion/base.py:245-259`)
+4. Lock held by dead session's connection in Neon's PgBouncer-based connection pool (ghost lock)
+5. `got_lock = False` → task returns cleanly (`ingestion/kalshi.py:303` / `ingestion/fl.py:352`)
+6. **`supervise()` interprets clean return as intentional shutdown** → exits restart loop
+7. Task permanently dead; service stays "online" because web API endpoints unaffected
+
+**The bug is the interaction between three correct-in-isolation components:**
+- Session-scoped advisory locks (correct for singleton enforcement)
+- Connection pooler keeping dead sessions alive (correct for pool efficiency)
+- Supervisor exiting on clean return (correct for intentional-shutdown semantic)
+
+None of the three is wrong alone; the failure emerges from their composition. The lock-contention exit path using `return` instead of a retriable signal is the precise coupling point.
+
+**Three-layer fix scoped and Issues filed:**
+
+| Layer | Issue | Fix | Priority |
+|---|---|---|---|
+| **2 — Lock-contention retry** | #184 | Change `return` → sleep-and-retry loop in `kalshi.py:run()` + `fl.py:run()`. 10 LOC. | Medium |
+| **3 — Transaction-scoped locks** | #185 | Switch `pg_try_advisory_lock` → `pg_try_advisory_xact_lock`. Eliminates ghost-lock-leak class. 20 LOC. | Low |
+| **Defense-in-depth — Staleness monitor** | #186 | Daily-diff pre-flight `last_seen_at` age check. Exit code 6 for ingestion-stale. 20 LOC. | Medium |
+
+**Methodology observation:** The diagnosis chain itself (supervisor-exists-but-exits-on-clean-return → advisory-lock-leak-with-pooler → ghost-session-identification → multi-redeploy-resolution) is worth capturing as a worked example of composition-failure diagnosis. The bug is NOT in any single component — it's in the handshake between three components' assumptions. Same epistemic shape as the "Goyang Skygunners" Pattern A finding: the system passed all its unit tests but failed at the integration boundary.
+
+### Issues filed today
+
+| Issue | Title | Priority |
+|---|---|---|
+| #183 | FL ingestion: possible sport-misclassification for Rugby Union | Low |
+| #184 | Ingestion lock-contention exit path uses return instead of raise | Medium |
+| #185 | Switch ingestion advisory locks from session-scoped to transaction-scoped | Low |
+| #186 | Ingestion staleness monitor — daily-diff pre-flight last_seen_at age check | Medium |
+
+**Ingestion incident baseline_shifts annotation written** at 13:51:50 UTC (`id 7c11e66b-b5fb-43cc-adb1-18cd76ec479e`, `event_type='ingestion_incident'`, `event_date=2026-05-25`). Notes field captures root cause (advisory-lock-leak + supervisor clean-return interaction), recovery timeline, and Issues #184/#185/#186 references. Day-26 daily-diff measurement will render this annotation in the baseline-shift-events section of the report output — second real test of the Track A annotation mechanism after the Golf scope-filter event.
+
+### Tennis dedup scope-doc — substrate ready
+
+F1-F8 framing matrix locked from Friday's prep (Day-22). Schema survey confirmed one-row-per-player in `sp.teams` (no separate `sp.players` table). FK cascade enumeration complete:
+
+| Table | Column | Type | Merge action |
+|---|---|---|---|
+| `sp.team_aliases` | `team_id` | Direct FK, CASCADE DELETE | Copy aliases to canonical team (INSERT ON CONFLICT DO NOTHING), then cascade handles delete |
+| `sp.fixtures` | `home_team_id` | Direct FK, NO ACTION | UPDATE to canonical team_id before team delete |
+| `sp.fixtures` | `away_team_id` | Direct FK, NO ACTION | Same |
+| `sp.review_queue` | `candidate_fixtures` | JSONB (no FK) | Search-and-replace team_id in array |
+| `sp.resolution_log` | `reason_detail` | JSONB (no FK) | Immutable audit; do NOT rewrite |
+
+F4 cascade SQL, F5 JSONB rewrite shape, F6 two-phase batching strategy (457 high-confidence + 263 candidate-verification), F7 rollback via `sp.dedup_audit` table — all concrete from Friday's session.
+
+**Scope-doc draft is next workstream** once ingestion stabilizes and Day-26 produces the first clean post-incident measurement.
+
+### v1.5 amendment pile (end-of-day-25)
+
+1. **Neon migration** — unchanged
+2. **§7.4 corroboration model** — unchanged
+3. **§6.5 archival job status (#164)** — unchanged (urgency confirmed Day-21; 58K no_match writes/day)
+4. **§7.7 cadence** — unchanged
+5. **audit-stream separation for operator approvals** — unchanged
+6. **alias-tier and fuzzy-tier don't consult `sp.team_aliases`** — unchanged
+7. **§7.5 sport-class distinction** — unchanged (empirically validated Day-21)
+8. **matcher-capability vs incremental-apply distinction** — unchanged
+9. **daily-diff vs production-cron reason_code semantic gap** — unchanged (Finding 3, Day-22)
+10. **FL-only sports have structural review_queue floor at 0.70** — adopted Day-22; corroboration-ceiling confirmed empirically during Handball pre-scope discovery
+11. **Bootstrap leverage ≠ total-daily-volume** — adopted Day-22; Pattern G diagnostic validated by Handball + Rugby Union case studies
+
+Pile at 11 items.
+
+### PR state at end-of-day-25
+
+- **PR #167** — KBL methodology + Patterns A/B/C/D/E. Open. Pending Pattern F + Pattern G + Pattern A.2 additions. Operator review pending.
+- **PR #179** — Track A Deliverable 2. **Merged Day-22.**
+- **PR #180** — Day-21 supplement. **Merged Day-22.**
+- **PR #181** — Golf scope-filter extension (v0.3.0). **Merged Day-22.**
+- **PR #182** — Day-22 supplement. **Merged Day-22.**
+- **PR #187** — this Day-25 entry.
+
+### Pending — next, operator review
+
+1. **Ingestion stability verification** — monitor `last_seen_at` over next 24h to confirm both providers stay alive post-redeploy.
+2. **Day-26 daily-diff manual run** — first clean post-incident measurement. Validates Golf scope-filter baseline-shift prediction.
+3. **Tennis dedup scope-doc kickoff** — F1-F8 matrix ready; operator-led drafting per KBL precedent.
+4. **PR #167 review** — Pattern D/E + add Patterns F, G, A.2 per Day-22/25 findings.
+5. **Issue #184 fix PR** — lock-contention return→retry. Small standalone PR, 10 LOC.
+
+---
+
 ## Session — 2026-05-22
 
 ### Day-22 morning baseline + daily-diff day-over-day
