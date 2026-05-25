@@ -16,7 +16,7 @@ Reality check (operator-side, pre-work):
 |---|---|---|
 | `review_queue` depth | 8,724 (was 8,661 day-22) | +63 over 3 days; slow growth |
 | `daily_diff_reports` rows | 2 | No cron wired yet; Sat+Sun measurements missed |
-| `baseline_shifts` count | 1 | Golf scope-filter from day-22 |
+| `baseline_shifts` count | 2 | Golf scope-filter (day-22) + ingestion incident (day-25, written 13:51:50 UTC, id `7c11e66b`) |
 | Last `resolution_log` write | 2026-05-25 02:47 UTC | This morning's cron ran cleanly |
 | `alembic_version` | `c4d9e2a1b3f7` | Track A migration head |
 
@@ -131,6 +131,8 @@ None of the three is wrong alone; the failure emerges from their composition. Th
 | #185 | Switch ingestion advisory locks from session-scoped to transaction-scoped | Low |
 | #186 | Ingestion staleness monitor — daily-diff pre-flight last_seen_at age check | Medium |
 
+**Ingestion incident baseline_shifts annotation written** at 13:51:50 UTC (`id 7c11e66b-b5fb-43cc-adb1-18cd76ec479e`, `event_type='ingestion_incident'`, `event_date=2026-05-25`). Notes field captures root cause (advisory-lock-leak + supervisor clean-return interaction), recovery timeline, and Issues #184/#185/#186 references. Day-26 daily-diff measurement will render this annotation in the baseline-shift-events section of the report output — second real test of the Track A annotation mechanism after the Golf scope-filter event.
+
 ### Tennis dedup scope-doc — substrate ready
 
 F1-F8 framing matrix locked from Friday's prep (Day-22). Schema survey confirmed one-row-per-player in `sp.teams` (no separate `sp.players` table). FK cascade enumeration complete:
@@ -170,7 +172,7 @@ Pile at 11 items.
 - **PR #180** — Day-21 supplement. **Merged Day-22.**
 - **PR #181** — Golf scope-filter extension (v0.3.0). **Merged Day-22.**
 - **PR #182** — Day-22 supplement. **Merged Day-22.**
-- **PR forthcoming** — this Day-25 entry.
+- **PR #187** — this Day-25 entry.
 
 ### Pending — next, operator review
 
