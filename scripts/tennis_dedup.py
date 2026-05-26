@@ -293,7 +293,7 @@ import argparse
 import asyncio
 import json
 import uuid
-from datetime import timedelta
+from datetime import datetime as _datetime, timedelta
 
 from sqlalchemy import text  # noqa: E402
 
@@ -913,7 +913,7 @@ async def rollback_merge(audit_id: str, *, force: bool = False) -> int:
                     "nn": t["normalized_name"],
                     "sid": t["sport_id"],
                     "cc": t["country_code"],
-                    "ca": t["created_at"],
+                    "ca": _datetime.fromisoformat(t["created_at"]) if t["created_at"] else None,
                 })
 
             # (b) Restore fixture FKs from pre_state
@@ -961,7 +961,7 @@ async def rollback_merge(audit_id: str, *, force: bool = False) -> int:
                         "anorm": a["alias_normalized"],
                         "src": a["source"],
                         "conf": a["confidence"],
-                        "ca": a["created_at"],
+                        "ca": _datetime.fromisoformat(a["created_at"]) if a["created_at"] else None,
                     })
 
             # (e) Remove alias copies that merge_cluster step 1 created
