@@ -646,18 +646,21 @@ async def merge_cluster(
                 ), {"canonical_id": canonical_uuid, "dupe_id": dupe_uuid})
 
                 # Step 3: Rewrite review_queue candidate_fixtures JSONB
+                # Explicit CAST on parameters — asyncpg prepared statements
+                # can't infer types for polymorphic functions (to_jsonb,
+                # jsonb_agg) operating on untyped parameters.
                 dupe_text = str(dupe_id)
                 canonical_text = str(canonical_id)
                 await session.execute(text("""
                     UPDATE sp.review_queue
                     SET candidate_fixtures = (
                       SELECT jsonb_agg(
-                        CASE WHEN elem #>> '{}' = :dupe_text
-                             THEN to_jsonb(:canonical_text)
+                        CASE WHEN elem #>> '{}' = CAST(:dupe_text AS text)
+                             THEN to_jsonb(CAST(:canonical_text AS text))
                              ELSE elem END
                       ) FROM jsonb_array_elements(candidate_fixtures) elem
                     )
-                    WHERE candidate_fixtures::text LIKE '%%' || :dupe_text || '%%'
+                    WHERE candidate_fixtures::text LIKE '%%' || CAST(:dupe_text AS text) || '%%'
                 """), {"dupe_text": dupe_text, "canonical_text": canonical_text})
 
             # Step 4: Audit row
