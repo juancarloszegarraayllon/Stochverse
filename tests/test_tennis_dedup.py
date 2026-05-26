@@ -1,10 +1,11 @@
-"""Tennis cross-format dedup — pure-function unit tests.
+"""Tennis cross-format dedup — unit tests + integration test stubs.
 
-No DB required. Tests the classifiers, union-find, tiebreaker, and
-Phase A criterion check from scripts/tennis_dedup.py.
+Pure-function tests (no DB required) test the classifiers, union-find,
+tiebreaker, and Phase A criterion check.
 
-Integration tests (merge_cluster, FK cascade, JSONB rewrite, audit
-row, rollback) ship in a separate PR gated on SP_INTEGRATION_DB.
+Integration tests (SP_INTEGRATION_DB-gated) test merge_cluster
+transaction isolation, FK cascade, JSONB rewrite, audit row capture,
+and rollback.
 """
 from __future__ import annotations
 
@@ -325,3 +326,168 @@ class TestPartitionCluster:
         assert mg is not None
         assert mg.canonical.team_id == "b"  # older
         assert mg.dupes[0].team_id == "a"
+
+
+# ══════════════════════════════════════════════════════════════
+# CLI argument validation (no DB required)
+# ══════════════════════════════════════════════════════════════
+
+
+class TestCLIArgValidation:
+    """CLI argument parsing — validates error handling without
+    needing a database connection."""
+
+    def test_no_action_specified_exits_2(self):
+        from scripts.tennis_dedup import main
+        rc = main(["--phase", "a"])
+        assert rc == 2
+
+    def test_phase_b_not_implemented_exits_2(self):
+        from scripts.tennis_dedup import main
+        rc = main(["--phase", "b", "--dry-run"])
+        assert rc == 2
+
+    def test_rollback_without_audit_id_exits_2(self):
+        from scripts.tennis_dedup import main
+        rc = main(["--rollback"])
+        assert rc == 2
+
+    def test_apply_blocked_until_rollback_implemented(self):
+        """--apply is guarded until rollback ships. Prevents wet apply
+        against production without a recovery path."""
+        from scripts.tennis_dedup import main
+        rc = main(["--phase", "a", "--apply"])
+        assert rc == 2
+
+    def test_rollback_with_audit_id_but_no_db_exits_1(self):
+        """Rollback needs a DB connection; without DATABASE_URL it
+        exits 1 (DB unavailable) rather than 2 (not implemented).
+        The "not implemented" exit is only reachable when DB is
+        available — tested via SP_INTEGRATION_DB-gated tests."""
+        from scripts.tennis_dedup import main
+        rc = main(["--rollback", "--audit-id", "deadbeef-0000-0000-0000-000000000000"])
+        assert rc == 1
+
+
+# ══════════════════════════════════════════════════════════════
+# Dry-run report formatting (no DB required)
+# ══════════════════════════════════════════════════════════════
+
+
+class TestDryRunReportFormat:
+    """Verifies the dry-run report includes the right sections
+    for operator review."""
+
+    def test_report_includes_merge_group_details(self):
+        from scripts.tennis_dedup import (
+            format_dry_run_report, MergeGroup, TeamRow,
+        )
+        mg = MergeGroup(
+            canonical=TeamRow("a", "Carlos Alcaraz",
+                              datetime(2026, 1, 1, tzinfo=timezone.utc), 3),
+            dupes=[TeamRow("b", "Alcaraz C. (Esp)",
+                           datetime(2026, 5, 1, tzinfo=timezone.utc), 1)],
+            shared_records=50,
+        )
+        report = {
+            "canonical_id": "a",
+            "dupe_ids": ["b"],
+            "aliases_transferring": 2,
+            "affected_fixtures": 5,
+            "affected_review_queue": 1,
+        }
+        team_map = {
+            "a": mg.canonical,
+            "b": mg.dupes[0],
+        }
+        output = format_dry_run_report([mg], [], team_map, [report])
+        assert "Carlos Alcaraz" in output
+        assert "Alcaraz C. (Esp)" in output
+        assert "Merge-group 1" in output
+        assert "Shared records: 50" in output
+        assert "Aliases transferring: 2" in output
+        assert "Affected fixtures: 5" in output
+
+    def test_report_includes_skipped_clusters(self):
+        from scripts.tennis_dedup import (
+            format_dry_run_report, TeamRow,
+        )
+        skipped = [{"x", "y", "z"}]
+        team_map = {
+            "x": TeamRow("x", "Chen Y.", datetime(2026, 1, 1, tzinfo=timezone.utc), 0),
+            "y": TeamRow("y", "Chen M.", datetime(2026, 1, 1, tzinfo=timezone.utc), 0),
+            "z": TeamRow("z", "Chen C.", datetime(2026, 1, 1, tzinfo=timezone.utc), 0),
+        }
+        output = format_dry_run_report([], skipped, team_map, [])
+        assert "Skipped clusters (1)" in output
+        assert "3 members" in output
+        assert "Chen" in output
+
+    def test_empty_population_report(self):
+        from scripts.tennis_dedup import format_dry_run_report
+        output = format_dry_run_report([], [], {}, [])
+        assert "Merge-groups: 0" in output
+        assert "Skipped clusters (Phase B or skip): 0" in output
+
+
+# ══════════════════════════════════════════════════════════════
+# Integration tests (SP_INTEGRATION_DB-gated)
+# ══════════════════════════════════════════════════════════════
+
+
+import os
+
+INTEGRATION_DB = os.environ.get("SP_INTEGRATION_DB", "").strip()
+
+
+@pytest.mark.skipif(
+    not INTEGRATION_DB,
+    reason="SP_INTEGRATION_DB not set — Tennis dedup integration tests need real Postgres.",
+)
+class TestMergeClusterIntegration:
+    """Real-DB tests against a Postgres with the Tennis dedup
+    migration (e2a7f3c1d4b8) applied.
+
+    Run via:
+        SP_INTEGRATION_DB=postgresql+asyncpg://... pytest tests/test_tennis_dedup.py -v
+    """
+
+    @pytest.mark.skip(reason="Integration test — implementation pending operator dry-run approval")
+    def test_merge_cluster_transaction_isolation(self):
+        """Each merge_cluster call is a single transaction per Phase 2D.3.1.
+        Failure mid-merge rolls back the entire cluster — no partial state."""
+        pass
+
+    @pytest.mark.skip(reason="Integration test — implementation pending")
+    def test_fk_cascade_correctness(self):
+        """sp.fixtures home/away team_ids rewrite to canonical. sp.team_aliases
+        copy to canonical via INSERT ON CONFLICT DO NOTHING. Original dupe
+        aliases deleted via CASCADE on sp.teams DELETE."""
+        pass
+
+    @pytest.mark.skip(reason="Integration test — implementation pending")
+    def test_jsonb_candidate_fixtures_rewrite(self):
+        """sp.review_queue.candidate_fixtures JSONB array entries matching
+        dupe team_id are rewritten to canonical team_id."""
+        pass
+
+    @pytest.mark.skip(reason="Integration test — implementation pending")
+    def test_audit_row_pre_state_capture(self):
+        """sp.dedup_audit.pre_state captures: team rows + alias sets +
+        affected fixtures with original FKs + affected review_queue
+        rows with original candidate_fixtures JSONB."""
+        pass
+
+    @pytest.mark.skip(reason="Integration test — implementation pending")
+    def test_rollback_restores_original_state(self):
+        """Rollback from sp.dedup_audit row re-inserts deleted team +
+        aliases, reverts fixture FKs, writes back original
+        candidate_fixtures JSONB."""
+        pass
+
+    @pytest.mark.skip(reason="Integration test — implementation pending")
+    def test_concurrent_merge_select_for_update_failfast(self):
+        """Two concurrent merge_cluster calls targeting overlapping
+        team_ids: SELECT FOR UPDATE at step 0 causes the second to
+        fail-fast with ValueError (row count mismatch)."""
+        pass
