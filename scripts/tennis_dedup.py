@@ -293,6 +293,7 @@ import argparse
 import asyncio
 import json
 import uuid
+from datetime import timedelta
 
 from sqlalchemy import text  # noqa: E402
 
@@ -309,7 +310,7 @@ WITH tennis_collisions AS (
   WHERE reason_detail->>'sport' = 'Tennis'
     AND reason_detail->'colliding_home_team_ids' IS NOT NULL
     AND jsonb_array_length(reason_detail->'colliding_home_team_ids') >= 2
-    AND decided_at >= NOW() - CAST(:window AS INTERVAL)
+    AND decided_at >= NOW() - :window
   UNION ALL
   SELECT
     provider_record_id,
@@ -318,7 +319,7 @@ WITH tennis_collisions AS (
   WHERE reason_detail->>'sport' = 'Tennis'
     AND reason_detail->'colliding_away_team_ids' IS NOT NULL
     AND jsonb_array_length(reason_detail->'colliding_away_team_ids') >= 2
-    AND decided_at >= NOW() - CAST(:window AS INTERVAL)
+    AND decided_at >= NOW() - :window
 ),
 collision_pairs AS (
   SELECT
@@ -360,7 +361,7 @@ async def extract_collision_pairs(
     async with async_session() as session:
         rows = (await session.execute(
             text(_COLLISION_PAIRS_SQL),
-            {"window": f"{window_days} days", "min_shared": min_shared},
+            {"window": timedelta(days=window_days), "min_shared": min_shared},
         )).all()
     return [(str(r.team_a), str(r.team_b), r.shared_records) for r in rows]
 
