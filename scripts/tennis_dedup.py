@@ -352,7 +352,7 @@ WHERE s.code = 'tennis'
 
 
 async def extract_collision_pairs(
-    *, window_days: int = 30, min_shared: int = 5,
+    *, window_days: int = 7, min_shared: int = 5,
 ) -> list[tuple[str, str, int]]:
     """Run the F8 criterion query against production.
 
@@ -391,7 +391,7 @@ async def load_team_rows(team_ids: list[str]) -> dict[str, TeamRow]:
 
 
 async def build_phase_a_population(
-    *, window_days: int = 30, min_shared: int = 5,
+    *, window_days: int = 7, min_shared: int = 5,
     max_cluster_size: int = 4,
 ) -> tuple[list[MergeGroup], list[set[str]]]:
     """Full Phase A pipeline: criterion query → clusters → partition.
