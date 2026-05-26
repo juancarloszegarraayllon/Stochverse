@@ -737,11 +737,11 @@ def format_dry_run_report(
 # ── CLI entry point ───────────────────────────────────────────
 
 
-async def run_phase_a(*, dry_run: bool, merge_pr: str | None) -> int:
+async def run_phase_a(*, dry_run: bool, merge_pr: str | None, window_days: int) -> int:
     """Execute Phase A: criterion query → partition → merge (or dry-run)."""
     log = get_logger("tennis_dedup")
 
-    merge_groups, skipped = await build_phase_a_population()
+    merge_groups, skipped = await build_phase_a_population(window_days=window_days)
     if not merge_groups:
         print("No merge-groups found meeting Phase A criterion.")
         return 0
@@ -775,6 +775,141 @@ async def run_phase_a(*, dry_run: bool, merge_pr: str | None) -> int:
     return 0
 
 
+# ── Rollback from sp.dedup_audit ──────────────────────────────
+
+
+async def rollback_merge(audit_id: str) -> int:
+    """Reverse a merge using the pre_state captured in sp.dedup_audit.
+
+    Single transaction — either fully restores pre-merge state or
+    rolls back entirely on error.
+    """
+    log = get_logger("tennis_dedup")
+    audit_uuid = uuid.UUID(audit_id)
+
+    async with async_session() as session:
+        async with session.begin():
+            row = (await session.execute(text(
+                "SELECT canonical_id, merged_ids, pre_state, rolled_back_at "
+                "FROM sp.dedup_audit WHERE id = :id FOR UPDATE"
+            ), {"id": audit_uuid})).mappings().first()
+
+            if not row:
+                print(f"ERROR: no audit row with id {audit_id}.", file=sys.stderr)
+                return 2
+
+            if row["rolled_back_at"] is not None:
+                print(
+                    f"ERROR: audit row {audit_id} was already rolled back "
+                    f"at {row['rolled_back_at']}.",
+                    file=sys.stderr,
+                )
+                return 2
+
+            pre = row["pre_state"]
+            if isinstance(pre, str):
+                pre = json.loads(pre)
+
+            canonical_id = str(row["canonical_id"])
+
+            # (a) Re-INSERT deleted team rows
+            for t in pre["team_rows"]:
+                if str(t["id"]) == canonical_id:
+                    continue
+                await session.execute(text("""
+                    INSERT INTO sp.teams (id, canonical_name, normalized_name,
+                                          sport_id, country_code, created_at)
+                    VALUES (:id, :cn, :nn, :sid, :cc, :ca)
+                    ON CONFLICT (id) DO NOTHING
+                """), {
+                    "id": uuid.UUID(t["id"]),
+                    "cn": t["canonical_name"],
+                    "nn": t["normalized_name"],
+                    "sid": t["sport_id"],
+                    "cc": t["country_code"],
+                    "ca": t["created_at"],
+                })
+
+            # (b) Re-INSERT aliases with original IDs
+            for team_id_str, aliases in pre["alias_sets"].items():
+                if team_id_str == canonical_id:
+                    continue
+                for a in aliases:
+                    await session.execute(text("""
+                        INSERT INTO sp.team_aliases
+                          (id, team_id, alias, alias_normalized, source,
+                           confidence, created_at)
+                        VALUES (:id, :tid, :alias, :anorm, :src, :conf, :ca)
+                        ON CONFLICT (id) DO NOTHING
+                    """), {
+                        "id": uuid.UUID(a["alias_id"]),
+                        "tid": uuid.UUID(team_id_str),
+                        "alias": a["alias"],
+                        "anorm": a["alias_normalized"],
+                        "src": a["source"],
+                        "conf": a["confidence"],
+                        "ca": a["created_at"],
+                    })
+
+            # (c) Restore fixture FKs from pre_state
+            for f in pre["affected_fixtures"]:
+                await session.execute(text("""
+                    UPDATE sp.fixtures
+                    SET home_team_id = :orig_home,
+                        away_team_id = :orig_away
+                    WHERE id = :fid
+                """), {
+                    "fid": uuid.UUID(f["fixture_id"]),
+                    "orig_home": uuid.UUID(f["original_home_team_id"]),
+                    "orig_away": uuid.UUID(f["original_away_team_id"]),
+                })
+
+            # (d) Restore review_queue candidate_fixtures JSONB
+            for r in pre["affected_review_queue"]:
+                original_cf = r["original_candidate_fixtures"]
+                if isinstance(original_cf, str):
+                    original_cf = json.loads(original_cf)
+                await session.execute(text("""
+                    UPDATE sp.review_queue
+                    SET candidate_fixtures = CAST(:cf AS jsonb)
+                    WHERE id = :rid
+                """), {
+                    "rid": uuid.UUID(r["review_queue_id"]),
+                    "cf": json.dumps(original_cf),
+                })
+
+            # (e) Remove alias copies that merge_cluster step 1 created
+            #     on the canonical row. These are aliases that didn't
+            #     exist on the canonical before the merge — identified
+            #     by comparing current canonical aliases against
+            #     pre_state's canonical alias set.
+            canonical_pre_alias_ids = {
+                a["alias_id"]
+                for a in pre["alias_sets"].get(canonical_id, [])
+            }
+            current_canonical_aliases = (await session.execute(text(
+                "SELECT id FROM sp.team_aliases WHERE team_id = :tid"
+            ), {"tid": uuid.UUID(canonical_id)})).scalars().all()
+            for alias_uuid in current_canonical_aliases:
+                if str(alias_uuid) not in canonical_pre_alias_ids:
+                    await session.execute(text(
+                        "DELETE FROM sp.team_aliases WHERE id = :id"
+                    ), {"id": alias_uuid})
+
+            # (f) Mark audit row as rolled back
+            await session.execute(text(
+                "UPDATE sp.dedup_audit SET rolled_back_at = NOW() "
+                "WHERE id = :id"
+            ), {"id": audit_uuid})
+
+    log.info("tennis_dedup.rollback_complete", audit_id=audit_id)
+    print(f"Rollback complete for audit row {audit_id}.")
+    return 0
+
+
+# ── CLI entry point ───────────────────────────────────────────
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Tennis cross-format dedup (Phase A/B).",
@@ -796,6 +931,10 @@ def main(argv: list[str] | None = None) -> int:
         help="PR number for audit trail provenance.",
     )
     parser.add_argument(
+        "--window-days", type=int, default=7,
+        help="Collision-evidence lookback window in days (default: 7).",
+    )
+    parser.add_argument(
         "--rollback", action="store_true",
         help="Rollback a specific merge from sp.dedup_audit.",
     )
@@ -806,8 +945,6 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # Argument validation first (before DATABASE_URL check) so CLI
-    # errors surface without requiring a live DB connection.
     if args.rollback:
         if not args.audit_id:
             print("ERROR: --rollback requires --audit-id.", file=sys.stderr)
@@ -815,8 +952,7 @@ def main(argv: list[str] | None = None) -> int:
         if not async_session:
             print("ERROR: DATABASE_URL not set.", file=sys.stderr)
             return 1
-        print("Rollback not yet implemented.", file=sys.stderr)
-        return 2
+        return asyncio.run(rollback_merge(args.audit_id))
 
     if args.phase == "b":
         print("Phase B not yet implemented.", file=sys.stderr)
@@ -826,19 +962,6 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: specify --dry-run or --apply.", file=sys.stderr)
         return 2
 
-    if args.apply:
-        # GUARD: wet apply requires rollback to be implemented first.
-        # An erroneous merge without a recovery path risks destroying
-        # real player data. This guard is removed when rollback ships
-        # in the Phase A apply PR.
-        print(
-            "ERROR: --apply is blocked until rollback is implemented. "
-            "Use --dry-run to preview merge-groups. "
-            "Rollback implementation ships in the Phase A apply PR.",
-            file=sys.stderr,
-        )
-        return 2
-
     if not async_session:
         print("ERROR: DATABASE_URL not set.", file=sys.stderr)
         return 1
@@ -846,6 +969,7 @@ def main(argv: list[str] | None = None) -> int:
     return asyncio.run(run_phase_a(
         dry_run=args.dry_run,
         merge_pr=args.merge_pr,
+        window_days=args.window_days,
     ))
 
 

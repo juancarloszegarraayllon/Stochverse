@@ -352,12 +352,21 @@ class TestCLIArgValidation:
         rc = main(["--rollback"])
         assert rc == 2
 
-    def test_apply_blocked_until_rollback_implemented(self):
-        """--apply is guarded until rollback ships. Prevents wet apply
-        against production without a recovery path."""
+    def test_apply_without_db_exits_1(self):
+        """--apply without DATABASE_URL exits 1 (DB unavailable).
+        Replaces the former apply-guard test — rollback is now
+        implemented, so --apply is unblocked."""
         from scripts.tennis_dedup import main
         rc = main(["--phase", "a", "--apply"])
-        assert rc == 2
+        assert rc == 1
+
+    def test_window_days_flag_accepted(self):
+        """--window-days flag is accepted by argparse without error.
+        Actual propagation tested via integration tests."""
+        from scripts.tennis_dedup import main
+        # Without DB, exits 1 (DB unavailable) after parsing args
+        rc = main(["--phase", "a", "--dry-run", "--window-days", "14"])
+        assert rc == 1
 
     def test_rollback_with_audit_id_but_no_db_exits_1(self):
         """Rollback needs a DB connection; without DATABASE_URL it
