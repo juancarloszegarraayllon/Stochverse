@@ -284,3 +284,532 @@ def partition_cluster(
         dupes=dupes,
         shared_records=shared_records,
     )
+
+
+# ── Criterion query (F8 collision-cluster extraction) ─────────
+
+
+import argparse
+import asyncio
+import json
+import uuid
+
+from sqlalchemy import text  # noqa: E402
+
+from db import async_session  # noqa: E402
+from observability import get_logger  # noqa: E402
+
+
+_COLLISION_PAIRS_SQL = """
+WITH tennis_collisions AS (
+  SELECT
+    provider_record_id,
+    jsonb_array_elements_text(reason_detail->'colliding_home_team_ids')::uuid AS team_id
+  FROM sp.resolution_log
+  WHERE reason_detail->>'sport' = 'Tennis'
+    AND reason_detail->'colliding_home_team_ids' IS NOT NULL
+    AND jsonb_array_length(reason_detail->'colliding_home_team_ids') >= 2
+    AND decided_at >= NOW() - INTERVAL :window
+  UNION ALL
+  SELECT
+    provider_record_id,
+    jsonb_array_elements_text(reason_detail->'colliding_away_team_ids')::uuid AS team_id
+  FROM sp.resolution_log
+  WHERE reason_detail->>'sport' = 'Tennis'
+    AND reason_detail->'colliding_away_team_ids' IS NOT NULL
+    AND jsonb_array_length(reason_detail->'colliding_away_team_ids') >= 2
+    AND decided_at >= NOW() - INTERVAL :window
+),
+collision_pairs AS (
+  SELECT
+    LEAST(a.team_id, b.team_id) AS team_a,
+    GREATEST(a.team_id, b.team_id) AS team_b,
+    a.provider_record_id
+  FROM tennis_collisions a
+  JOIN tennis_collisions b
+    ON a.provider_record_id = b.provider_record_id
+    AND a.team_id < b.team_id
+)
+SELECT team_a, team_b,
+       count(DISTINCT provider_record_id) AS shared_records
+FROM collision_pairs
+GROUP BY team_a, team_b
+HAVING count(DISTINCT provider_record_id) >= :min_shared
+ORDER BY shared_records DESC
+"""
+
+_TEAM_ROWS_SQL = """
+SELECT t.id AS team_id,
+       t.canonical_name,
+       t.created_at,
+       (SELECT count(*) FROM sp.team_aliases a WHERE a.team_id = t.id) AS alias_count
+FROM sp.teams t
+JOIN sp.sports s ON s.id = t.sport_id
+WHERE s.code = 'tennis'
+  AND t.id = ANY(:team_ids)
+"""
+
+
+async def extract_collision_pairs(
+    *, window_days: int = 30, min_shared: int = 5,
+) -> list[tuple[str, str, int]]:
+    """Run the F8 criterion query against production.
+
+    Returns list of (team_a, team_b, shared_records) tuples.
+    """
+    async with async_session() as session:
+        rows = (await session.execute(
+            text(_COLLISION_PAIRS_SQL),
+            {"window": f"{window_days} days", "min_shared": min_shared},
+        )).all()
+    return [(str(r.team_a), str(r.team_b), r.shared_records) for r in rows]
+
+
+async def load_team_rows(team_ids: list[str]) -> dict[str, TeamRow]:
+    """Load sp.teams rows for a set of team_ids.
+
+    Returns {team_id_str: TeamRow}.
+    """
+    if not team_ids:
+        return {}
+    uuids = [uuid.UUID(tid) for tid in team_ids]
+    async with async_session() as session:
+        rows = (await session.execute(
+            text(_TEAM_ROWS_SQL),
+            {"team_ids": uuids},
+        )).all()
+    return {
+        str(r.team_id): TeamRow(
+            team_id=str(r.team_id),
+            canonical_name=r.canonical_name,
+            created_at=r.created_at,
+            alias_count=r.alias_count,
+        )
+        for r in rows
+    }
+
+
+async def build_phase_a_population(
+    *, window_days: int = 30, min_shared: int = 5,
+    max_cluster_size: int = 4,
+) -> tuple[list[MergeGroup], list[set[str]]]:
+    """Full Phase A pipeline: criterion query → clusters → partition.
+
+    Returns (merge_groups, skipped_clusters).
+    merge_groups: clusters that passed all F8 conditions.
+    skipped_clusters: clusters that failed (Phase B candidates or skip).
+    """
+    log = get_logger("tennis_dedup")
+
+    pairs_raw = await extract_collision_pairs(
+        window_days=window_days, min_shared=min_shared,
+    )
+    log.info("tennis_dedup.pairs_extracted", count=len(pairs_raw))
+
+    pair_evidence: dict[tuple[str, str], int] = {}
+    for a, b, shared in pairs_raw:
+        key = (min(a, b), max(a, b))
+        pair_evidence[key] = max(pair_evidence.get(key, 0), shared)
+
+    clusters = build_clusters([(a, b) for a, b, _ in pairs_raw])
+    log.info("tennis_dedup.clusters_built", count=len(clusters))
+
+    all_team_ids = sorted({tid for c in clusters for tid in c})
+    team_rows = await load_team_rows(all_team_ids)
+    log.info("tennis_dedup.team_rows_loaded", count=len(team_rows))
+
+    merge_groups: list[MergeGroup] = []
+    skipped: list[set[str]] = []
+
+    for cluster in clusters:
+        members = [team_rows[tid] for tid in cluster if tid in team_rows]
+        if len(members) < 2:
+            skipped.append(cluster)
+            continue
+
+        cluster_evidence = max(
+            pair_evidence.get((min(a, b), max(a, b)), 0)
+            for a in cluster for b in cluster if a < b
+        )
+
+        mg = partition_cluster(
+            members, cluster_evidence,
+            max_cluster_size=max_cluster_size,
+            min_shared_records=min_shared,
+        )
+        if mg is not None:
+            merge_groups.append(mg)
+        else:
+            skipped.append(cluster)
+
+    log.info(
+        "tennis_dedup.population_built",
+        phase_a=len(merge_groups),
+        skipped=len(skipped),
+    )
+    return merge_groups, skipped
+
+
+# ── Pre-state capture (F7) ────────────────────────────────────
+
+
+async def capture_pre_state(
+    session, canonical_id: str, dupe_ids: list[str],
+) -> dict:
+    """Capture full pre-merge state for rollback per F7 decision.
+
+    Returns a dict suitable for JSONB serialization into
+    sp.dedup_audit.pre_state.
+    """
+    all_ids = [uuid.UUID(canonical_id)] + [uuid.UUID(d) for d in dupe_ids]
+
+    # Team rows
+    team_rows = (await session.execute(text(
+        "SELECT id, canonical_name, normalized_name, sport_id, "
+        "       country_code, created_at "
+        "FROM sp.teams WHERE id = ANY(:ids)"
+    ), {"ids": all_ids})).mappings().all()
+
+    # Alias sets per team
+    alias_rows = (await session.execute(text(
+        "SELECT team_id, id AS alias_id, alias, alias_normalized, "
+        "       source, confidence, created_at "
+        "FROM sp.team_aliases WHERE team_id = ANY(:ids)"
+    ), {"ids": all_ids})).mappings().all()
+
+    alias_sets: dict[str, list[dict]] = {}
+    for a in alias_rows:
+        tid = str(a["team_id"])
+        alias_sets.setdefault(tid, []).append({
+            "alias_id": str(a["alias_id"]),
+            "alias": a["alias"],
+            "alias_normalized": a["alias_normalized"],
+            "source": a["source"],
+            "confidence": float(a["confidence"]) if a["confidence"] is not None else None,
+            "created_at": a["created_at"].isoformat() if a["created_at"] else None,
+        })
+
+    # Affected fixtures
+    dupe_uuids = [uuid.UUID(d) for d in dupe_ids]
+    fixture_rows = (await session.execute(text(
+        "SELECT id, home_team_id, away_team_id "
+        "FROM sp.fixtures "
+        "WHERE home_team_id = ANY(:dids) OR away_team_id = ANY(:dids)"
+    ), {"dids": dupe_uuids})).mappings().all()
+
+    # Affected review_queue rows — full candidate_fixtures JSONB per F7 adjustment
+    rq_rows = (await session.execute(text(
+        "SELECT id, candidate_fixtures "
+        "FROM sp.review_queue "
+        "WHERE candidate_fixtures::text LIKE ANY(:patterns)"
+    ), {
+        "patterns": [f"%{d}%" for d in dupe_ids],
+    })).mappings().all()
+
+    return {
+        "team_rows": [
+            {
+                "id": str(t["id"]),
+                "canonical_name": t["canonical_name"],
+                "normalized_name": t["normalized_name"],
+                "sport_id": t["sport_id"],
+                "country_code": t["country_code"],
+                "created_at": t["created_at"].isoformat() if t["created_at"] else None,
+            }
+            for t in team_rows
+        ],
+        "alias_sets": alias_sets,
+        "affected_fixtures": [
+            {
+                "fixture_id": str(f["id"]),
+                "original_home_team_id": str(f["home_team_id"]),
+                "original_away_team_id": str(f["away_team_id"]),
+            }
+            for f in fixture_rows
+        ],
+        "affected_review_queue": [
+            {
+                "review_queue_id": str(r["id"]),
+                "original_candidate_fixtures": r["candidate_fixtures"],
+            }
+            for r in rq_rows
+        ],
+    }
+
+
+# ── merge_cluster() async primitive ───────────────────────────
+
+
+async def merge_cluster(
+    mg: MergeGroup,
+    *,
+    merge_phase: str,
+    merge_pr: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Merge a validated MergeGroup. Single transaction per F4/Phase 2D.3.1.
+
+    Returns a report dict (usable in both dry-run and wet modes).
+    In dry_run mode: captures what WOULD happen without writing.
+    In wet mode: applies the merge and writes the audit row.
+    """
+    canonical_id = mg.canonical.team_id
+    dupe_ids = [d.team_id for d in mg.dupes]
+    log = get_logger("tennis_dedup")
+
+    async with async_session() as session:
+        async with session.begin():
+            # Step 0: SELECT FOR UPDATE — fail-fast if any row already gone
+            all_ids = [uuid.UUID(canonical_id)] + [uuid.UUID(d) for d in dupe_ids]
+            locked = (await session.execute(text(
+                "SELECT id FROM sp.teams WHERE id = ANY(:ids) FOR UPDATE"
+            ), {"ids": all_ids})).scalars().all()
+
+            if len(locked) != len(all_ids):
+                raise ValueError(
+                    f"Expected {len(all_ids)} rows, locked {len(locked)}. "
+                    "Concurrent modification or prior merge."
+                )
+
+            # Capture pre-state before any mutations
+            pre_state = await capture_pre_state(session, canonical_id, dupe_ids)
+
+            report = {
+                "canonical_id": canonical_id,
+                "canonical_name": mg.canonical.canonical_name,
+                "dupe_ids": dupe_ids,
+                "dupe_names": [d.canonical_name for d in mg.dupes],
+                "shared_records": mg.shared_records,
+                "affected_fixtures": len(pre_state["affected_fixtures"]),
+                "affected_review_queue": len(pre_state["affected_review_queue"]),
+                "aliases_transferring": sum(
+                    len(pre_state["alias_sets"].get(d, []))
+                    for d in dupe_ids
+                ),
+                "unclassified_standalone": [],
+            }
+
+            if dry_run:
+                # Transaction rolls back on context exit (no commit)
+                return report
+
+            # Step 1-5: apply the merge
+            for dupe_id in dupe_ids:
+                dupe_uuid = uuid.UUID(dupe_id)
+                canonical_uuid = uuid.UUID(canonical_id)
+
+                # Step 1: Copy aliases
+                await session.execute(text("""
+                    INSERT INTO sp.team_aliases
+                      (id, team_id, alias, alias_normalized, source,
+                       confidence, created_at)
+                    SELECT gen_random_uuid(), :canonical_id, a.alias,
+                           a.alias_normalized, a.source, a.confidence,
+                           a.created_at
+                    FROM sp.team_aliases a WHERE a.team_id = :dupe_id
+                    ON CONFLICT (alias_normalized, source) DO NOTHING
+                """), {"canonical_id": canonical_uuid, "dupe_id": dupe_uuid})
+
+                # Step 2: Rewrite fixtures
+                await session.execute(text(
+                    "UPDATE sp.fixtures SET home_team_id = :canonical_id "
+                    "WHERE home_team_id = :dupe_id"
+                ), {"canonical_id": canonical_uuid, "dupe_id": dupe_uuid})
+                await session.execute(text(
+                    "UPDATE sp.fixtures SET away_team_id = :canonical_id "
+                    "WHERE away_team_id = :dupe_id"
+                ), {"canonical_id": canonical_uuid, "dupe_id": dupe_uuid})
+
+                # Step 3: Rewrite review_queue candidate_fixtures JSONB
+                dupe_text = str(dupe_id)
+                canonical_text = str(canonical_id)
+                await session.execute(text("""
+                    UPDATE sp.review_queue
+                    SET candidate_fixtures = (
+                      SELECT jsonb_agg(
+                        CASE WHEN elem #>> '{}' = :dupe_text
+                             THEN to_jsonb(:canonical_text)
+                             ELSE elem END
+                      ) FROM jsonb_array_elements(candidate_fixtures) elem
+                    )
+                    WHERE candidate_fixtures::text LIKE '%%' || :dupe_text || '%%'
+                """), {"dupe_text": dupe_text, "canonical_text": canonical_text})
+
+            # Step 4: Audit row
+            await session.execute(text("""
+                INSERT INTO sp.dedup_audit
+                  (canonical_id, merged_ids, pre_state, merge_phase, merge_pr)
+                VALUES (:canonical_id, :merged_ids, :pre_state, :phase, :pr)
+            """), {
+                "canonical_id": uuid.UUID(canonical_id),
+                "merged_ids": [uuid.UUID(d) for d in dupe_ids],
+                "pre_state": json.dumps(pre_state, default=str),
+                "phase": merge_phase,
+                "pr": merge_pr,
+            })
+
+            # Step 5: Delete dupe rows (CASCADE purges alias originals)
+            for dupe_id in dupe_ids:
+                await session.execute(text(
+                    "DELETE FROM sp.teams WHERE id = :dupe_id"
+                ), {"dupe_id": uuid.UUID(dupe_id)})
+
+            log.info(
+                "tennis_dedup.merged",
+                canonical_id=canonical_id,
+                dupe_ids=dupe_ids,
+                fixtures=report["affected_fixtures"],
+                review_queue=report["affected_review_queue"],
+            )
+
+    return report
+
+
+# ── Dry-run report formatting ─────────────────────────────────
+
+
+def format_dry_run_report(
+    merge_groups: list[MergeGroup],
+    skipped_clusters: list[set[str]],
+    team_rows: dict[str, TeamRow],
+    reports: list[dict],
+) -> str:
+    """Format the --dry-run output for operator review."""
+    out: list[str] = []
+    out.append(f"# Tennis Dedup Phase A — Dry-Run Report")
+    out.append("")
+    out.append(f"Merge-groups: {len(merge_groups)}")
+    out.append(f"Skipped clusters (Phase B or skip): {len(skipped_clusters)}")
+    out.append("")
+
+    for i, (mg, report) in enumerate(zip(merge_groups, reports), 1):
+        out.append(f"## Merge-group {i}")
+        out.append(f"- Canonical: `{mg.canonical.canonical_name}` ({mg.canonical.team_id})")
+        for d in mg.dupes:
+            out.append(f"- Dupe: `{d.canonical_name}` ({d.team_id})")
+        out.append(f"- Shared records: {mg.shared_records}")
+        out.append(f"- Aliases transferring: {report['aliases_transferring']}")
+        out.append(f"- Affected fixtures: {report['affected_fixtures']}")
+        out.append(f"- Affected review_queue rows: {report['affected_review_queue']}")
+        out.append("")
+
+    if skipped_clusters:
+        out.append(f"## Skipped clusters ({len(skipped_clusters)})")
+        out.append("")
+        for cluster in skipped_clusters[:20]:
+            names = [
+                team_rows[tid].canonical_name if tid in team_rows else tid
+                for tid in sorted(cluster)
+            ]
+            out.append(f"- {len(cluster)} members: {', '.join(names)}")
+        if len(skipped_clusters) > 20:
+            out.append(f"- ... and {len(skipped_clusters) - 20} more")
+        out.append("")
+
+    return "\n".join(out)
+
+
+# ── CLI entry point ───────────────────────────────────────────
+
+
+async def run_phase_a(*, dry_run: bool, merge_pr: str | None) -> int:
+    """Execute Phase A: criterion query → partition → merge (or dry-run)."""
+    log = get_logger("tennis_dedup")
+
+    merge_groups, skipped = await build_phase_a_population()
+    if not merge_groups:
+        print("No merge-groups found meeting Phase A criterion.")
+        return 0
+
+    all_team_ids = sorted({
+        tid
+        for mg in merge_groups
+        for tid in [mg.canonical.team_id] + [d.team_id for d in mg.dupes]
+    } | {tid for c in skipped for tid in c})
+    team_rows_map = await load_team_rows(all_team_ids)
+
+    reports: list[dict] = []
+    for mg in merge_groups:
+        report = await merge_cluster(
+            mg, merge_phase="phase_a", merge_pr=merge_pr, dry_run=dry_run,
+        )
+        reports.append(report)
+
+    output = format_dry_run_report(merge_groups, skipped, team_rows_map, reports)
+    print(output)
+
+    if dry_run:
+        log.info("tennis_dedup.dry_run_complete", groups=len(merge_groups))
+        return 3
+
+    log.info(
+        "tennis_dedup.phase_a_complete",
+        merged=len(merge_groups),
+        skipped=len(skipped),
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Tennis cross-format dedup (Phase A/B).",
+    )
+    parser.add_argument(
+        "--phase", choices=["a", "b"], default="a",
+        help="Phase A (automated) or Phase B (operator-reviewed).",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Produce report without applying merges.",
+    )
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="Apply merges (wet run).",
+    )
+    parser.add_argument(
+        "--merge-pr", type=str, default=None,
+        help="PR number for audit trail provenance.",
+    )
+    parser.add_argument(
+        "--rollback", action="store_true",
+        help="Rollback a specific merge from sp.dedup_audit.",
+    )
+    parser.add_argument(
+        "--audit-id", type=str, default=None,
+        help="Audit row UUID for --rollback.",
+    )
+
+    args = parser.parse_args(argv)
+
+    # Argument validation first (before DATABASE_URL check) so CLI
+    # errors surface without requiring a live DB connection.
+    if args.rollback:
+        if not args.audit_id:
+            print("ERROR: --rollback requires --audit-id.", file=sys.stderr)
+            return 2
+        if not async_session:
+            print("ERROR: DATABASE_URL not set.", file=sys.stderr)
+            return 1
+        print("Rollback not yet implemented.", file=sys.stderr)
+        return 2
+
+    if args.phase == "b":
+        print("Phase B not yet implemented.", file=sys.stderr)
+        return 2
+
+    if not args.dry_run and not args.apply:
+        print("ERROR: specify --dry-run or --apply.", file=sys.stderr)
+        return 2
+
+    if not async_session:
+        print("ERROR: DATABASE_URL not set.", file=sys.stderr)
+        return 1
+
+    return asyncio.run(run_phase_a(
+        dry_run=args.dry_run,
+        merge_pr=args.merge_pr,
+    ))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
