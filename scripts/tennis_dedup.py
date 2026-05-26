@@ -309,7 +309,7 @@ WITH tennis_collisions AS (
   WHERE reason_detail->>'sport' = 'Tennis'
     AND reason_detail->'colliding_home_team_ids' IS NOT NULL
     AND jsonb_array_length(reason_detail->'colliding_home_team_ids') >= 2
-    AND decided_at >= NOW() - INTERVAL :window
+    AND decided_at >= NOW() - CAST(:window AS INTERVAL)
   UNION ALL
   SELECT
     provider_record_id,
@@ -318,7 +318,7 @@ WITH tennis_collisions AS (
   WHERE reason_detail->>'sport' = 'Tennis'
     AND reason_detail->'colliding_away_team_ids' IS NOT NULL
     AND jsonb_array_length(reason_detail->'colliding_away_team_ids') >= 2
-    AND decided_at >= NOW() - INTERVAL :window
+    AND decided_at >= NOW() - CAST(:window AS INTERVAL)
 ),
 collision_pairs AS (
   SELECT
@@ -407,9 +407,18 @@ async def build_phase_a_population(
     log.info("tennis_dedup.pairs_extracted", count=len(pairs_raw))
 
     pair_evidence: dict[tuple[str, str], int] = {}
+    dupes_seen = 0
     for a, b, shared in pairs_raw:
         key = (min(a, b), max(a, b))
+        if key in pair_evidence:
+            dupes_seen += 1
         pair_evidence[key] = max(pair_evidence.get(key, 0), shared)
+    if dupes_seen:
+        log.warning(
+            "tennis_dedup.duplicate_pairs",
+            count=dupes_seen,
+            note="criterion query returned duplicate pairs; max() dedup applied",
+        )
 
     clusters = build_clusters([(a, b) for a, b, _ in pairs_raw])
     log.info("tennis_dedup.clusters_built", count=len(clusters))
@@ -427,6 +436,16 @@ async def build_phase_a_population(
             skipped.append(cluster)
             continue
 
+        # Use max shared_records across all pairs in the cluster as the
+        # evidence strength. For fully-connected clusters from single
+        # co-occurrence events (the common case: all N team_ids appeared
+        # in the same colliding_*_team_ids array), all pairs share the
+        # same shared_records count, so max == any. For clusters
+        # assembled from pairs with different evidence strengths (rare:
+        # would require team_ids to co-occur in different collision
+        # events at different frequencies), max overstates the weakest
+        # pair's evidence. Acceptable for Phase A's ≥5 threshold —
+        # the partition_cluster check re-validates the threshold.
         cluster_evidence = max(
             pair_evidence.get((min(a, b), max(a, b)), 0)
             for a in cluster for b in cluster if a < b
@@ -586,6 +605,11 @@ async def merge_cluster(
                     len(pre_state["alias_sets"].get(d, []))
                     for d in dupe_ids
                 ),
+                # TODO: populate with UNCLASSIFIED cluster members that
+                # didn't pair into a merge-group. Enhances the dry-run
+                # report per review observation #3 ("Cluster X has 4
+                # members; merging F/S pair (2 rows); 2 UNCLASSIFIED
+                # members remain standalone").
                 "unclassified_standalone": [],
             }
 
@@ -799,6 +823,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.dry_run and not args.apply:
         print("ERROR: specify --dry-run or --apply.", file=sys.stderr)
+        return 2
+
+    if args.apply:
+        # GUARD: wet apply requires rollback to be implemented first.
+        # An erroneous merge without a recovery path risks destroying
+        # real player data. This guard is removed when rollback ships
+        # in the Phase A apply PR.
+        print(
+            "ERROR: --apply is blocked until rollback is implemented. "
+            "Use --dry-run to preview merge-groups. "
+            "Rollback implementation ships in the Phase A apply PR.",
+            file=sys.stderr,
+        )
         return 2
 
     if not async_session:

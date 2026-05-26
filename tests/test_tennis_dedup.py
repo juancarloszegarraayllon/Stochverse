@@ -352,6 +352,13 @@ class TestCLIArgValidation:
         rc = main(["--rollback"])
         assert rc == 2
 
+    def test_apply_blocked_until_rollback_implemented(self):
+        """--apply is guarded until rollback ships. Prevents wet apply
+        against production without a recovery path."""
+        from scripts.tennis_dedup import main
+        rc = main(["--phase", "a", "--apply"])
+        assert rc == 2
+
     def test_rollback_with_audit_id_but_no_db_exits_1(self):
         """Rollback needs a DB connection; without DATABASE_URL it
         exits 1 (DB unavailable) rather than 2 (not implemented).
