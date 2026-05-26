@@ -624,15 +624,32 @@ async def merge_cluster(
                 canonical_uuid = uuid.UUID(canonical_id)
 
                 # Step 1: Copy aliases
+                # Step 1: Reparent dupe's aliases to canonical.
+                #
+                # The UNIQUE constraint on sp.team_aliases is GLOBAL
+                # on (alias_normalized, source), NOT per-team. A naive
+                # INSERT ... ON CONFLICT DO NOTHING silently drops the
+                # copy because the dupe's OWN alias row (still alive)
+                # satisfies the constraint. Step 5's CASCADE then
+                # deletes the original → alias lost.
+                #
+                # Fix: UPDATE the dupe's aliases to point at the
+                # canonical team_id directly. For aliases where the
+                # canonical already has a row with the same
+                # (alias_normalized, source), we skip (the canonical's
+                # version wins). Then step 5's CASCADE only deletes
+                # aliases we've already reparented or intentionally
+                # skipped.
                 await session.execute(text("""
-                    INSERT INTO sp.team_aliases
-                      (id, team_id, alias, alias_normalized, source,
-                       confidence, created_at)
-                    SELECT gen_random_uuid(), :canonical_id, a.alias,
-                           a.alias_normalized, a.source, a.confidence,
-                           a.created_at
-                    FROM sp.team_aliases a WHERE a.team_id = :dupe_id
-                    ON CONFLICT (alias_normalized, source) DO NOTHING
+                    UPDATE sp.team_aliases
+                    SET team_id = :canonical_id
+                    WHERE team_id = :dupe_id
+                      AND NOT EXISTS (
+                        SELECT 1 FROM sp.team_aliases existing
+                        WHERE existing.team_id = :canonical_id
+                          AND existing.alias_normalized = sp.team_aliases.alias_normalized
+                          AND existing.source = sp.team_aliases.source
+                      )
                 """), {"canonical_id": canonical_uuid, "dupe_id": dupe_uuid})
 
                 # Step 2: Rewrite fixtures
