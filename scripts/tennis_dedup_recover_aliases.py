@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime as _datetime
 import os
 import sys
 import uuid
@@ -121,7 +122,7 @@ async def recover_aliases(*, dry_run: bool, merge_pr: str = "197") -> int:
                                 "anorm": anorm,
                                 "src": source,
                                 "conf": alias_data["confidence"],
-                                "ca": alias_data["created_at"],
+                                "ca": _datetime.fromisoformat(alias_data["created_at"]) if alias_data["created_at"] else None,
                             })
                     total_recovered += 1
 
