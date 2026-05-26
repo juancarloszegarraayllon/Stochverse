@@ -624,15 +624,32 @@ async def merge_cluster(
                 canonical_uuid = uuid.UUID(canonical_id)
 
                 # Step 1: Copy aliases
+                # Step 1: Reparent dupe's aliases to canonical.
+                #
+                # The UNIQUE constraint on sp.team_aliases is GLOBAL
+                # on (alias_normalized, source), NOT per-team. A naive
+                # INSERT ... ON CONFLICT DO NOTHING silently drops the
+                # copy because the dupe's OWN alias row (still alive)
+                # satisfies the constraint. Step 5's CASCADE then
+                # deletes the original → alias lost.
+                #
+                # Fix: UPDATE the dupe's aliases to point at the
+                # canonical team_id directly. For aliases where the
+                # canonical already has a row with the same
+                # (alias_normalized, source), we skip (the canonical's
+                # version wins). Then step 5's CASCADE only deletes
+                # aliases we've already reparented or intentionally
+                # skipped.
                 await session.execute(text("""
-                    INSERT INTO sp.team_aliases
-                      (id, team_id, alias, alias_normalized, source,
-                       confidence, created_at)
-                    SELECT gen_random_uuid(), :canonical_id, a.alias,
-                           a.alias_normalized, a.source, a.confidence,
-                           a.created_at
-                    FROM sp.team_aliases a WHERE a.team_id = :dupe_id
-                    ON CONFLICT (alias_normalized, source) DO NOTHING
+                    UPDATE sp.team_aliases
+                    SET team_id = :canonical_id
+                    WHERE team_id = :dupe_id
+                      AND NOT EXISTS (
+                        SELECT 1 FROM sp.team_aliases existing
+                        WHERE existing.team_id = :canonical_id
+                          AND existing.alias_normalized = sp.team_aliases.alias_normalized
+                          AND existing.source = sp.team_aliases.source
+                      )
                 """), {"canonical_id": canonical_uuid, "dupe_id": dupe_uuid})
 
                 # Step 2: Rewrite fixtures
@@ -943,26 +960,56 @@ async def rollback_merge(audit_id: str, *, force: bool = False) -> int:
                     "cf": json.dumps(original_cf),
                 })
 
-            # (d) Re-INSERT aliases with original IDs
+            # (d) Restore dupe's aliases.
+            #
+            # Two merge-code-path cases:
+            #   - UPDATE-reparent path (new code, PR #200+): aliases
+            #     were UPDATEd to team_id=canonical. They still exist
+            #     with their original alias_id. Rollback UPDATEs them
+            #     back to team_id=dupe_id.
+            #   - INSERT-copy path (old code, PR #197 76 merges):
+            #     aliases were lost (INSERT silently dropped, CASCADE
+            #     deleted originals). Rollback must re-INSERT from
+            #     pre_state. ON CONFLICT (id) DO NOTHING handles the
+            #     case where the alias_id already exists (reparent path).
+            #
+            # The combined approach: for each dupe alias in pre_state,
+            # first try UPDATE (reparent path — alias still exists with
+            # canonical team_id). If UPDATE touches 0 rows, INSERT
+            # (old path — alias was lost and needs re-creation).
             for team_id_str, aliases in pre["alias_sets"].items():
                 if team_id_str == canonical_id:
                     continue
+                dupe_uuid_restore = uuid.UUID(team_id_str)
                 for a in aliases:
-                    await session.execute(text("""
-                        INSERT INTO sp.team_aliases
-                          (id, team_id, alias, alias_normalized, source,
-                           confidence, created_at)
-                        VALUES (:id, :tid, :alias, :anorm, :src, :conf, :ca)
-                        ON CONFLICT (id) DO NOTHING
+                    alias_uuid = uuid.UUID(a["alias_id"])
+                    # Try UPDATE first (reparented alias still exists)
+                    result = await session.execute(text("""
+                        UPDATE sp.team_aliases
+                        SET team_id = :dupe_tid
+                        WHERE id = :aid AND team_id = :canonical_tid
                     """), {
-                        "id": uuid.UUID(a["alias_id"]),
-                        "tid": uuid.UUID(team_id_str),
-                        "alias": a["alias"],
-                        "anorm": a["alias_normalized"],
-                        "src": a["source"],
-                        "conf": a["confidence"],
-                        "ca": _datetime.fromisoformat(a["created_at"]) if a["created_at"] else None,
+                        "aid": alias_uuid,
+                        "dupe_tid": dupe_uuid_restore,
+                        "canonical_tid": uuid.UUID(canonical_id),
                     })
+                    if result.rowcount == 0:
+                        # Alias was lost (old INSERT-copy path) — re-INSERT
+                        await session.execute(text("""
+                            INSERT INTO sp.team_aliases
+                              (id, team_id, alias, alias_normalized, source,
+                               confidence, created_at)
+                            VALUES (:id, :tid, :alias, :anorm, :src, :conf, :ca)
+                            ON CONFLICT (id) DO NOTHING
+                        """), {
+                            "id": alias_uuid,
+                            "tid": dupe_uuid_restore,
+                            "alias": a["alias"],
+                            "anorm": a["alias_normalized"],
+                            "src": a["source"],
+                            "conf": a["confidence"],
+                            "ca": _datetime.fromisoformat(a["created_at"]) if a["created_at"] else None,
+                        })
 
             # (e) Remove alias copies that merge_cluster step 1 created
             #     on the canonical row — aliases that didn't exist on
