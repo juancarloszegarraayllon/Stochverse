@@ -310,7 +310,7 @@ WITH tennis_collisions AS (
   WHERE reason_detail->>'sport' = 'Tennis'
     AND reason_detail->'colliding_home_team_ids' IS NOT NULL
     AND jsonb_array_length(reason_detail->'colliding_home_team_ids') >= 2
-    AND decided_at >= NOW() - :window
+    AND decided_at >= NOW() - CAST(:window AS INTERVAL)
   UNION ALL
   SELECT
     provider_record_id,
@@ -319,7 +319,7 @@ WITH tennis_collisions AS (
   WHERE reason_detail->>'sport' = 'Tennis'
     AND reason_detail->'colliding_away_team_ids' IS NOT NULL
     AND jsonb_array_length(reason_detail->'colliding_away_team_ids') >= 2
-    AND decided_at >= NOW() - :window
+    AND decided_at >= NOW() - CAST(:window AS INTERVAL)
 ),
 collision_pairs AS (
   SELECT
