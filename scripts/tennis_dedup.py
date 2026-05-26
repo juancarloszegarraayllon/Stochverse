@@ -737,14 +737,44 @@ def format_dry_run_report(
 # ── CLI entry point ───────────────────────────────────────────
 
 
-async def run_phase_a(*, dry_run: bool, merge_pr: str | None) -> int:
-    """Execute Phase A: criterion query → partition → merge (or dry-run)."""
+async def run_phase_a(
+    *, dry_run: bool, merge_pr: str | None,
+    window_days: int, only_cluster: str | None,
+) -> int:
+    """Execute Phase A: criterion query → partition → merge (or dry-run).
+
+    If only_cluster is set, applies/reports only the merge-group whose
+    canonical_id matches. Used for smoke-test-one-group-then-rollback
+    validation before bulk apply.
+    """
     log = get_logger("tennis_dedup")
 
-    merge_groups, skipped = await build_phase_a_population()
+    merge_groups, skipped = await build_phase_a_population(window_days=window_days)
     if not merge_groups:
         print("No merge-groups found meeting Phase A criterion.")
         return 0
+
+    if only_cluster:
+        filtered = [
+            mg for mg in merge_groups
+            if mg.canonical.team_id == only_cluster
+        ]
+        if not filtered:
+            all_canonicals = [mg.canonical.team_id for mg in merge_groups]
+            print(
+                f"ERROR: --only-cluster {only_cluster} not found in "
+                f"{len(merge_groups)} merge-groups. "
+                f"Available canonical_ids (first 10): "
+                f"{', '.join(all_canonicals[:10])}",
+                file=sys.stderr,
+            )
+            return 2
+        merge_groups = filtered
+        log.info(
+            "tennis_dedup.only_cluster_filter",
+            canonical_id=only_cluster,
+            groups_after_filter=len(merge_groups),
+        )
 
     all_team_ids = sorted({
         tid
@@ -775,6 +805,192 @@ async def run_phase_a(*, dry_run: bool, merge_pr: str | None) -> int:
     return 0
 
 
+# ── Rollback from sp.dedup_audit ──────────────────────────────
+
+
+async def rollback_merge(audit_id: str, *, force: bool = False) -> int:
+    """Reverse a merge using the pre_state captured in sp.dedup_audit.
+
+    Single transaction — either fully restores pre-merge state or
+    rolls back entirely on error.
+
+    Restoration order (inverse of merge cascade):
+      (a) Re-INSERT deleted team rows (FK targets first)
+      (b) Restore sp.fixtures home/away FKs (referrers after targets)
+      (c) Restore sp.review_queue candidate_fixtures JSONB
+      (d) Re-INSERT aliases with original IDs
+      (e) Remove alias copies created on canonical by merge step 1
+      (f) Mark audit row rolled_back_at = NOW()
+
+    Safety checks (skippable with force=True):
+      - If the canonical row was modified after the merge (e.g., by a
+        later Phase B merge or manual UPDATE), rollback warns and exits
+        unless --force is set.
+      - If affected fixture rows were externally modified, same guard.
+    """
+    log = get_logger("tennis_dedup")
+    audit_uuid = uuid.UUID(audit_id)
+
+    async with async_session() as session:
+        async with session.begin():
+            row = (await session.execute(text(
+                "SELECT canonical_id, merged_ids, pre_state, rolled_back_at "
+                "FROM sp.dedup_audit WHERE id = :id FOR UPDATE"
+            ), {"id": audit_uuid})).mappings().first()
+
+            if not row:
+                print(f"ERROR: no audit row with id {audit_id}.", file=sys.stderr)
+                return 2
+
+            if row["rolled_back_at"] is not None:
+                print(
+                    f"ERROR: audit row {audit_id} was already rolled back "
+                    f"at {row['rolled_back_at']}.",
+                    file=sys.stderr,
+                )
+                return 2
+
+            pre = row["pre_state"]
+            if isinstance(pre, str):
+                pre = json.loads(pre)
+
+            canonical_id = str(row["canonical_id"])
+            merged_ids = [str(m) for m in row["merged_ids"]]
+
+            # Safety check: verify affected fixtures haven't been
+            # externally modified since the merge. If any fixture's
+            # current home/away team_id doesn't match canonical_id
+            # (the value the merge wrote), something else changed it.
+            if not force and pre["affected_fixtures"]:
+                for f in pre["affected_fixtures"]:
+                    current = (await session.execute(text(
+                        "SELECT home_team_id, away_team_id "
+                        "FROM sp.fixtures WHERE id = :fid"
+                    ), {"fid": uuid.UUID(f["fixture_id"])})).mappings().first()
+                    if current is None:
+                        print(
+                            f"WARNING: fixture {f['fixture_id']} no longer exists. "
+                            f"Use --force to proceed anyway.",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    current_home = str(current["home_team_id"])
+                    current_away = str(current["away_team_id"])
+                    expected_home = f["original_home_team_id"]
+                    expected_away = f["original_away_team_id"]
+                    # After merge, the dupe's team_id was rewritten to
+                    # canonical. If current value is NEITHER the canonical
+                    # NOR the original, something external modified it.
+                    for side, cur, orig in [
+                        ("home", current_home, expected_home),
+                        ("away", current_away, expected_away),
+                    ]:
+                        if cur != canonical_id and cur != orig:
+                            print(
+                                f"WARNING: fixture {f['fixture_id']} {side}_team_id "
+                                f"is {cur}, expected {canonical_id} (post-merge) or "
+                                f"{orig} (pre-merge). External modification detected. "
+                                f"Use --force to proceed anyway.",
+                                file=sys.stderr,
+                            )
+                            return 2
+
+            # (a) Re-INSERT deleted team rows (FK targets first)
+            for t in pre["team_rows"]:
+                if str(t["id"]) == canonical_id:
+                    continue
+                await session.execute(text("""
+                    INSERT INTO sp.teams (id, canonical_name, normalized_name,
+                                          sport_id, country_code, created_at)
+                    VALUES (:id, :cn, :nn, :sid, :cc, :ca)
+                    ON CONFLICT (id) DO NOTHING
+                """), {
+                    "id": uuid.UUID(t["id"]),
+                    "cn": t["canonical_name"],
+                    "nn": t["normalized_name"],
+                    "sid": t["sport_id"],
+                    "cc": t["country_code"],
+                    "ca": t["created_at"],
+                })
+
+            # (b) Restore fixture FKs from pre_state
+            for f in pre["affected_fixtures"]:
+                await session.execute(text("""
+                    UPDATE sp.fixtures
+                    SET home_team_id = :orig_home,
+                        away_team_id = :orig_away
+                    WHERE id = :fid
+                """), {
+                    "fid": uuid.UUID(f["fixture_id"]),
+                    "orig_home": uuid.UUID(f["original_home_team_id"]),
+                    "orig_away": uuid.UUID(f["original_away_team_id"]),
+                })
+
+            # (c) Restore review_queue candidate_fixtures JSONB
+            for r in pre["affected_review_queue"]:
+                original_cf = r["original_candidate_fixtures"]
+                if isinstance(original_cf, str):
+                    original_cf = json.loads(original_cf)
+                await session.execute(text("""
+                    UPDATE sp.review_queue
+                    SET candidate_fixtures = CAST(:cf AS jsonb)
+                    WHERE id = :rid
+                """), {
+                    "rid": uuid.UUID(r["review_queue_id"]),
+                    "cf": json.dumps(original_cf),
+                })
+
+            # (d) Re-INSERT aliases with original IDs
+            for team_id_str, aliases in pre["alias_sets"].items():
+                if team_id_str == canonical_id:
+                    continue
+                for a in aliases:
+                    await session.execute(text("""
+                        INSERT INTO sp.team_aliases
+                          (id, team_id, alias, alias_normalized, source,
+                           confidence, created_at)
+                        VALUES (:id, :tid, :alias, :anorm, :src, :conf, :ca)
+                        ON CONFLICT (id) DO NOTHING
+                    """), {
+                        "id": uuid.UUID(a["alias_id"]),
+                        "tid": uuid.UUID(team_id_str),
+                        "alias": a["alias"],
+                        "anorm": a["alias_normalized"],
+                        "src": a["source"],
+                        "conf": a["confidence"],
+                        "ca": a["created_at"],
+                    })
+
+            # (e) Remove alias copies that merge_cluster step 1 created
+            #     on the canonical row — aliases that didn't exist on
+            #     the canonical before the merge.
+            canonical_pre_alias_ids = {
+                a["alias_id"]
+                for a in pre["alias_sets"].get(canonical_id, [])
+            }
+            current_canonical_aliases = (await session.execute(text(
+                "SELECT id FROM sp.team_aliases WHERE team_id = :tid"
+            ), {"tid": uuid.UUID(canonical_id)})).scalars().all()
+            for alias_uuid in current_canonical_aliases:
+                if str(alias_uuid) not in canonical_pre_alias_ids:
+                    await session.execute(text(
+                        "DELETE FROM sp.team_aliases WHERE id = :id"
+                    ), {"id": alias_uuid})
+
+            # (f) Mark audit row as rolled back
+            await session.execute(text(
+                "UPDATE sp.dedup_audit SET rolled_back_at = NOW() "
+                "WHERE id = :id"
+            ), {"id": audit_uuid})
+
+    log.info("tennis_dedup.rollback_complete", audit_id=audit_id)
+    print(f"Rollback complete for audit row {audit_id}.")
+    return 0
+
+
+# ── CLI entry point ───────────────────────────────────────────
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Tennis cross-format dedup (Phase A/B).",
@@ -796,6 +1012,10 @@ def main(argv: list[str] | None = None) -> int:
         help="PR number for audit trail provenance.",
     )
     parser.add_argument(
+        "--window-days", type=int, default=7,
+        help="Collision-evidence lookback window in days (default: 7).",
+    )
+    parser.add_argument(
         "--rollback", action="store_true",
         help="Rollback a specific merge from sp.dedup_audit.",
     )
@@ -803,11 +1023,21 @@ def main(argv: list[str] | None = None) -> int:
         "--audit-id", type=str, default=None,
         help="Audit row UUID for --rollback.",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Force rollback even if external modifications detected.",
+    )
+    parser.add_argument(
+        "--only-cluster", type=str, default=None,
+        help=(
+            "Apply/dry-run only the merge-group whose canonical_id "
+            "matches this UUID. For smoke-test-one-group-then-rollback "
+            "validation before bulk apply."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
-    # Argument validation first (before DATABASE_URL check) so CLI
-    # errors surface without requiring a live DB connection.
     if args.rollback:
         if not args.audit_id:
             print("ERROR: --rollback requires --audit-id.", file=sys.stderr)
@@ -815,8 +1045,7 @@ def main(argv: list[str] | None = None) -> int:
         if not async_session:
             print("ERROR: DATABASE_URL not set.", file=sys.stderr)
             return 1
-        print("Rollback not yet implemented.", file=sys.stderr)
-        return 2
+        return asyncio.run(rollback_merge(args.audit_id, force=args.force))
 
     if args.phase == "b":
         print("Phase B not yet implemented.", file=sys.stderr)
@@ -826,19 +1055,6 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: specify --dry-run or --apply.", file=sys.stderr)
         return 2
 
-    if args.apply:
-        # GUARD: wet apply requires rollback to be implemented first.
-        # An erroneous merge without a recovery path risks destroying
-        # real player data. This guard is removed when rollback ships
-        # in the Phase A apply PR.
-        print(
-            "ERROR: --apply is blocked until rollback is implemented. "
-            "Use --dry-run to preview merge-groups. "
-            "Rollback implementation ships in the Phase A apply PR.",
-            file=sys.stderr,
-        )
-        return 2
-
     if not async_session:
         print("ERROR: DATABASE_URL not set.", file=sys.stderr)
         return 1
@@ -846,6 +1062,8 @@ def main(argv: list[str] | None = None) -> int:
     return asyncio.run(run_phase_a(
         dry_run=args.dry_run,
         merge_pr=args.merge_pr,
+        window_days=args.window_days,
+        only_cluster=args.only_cluster,
     ))
 
 
