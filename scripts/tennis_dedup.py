@@ -737,14 +737,44 @@ def format_dry_run_report(
 # ── CLI entry point ───────────────────────────────────────────
 
 
-async def run_phase_a(*, dry_run: bool, merge_pr: str | None, window_days: int) -> int:
-    """Execute Phase A: criterion query → partition → merge (or dry-run)."""
+async def run_phase_a(
+    *, dry_run: bool, merge_pr: str | None,
+    window_days: int, only_cluster: str | None,
+) -> int:
+    """Execute Phase A: criterion query → partition → merge (or dry-run).
+
+    If only_cluster is set, applies/reports only the merge-group whose
+    canonical_id matches. Used for smoke-test-one-group-then-rollback
+    validation before bulk apply.
+    """
     log = get_logger("tennis_dedup")
 
     merge_groups, skipped = await build_phase_a_population(window_days=window_days)
     if not merge_groups:
         print("No merge-groups found meeting Phase A criterion.")
         return 0
+
+    if only_cluster:
+        filtered = [
+            mg for mg in merge_groups
+            if mg.canonical.team_id == only_cluster
+        ]
+        if not filtered:
+            all_canonicals = [mg.canonical.team_id for mg in merge_groups]
+            print(
+                f"ERROR: --only-cluster {only_cluster} not found in "
+                f"{len(merge_groups)} merge-groups. "
+                f"Available canonical_ids (first 10): "
+                f"{', '.join(all_canonicals[:10])}",
+                file=sys.stderr,
+            )
+            return 2
+        merge_groups = filtered
+        log.info(
+            "tennis_dedup.only_cluster_filter",
+            canonical_id=only_cluster,
+            groups_after_filter=len(merge_groups),
+        )
 
     all_team_ids = sorted({
         tid
@@ -997,6 +1027,14 @@ def main(argv: list[str] | None = None) -> int:
         "--force", action="store_true",
         help="Force rollback even if external modifications detected.",
     )
+    parser.add_argument(
+        "--only-cluster", type=str, default=None,
+        help=(
+            "Apply/dry-run only the merge-group whose canonical_id "
+            "matches this UUID. For smoke-test-one-group-then-rollback "
+            "validation before bulk apply."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -1025,6 +1063,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         merge_pr=args.merge_pr,
         window_days=args.window_days,
+        only_cluster=args.only_cluster,
     ))
 
 
