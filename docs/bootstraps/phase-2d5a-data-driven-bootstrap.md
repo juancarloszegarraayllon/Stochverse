@@ -25,14 +25,14 @@ The unresolved strings cluster by league:
 
 | League | Sport | Records/7d | Teams to seed |
 |---|---|---:|---:|
-| LMB (Mexican Baseball League) | Baseball | ~600 | 16 |
+| LMB (Mexican Baseball League) | Baseball | ~600 | 20 |
 | Liga ACB (Spanish Basketball) | Basketball | ~400 | 18 |
 | EuroLeague (Continental Basketball) | Basketball | ~250 | 18 |
 | European Baseball (IT/DE/CZ/FR) | Baseball | ~250 | ~15 |
 | Polish PLK + Czech NBL + Israeli BSL | Basketball | ~200 | ~20 |
 | Tennis surnames | Tennis | ~200 | alias-only |
 
-Total: ~100 canonical rows + aliases across 5-6 bootstrap scripts.
+Total: ~105 canonical rows + aliases across 5-6 bootstrap scripts.
 Expected resolution: 1,700-2,500 records/week.
 
 ### Why "data-driven bootstrap" instead of league-driven
@@ -129,7 +129,7 @@ Expected: `strict` count rises (newly aliased teams resolve via strict tier); `r
 
 ### 4.1 LMB team manifest (`scripts/lmb_seed.py`)
 
-16 teams across two zones (Norte + Sur). Format mirrors `kbl_seed.py`:
+20 teams across two zones of 10 (Norte + Sur). Format mirrors `kbl_seed.py`:
 
 ```python
 LMB_TEAMS_SEED = [
