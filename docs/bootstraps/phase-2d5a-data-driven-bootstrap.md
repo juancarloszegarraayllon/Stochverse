@@ -95,23 +95,26 @@ Exception: if two teams in the same sport + league share a city (rare), bare cit
 
 ### F7 — Verification
 
-**Decision:** Post-apply verification query per league:
+**Decision:** Post-apply verification query per league. Counts only NEW resolution_log entries written after the apply timestamp — same `provider_record_id` may have older review_queue entries from pre-apply cron passes (re-resolution retry traffic per Finding X), which must be excluded.
 
 ```sql
 -- Did the bootstrapped teams resolve previously-failing records?
+-- Only count entries decided AFTER apply to avoid double-counting
+-- old review_queue entries + new strict resolutions for the same record.
 SELECT
   reason_code,
   count(*) AS records
 FROM sp.resolution_log
 WHERE reason_detail->>'sport' = '<sport>'
-  AND decided_at >= :post_apply_timestamp
+  AND decided_at >= :apply_timestamp
+  AND decided_at < :apply_timestamp + INTERVAL '7 days'
   AND provider_record_id IN (
     SELECT DISTINCT provider_record_id
     FROM sp.resolution_log
     WHERE reason_code = 'review_queue'
       AND reason_detail->>'routing_shape' = 'asymmetric_anchor_failure'
-      AND decided_at >= :pre_apply_timestamp - INTERVAL '7 days'
-      AND decided_at < :pre_apply_timestamp
+      AND decided_at >= :apply_timestamp - INTERVAL '7 days'
+      AND decided_at < :apply_timestamp
   )
 GROUP BY reason_code;
 ```
@@ -120,7 +123,7 @@ Expected: `strict` count rises (newly aliased teams resolve via strict tier); `r
 
 ### F8 — Success criterion
 
-**Decision:** Per-league success = asymmetric_anchor_failure inflow rate for the bootstrapped sport drops by ≥50% within 48 hours of apply (measured via daily-diff per-sport breakdown). The 50% threshold accounts for teams not in the manifest (smaller leagues, amateur tiers) that continue to fail.
+**Decision:** Per-league success = asymmetric_anchor_failure inflow rate for the bootstrapped sport drops by ≥50% measured over a 7-day post-apply window (not 48 hours — league game schedules are non-continuous; LMB games may not occur every day, so a 48-hour window may miss the effect). The 50% threshold accounts for teams not in the manifest (smaller leagues, amateur tiers) that continue to fail.
 
 ## 4. Implementation plan — LMB first
 
@@ -155,13 +158,19 @@ Mirrors `tests/test_bootstrap_kbl.py`:
 ### 4.4 Apply sequence
 
 1. PR with seed + script + tests
-2. Merge
-3. Operator runs `python scripts/bootstrap_lmb.py --dry-run` against production (Pattern D pre-flight)
-4. Review dry-run output
-5. `python scripts/bootstrap_lmb.py` wet apply
+2. Merge + `git pull`
+3. Pattern D pre-flight env verification:
+   ```
+   $env:DATABASE_URL = '<production-Neon-URL>'
+   $env:EXPECTED_PRODUCTION_DB_NAME = 'neondb'
+   $env:EXPECTED_PRODUCTION_DB_HOST = 'ep-fragrant-frog-ak3esp11'
+   ```
+   Verify all three match production before proceeding.
+4. `python scripts/bootstrap_lmb.py --dry-run` — review output (INSERT/BACKFILL/SKIP counts)
+5. `python scripts/bootstrap_lmb.py` — wet apply. Script's `pattern_d.ok` log line confirms production endpoint.
 6. Verification query (F7)
 7. `sp.baseline_shifts` annotation
-8. Day-N+1 daily-diff measurement
+8. Day-N+1 daily-diff measurement (7-day window per F8)
 
 ## 5. Sequencing
 
@@ -176,7 +185,7 @@ Mirrors `tests/test_bootstrap_kbl.py`:
 
 Total: ~14 hours across 6 deliverables over 5-6 calendar days.
 
-Batching option: ship leagues 1-3 in a single PR if they don't conflict (different sport_ids, no cross-manifest collision risk). Saves PR overhead at the cost of larger review surface.
+One league per PR. Tennis dedup Day-26 taught that smoke-test discipline catches bugs that code review misses (3 bugs caught in-flight). Bundling multiple leagues bundles multiple bootstraps' worth of potential bugs into one debugging surface. PR overhead is small; debugging multi-league failures is large.
 
 ## 6. Risks and mitigations
 
