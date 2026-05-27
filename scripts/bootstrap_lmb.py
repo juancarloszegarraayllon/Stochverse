@@ -47,6 +47,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
 from db import async_session  # noqa: E402
 from observability import get_logger  # noqa: E402
 from resolver._normalize import normalize_name  # noqa: E402
+from scripts.daily_diff import _check_pattern_d_endpoint  # noqa: E402
 from scripts.lmb_seed import LMB_ALIAS_SOURCE, LMB_TEAMS_SEED  # noqa: E402
 from sp_models import Team  # noqa: E402
 
@@ -65,6 +66,45 @@ async def bootstrap(dry_run: bool) -> int:
         print("ERROR: DATABASE_URL not set or engine unavailable.",
               file=sys.stderr)
         return 1
+
+    # ── Pattern D pre-flight (write-path) ─────────────────────
+    # Per scope-doc §4.4: verify DATABASE_URL points at production
+    # before any INSERTs. Reuses daily_diff._check_pattern_d_endpoint
+    # (pure function). A misconfigured DATABASE_URL would silently
+    # INSERT 20 teams + 76 aliases into the wrong DB.
+    allow_non_prod = (
+        os.environ.get("DAILY_DIFF_ALLOW_NON_PRODUCTION", "").strip() == "1"
+    )
+    if not allow_non_prod:
+        expected_db_name = (
+            os.environ.get("EXPECTED_PRODUCTION_DB_NAME", "").strip()
+            or "neondb"
+        )
+        expected_db_host = (
+            os.environ.get("EXPECTED_PRODUCTION_DB_HOST", "").strip() or None
+        )
+        async with async_session() as preflight_session:
+            result = await preflight_session.execute(
+                text("SELECT current_database();")
+            )
+            current_db = result.scalar_one()
+        rc, msg = _check_pattern_d_endpoint(
+            os.environ.get("DATABASE_URL"),
+            current_db,
+            expected_db_name=expected_db_name,
+            expected_db_host=expected_db_host,
+            allow_non_production=False,
+        )
+        if rc != 0:
+            print(f"ERROR: {msg}", file=sys.stderr)
+            return 3
+        log.info("bootstrap.lmb.pattern_d.ok",
+                 current_database=current_db,
+                 expected_db_name=expected_db_name,
+                 expected_db_host=expected_db_host)
+    else:
+        log.info("bootstrap.lmb.pattern_d.bypass",
+                 reason="DAILY_DIFF_ALLOW_NON_PRODUCTION=1")
 
     async with async_session() as session:
         # ── Step 1: resolve Baseball sport_id ─────────────────────
