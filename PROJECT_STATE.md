@@ -6,6 +6,231 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-28
+
+### Day-28 morning baseline + Tennis dedup +5.90pp validation
+
+Day-28 daily-diff (Tennis dedup lift HELD AND EXTENDED from Day-27):
+
+| Sport | Day-22 | Day-26 (pre-dedup) | Day-27 (post-dedup partial) | Day-28 (full post-dedup) |
+|---|---:|---:|---:|---:|
+| Tennis | 27.97% | 15.98% | 20.15% | **21.88%** (+5.90pp cumulative) |
+| Baseball | 85.17% | — | — | 85.17% (within noise, no leakage) |
+| Overall | 51.02% | 47.59% | 46.51% | 46.51% |
+
+Multi-day apples-to-apples via `metrics->'scope_filtered'->>'matcher_capability_rate_overall'`. The +5.90pp Tennis lift from the Day-26 baseline is the empirical close on the Tennis dedup workstream — extends beyond the +4.17pp partial-window measurement on Day-27, confirming the consolidated player population produces durably fewer collision events.
+
+### LMB bootstrap apply (Phase 2D.5-A first deliverable)
+
+Apply at 19:41 UTC. Clean execution:
+
+- **17 new LMB canonicals inserted** (sp.teams, sport_id=6, country_code='MEX')
+- **3 BACKFILLs**: Bravos de León, Caliente de Durango, Toros de Tijuana — already existed as stubs with NULL country_code. Three-branch classifier correctly detected and queued UPDATE (not INSERT). KBL precedent's Phase 1.5 backfill discipline working as designed.
+- **63 aliases inserted** (sp.team_aliases, source='bootstrap_league_coverage')
+- **0 global conflicts, 0 errors**
+- Runtime: 10.7s
+- Pattern D pre-flight confirmed production endpoint pre-write
+
+Post-apply production state: 289 baseball teams (was 269), 20 MEX (was 0), 269 untouched.
+
+`sp.baseline_shifts` annotation: `f0f99c99-1c1d-4840-beea-6465bfd03e30` (event_type='dedup_bootstrap', event_date=2026-05-28).
+
+Day-29 daily-diff will measure the LMB-attributable Baseball lift (expected ~5-10pp depending on what fraction of the ~600 weekly LMB records reach strict tier via the new aliases).
+
+### Liga ACB scope-doc + manifest + bootstrap script (PR #204, merged)
+
+Production-data discovery revealed Liga ACB is NOT the highest-volume next workstream:
+
+| League | Records/7d |
+|---|---:|
+| Polish PLK | ~150 |
+| VTB United (Russian) | ~120 |
+| German BBL | ~110 |
+| Italian LBA | ~110 |
+| Liga ACB | ~70 |
+
+Decision: ship Liga ACB next anyway per scope-doc §5 (methodology validation #2 for cross-sport collision pattern). Re-evaluate sequencing after Liga ACB applies cleanly. This is **v1.5 amendment**: bootstrap workstream sequencing should re-evaluate after each apply based on production-data discovery (Pattern G extension — scope-doc priority order can be overridden by empirical evidence).
+
+**Wikipedia verification**: 7 of 10 questionable canonicals confirmed correct as drafted (Bàsquet Manresa, Bilbao Basket, CB Canarias, CB Gran Canaria, CB San Pablo Burgos, Força Lleida CE, UCAM Murcia CB). 3 accepted on operator judgment (Río Breogán, Basket Zaragoza, Saski Baskonia).
+
+**Liga ACB manifest**: 18 teams, 98 aliases, 2 country codes (ESP + AND for BC Andorra), cross-sport collision discipline applied:
+
+- **Real Madrid Baloncesto** canonical (not "Real Madrid") — distinguishes from Real Madrid CF soccer canonical
+- **FC Barcelona Bàsquet** canonical (not "FC Barcelona") — same discipline
+- Bare "Real Madrid" and "Barcelona" aliases safe under sport_id partition (Day-22 finding empirically validated)
+- "Madrid" bare alias INTENTIONALLY EXCLUDED — too generic; risks future Madrid-area basketball clubs (Estudiantes)
+
+**bootstrap_acb.py improvement over bootstrap_lmb.py**: reuses `_check_pattern_d_endpoint` from `daily_diff.py` as shared function. bootstrap_lmb.py only logs `current_database`. Backport noted as follow-up (worth normalizing once we have 3+ bootstrap scripts in the cohort).
+
+PR shipped as single PR (scope-doc + manifest + script + tests) rather than two — methodology proven via LMB, so the LMB precedent of two PRs is unnecessary scaffolding for ACB. **v1.5 amendment**: calibrate PR granularity by methodology maturity.
+
+### v1.5 amendment pile (Days 27-28 additions)
+
+The pile, updated for findings across both days:
+
+1-11. (Unchanged from end-of-day-22 entry)
+
+12. **NEW — Multi-agent verification handoffs require artifact paste, not summary or line references.** Today (Day-28): 3 rounds for LMB manifest verification, 1 round for ACB. Improvement curve visible. The pattern: when claiming "verified" / "correct" / "confirmed", the underlying artifact (Python tuple list, SQL query result, file content) must be pasted as a code block. Line references ("see lines 109-112") and summaries ("all 20 teams verified") are insufficient — same epistemic risk as PR #198's first-commit-only merge incident (claimed correct, actually missing the second commit).
+
+13. **NEW — Pattern A.2 applies to data sources, not just code.** Wikipedia verification caught 6 missing teams + 2 phantoms in initial LMB draft (Claude Code's general-knowledge manifest was the wrong-roster shape for the 2026 season). Authoritative source verification cannot be skipped because the deliverable "looks reasonable." Same discipline as Pattern A's "production-data verification" but applied to upstream reference sources.
+
+14. **NEW — Sequential PRs > bundled PRs when methodology is being validated; bundle once proven.** LMB shipped as 2 PRs (scope-doc + implementation) because the data-driven-bootstrap methodology was new. Liga ACB shipped as single PR because the methodology proved out on LMB. Calibrate PR granularity by methodology maturity, not by deliverable size.
+
+15. **NEW — Bootstrap leverage ≠ total-daily-volume (Pattern G extension).** Workstream sequencing should re-evaluate after each apply based on production-data discovery. Liga ACB was scope-doc §5 priority #2 but production data shows 4 other leagues with higher volume (PLK, VTB, BBL, LBA). Scope-doc priority order is a default starting point, not a commitment — empirical evidence overrides.
+
+16. **NEW — 3-letter ISO country codes are the established `sp.teams` convention.** Verified Day-27 via `SELECT country_code, count(*) FROM sp.teams GROUP BY country_code`: KOR has 11 teams, plus 9 other countries with 1 team each. All Phase 2D.5-A bootstraps use MEX, ESP, AND, etc. Day-27 LMB seed prompt incorrectly initially considered 2-letter codes.
+
+17. **NEW — Pattern D pre-flight as shared function** is better than per-script implementation. `bootstrap_acb.py` imports `_check_pattern_d_endpoint` from `daily_diff.py`. `bootstrap_lmb.py` has an inline implementation that should be backported. Future bootstraps should import the shared function from day one.
+
+Pile expanded from 11 to 17 items.
+
+### PR state at end-of-day-28
+
+- **PR #202** — Phase 2D.5-A scope-doc + LMB seed manifest. **Merged Day-27.**
+- **PR #203** — bootstrap_lmb.py + 12 tests. **Merged Day-27.**
+- **PR #204** — Liga ACB scope-doc + manifest + bootstrap_acb.py + 17 tests (single PR per methodology maturity). **Merged Day-28.**
+
+### Pending — next, operator review
+
+1. **Day-29 daily-diff** — measure LMB-attributable Baseball lift (F7 verification query per scope-doc).
+2. **Liga ACB apply** — if Day-29 confirms LMB healthy: Pattern D pre-flight → dry-run → wet apply → F7 → baseline_shifts annotation.
+3. **Next-league sequencing decision** — original scope-doc says EuroLeague (~250 records/7d); production data suggests Polish PLK / VTB / German BBL / Italian LBA all have higher volume. Decide based on Day-29 discovery query, not scope-doc default.
+4. **Backport Pattern D pre-flight import** to `bootstrap_lmb.py` — small follow-up PR for consistency.
+
+---
+
+## Session — 2026-05-27
+
+### Day-27 morning: Tennis dedup post-apply validation
+
+Day-27 daily-diff confirmed Tennis dedup workstream produced measurable lift (Day-26 → Day-27, partial window):
+
+| Date | Tennis | Overall | Schema |
+|---|---:|---:|---|
+| Day-22 | 27.97% | 51.02% | v0.2.0 |
+| Day-26 (pre-dedup baseline) | 15.98% | 47.59% | v0.3.0 |
+| Day-27 (post-dedup partial) | 20.15% | 46.51% | v0.3.0 |
+
+Apples-to-apples comparison via `metrics->'scope_filtered'->>'matcher_capability_rate_overall'`. Tennis +4.17pp partial-window lift validated the dedup mechanism; magnitude consistent with theoretical ~5pp ceiling.
+
+### Day-27 morning: 9-layer Pattern A.2 investigation chain
+
+Originally scoped as "Phase 2D.5 FL alias expansion" investigation. The diagnostic chain reframed the workstream entirely:
+
+**Layer 1** — FL Tennis failure population query:
+```sql
+SELECT count(*) FROM sp.resolution_log
+WHERE provider = 'fl' AND reason_detail->>'sport' = 'Tennis'
+  AND reason_code = 'no_match'
+  AND reason_detail->>'home_provider_normalized' IS NULL;
+-- 45,196 records (94% of FL Tennis failures in 7-day window)
+```
+
+**Layer 2** — Sample `reason_detail` for the NULL-form population: explicit `fail_reason='deferred_to_2d'` + `alias_resolution_incomplete` flags. Resolver is correctly tagging records for fuzzy-tier handoff at strict + alias tier.
+
+**Layer 3** — Provider comparison: Kalshi 66.7% NULL form, FL 67.0% NULL form. Not FL-specific — shared matcher path behavior across providers.
+
+**Layer 4** — Single `provider_record_id` trace (GQfsoI5F) across 7 days: same 3-entry pattern repeating daily (`no_match` + `alias_resolution_incomplete`, `no_match` + `deferred_to_2d`, `review_queue` terminal). **No fuzzy-tier follow-up entries.** Suggests fuzzy tier isn't picking up the handoff.
+
+**Layer 5** — 30-day reason_code distribution:
+
+| reason_code | count | % |
+|---|---:|---:|
+| no_match | 978,144 | 89.0% |
+| review_queue | 117,228 | 10.7% |
+| strict | 26,403 | 2.4% |
+| alias | 238 | 0.02% |
+| fuzzy | **80** | 0.007% |
+
+Only 80 fuzzy auto-applies in 30 days against 155K fuzzy invocations.
+
+**Layer 6** — Sport breakdown of 80 fuzzy successes: 100% Tennis, 100% Kalshi provider. Fuzzy works for Tennis when provider sends populated short forms; no successes against FL.
+
+**Layer 7** — `resolver_version='fuzzy@2d.0'` 7-day stats:
+
+| reason_code | count |
+|---|---:|
+| no_match | 114,442 |
+| review_queue | 40,586 |
+| fuzzy (auto) | 63 |
+
+155,091 invocations, 0.04% auto-apply rate. Fuzzy IS running, just rarely auto-applying.
+
+**Layer 8** — 39,481 of 40,586 review_queue entries (97.3%) have NULL `fuzzy_score_breakdown.total`. Fuzzy didn't compute confidence for them — they reached review_queue via a different routing path.
+
+**Layer 9** — `sp.review_queue` status: 10,506 pending, 9 lifetime processed (7 approved + 2 rejected). The review_queue is a sink, not a queue. Architecture §7.5 specified <20 target depth and >100 alert threshold; production is at 10,506.
+
+Sample reason_detail for the NULL-fuzzy-score population reveals the actual shape: `home_collision: true OR away_collision: true`, `colliding_home_team_ids` / `colliding_away_team_ids` arrays populated, `home_team_id` or `away_team_id` NULL on the colliding side. **These are collision-bound records, not "fuzzy found low-confidence candidate" cases.**
+
+### Day-27 morning: Phase 2D.5 reframe to data-driven league bootstrap
+
+Sample of the 39K collision-bound records shows the unresolved provider strings cluster by missing league coverage:
+
+- **LMB (Mexican Baseball)**: Monterrey, Puebla, Queretaro, Tabasco
+- **Liga ACB (Spanish Basketball)**: Real Madrid, Baskonia, Joventut, Breogan
+- **European Baseball**: Parma, Bologna, Hamburg, Mainz, Ostrava, Rouen
+- **EuroLeague**: Olympiacos, Panathinaikos, Fenerbahce, CSKA, Maccabi Tel Aviv
+- **Polish PLK + Czech NBL + Israeli BSL**: Legia, Slask Wroclaw, Karvina, Hapoel Jerusalem
+
+Architectural finding via code survey: `sp.teams` is populated ONLY by explicit bootstrap scripts (KBL, national teams) and operator-approved review_queue entries. Anything not in a bootstrap manifest AND not operator-approved is missing — regardless of how professional or active the team is. FL ingestion writes only to `sp.fl_events`; it does NOT auto-create `sp.teams` rows.
+
+Phase 2D.5-A reframed: **data-driven league bootstrap using resolver failure signal as discovery source**. Inverts KBL methodology's discovery direction — instead of "which teams exist in this league?" the question becomes "which teams does the resolver fail on most?"
+
+### Day-27 afternoon: Phase 2D.5-A scope-doc (PR #202)
+
+F1-F8 framing decisions locked per KBL precedent:
+
+- **F1 — Canonical_name policy**: Use official team name; provider-variant forms as aliases. KBL F1 precedent.
+- **F2 — Alias distinctiveness**: Bare city-name aliases safe within `sport_id` partition. Day-22 finding (`resolver/aliases.py:51,111` + `resolver/alias_tier/candidates.py:106`). Within-sport collision is the only risk; cross-sport is architecturally prevented.
+- **F3 — Diacritics**: Both accented and ASCII-stripped variants included. Normalizer (NFD decomposition) handles either, but belt-and-suspenders.
+- **F4 — Source value**: `bootstrap_league_coverage` per KBL Q3 convention.
+- **F5 — Country code**: 3-letter ISO (MEX, ESP, AND). Per-team; multi-country supported for continental competitions.
+- **F6 — One bootstrap script per league** (mirrors KBL).
+- **F7 — Verification**: Post-apply query with `decided_at >= :apply_timestamp` filter — avoids double-counting re-resolution loop entries against pre-apply review_queue entries.
+- **F8 — Success criterion**: Asymmetric_anchor_failure inflow rate for sport drops ≥50% over 7-day post-apply window (not 48h — league game-day cadence is non-continuous).
+
+### Day-27 afternoon: LMB seed manifest verification (3 rounds before paste)
+
+Multi-agent verification handoff produced 3 rounds of pushback before the actual Python tuples were pasted (rather than summarized as "16 teams confirmed correct"). Wikipedia verification against Posta Deportes April 2026 caught:
+
+- **6 missing teams** in initial draft (Caliente de Durango, Charros de Jalisco, Dorados de Chihuahua, Rieleros de Aguascalientes, Tecolotes de los Dos Laredos, Conspiradores de Querétaro)
+- **2 phantom teams** in initial draft (Águilas de Mexicali, Mariachis de Guadalajara — not in 2026 roster)
+- Critical target: Conspiradores de Querétaro at 161 records/week was missing from the initial draft
+
+Final LMB manifest: 20 teams (10 Norte + 10 Sur), 76 aliases, all `MEX`, zero within-league collisions. `Tigres` bare excluded due to within-LMB collision with Tigres de Quintana Roo.
+
+PR #202 merged.
+
+### Day-27 afternoon: bootstrap_lmb.py + 12 tests (PR #203)
+
+Mirrors `bootstrap_kbl.py` structure with critical PR #200 alias-safety fix: `INSERT...WHERE NOT EXISTS` instead of `ON CONFLICT (alias_normalized, source) DO NOTHING` on the global UNIQUE constraint. The ON CONFLICT pattern silently drops aliases when the same `(alias_normalized, source)` exists on a different team — empirically caught during Tennis dedup Day-26 (76 merges, ~58% alias loss before recovery).
+
+- Three-branch classifier (INSERT / BACKFILL / SKIP)
+- Global conflict pre-check at classify time with warning logs
+- `--dry-run` mode
+- `confidence=1.0` on aliases (KBL precedent)
+- Pattern D pre-flight check (inline implementation; to be standardized in future bootstraps)
+
+12 tests:
+- TestLMBManifestShape (9): imports, size=20, 4-tuple arity, country=MEX, normalization, no duplicate canonicals, no cross-team collisions, source value
+- TestLMBDiacriticCoverage (1): accented teams have ASCII variants
+- TestLMBDay27Targets (2): Day-27 target strings (Monterrey, Puebla, Queretaro, Tabasco) are aliases; Tigres bare excluded
+
+PR #203 merged.
+
+### Day-27 PR state
+
+- **PR #202** — Phase 2D.5-A scope-doc + LMB seed manifest. Merged.
+- **PR #203** — bootstrap_lmb.py + 12 tests. Merged.
+
+### Day-27 pending — Day-28 morning
+
+1. LMB bootstrap apply (Pattern D pre-flight → dry-run → wet apply → F7 verification → baseline_shifts annotation).
+2. Day-28 daily-diff measurement to validate Tennis +4.17pp lift holds.
+3. Liga ACB scope-doc + manifest + bootstrap as next workstream (or pivot to higher-volume league if production data shows different priorities).
+
+---
+
 ## Session — 2026-05-25
 
 ### Day-25 morning baseline
