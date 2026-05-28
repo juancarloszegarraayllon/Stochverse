@@ -33,7 +33,7 @@ Apply at 19:41 UTC. Clean execution:
 
 Post-apply production state: 289 baseball teams (was 272 pre-apply, 17 newly inserted), 20 MEX (was 0, comprising 17 INSERTs + 3 BACKFILLs of pre-existing stubs Bravos de León / Caliente de Durango / Toros de Tijuana), 269 untouched.
 
-`sp.baseline_shifts` annotation: `f0f99c99-1c1d-4840-beea-6465bfd03e30` (event_type='dedup_bootstrap', event_date=2026-05-28).
+`sp.baseline_shifts` annotation: `f0f99c99-1c1d-4840-beea-6465bfd03e30` (event_type='phase_2d5a_lmb_bootstrap', event_date=2026-05-28). The phase-prefixed event_type aligns with the bootstrap script's naming convention — future operators searching `sp.baseline_shifts` by event_type can filter `LIKE 'phase_2d5a_%'` to find all data-driven league bootstrap annotations cleanly.
 
 Day-29 daily-diff will measure the LMB-attributable Baseball lift (expected ~5-10pp depending on what fraction of the ~600 weekly LMB records reach strict tier via the new aliases).
 
