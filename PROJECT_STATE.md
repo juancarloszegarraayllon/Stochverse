@@ -15,8 +15,8 @@ Day-28 daily-diff (Tennis dedup lift HELD AND EXTENDED from Day-27):
 | Sport | Day-22 | Day-26 (pre-dedup) | Day-27 (post-dedup partial) | Day-28 (full post-dedup) |
 |---|---:|---:|---:|---:|
 | Tennis | 27.97% | 15.98% | 20.15% | **21.88%** (+5.90pp cumulative) |
-| Baseball | 85.17% | — | — | 85.17% (within noise, no leakage) |
-| Overall | 51.02% | 47.59% | 46.51% | 46.51% |
+| Baseball | 76.66% | 83.92% | 86.72% | 85.17% (within noise, no leakage from dedup) |
+| Overall | 51.02% | 47.59% | 46.51% | 46.37% |
 
 Multi-day apples-to-apples via `metrics->'scope_filtered'->>'matcher_capability_rate_overall'`. The +5.90pp Tennis lift from the Day-26 baseline is the empirical close on the Tennis dedup workstream — extends beyond the +4.17pp partial-window measurement on Day-27, confirming the consolidated player population produces durably fewer collision events.
 
@@ -31,7 +31,7 @@ Apply at 19:41 UTC. Clean execution:
 - Runtime: 10.7s
 - Pattern D pre-flight confirmed production endpoint pre-write
 
-Post-apply production state: 289 baseball teams (was 269), 20 MEX (was 0), 269 untouched.
+Post-apply production state: 289 baseball teams (was 272 pre-apply, 17 newly inserted), 20 MEX (was 0, comprising 17 INSERTs + 3 BACKFILLs of pre-existing stubs Bravos de León / Caliente de Durango / Toros de Tijuana), 269 untouched.
 
 `sp.baseline_shifts` annotation: `f0f99c99-1c1d-4840-beea-6465bfd03e30` (event_type='dedup_bootstrap', event_date=2026-05-28).
 
