@@ -28,7 +28,8 @@ Idempotent — re-running is a no-op for rows + aliases already present.
   0 — success (writes happened OR no-op idempotent re-run)
   1 — DATABASE_URL not set / engine unavailable
   2 — bad CLI args
-  3 — sp.sports missing or doesn't contain 'Baseball'
+  3 — sp.sports missing or doesn't contain 'Baseball', OR
+      Pattern D pre-flight failed (endpoint mismatch)
 """
 from __future__ import annotations
 
