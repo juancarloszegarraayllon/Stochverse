@@ -174,6 +174,8 @@ Mirrors `tests/test_bootstrap_kbl.py`:
 
 ## 5. Sequencing
 
+> **Day-28 update:** See [`phase-2d5a-sequencing-decision.md`](phase-2d5a-sequencing-decision.md) for the sequencing reconsideration that supersedes this section's workstream #3 default. Day-28 production-data discovery showed Italian LBA is a cleaner methodology iteration than EuroLeague for league #3 (worked example of v1.5 amendment #15).
+
 | Priority | League | Est. effort | Est. lift |
 |---|---|---|---|
 | 1 | LMB (Mexican Baseball) | 2 hours | ~600 records/week |
