@@ -6,6 +6,99 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-05-29
+
+### Day-29 morning: Day-28 erratum (Pattern D backport claim was stale)
+
+The Day-28 journal entry (PR #205) listed "Backport Pattern D pre-flight import to bootstrap_lmb.py" as pending follow-up item #4. Day-28 evening verification (Select-String against `scripts/bootstrap_lmb.py` lines 50-107) confirmed the backport was **already complete** as of Day-27 PR #203 commit `d660b01` ("address 5 review concerns"). Only the docstring's exit-code-3 entry on line 31 lagged — it still listed only `sp.sports missing or doesn't contain 'Baseball'` without the Pattern D failure case.
+
+PR #206 shipped the 1-line docstring fix Day-28 evening. The journal narrative claiming "bootstrap_lmb.py only logs current_database" was drafted from operator/Claude memory rather than from a grep against the actual file state.
+
+**This is v1.5 amendment #12 ("artifact paste over summary") generalizing to journal claims about code state.** The amendment originally addressed multi-agent verification handoffs (LMB manifest verification, 3 rounds before paste). Day-28's Pattern D claim demonstrates that the same epistemic risk applies to journal narratives — stale claims propagate via merge into canonical docs and waste downstream effort (a "backport" PR task that would have been a no-op).
+
+### v1.5 amendment #18 (NEW)
+
+**Journal entries claiming code state must be grounded in artifact verification at write time, not operator/Claude memory of prior discussion.** Stale claims propagate via merge into canonical PROJECT_STATE.md and waste downstream effort. Mitigation: every PROJECT_STATE.md claim of form "X is missing from file Y" or "Y has Z but not W" requires a fresh grep/cat/Select-String artifact paste in the drafting workspace before the claim is committed. Same discipline as amendment #12 (manifest verification), extended to journal-narrative drafting itself.
+
+Pile expanded from 17 to 18 items.
+
+### Day-29 morning: F7 verification confirms LMB apply EMPIRICALLY VALIDATED
+
+F7 verification via team_id JOIN (bypassing the `reason_detail` JSON which is sparse for FL records — see finding below) revealed **18 strict-tier LMB resolutions in the 14-hour post-apply window** (2026-05-28 19:41 UTC → 2026-05-29 09:00 UTC sample point).
+
+| Team Pair | Strict Resolutions |
+|---|---:|
+| Toros de Tijuana vs Sultanes de Monterrey | 6 |
+| Sultanes de Monterrey vs Caliente de Durango | 3 |
+| Conspiradores de Querétaro vs Pericos de Puebla | 3 |
+| Conspiradores de Querétaro vs Bravos de Leon | 3 |
+| Pericos de Puebla vs Bravos de Leon | 3 |
+
+**Six distinct LMB teams resolved cleanly via strict-tier AliasIndex**: Toros de Tijuana, Sultanes de Monterrey, Caliente de Durango, Conspiradores de Querétaro, Pericos de Puebla, Bravos de Leon.
+
+**Both branches of the three-branch classifier validated end-to-end:**
+- **INSERT branch**: Sultanes de Monterrey, Conspiradores de Querétaro, Pericos de Puebla — all resolving via newly-created `sp.teams` rows with `country_code='MEX'` and accompanying aliases
+- **BACKFILL branch**: Toros de Tijuana, Caliente de Durango, Bravos de Leon — all resolving via pre-existing stub rows that received `country_code='MEX'` backfill on apply
+
+This is the **first empirical validation of the Phase 2D.5-A methodology hypothesis**. The Day-27 9-layer Pattern A.2 investigation predicted that league bootstraps would lift asymmetric_anchor_failure records to strict-tier auto-apply. Day-29 F7 confirms with real production data: 18 records, 6 teams, 100% clean strict resolutions across both INSERT and BACKFILL branches.
+
+LMB-attributable lift projection: ~31 strict resolutions/day extrapolated from the 14h window, against the F8 success criterion of ≥50% reduction in asymmetric_anchor_failure inflow for Baseball over a 7-day window. Full 7-day measurement window opens 2026-06-04.
+
+### Day-29 morning: LMB flows through FL pipeline, not Kalshi
+
+Discovered during F7 attribution drilldown. All 18 LMB strict resolutions have 8-character provider_record_ids (e.g., `ptrmOLkn`, `QHE5Fi7E`, `M9ysjGM5`) — FL provider format. `sp.kalshi_markets WHERE ticker LIKE 'KXLMB%'` returns empty.
+
+**Implication:** Kalshi does not list LMB markets (or uses a different ticker prefix not yet observed). The Day-22 amendment #10 ("FL-only sports have structural review_queue floor at 0.70 without cross-provider corroboration") applies to LMB — alias/fuzzy-tier matches for LMB cap at 0.70 confidence and route to review_queue without strict-tier resolution. Bootstrap value for LMB is **entirely gated on strict-tier coverage**.
+
+The Day-29 result confirms strict-tier is the operational mechanism: 18/18 LMB resolutions came through strict tier via AliasIndex lookup, exactly as the amendment #10 framing predicted.
+
+**No action required** — the manifest's 63 aliases were designed to maximize strict-tier reachability under the FL-only constraint. This finding is documentation, not a methodology problem.
+
+### Day-29 morning: FL strict resolutions have sparse reason_detail JSON
+
+Discovered during F7 attribution attempt. Original F7 query filtered by `reason_detail->>'home_provider_normalized'` and `reason_detail->>'away_provider_normalized'` ILIKE patterns. Result: zero LMB matches via the JSON path, despite 18 actual LMB strict resolutions present in the table.
+
+Investigation: sampled 10 strict-resolved Baseball records via `LIMIT 10`. All 10 records returned NULL for `home_provider_normalized`, `away_provider_normalized`, `home_canonical`, `away_canonical`. Nine were FL records (8-char IDs), one was Kalshi (`KXMLBGAME-26MAY301915ATLCIN`).
+
+**Finding:** FL's strict-tier resolution path writes `reason_detail` without the diagnostic name fields that Kalshi's path populates. The strict resolution itself works correctly (fixture_id is set, team_id references in `sp.fixtures` are correct), but the diagnostic detail in `sp.resolution_log.reason_detail` is sparse.
+
+**Methodology implication:** Future F7 verification queries should JOIN to `sp.fixtures` + `sp.teams` to determine team attribution rather than relying on `reason_detail` JSON fields. The team_id JOIN bypasses the NULL detail and resolves attribution via fixture rows.
+
+**Captured for future F7 query template:**
+
+```sql
+-- Use this pattern for league-attributable strict resolution counts:
+SELECT count(*)
+FROM sp.resolution_log rl
+JOIN sp.fixtures f ON f.id = rl.fixture_id
+JOIN sp.teams t_home ON t_home.id = f.home_team_id
+JOIN sp.teams t_away ON t_away.id = f.away_team_id
+WHERE rl.reason_detail->>'sport' = :sport
+  AND rl.reason_code = 'strict'
+  AND rl.decided_at >= :apply_timestamp
+  AND (t_home.country_code = :country OR t_away.country_code = :country);
+```
+
+Filed as tech-debt note: investigate why FL strict resolutions skip the parsed-name preservation (PR #138 lifted this for fuzzy-tier; check if strict-tier needs the same fix). Not blocking — current resolution behavior is correct, only the diagnostic shape lags.
+
+### v1.5 amendment pile (after Day-29 morning)
+
+Pile at 18 items. New addition: #18 (journal claims about code state require artifact verification). Other amendments unchanged from Day-28.
+
+### Day-29 PR state (morning)
+
+- **PR for this entry**: this Day-29 morning batch (LMB validation + Pattern D erratum + amendment #18 + FL pipeline finding + FL reason_detail finding)
+- Liga ACB apply, daily-diff measurement, and end-of-day journal section to follow
+
+### Pending — next, operator review (Day-29 afternoon)
+
+1. **Daily-diff Day-29** — measure Baseball capability rate change. Expected: small lift (~1pp) on aggregate Baseball metric; full F8 7-day measurement window opens 2026-06-04.
+2. **Liga ACB apply** — Pattern D pre-flight → dry-run → wet apply → F7 (using the JOIN pattern above, not reason_detail JSON) → baseline_shifts annotation (event_type='phase_2d5a_acb_bootstrap').
+3. **Day-29 afternoon journal batch** — Liga ACB apply results + daily-diff measurement + any other afternoon findings.
+4. **Italian LBA scope-doc + manifest sourcing** — if time permits after Liga ACB applies cleanly. Sequencing decision committed in `docs/bootstraps/phase-2d5a-sequencing-decision.md`.
+
+---
+
 ## Session — 2026-05-28
 
 ### Day-28 morning baseline + Tennis dedup +5.90pp validation
