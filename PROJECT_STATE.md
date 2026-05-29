@@ -8,6 +8,96 @@ next session. Treat it as the project's running journal.
 
 ## Session — 2026-05-29
 
+### Day-29 afternoon: Liga ACB apply — workstream #2 EMPIRICALLY APPLIED
+
+Apply at 2026-05-29T21:42:54 UTC. Runtime 11.66s, 0 errors. Same Pattern D pre-flight → dry-run → wet apply sequence as LMB.
+
+**Apply results:**
+- **16 new Liga ACB canonicals inserted** (sp.teams, sport_id=3, country_code='ESP' or 'AND')
+- **2 BACKFILLs**: Basket Zaragoza and Basquet Girona — both pre-existed since Phase 2A.5 bootstrap (2026-05-08) as Basketball entities without country_code. The bootstrap's three-branch classifier matched them on `normalized_name` against the manifest's canonicals "Casademont Zaragoza" and "Bàsquet Girona" respectively (NFD accent stripping + Spanish diacritic handling working as designed via `resolver/alias_tier/normalize.py:104-108`).
+- **83 aliases inserted**, 15 deduped within batch (within-manifest duplicates, not cross-team conflicts), 0 global conflicts (PR #200 alias-safety discipline held)
+- `bootstrap.acb.pattern_d.ok` confirmed production endpoint pre-write
+- `existing_teams_loaded`: 1,981 Basketball teams (sport_id=3) — baseline pre-apply
+
+**F1 discipline reaffirmed**: BACKFILL branch updates `country_code` only, NOT `canonical_name`. Basket Zaragoza stays "Basket Zaragoza" canonically; the current sponsored name "Casademont Zaragoza" lives as an alias attached to the existing row. Same precedent as KBL's Goyang Sono Skygunners (PR #166 F1 decision) and LMB's BACKFILLs (Bravos de León retaining its canonical despite the manifest using "Bravos de Leon" without diacritic).
+
+**F7 verification post-apply (immediate)**: zero strict resolutions, as expected — query ran ~7 minutes after apply, before any FL or Kalshi cron pass touched Basketball records. Real F7 measurement opens with tomorrow morning's cron data.
+
+### Day-29 afternoon: Daily-diff +1.94pp overall, per-sport tells a more interesting story
+
+Daily-diff Day-29 at 21:32 UTC: 13,197 records scanned, **matcher_capability_rate 48.31%** (+1.94pp from Day-28's 46.37%).
+
+**Per-sport breakdown** (Day-29 vs Day-28, via `python scripts/render_daily_diff_report.py`):
+
+| Sport | Day-29 | Day-28 | Δ | Note |
+|---|---:|---:|---:|---|
+| Tennis | 24.6% | 21.88% (morning entry) | **+2.7pp** | Tennis dedup lift continues to extend |
+| Baseball | 76.5% | 85.17% | **-8.67pp** | Predicted in baseline_shifts annotation |
+| Soccer | 80.5% | — | — | Single-day baseline (within typical range) |
+| Basketball | 53.3% | — | — | Liga ACB just applied; not yet reflected |
+| Hockey | 71.4% | — | — | — |
+| American Football | 54.0% | — | — | — |
+| Football | 13.5% | — | — | — |
+| Cricket | 9.0% | — | — | — |
+| Aussie Rules | 18.2% | — | — | — |
+
+**Tennis cumulative lift, Day-26 → Day-29**: 15.98% → 20.15% → 21.88% → **24.6%** = +8.62pp cumulative from pre-dedup baseline. The Tennis dedup workstream's lift is still growing — Day-26 (pre-dedup) was 15.98%, three days later we're +8.62pp above that baseline. Re-resolution loop continuing to drain the collision-routed-from-pre-dedup backlog into strict tier.
+
+**Baseball drop investigation needed but not alarming**: The Day-28 LMB baseline_shifts annotation pre-registered "Baseball matcher_capability_rate may dip slightly as new LMB records previously not in scope start appearing in denominator." The actual -8.67pp drop is larger than "slightly" but qualitatively in the predicted direction.
+
+Two hypotheses for the larger-than-predicted magnitude:
+1. **LMB records entering denominator**: Pre-apply, LMB records routed to no_match with NULL home_provider_normalized and were potentially filtered as signal-extraction failures (not counted in the Baseball capability denominator). Post-apply, LMB records pass signal extraction (because alias lookup succeeds on at least one side), enter the resolver pipeline, count toward the Baseball denominator, but most route to review_queue or no_match (only ~18-31/day reach strict tier per Day-29 morning measurement). The denominator grows faster than the numerator, dragging the rate down.
+2. **Day-to-day baseline noise**: Baseball capability has varied 76.66% → 83.92% → 86.72% → 85.17% across recent measurements. A swing from 85% to 76% is larger than that band, but baseball game schedule and prop-market mix vary day-to-day.
+
+**Decision**: monitor Baseball capability over the next 3-5 days. If it stabilizes around 76-78%, hypothesis 1 (denominator inflation from LMB) is empirically supported and we should adjust the F8 success criterion framing — Baseball's aggregate capability rate is no longer the right metric to validate LMB lift, since LMB contribution lifts strict resolutions but drags aggregate rate. The LMB-specific JOIN query (from this morning) becomes the canonical F7 measurement, not aggregate Baseball capability.
+
+If it bounces back to 80%+ within 3-5 days, hypothesis 2 (noise) holds and the dip was sampling artifact.
+
+This is a **predicted-direction-larger-magnitude finding** worth investigation but not concerning. The morning's F7 already proved LMB methodology works end-to-end at the resolution level; aggregate capability rate is a denominator-sensitive lagging indicator.
+
+### Day-29 afternoon: baseline_shifts annotation erratum + v1.5 amendment #19
+
+**Erratum**: Liga ACB baseline_shifts annotation was inserted twice (rows daa426d0 at 21:43:44 UTC and 5a7c445b at 21:49:44 UTC) before detection. Initial INSERT happened immediately post-apply following the LMB Day-28 precedent template (with `<timestamp>` placeholder text that we didn't catch at first); subsequent UPDATE corrected the text on both rows, then SELECT revealed the duplicate. DELETE removed row 5a7c445b; row daa426d0 retained as the canonical record.
+
+This is the **third worked example** of the v1.5 amendment #12 epistemic shape generalizing beyond multi-agent manifest verification:
+1. **Day-28**: Pattern D backport claim in journal narrative was stale (PR #206 fix)
+2. **Day-29 morning**: F7 ILIKE filter false-positive matched NCAA Baseball "Mexico" pattern, required JOIN-based attribution (amendment #18 captured)
+3. **Day-29 afternoon (now)**: baseline_shifts INSERT lacked existence pre-check, produced silent duplicate
+
+### v1.5 amendment #19 (NEW)
+
+**Production-state write operations against observability tables (baseline_shifts, dedup_audit, resolver_runs annotations, manual review_queue UPDATEs) require explicit idempotency discipline — either pre-flight existence check or schema-level UNIQUE constraint — same as bootstrap script INSERT semantics.** The Day-29 Liga ACB annotation was inserted twice because no operator workflow guards against duplicate INSERT on (event_type, event_date). Bootstrap scripts have this discipline via Pattern D + ON CONFLICT / NOT EXISTS; operational annotations don't.
+
+Mitigation options (not selected — captured for future workstream):
+- Schema-level: add UNIQUE constraint on (event_type, event_date) for baseline_shifts (would have prevented the duplicate at INSERT time)
+- Workflow-level: annotation INSERTs require pre-flight `SELECT ... WHERE event_type=? AND event_date=?` check (operator discipline, same as Pattern D pre-flight)
+- Tooling-level: dedicated `scripts/annotate_baseline_shift.py` with idempotency built in (parallel to bootstrap scripts' pattern)
+
+Filed as tech-debt note. Not blocking; the dedup cleanup pattern (SELECT to find duplicates → DELETE the redundant row) is a reasonable operator fallback for now.
+
+Pile expanded from 18 to 19 items.
+
+### Day-29 cumulative methodology results
+
+**Phase 2D.5-A progress: 2 of 6 leagues applied**
+- ✅ Workstream #1 (LMB): Day-28 apply, Day-29 morning F7 validation (18 resolutions / 6 teams)
+- ✅ Workstream #2 (Liga ACB): Day-29 afternoon apply, F7 validation tomorrow morning
+- ⏳ Workstream #3 (Italian LBA): scope-doc + manifest sourcing — pending, sequencing decision committed
+- ⏳ Workstream #4-7: EuroLeague, PLK, BBL, VTB+others — sequence per `docs/bootstraps/phase-2d5a-sequencing-decision.md`
+
+**Methodology momentum**: Liga ACB applied without surprises — methodology generalized cleanly from LMB. Cross-sport collision discipline (Real Madrid Baloncesto, FC Barcelona Bàsquet canonicals) survived the apply unchanged. BACKFILL branch handled pre-existing Phase 2A.5 stubs (Basket Zaragoza, Basquet Girona) correctly via normalized_name match. PR granularity calibration (PR #204 single-PR delivery) proved out — fewer commits, faster delivery, no quality loss vs LMB's two-PR Day-27 split.
+
+### Day-29 PR state (afternoon)
+
+- **Morning batch (PR #208)**: Pattern D erratum + amendment #18 + LMB F7 validation + FL pipeline finding + FL reason_detail finding + F7 JOIN template (MERGED)
+- **Afternoon batch (this entry)**: Liga ACB apply + daily-diff per-sport breakdown + amendment #19 (annotation idempotency) + baseline_shifts dedup erratum
+
+### Pending — next, operator review
+
+1. **Liga ACB F7 verification (tomorrow morning)** — use this morning's JOIN template with apply timestamp 2026-05-29T21:42:54+00 and country_code IN ('ESP', 'AND') filter. Expected: meaningful strict resolutions if Liga ACB games occur in the cron window. Same shape as Day-29 morning LMB F7 (~14 hours post-apply, 18 resolutions / 6 teams).
+2. **Baseball capability monitoring** — track Day-30 / Day-31 daily-diff. If Baseball stabilizes at 76-78%, hypothesis 1 (LMB denominator inflation) is supported; adjust F8 framing for FL-only league bootstraps.
+3. **Italian LBA scope-doc + manifest sourcing** — sequencing decision already committed (`docs/bootstraps/phase-2d5a-sequencing-decision.md`); execution begins Day-30 or Day-31 post-Liga-ACB-F7-confirmation.
+
 ### Day-29 morning: Day-28 erratum (Pattern D backport claim was stale)
 
 The Day-28 journal entry (PR #205) listed "Backport Pattern D pre-flight import to bootstrap_lmb.py" as pending follow-up item #4. Day-28 evening verification (Select-String against `scripts/bootstrap_lmb.py` lines 50-107) confirmed the backport was **already complete** as of Day-27 PR #203 commit `d660b01` ("address 5 review concerns"). Only the docstring's exit-code-3 entry on line 31 lagged — it still listed only `sp.sports missing or doesn't contain 'Baseball'` without the Pattern D failure case.
