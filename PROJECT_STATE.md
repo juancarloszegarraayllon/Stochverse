@@ -8,6 +8,161 @@ next session. Treat it as the project's running journal.
 
 ## Session — 2026-06-01
 
+### Day-30 afternoon: Italian LBA workstream #3 DESIGN-COMPLETE (PR #211, merged)
+
+Workstream #3 of Phase 2D.5-A. Single PR per amendment #14 (methodology proven on Liga ACB workstream #2). Apply deferred to Day-31 morning per operator fresh-attention discipline.
+
+**Deliverable (PR #211, 1,319 lines net add):**
+- `scripts/lba_seed.py` (295 lines) — 16-team manifest, 90 raw aliases / 86 unique-normalized
+- `scripts/bootstrap_lba.py` (405 lines) — apply script mirroring `bootstrap_acb.py`, shared `_check_pattern_d_endpoint` import (amendment #17), PR #200 alias-safety discipline
+- `tests/test_bootstrap_lba.py` (344 lines) — manifest-shape, diacritic, cross-sport collision, discovery-target, roster-membership tests
+- `docs/bootstraps/phase-2d5a-italian-lba.md` (275 lines) — F1-F8 framing, discovery query table, scope decisions, 3 open follow-ups
+
+**Roster source**: operator-verified Wikipedia "2025-26 LBA season" paste (Day-30 afternoon). 16 teams confirmed against Pattern A.2 discovery query results.
+
+**Cross-sport collision discipline expanded to 4 Italian Serie A football overlaps**:
+- Milano (AC Milan, Inter Milan) — bare alias EXCLUDED, "Olimpia" / "EA7" / "Armani" sport-disambiguators
+- Bologna (Bologna FC) — bare alias EXCLUDED, "Virtus" sport-disambiguator
+- Napoli (SSC Napoli) — bare alias EXCLUDED, "Basket" sport-disambiguator
+- Venezia (Venezia FC) — bare alias EXCLUDED, "Reyer" sport-disambiguator
+
+Plus within-LBA "Virtus" within-league collision discipline: bare "Virtus" EXCLUDED (multiple Italian basketball Virtus clubs exist).
+
+**Sport_id partition reasoning preserved**: Reggiana (AC Reggiana 1919 football exists) and Udine (Udinese Calcio exists) kept bare per Day-22 sport_id partition finding — matcher-layer safe, and discovery query shows FL sends bare forms (Reggiana 28/7d). Operator-clarity discipline applied to top-five-recognition football overlaps only.
+
+### Day-30 afternoon: Pre-scope discovery query saved Pattern A.2 risk
+
+Methodology improvement worth documenting. The Day-30 pre-scope discovery query (Pattern A.2 discipline) was run BEFORE Wikipedia roster sourcing rather than after. Compare to LMB Day-27 sequence:
+- **LMB Day-27**: Wikipedia roster drafted → Pattern A.2 against production found 6 missing + 2 phantom teams → 3 rounds of corrections
+- **Italian LBA Day-30**: Pre-scope discovery query run against production FIRST → Wikipedia roster verified against discovery results → 4 out-of-scope Serie A2/B leakage targets identified BEFORE manifest commit → 0 rounds of corrections
+
+The 16 in-scope Wikipedia roster teams matched the in-scope discovery targets cleanly; the 4 out-of-scope discovery hits (Fortitudo Bologna, Verona/Tezenis, Virtus Roma 1960, Rucker San Vendemiano) were correctly classified as Serie A2/B leakage and excluded from manifest BEFORE drafting.
+
+**Implication**: Pattern A.2 pre-scope discovery is more efficient when run before authoritative-source roster sourcing, not after. Future bootstraps should follow Day-30 sequence: production discovery first, authoritative-source verification second.
+
+### Day-30 afternoon: Serie A2/B FL leakage finding (~80 records/week noise)
+
+The Italian LBA discovery query surfaced 4 distinct team patterns at material occurrence rates that DO NOT belong in 2025-26 LBA Serie A:
+
+| Provider string | Occurrences/7d | True league |
+|---|---:|---|
+| Fortitudo Bologna | 28 | Serie A2 |
+| Verona / Verona * | 28 + 14 = 42 | Serie A2 (Tezenis Verona / Scaligera Basket) |
+| Virtus Gvm Roma 1960 | 10 | Serie A2/B |
+| Rucker San Vendemiano | 6 | Serie A2 |
+| **Total noise** | **~80/7d** | **Serie A2/B leakage via FL Basketball sport_id** |
+
+These records get routed to the Basketball matcher (sport_id=3) but have no matching `sp.teams` entries because they're not in LBA Serie A. They will continue to flow to review_queue / no_match indefinitely until either (a) FL ingestion classifies Serie A2/B records under a separate sport_id, or (b) a separate Serie A2 bootstrap workstream is scoped.
+
+Decision: out-of-scope for LBA Serie A workstream #3. Captured in PR #211 §6.3 as follow-up investigation. Phase 2D.5-A scope sticks to top-tier league bootstraps for now; Serie A2 / EuroCup / FIBA Europe Cup secondary-league workstreams are deferred.
+
+### Day-30 afternoon: Tennis investigation reframes Tennis workstream priorities
+
+Three substantive findings from Day-30 afternoon Tennis drilldown via discriminator queries. These refine the morning journal's framing of Tennis as "Sunday challenger/ITF mix harder" + "re-resolution backlog exhausted." Both factors are real; the substantive mechanism is more specific.
+
+**Finding 1: Kalshi Tennis tickers are near-zero strict-tier reachable**
+
+Day-30 production data across all Kalshi Tennis ticker patterns:
+
+| Kalshi Tennis ticker pattern | Records (Day-30) | Strict resolutions | Strict rate |
+|---|---:|---:|---:|
+| ATP Tour (KXATPMATCH-*) | 845 | 2 | 0.24% |
+| ATP Challenger (KXATPCHALLENGERMATCH-*) | 1,584 | 0 | 0.00% |
+| WTA Tour (KXWTAMATCH-*) | 864 | 0 | 0.00% |
+| ITF Women (KXITFWMATCH-*) | 6,087 | 0 | 0.00% |
+| ITF other (KXITF*) | 6,897 | 0 | 0.00% |
+| Kalshi other Tennis | 549 | 0 | 0.00% |
+| **All Kalshi Tennis combined** | **16,826** | **2** | **0.012%** |
+
+Compare to FL Tennis: 14,325 records / 60 strict resolutions = **0.42%** strict rate.
+
+Implication: Kalshi Tennis uses surname-only abbreviated tickers (e.g., "Rogers" vs "Kalieva") that do NOT match `sp.teams.canonical_name` entries (which are mostly full names or FL-format "Last F. (Country)"). The strict-tier AliasIndex has no surname-to-team_id mapping for these tickers. This empirically confirms the Day-17 Finding 1 framing.
+
+**Finding 2: FL Tennis is the dominant Tennis population**
+
+FL records are 14,325 of 31,151 Tennis records Day-30 (46%). Day-29/Day-30 Tennis capability rates (24.6% / 19.2%) are dominated by FL pipeline performance, not Kalshi pipeline performance.
+
+Tennis workstreams should split into two distinct optimization targets:
+- **FL Tennis**: alias completeness within "Last F. (Country)" canonical format → modest lift potential
+- **Kalshi Tennis**: surname-aware matching workstream (scope-doc §1.6, deferred) → large lift potential, requires methodology change
+
+**Finding 3: Tennis dedup workstream lift mechanism was alias-tier, not strict-tier**
+
+The Tennis dedup workstream's measured +8.62pp cumulative lift (Day-26 baseline 15.98% → Day-29 24.6%) cannot have come from strict-tier coverage — Day-30 production shows only 62 strict-tier Tennis resolutions in a 24-hour window across all 31,151 Tennis records (FL 60 + Kalshi 2).
+
+The +8.62pp lift was alias-tier auto-apply enablement. Pre-dedup, FL records routed to review_queue under alias-tier collision detection because `sp.teams` contained multiple rows for the same player in different canonical formats (Kalshi-format vs FL-format duplicates). Post-dedup, the same FL records resolve via alias-tier without collision, hitting the auto-apply threshold (0.95-1.00 bucket per Day-21 bimodal histogram).
+
+This refines the morning journal's "two contributing factors" framing. Both factors (Sunday challenger/ITF mix + dedup backlog exhaustion) are real, but the underlying mechanism for Tennis dedup's lift is alias-tier auto-apply, not strict-tier coverage.
+
+**Forward-pointer to Tennis surname workstream**: The empirical ceiling for further Tennis lift via current strict + alias + fuzzy matcher is approximately the FL strict + alias rate (~25-30%). Crossing the ~30% Tennis capability ceiling requires the surname-aware matching workstream from scope-doc §1.6.
+
+### Day-30 afternoon: Claude Code blocker handling — amendment #12 generalizes again
+
+Worked example. Italian LBA workstream #3 manifest sourcing hit a sandbox egress blocker: Claude Code's WebFetch returned HTTP 403 from all 8 candidate authoritative sources (en.wikipedia.org, it.wikipedia.org, proballers.com, legabasket.it, basketball-reference.com, es.wikipedia.org, realgm.com, grokipedia.com). Direct curl from Bash also returned 403, confirming sandbox-side block.
+
+**Claude Code's response (verbatim from session log):**
+> "Drafting the manifest from my general-knowledge would replay the LMB 3-round correction cycle. The operator's instructions explicitly bind this work to authoritative-source artifact verification before paste (amendment #12), and the discovery query alone confirms ~10 of 16 — not enough to lock the manifest."
+
+Claude Code presented 3 paths (operator paste, alternate-URL source, explicit-override-to-proceed-from-memory) and stopped rather than drafting from general knowledge. Operator-paste recovery cleanly resumed the workstream within minutes.
+
+**Significance**: amendment #12 ("artifact paste over summary") originally addressed multi-agent verification handoffs. Day-28 morning surfaced it generalizing to journal claims about code state (#18). Day-29 afternoon surfaced it for baseline_shifts annotation idempotency (#19). Today, the agent itself refused to skip artifact verification when the canonical path was blocked, citing the amendment as the gating constraint.
+
+This is the **fourth worked example** of the v1.5 amendment #12 epistemic shape generalizing:
+1. Day-28 morning: Pattern D backport claim stale in journal narrative (#18)
+2. Day-29 morning: F7 ILIKE filter false-positive matched NCAA Baseball (#18)
+3. Day-29 afternoon: baseline_shifts duplicate INSERT (#19)
+4. Day-30 afternoon: Claude Code refused general-knowledge manifest draft when WebFetch blocked
+
+The pattern is now sufficiently robust to consider it institutionalized. No new amendment needed; existing amendments #12, #13, #18 cover the discipline.
+
+### v1.5 amendment #21 (NEW)
+
+**Pre-scope discovery query (Pattern A.2) is more efficient when run BEFORE authoritative-source roster sourcing, not after.** LMB Day-27 sequence (Wikipedia draft → Pattern A.2 verification → 3 rounds of corrections) took 6 missing + 2 phantom teams to detect. Italian LBA Day-30 sequence (Pattern A.2 discovery → Wikipedia verification against discovery results → 0 rounds of corrections) caught 4 out-of-scope leakage targets BEFORE manifest commit. Future bootstraps should follow Day-30 sequence: production discovery first, authoritative-source verification second, manifest commit third.
+
+Mitigation captured: this is process improvement, not tooling. Already reflected in `docs/bootstraps/phase-2d5a-italian-lba.md` §2.
+
+Pile expanded from 20 to 21 items.
+
+### Day-30 afternoon: PowerShell env vars dropping between sessions (friction observation, 2nd occurrence)
+
+Friction-pattern observation, not blocking. Today (Day-30) was the second consecutive session where the PowerShell environment variables (`DATABASE_URL`, `EXPECTED_PRODUCTION_DB_NAME`, `EXPECTED_PRODUCTION_DB_HOST`) had to be re-set at session start. Day-29 was the first occurrence.
+
+The Pattern D pre-flight is doing its safety job correctly (refuses to proceed when env vars missing), but the operator workflow could be smoother.
+
+Three mitigation options, captured for future consideration:
+- `.env` file with python-dotenv auto-load (requires committing or gitignored secret handling)
+- PowerShell `$PROFILE` script export (per-machine setup)
+- Convenience script `scripts/setup_env.ps1` reading from gitignored `.env.local`
+
+Not blocking; Pattern D safety mechanism working. Filed as tech-debt observation.
+
+### Day-30 afternoon: Phase 2D.5-A progress check
+
+**3 of 6 leagues design-complete; 2 of 6 applied + validated:**
+- ✅ Workstream #1 (LMB): Day-28 apply, Day-29 morning F7 validation (18 resolutions / 6 teams)
+- ✅ Workstream #2 (Liga ACB): Day-29 afternoon apply, Day-30 morning F7 validation (41 resolutions / 11 manifest teams + 2 EuroLeague crossovers)
+- 🟡 Workstream #3 (Italian LBA): Day-30 afternoon design-complete (PR #211), apply Day-31 morning
+- ⏳ Workstream #4-7: EuroLeague, PLK, BBL, VTB+others — sequence per `docs/bootstraps/phase-2d5a-sequencing-decision.md`
+
+**Cumulative methodology lift since Phase 2D.5-A began**:
+- 59 LMB+Liga ACB strict resolutions in ~31 hours combined (~46/day average)
+- 16 distinct previously-missing teams now resolving (6 LMB + 10 Liga ACB; LBA pending Day-31 apply + F7)
+- 5 BACKFILL teams successfully promoted (3 LMB + 2 Liga ACB)
+
+Italian LBA expected F7 yield: ~25-40 strict resolutions in first 14-17 hours post-apply, scaled from Liga ACB's 41/17h with LBA's modestly-higher unresolved-record volume.
+
+### Day-30 PR state (afternoon)
+
+- Morning batch (PR #210): Liga ACB F7 validation + daily-diff record-mix finding + amendment #20 + Tennis observations (MERGED)
+- Afternoon batch — Italian LBA scope-doc + manifest + script + tests (PR #211, MERGED)
+- Afternoon journal batch (this entry, separate PR)
+
+### Pending — next, operator review (Day-31 morning)
+
+1. **Italian LBA apply (Workstream #3)** — Pattern D pre-flight env verification → dry-run → wet apply → F7 verification (~14-17 hours post-apply) → baseline_shifts annotation (pre-flight existence check per amendment #19; event_type='phase_2d5a_lba_bootstrap').
+2. **Liga ACB F7 follow-up + Baseball capability monitoring** — continue tracking whether Baseball capability stabilizes at 76-78% (LMB denominator inflation hypothesis) or bounces back to 80%+ (noise hypothesis). Day-31 daily-diff = data point 3.
+3. **Day-31 morning journal batch** — Italian LBA apply + F7 validation results + Day-31 daily-diff observations.
+
 ### Day-30 morning: Liga ACB F7 EMPIRICALLY VALIDATED
 
 F7 verification via team_id JOIN against `sp.fixtures` revealed **41 strict-tier Liga ACB resolutions in the ~17-hour post-apply window** (2026-05-29 21:42:54 UTC apply → 2026-06-01 ~14:35 UTC sample point).
