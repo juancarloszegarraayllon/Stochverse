@@ -8,6 +8,118 @@ next session. Treat it as the project's running journal.
 
 ## Session — 2026-06-02
 
+### Day-31 end-of-day: Turkish BSL APPLIED (workstream #5) + CROSS-WORKSTREAM COLLISION FINDING
+
+Apply at 2026-06-02T16:52:01 UTC. Runtime 11.38s, 0 errors. Pattern D pre-flight → dry-run → wet apply sequence completed cleanly. PR #217 merged for workstream design.
+
+**Apply results:**
+- **11 new Turkish BSL canonicals inserted** (sp.teams, sport_id=3, country_code='TUR'): Beşiktaş, Fenerbahçe, Galatasaray, Esenler Erokspor, Manisa Basket, Karşıyaka Basket, Mersin MSK, Büyükçekmece Basketbol, Trabzonspor (Basketbol), Türk Telekom Ankara, Merkezefendi Basket
+- **5 BACKFILLs from Phase 2A.5 Basketball stubs (2026-05-08)**: Anadolu Efes (ca2f4866-c4ac-4a26-976f-d54401ce8c1d), Bahçeşehir Koleji (052768a0-79b1-4cd9-a823-530c04635324), Bursaspor Basketbol (85c6d6bf-8ffb-4309-b0aa-9ba3d146ad4c), Petkim Spor (c2cacf82-b492-4664-8631-14c2c013de6a), Tofas → Tofaş (7f3d7ec1-c48f-48cf-8b8f-089faec3fc53)
+- **65 aliases queued for insert**, 24 deduped within batch (belt-and-suspenders diacritic + dotless-ı pairs)
+- `bootstrap.turkish_bsl.pattern_d.ok` confirmed production endpoint pre-write
+- `existing_teams_loaded`: 2,019 Basketball teams pre-apply (sanity check: 2,010 post-LBA + 9 BSL INSERTs = 2,019 ✓)
+
+**baseline_shifts annotation: DEFERRED to Day-32 morning** pending systematic resolution of the cross-workstream collision finding documented below.
+
+### Day-31 end-of-day: Cross-workstream alias collision finding (Amendment #22 CANDIDATE)
+
+**During post-apply alias-claim audit, discovered that the PR #200 alias-safety discipline does not catch cross-source collisions.** The INSERT...WHERE NOT EXISTS pattern checks for duplicates within `source='bootstrap_league_coverage'` only. When manifest aliases match `alias_normalized` values that already exist under `source='legacy_bootstrap'` or `source='alias_tier'`, the new rows insert successfully — creating multi-team_id mappings under sport_id=3.
+
+**Comprehensive audit query revealed 43 such collisions across all 5 Phase 2D.5-A Basketball workstreams** (KBL Day-19, Liga ACB Day-29, Italian LBA Day-31 morning, Israeli BSL Day-31 afternoon, Turkish BSL Day-31 evening).
+
+**Runtime impact**: AliasIndex (`resolver/aliases.py:51,111`) is keyed by `(alias_normalized, sport_id)` returning a set of team_ids. When the set has size > 1, strict tier punts (treats as ambiguous). Records that should resolve via strict tier are routing to alias tier instead.
+
+**This is not a data loss event** — records still resolve at alias-tier confidence, just below strict-tier confidence. But it IS a methodology regression for strict-tier coverage that has been silently degrading across Phase 2D.5-A.
+
+**Distribution by workstream** (43 total collisions):
+
+| Workstream | Collisions | Examples |
+|---|---:|---|
+| KBL (Day-19) | 1 | `anyang jungkwanjang` |
+| Liga ACB (Day-29) | 14 | `baskonia`, `baxi manresa`, `bc andorra`, `breogan`, `forca lleida`, `gran canaria`, `joventut badalona`, `morabanc andorra`, `murcia`, `surne bilbao basket`, `unicaja`, `san pablo burgos`, `cb san pablo burgos`, `ucam murcia` |
+| Italian LBA (Day-31 morning) | 14 | `basket napoli`, `cantu`, `cremona`, `dolomiti energia trento`, `napoli basket`, `pallacanestro trieste 2004`, `sassari`, `tortona`, `trieste`, `udine`, `apu udine`, `unahotels reggio emilia`, `varese`, `vanoli cremona` |
+| Israeli BSL (Day-31 afternoon) | 8 | `elitzur maccabi netanya`, `elitzur netanya`, `galil elyon`, `hapoel beer sheva`, `hapoel galil elyon`, `maccabi raanana`, `maccabi rishon`, `maccabi rishon lezion` |
+| Turkish BSL (today) | 4 | `bahcesehir kol`, `besiktas gain`, `merkezefendi`, `tofas bursa` |
+
+**Turkish BSL partial remediation already applied (3 of 4)**: DELETEs against `bootstrap_league_coverage` source for `manisa`, `mersin sk`, `buyukcekmece basketbol` to preserve legacy strict-tier routing (consistent with F1 canonical-name fragmentation / dormant phantom discipline). 4th Turkish collision (`bahcesehir kol`) discovered after initial audit; remediation pending.
+
+**The other 39 collisions are NOT remediated yet** — discovered post-Turkish-BSL-apply via comprehensive audit query. Decision deferred to Day-32 morning systematic remediation workstream.
+
+### Amendment #22 candidate (NEW)
+
+**Pre-flight alias-claim audit before workstream apply is mandatory.** Manifest aliases under `source='bootstrap_league_coverage'` do not block on legacy aliases under `source='legacy_bootstrap'` or `source='alias_tier'` (PR #200 INSERT...WHERE NOT EXISTS only checks within-source). Multi-team_id collisions at the `(alias_normalized, sport_id)` index create strict-tier punt behavior. Future workstreams must run pre-apply audit query identifying any manifest-alias-normalized form that ALREADY has team_id mappings under any source, and resolve collisions before apply (omit the alias OR delete the legacy alias OR accept the alias-tier routing degradation).
+
+**Audit query template** (run pre-apply, scope to sport_id, scan all sources):
+
+```sql
+SELECT ta.alias_normalized, COUNT(DISTINCT ta.team_id) AS team_count,
+       ARRAY_AGG(DISTINCT t.canonical_name) AS canonicals,
+       ARRAY_AGG(DISTINCT ta.source) AS sources
+FROM sp.team_aliases ta
+JOIN sp.teams t ON t.id = ta.team_id
+WHERE t.sport_id = :target_sport_id
+  AND ta.alias_normalized IN (:manifest_alias_normalized_list)
+GROUP BY ta.alias_normalized
+HAVING COUNT(DISTINCT ta.team_id) > 0;
+```
+
+Any rows returned indicate pre-existing alias_normalized values that will produce multi-team_id collisions on insert. Resolve before apply.
+
+**Amendment pile expands from 21 to 22 items.** Formal documentation deferred to Day-32 morning along with systematic remediation.
+
+### Day-31 end-of-day: Workstream-level summary
+
+**Phase 2D.5-A status: 5 of 9 leagues applied**
+- ✅ Workstream #1 (LMB): Day-28 apply, Day-29 morning F7 validation (18 strict / 6 teams)
+- ✅ Workstream #2 (Liga ACB): Day-29 afternoon apply, Day-30 morning F7 validation (41 strict / 11 manifest teams + 2 EuroLeague crossovers); 14 cross-workstream collisions discovered Day-31 evening
+- ✅ Workstream #3 (Italian LBA): Day-31 morning apply (13 INSERT + 3 BACKFILL + 86 aliases); 14 cross-workstream collisions discovered Day-31 evening; F7 opens ~03:39 UTC Day-32
+- ✅ Workstream #4 (Israeli BSL): Day-31 afternoon apply (9 INSERT + 5 BACKFILL + 43 aliases); 8 cross-workstream collisions discovered Day-31 evening; F7 opens ~04:56 UTC Day-32
+- ✅ Workstream #5 (Turkish BSL): Day-31 evening apply (11 INSERT + 5 BACKFILL + 65 aliases); 4 collisions (3 remediated, 1 pending); F7 opens ~06:52 UTC Day-32
+- ⏳ Workstream #6-9: Greek HEBA, Russian VTB, EuroLeague (gap-fill), Serbian/ABA
+
+**Day-31 substantive deliverables (16 items)**: Italian LBA apply + LBA annotation + LBA daily-diff + Day-31 morning journal PR #213 + EuroLeague pre-scope discovery + sequencing-decision update PR #214 + FL API discussion + maintenance question discussion + Israeli BSL design PR #215 + Israeli BSL apply + Israeli BSL annotation + Day-31 afternoon journal PR #216 + Turkish BSL discovery + Turkish BSL design PR #217 + Turkish BSL apply + cross-workstream collision finding.
+
+### Day-31 end-of-day: PR state
+
+- Morning batch (PR #213): Italian LBA apply + daily-diff + schema-verification erratum (MERGED)
+- Afternoon PR #214: Sequencing decision Day-31 addendum (MERGED)
+- Afternoon PR #215: Israeli BSL workstream design (MERGED)
+- Afternoon PR #216: Day-31 afternoon journal (MERGED)
+- Evening PR #217: Turkish BSL workstream design (MERGED)
+- Evening journal (this entry, separate PR)
+
+### Pending — Day-32 morning agenda
+
+1. **F7 verifications for 3 applied workstreams** (Italian LBA + Israeli BSL + Turkish BSL): note F7 results will be ASTERISK-MARKED because collisions affect strict-tier reach. Run F7 BEFORE remediation to measure pre-remediation strict-tier coverage.
+
+2. **Day-32 daily-diff** with collision-state-as-background. Baseball trajectory data point 6, Basketball trajectory data point 4 (compounding LBA + BSL + Turkish BSL inflation per amendment #20).
+
+3. **Systematic cross-workstream collision remediation workstream** (substantive Day-32 morning task, ~1-2 hours):
+   - 4th Turkish BSL collision DELETE (`bahcesehir kol`)
+   - 39 prior-workstream collision DELETEs across KBL/ACB/LBA/Israeli-BSL
+   - Pattern: Option 2 (DELETE manifest aliases that collide with legacy stubs, preserve legacy routing as dormant phantoms per F1 canonical-name fragmentation discipline)
+   - Re-verify zero-collision state after each workstream's batch
+
+4. **Post-remediation F7 re-measurement** for all 5 applied workstreams. Compare pre- vs post-remediation strict-tier resolution counts to quantify the methodology-regression magnitude.
+
+5. **Amendment #22 formal documentation** in scope-doc + addition to v1.5 amendment pile (expansion 21 → 22).
+
+6. **Backfill the Turkish BSL baseline_shifts annotation** with final 6-dormant-phantom count + post-remediation alias-state-clean status.
+
+7. **Methodology reflection**: Was the empirical-coverage discipline (F2 NEW from Turkish BSL Day-31 scope-doc §4.1) the right call? Re-examine against the 43-collision empirical signal. Possible refinement: empirical-coverage discipline requires pre-flight alias-claim audit; without it, default to operator-clarity exclusion.
+
+### Day-31 end-of-day: Methodology reflections (post-mortem-shape)
+
+This is the **first Phase 2D.5-A methodology surprise that required pause** rather than push-through resolution. Healthy precedent: when a finding's scope grows beyond the current workstream during end-of-day hours, defer remediation to fresh-attention next-day session rather than compound methodology errors via rushed execution.
+
+The 6th worked example of amendment #12 generalizing (artifact verification over memory) surfaced earlier today (Claude assistant guessed `resolver.normalize_alias` function name + `alias_canonical` column name; both wrong; required Select-String + information_schema verification). The collision finding is the same epistemic shape at a different granularity: cross-source collisions exist as production-data artifacts that pre-flight discovery would have surfaced.
+
+**Pattern A.2 sequencing improvement (amendment #21)** was about pre-scope discovery against authoritative sources. Amendment #22 extends Pattern A.2 to **pre-apply discovery against production state**: not just "is the manifest correct against Wikipedia?" but "what does the production database already say about this alias?"
+
+The collision count distribution (1 / 14 / 14 / 8 / 4) tells a story: workstreams with more aggressive bare-form / sponsor-stripped alias coverage produced more collisions. KBL (1 collision) was small-scope and conservative. Liga ACB and Italian LBA (14 each) had heavy sponsor-stripping. Israeli BSL (8) had 11-city exclusion that limited the collision surface. Turkish BSL (4 pre-remediation) had the F2 NEW empirical-coverage inclusion. Greek HEBA workstream #6 should expect ~5-15 collisions of similar shape (Olympiakos / Panathinaikos / AEK Athens football-overlap teams have Phase 2A.5 legacy stubs).
+
+**No new amendment beyond #22 needed.** The collision pattern is contained by the alias-claim audit discipline. Tomorrow's systematic remediation completes the methodology refinement.
+
 ### Day-31 afternoon: Israeli BSL APPLIED + ANNOTATED (workstream #4 EMPIRICALLY APPLIED)
 
 Apply at 2026-06-02T14:56:10 UTC. Runtime 9.05s (fastest Phase 2D.5-A apply yet — LMB 10.7s, ACB 11.66s, LBA 13.3s, BSL 9.05s). 0 errors.
