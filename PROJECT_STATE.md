@@ -8,6 +8,160 @@ next session. Treat it as the project's running journal.
 
 ## Session — 2026-06-02
 
+### Day-31 afternoon: Israeli BSL APPLIED + ANNOTATED (workstream #4 EMPIRICALLY APPLIED)
+
+Apply at 2026-06-02T14:56:10 UTC. Runtime 9.05s (fastest Phase 2D.5-A apply yet — LMB 10.7s, ACB 11.66s, LBA 13.3s, BSL 9.05s). 0 errors.
+
+**Apply results:**
+- **9 new BSL canonicals inserted** (sp.teams, sport_id=3, country_code='ISR'): Maccabi Tel Aviv, Hapoel Tel Aviv, Hapoel Jerusalem, Maccabi Rishon LeZion, Hapoel Be'er Sheva/Dimona, Ironi Ness Ziona, Hapoel Galil Elyon, Elitzur Netanya, Maccabi Ironi Ra'anana
+- **5 BACKFILLs from Phase 2A.5 Basketball stubs (2026-05-08)**: Bnei Herzliya (3e218c54-bdee-4037-ace8-5d015871d2b7), Hapoel HaEmek (fad303be-d053-4780-9296-c13944f06670), Hapoel Holon (e02c83ea-f759-4ca4-863c-e07f037ac231), Ironi Kiryat Ata (9b4994a9-b827-478a-a64e-dba75ebd1f28), Maccabi Ironi Ramat Gan (416f4890-f6c3-4323-9c62-a52f65a8a412)
+- **43 aliases inserted**, 11 deduped within batch (belt-and-suspenders apostrophe + hyphen + capitalization pairs), 0 global conflicts (PR #200 alias-safety discipline held)
+- `bootstrap.israeli_bsl.pattern_d.ok` confirmed production endpoint pre-write
+- `existing_teams_loaded`: 2,010 Basketball teams pre-apply (sanity check: 1,997 LBA-baseline + 13 LBA INSERTs = 2,010 ✓)
+
+**baseline_shifts annotation**: row `e048283e-1e05-4fd2-afaf-a77b8e8b375f` (event_type='phase_2d5a_israeli_bsl_bootstrap', event_date=2026-06-02). Amendment #19 idempotency discipline applied via pre-flight SELECT (0 rows existed, safe to INSERT).
+
+### Day-31 afternoon: Empirical finding — Phase 2A.5 legacy coverage non-correlated with team prominence
+
+Surprising finding from BACKFILL identification. The 5 BSL teams that pre-existed in Phase 2A.5 legacy `public.entities` (2026-05-08 created_at) are:
+- Bnei Herzliya (mid-tier, EuroCup participant)
+- Hapoel HaEmek (mid-tier regional)
+- Hapoel Holon (mid-tier, EuroCup participant historically)
+- Ironi Kiryat Ata (mid-tier regional)
+- Maccabi Ironi Ramat Gan (mid-tier, EuroCup participant)
+
+Teams that were NOT in Phase 2A.5 legacy (today's INSERTs):
+- **Maccabi Tel Aviv** (6× EuroLeague champion — 1977, 1981, 2001, 2004, 2005, 2014; Israeli basketball flagship)
+- **Hapoel Tel Aviv** (perennial top-tier, EuroCup champion 2001-02)
+- **Hapoel Jerusalem** (former EuroChallenge champion 2003-04, EuroCup champion 2003-04)
+
+**This is counterintuitive.** Conventional expectation: Phase 2A.5 legacy `public.entities` would contain the most prominent international teams (Maccabi Tel Aviv as 6× EuroLeague champion is one of the highest-profile basketball clubs globally). Reality: legacy coverage was NOT prominence-correlated.
+
+**Hypothesis**: Phase 2A.5 legacy data came from a specific provider's coverage snapshot, not an authoritative-source roster. The provider's coverage was bounded by which teams that provider's data feeds included at the time `public.entities` was populated — possibly a specific tournament or league context that happened to include mid-tier Israeli BSL teams but not the EuroLeague-bound flagship teams.
+
+**Implication for future workstreams**: BACKFILL prediction (which manifest teams will be in legacy vs new INSERTs) is NOT reliable based on team prominence. Empirical verification via the dry-run pre-apply discovery is the ONLY reliable signal. Future workstreams should expect surprise: prominent teams may be NEW INSERTs; mid-tier teams may be BACKFILLs.
+
+This is a refinement of the operator's mental model of `public.entities` legacy data composition. No new amendment needed; falls within existing amendment #18 epistemic discipline ("artifact verification, not memory") applied at the workstream prediction level.
+
+### Day-31 afternoon: Phase 2D.5-A re-sequencing per Day-31 discovery (PR #214 merged)
+
+Pre-scope Pattern A.2 discovery query for EuroLeague workstream #4 (per amendment #21) revealed the unresolved Basketball population is dominated by domestic basketball leagues (Israeli BSL ~300/7d, Turkish BSL ~100+/7d, Greek HEBA ~50+/7d, Russian VTB ~150/7d), NOT EuroLeague-proper. EuroLeague-only residual is ~50-80/7d after subtracting domestic-league records.
+
+Per amendment #15 (bootstrap leverage ≠ total-daily-volume; production-data discovery overrides scope-doc defaults), the Day-28 sequencing decision is overridden by Day-31 empirical evidence.
+
+**Original Day-28 sequencing** (deprecated):
+- #4: EuroLeague (~250/7d per scope-doc estimate)
+- #5-7: PLK, BBL, VTB
+
+**Day-31 re-sequencing** (active, per PR #214 merged Day-31 afternoon):
+- #4: Israeli BSL (~300/7d, single country, low methodology risk) — APPLIED TODAY
+- #5: Turkish BSL (~100+/7d, single country, top-5-football cross-sport)
+- #6: Greek HEBA A1 (~50+/7d, single country, top-5-football cross-sport)
+- #7: Russian VTB (~150/7d, single country)
+- #8: EuroLeague (cross-country aggregator, ~50-80 residual, gap-fill after #4-7)
+- #9: Serbian KLS / ABA League (~40/7d, multi-country ABA)
+
+This is the **second empirical validation of amendment #15** (Day-28 surfaced it on Liga ACB volume estimates; Day-31 surfaces it on EuroLeague composition). PR #214 updated `docs/bootstraps/phase-2d5a-sequencing-decision.md` with the Day-31 addendum.
+
+### Day-31 afternoon: New methodology dimensions captured in Israeli BSL workstream
+
+PR #215 introduced three new methodology dimensions worth pinning:
+
+**1. Within-league bare-prefix discipline (NEW)**
+
+Five Israeli sports-club prefixes (Maccabi, Hapoel, Ironi, Bnei, Elitzur) appear across 4+ BSL teams each. Bare prefix aliases would produce within-league collision. EXCLUDED in manifest:
+- "Maccabi" bare (4 BSL teams share)
+- "Hapoel" bare (6 BSL teams share)
+- "Ironi" bare (4 BSL teams share)
+- "Bnei" bare (future-promotion collision risk)
+- "Elitzur" bare (Elitzur Yavne in Liga Leumit + future-promotion risk)
+
+This is a stronger form of F2 alias-distinctiveness than previous bootstraps. Italian LBA's "Virtus" exclusion was a single-prefix case; Israeli BSL's 5-prefix exclusion generalizes the pattern.
+
+**2. Apostrophe + slash handling (NEW)**
+
+"Hapoel Be'er Sheva/Dimona" requires both apostrophe-stripped (Beer Sheva) AND apostrophe-retained (Be'er Sheva) variants because the normalizer treats apostrophe as punctuation (stripped to space) which produces DIFFERENT normalized keys:
+- "Hapoel Be'er Sheva" → `hapoel be er sheva`
+- "Hapoel Beer Sheva" → `hapoel beer sheva`
+
+Both must be aliases. Same pattern for "Ra'anana"/"Raanana".
+
+**3. Highest cross-sport collision count of Phase 2D.5-A so far (11 of 14)**
+
+Israeli BSL: 11 of 14 cities have football counterparts. Comparison:
+- LMB Day-28: 0 cross-sport collisions
+- Liga ACB Day-29: 2 cities (Real Madrid, Barcelona)
+- Italian LBA Day-31 morning: 4 cities (Milano, Bologna, Napoli, Venezia)
+- Israeli BSL Day-31 afternoon: 11 cities (Tel Aviv, Jerusalem, Be'er Sheva, Holon, Ra'anana, Ness Ziona, Ramat Gan, Herzliya, Rishon LeZion, Netanya, plus Tel Aviv shared by Maccabi + Hapoel)
+
+The Maccabi/Hapoel/Ironi/Bnei/Elitzur prefix system serves as natural sport-disambiguator: bare cities EXCLUDED, but prefixed forms ("Maccabi Tel Aviv", "Hapoel Tel Aviv") SAFE.
+
+### Day-31 afternoon: Operator-raised question — maintenance for league/team changes over time
+
+Mid-afternoon operator question worth pinning: "would we need to do this as leagues and teams change?"
+
+Yes. Forces driving ongoing maintenance:
+- **Annual roster turnover** (~10-30% per league per year): promotion/relegation, new sponsors, team rebrands
+- **Production drift detection**: SAME Pattern A.2 discovery query that BUILDS manifests will surface STALE manifests (Trapani Shark replacement, etc.)
+- **Provider format changes**: rare but real (asterisk-suffix pattern emergence example from Day-30)
+
+**Recommended maintenance design** (to be implemented post-Phase-2D.5-A):
+1. **Monthly discovery-query cron**: parameterized over `baseline_shifts` rows where `event_type LIKE 'phase_2d5a_%'`, reports diff (new high-volume provider strings + zero-strict-resolution manifest teams)
+2. **F7 health monitoring**: per-league F7 JOIN queries daily/weekly, sudden drops = manifest staleness signal
+3. **Annual roster-refresh runbook**: documented operator workflow using existing idempotent bootstrap scripts
+
+**Cost projection**:
+- Tooling: ~2 days one-time investment
+- Per-league refresh: ~30 min/year operator time
+- For 9 leagues at completion: ~5 hours/year total maintenance
+
+**Deferred to post-Phase-2D.5-A**. Current bootstrap methodology track record (3 leagues applied, 2 validated, declining cost-per-league per amendment #21) doesn't justify maintenance-tooling investment yet. Revisit when Phase 2D.5-A wraps OR when maintenance pain materializes.
+
+Captured as scope-doc follow-up; not a Phase 2D.5-A scope item. Operator-asked-question artifact preserved here for future session reference.
+
+### Day-31 afternoon: Architectural question on FL API vs bootstrap methodology
+
+Mid-afternoon operator question worth pinning: "why are we following this methodology instead of using fl api?"
+
+Three interpretations of "use FL API":
+1. **Query FL `/teams` for league rosters**: doesn't solve the actual problem (production strings vary across providers; FL gives one canonical, we need multiple aliases)
+2. **Auto-create sp.teams from FL ingestion strings**: rejected by design (trust boundary, cross-sport collision propagation, no semantic anchor); Day-27 PROJECT_STATE entry captures the architectural decision
+3. **Use FL tournament_stage_id as anchor**: Kalshi has zero relationship to FL's tournament IDs; cross-provider corroboration value-add requires `sp.team_aliases` as convergence point
+
+**Conclusion**: Bootstrap methodology stays. FL API supplements the work (FL's `HOME_NAME`/`AWAY_NAME` ARE the strings we match against `sp.team_aliases`; `sp.fl_events.sport_id` from Phase 2A.7 IS the FL sport-tier anchor) but doesn't replace it. Cost comparison (60-90 min one-time bootstrap vs 1-2 week architectural pivot) favors bootstrap methodology for current Phase 2D.5-A scope.
+
+Captured as future-session reference; not a methodology change.
+
+### Day-31 afternoon: Phase 2D.5-A progress
+
+**4 of 9 leagues now applied:**
+- ✅ Workstream #1 (LMB): Day-28 apply, Day-29 morning F7 validation (18 strict / 6 teams)
+- ✅ Workstream #2 (Liga ACB): Day-29 afternoon apply, Day-30 morning F7 validation (41 strict / 11 manifest teams + 2 EuroLeague crossovers)
+- ✅ Workstream #3 (Italian LBA): Day-31 morning apply (13 INSERT + 3 BACKFILL + 86 aliases), F7 opens ~03:39 UTC Day-32
+- ✅ Workstream #4 (Israeli BSL): Day-31 afternoon apply (9 INSERT + 5 BACKFILL + 43 aliases), F7 opens ~04:56 UTC Day-32
+- ⏳ Workstream #5-9: Turkish BSL, Greek HEBA, Russian VTB, EuroLeague (gap-fill), Serbian/ABA
+
+**Cumulative methodology lift since Phase 2D.5-A began (4 leagues applied, 2 empirically F7-validated)**:
+- 59 strict resolutions in LMB + ACB combined ~31 hours (~46/day average)
+- 26 distinct previously-missing teams now resolving (6 LMB + 10 Liga ACB + 13 LBA INSERTs awaiting F7 + 9 BSL INSERTs awaiting F7 = pre-F7-tally)
+- 13 BACKFILL teams successfully promoted across 4 workstreams (3 LMB + 2 ACB + 3 LBA + 5 BSL)
+
+Israeli BSL expected F7 yield: ~50-100 strict resolutions in first 14-17h post-apply (~3× higher than LBA per ~3× higher discovery volume, plus 5 BACKFILLs unlock pre-existing fixture history).
+
+### Day-31 PR state (afternoon)
+
+- Morning batch (PR #213): Italian LBA apply + daily-diff Baseball trajectory + schema-verification erratum (MERGED)
+- Afternoon PR #214: Sequencing-decision Day-31 addendum (re-sequencing workstreams #4-9) (MERGED)
+- Afternoon PR #215: Israeli BSL workstream design + manifest + script + tests + scope-doc (MERGED)
+- Afternoon journal batch (this entry, separate PR)
+
+### Pending — next, operator review (Day-32 morning)
+
+1. **Italian LBA F7 verification** — opens ~03:39 UTC Day-32 (14h post-apply). JOIN template with `country_code='ITA'`, apply timestamp `2026-06-02 13:39:51+00`. Expected: ~25-40 strict resolutions per scope-doc projection.
+2. **Israeli BSL F7 verification** — opens ~04:56 UTC Day-32 (14h post-apply). JOIN template with `country_code='ISR'`, apply timestamp `2026-06-02 14:56:10+00`. Expected: ~50-100 strict resolutions per scope-doc projection.
+3. **Day-32 daily-diff** — Baseball trajectory data point 6, Basketball trajectory data point 4 (compounding LBA + BSL inflation per amendment #20).
+4. **Turkish BSL workstream #5** — pre-scope Pattern A.2 discovery query first (already partially surfaced via Day-31 EuroLeague discovery), then authoritative-source roster, then manifest + script + tests + scope-doc per amendment #14 single-PR convention.
+
 ### Day-31 morning: Italian LBA APPLIED + ANNOTATED (workstream #3 EMPIRICALLY APPLIED)
 
 Apply at 2026-06-02T13:39:51 UTC. Runtime 13.3s, 0 errors. Same Pattern D pre-flight → dry-run → wet apply sequence as LMB and Liga ACB.
