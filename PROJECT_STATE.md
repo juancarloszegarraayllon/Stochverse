@@ -6,6 +6,152 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-06-02
+
+### Day-31 morning: Italian LBA APPLIED + ANNOTATED (workstream #3 EMPIRICALLY APPLIED)
+
+Apply at 2026-06-02T13:39:51 UTC. Runtime 13.3s, 0 errors. Same Pattern D pre-flight → dry-run → wet apply sequence as LMB and Liga ACB.
+
+**Apply results:**
+- **13 new LBA canonicals inserted** (sp.teams, sport_id=3, country_code='ITA')
+- **3 BACKFILLs**: Olimpia Milano (43f96b2e-9694-44ee-a9dc-31cbf981b99b), Reyer Venezia (51dd1cd7-eff8-4b7b-b16f-810c770a1048), Virtus Bologna (28be3ef3-634a-4abf-bfa9-9b7681e6556c). All three were Phase 2A.5 Basketball entities (created 2026-05-08) without country_code. The bootstrap's three-branch classifier matched them on `normalized_name` against the manifest's canonicals (NFD accent stripping + Italian diacritic handling working as designed). All three are historically-prominent Italian basketball clubs with EuroLeague/EuroCup presence that existed in legacy `public.entities` pre-Phase-2A.5.
+- **86 aliases inserted**, 4 deduped within batch (within-manifest duplicates like Cantù+Cantu and Brescia+Brescia*, not cross-team conflicts), 0 global conflicts (PR #200 alias-safety discipline held)
+- `bootstrap.lba.pattern_d.ok` confirmed production endpoint pre-write
+- `existing_teams_loaded`: 1,997 Basketball teams (sport_id=3) — baseline pre-apply (Liga ACB Day-29 baseline was 1,981, +16 Liga ACB teams between Day-29 and today = 1,997, sanity check passes)
+
+**F1 discipline reaffirmed**: BACKFILL branch updates `country_code` only, NOT `canonical_name`. Olimpia Milano / Reyer Venezia / Virtus Bologna keep their legacy canonicals; current sponsored forms ("EA7 Emporio Armani Milano", "Umana Reyer Venezia", "Virtus Segafredo Bologna") live as aliases attached to the existing rows. Same precedent as LMB's Bravos de León, Liga ACB's Basket Zaragoza / Basquet Girona, KBL's Goyang Sono Skygunners.
+
+**Pattern A.2 sequencing improvement (amendment #21) empirically validated**: 0 rounds of corrections required (vs LMB's 3 rounds). Pre-scope discovery query run BEFORE Wikipedia roster sourcing caught 4 Serie A2/B leakage targets (Fortitudo Bologna, Tezenis Verona, Virtus Roma 1960, Rucker San Vendemiano) and confirmed all 10 in-scope provider forms map to manifest teams. Methodology now generalized cleanly across 3 leagues with progressively cleaner application (LMB 3 rounds → ACB 1 round → LBA 0 rounds).
+
+**baseline_shifts annotation**: row `e937cee8-365c-453e-8cf7-933d0cde4e1c` (event_type='phase_2d5a_lba_bootstrap', event_date=2026-06-02). Amendment #19 idempotency discipline applied: pre-flight SELECT confirmed 0 existing rows before INSERT. No duplicate-INSERT incident.
+
+### Day-31 morning: Schema-verification erratum + amendment #12 worked example #5
+
+While drafting the baseline_shifts INSERT statement, Claude assistant referenced column `expected_delta` (incorrect) instead of `expected_metric_delta` (actual). The INSERT failed with `SQLSTATE 42703` ("column does not exist"). Recovery via `information_schema.columns` query → corrected column name → INSERT succeeded on retry.
+
+**This is the fifth worked example of v1.5 amendment #12 generalizing** (artifact verification over memory):
+1. Day-28 morning: Pattern D backport claim stale in journal (amendment #18)
+2. Day-29 morning: F7 ILIKE filter false-positive matched NCAA Baseball (amendment #18)
+3. Day-29 afternoon: baseline_shifts duplicate INSERT (amendment #19)
+4. Day-30 afternoon: Claude Code refused general-knowledge manifest when WebFetch blocked
+5. Day-31 morning (now): Claude assistant drafted INSERT from journal-narrative memory rather than schema verification
+
+The pattern: claiming knowledge of an artifact (column name, code state, schema, manifest content) from memory rather than verification. Pre-flight artifact check would have caught all five.
+
+**Cost-asymmetry on this specific case**: schema-verification query ~5 seconds; INSERT failure + error parsing + retry ~30 seconds. Small in isolation; meaningful in aggregate. Already captured by amendments #12 and #18 — no new amendment needed.
+
+### Day-31 morning: Daily-diff 34.71% — multi-day trajectory now clearly multi-factor
+
+Day-31 daily-diff at 13:47 UTC: 12,079 records scanned, **matcher_capability_rate 34.71%** (-2.27pp from Day-30's 36.98%).
+
+**Capability rate progression across 6 measurements:**
+
+| Date | Day-of-week | Records | Capability | Δ |
+|---|---|---:|---:|---:|
+| Day-26 (2026-05-26) | Tue | 14,401 | 47.6% | baseline |
+| Day-27 (2026-05-27) | Wed | 14,847 | 46.5% | -1.1pp |
+| Day-28 (2026-05-28) | Thu | 15,160 | 46.4% | -0.1pp |
+| Day-29 (2026-05-29) | Fri | 13,197 | 48.3% | +1.9pp |
+| Day-30 (2026-06-01) | Sun | 14,732 | 37.0% | -11.3pp |
+| Day-31 (2026-06-02) | Tue | 12,079 | 34.7% | -2.3pp |
+
+**Per-sport breakdown (Day-31 vs Day-30):**
+
+| Sport | Day-30 | Day-31 | Δ |
+|---|---:|---:|---:|
+| Tennis | 19.2% | 15.5% | -3.7pp |
+| Baseball | 73.6% | 71.6% | -2.0pp |
+| Basketball | 51.5% | 44.6% | -6.9pp |
+| Soccer | 75.2% | 68.4% | -6.8pp |
+| Hockey | 66.7% | 63.6% | -3.1pp |
+| American Football | 51.2% | 48.3% | -2.9pp |
+| Football | 9.1% | 28.6% | +19.5pp (small denominator, noisy) |
+| Aussie Rules | 3.5% | 6.6% | +3.1pp (small denominator) |
+| Cricket | 6.5% | 5.9% | -0.6pp |
+
+**Ingestion volume signal in daily-diff log:**
+- Day-30: kalshi 7,096 + fl 7,636 = 14,732 total
+- Day-31: kalshi 6,254 + fl 5,825 = 12,079 total
+- Total provider records in 24h window: -18% Day-31 vs Day-30
+
+Monday morning has materially fewer new provider records in the rolling 24h ingestion window. This is a separate factor from the weekend-record-mix shift documented in amendment #20.
+
+**Aggregate matcher_capability_rate is now empirically multi-factor sensitive across observed dimensions:**
+1. Weekend vs weekday record-mix shift (amendment #20 from Day-30)
+2. Total ingestion volume cycling (NEW Day-31 observation — Monday window had -18% provider records)
+3. Compounding LMB denominator inflation (Baseball trajectory below)
+4. Compounding Liga ACB denominator inflation (Basketball -6.9pp Day-30→Day-31)
+5. Tennis re-resolution backlog exhaustion (Day-30 finding holds)
+
+### Day-31 morning: Baseball denominator-inflation hypothesis REFINED — compounding, not stabilizing
+
+Baseball capability trajectory across 5 days post-LMB-apply:
+
+| Date | Days post-LMB | Baseball capability |
+|---|---:|---:|
+| Day-27 (pre-LMB) | -1 | 86.7% |
+| Day-28 (LMB apply day) | 0 | 85.2% |
+| Day-29 (1d post) | 1 | 76.5% |
+| Day-30 (4d post) | 4 | 73.6% |
+| Day-31 (5d post) | 5 | **71.6%** |
+
+**Cumulative drop**: -15.1pp from Day-27 baseline. **Trajectory: monotonic decline, no stabilization signal yet.**
+
+The Day-29 afternoon hypothesis 1 framing ("If it stabilizes around 76-78%, hypothesis 1 [denominator inflation from LMB] is empirically supported") needs **refinement**:
+
+**Refined hypothesis 1**: LMB denominator inflation does NOT produce a one-shot drop with stabilization; it produces a compounding decline as MORE LMB records accumulate in the rolling 7-day measurement window each day. Day-1 captures ~1 day of LMB activity; Day-5 captures ~5 days. The denominator continues to grow while the numerator (strict-tier LMB resolutions, ~18-31/day) stays constant.
+
+**Empirical projection**: at -1.5 to -2pp/day continuing slope, Baseball capability could trough at 60-65% within ~10 more days as the LMB-window-saturation completes. Stabilization expected once the 7-day rolling window is fully LMB-saturated (~Day-34/35).
+
+**F8 framing decision (amendment #20 confirmed)**: F8 success criterion for FL-only league bootstraps is the F7 league-specific JOIN query (showing ≥50% reduction in asymmetric_anchor_failure for that league's attributable records), NOT aggregate sport capability rate. The Day-29 morning LMB F7 (18 strict / 6 teams) and Day-30 morning Liga ACB F7 (41 strict / 16 teams) remain the canonical methodology validation.
+
+### Day-31 morning: Window-overlap methodology observation
+
+Discriminator query (Day-30 vs Day-31 per-sport volume) revealed identical record counts for 4 low-volume sports (Handball 3693, Volleyball 243, Football 84, Lacrosse 63 — all unchanged Day-30→Day-31). Investigation: Day-30 daily-diff window ended 2026-06-01 20:12 UTC; Day-31 daily-diff window started 2026-06-01 13:47 UTC — windows overlap by ~6.5 hours. For sports where all records in the overlap window are the same set, counts are identical (these sports had rare events in the 6.5h overlap).
+
+Most volume changes for high-volume sports are real (Tennis +1,790, Golf +4,068, Baseball +507) since proportional contribution from the overlap is small. Low-volume comparisons (Football 84, Lacrosse 63) are artifact-bound.
+
+**Methodology note**: future discriminator queries between consecutive daily-diff windows should use non-overlapping 23:00-23:00 UTC daily windows (or align windows to a fixed day boundary) to eliminate overlap effects. Not blocking; daily-diff timing is operator-driven and varies with session start time. Filed as low-priority tech-debt observation. No new amendment.
+
+### Day-31 morning: PowerShell env vars dropping continued (3rd consecutive session)
+
+Friction observation, 3rd occurrence. PowerShell `DATABASE_URL`, `EXPECTED_PRODUCTION_DB_NAME`, `EXPECTED_PRODUCTION_DB_HOST` had to be re-set at session start today, same as Day-29 and Day-30. Pattern D pre-flight catches the missing-env case correctly (safety mechanism working).
+
+Three mitigation options still captured (no decision yet):
+- `.env` file with python-dotenv auto-load
+- PowerShell `$PROFILE` script export
+- Convenience script `scripts/setup_env.ps1` reading from gitignored `.env.local`
+
+Pattern: 3 of 3 sessions with this friction. Worth promoting from "tech-debt observation" to "small workstream candidate" if the friction continues into Day-32+.
+
+### Day-31 morning: Phase 2D.5-A progress check
+
+**3 of 6 leagues now applied + 2 of 3 empirically validated:**
+- ✅ Workstream #1 (LMB): Day-28 apply, Day-29 morning F7 validation (18 resolutions / 6 teams)
+- ✅ Workstream #2 (Liga ACB): Day-29 afternoon apply, Day-30 morning F7 validation (41 resolutions / 11 manifest teams + 2 EuroLeague crossovers)
+- 🟡 Workstream #3 (Italian LBA): Day-31 morning apply complete, F7 validation opens ~03:39 UTC Day-32 (~14h post-apply)
+- ⏳ Workstream #4-7: EuroLeague, PLK, BBL, VTB+others — sequence per `docs/bootstraps/phase-2d5a-sequencing-decision.md`
+
+**Cumulative methodology lift since Phase 2D.5-A began (LMB + ACB only, LBA F7 pending)**:
+- 59 strict resolutions (~46/day average over LMB + ACB applied windows)
+- 16 distinct previously-missing teams now resolving (6 LMB + 10 Liga ACB; LBA pending Day-32 F7)
+- 5 BACKFILL teams successfully promoted (3 LMB + 2 Liga ACB; 3 more pending LBA F7 = 8 total)
+
+### Day-31 PR state (morning)
+
+- Italian LBA apply (no PR — apply itself is operational, not code change)
+- baseline_shifts annotation (no PR — DB row INSERT)
+- Morning batch (this entry, separate PR)
+
+### Pending — next, operator review (Day-31 afternoon + Day-32 morning)
+
+1. **EuroLeague workstream #4 pre-scope discovery** — Pattern A.2 sequencing per amendment #21. Run discovery query against production sp.resolution_log for EuroLeague-pattern unresolved records (Olympiacos, Panathinaikos, Fenerbahce, CSKA, Maccabi Tel Aviv, etc.) BEFORE Wikipedia roster sourcing. 10-country multi-country scope; 4-team Liga ACB overlap; methodology now well-rehearsed.
+2. **Italian LBA F7 verification (Day-32 morning)** — opens ~03:39 UTC Day-32 (14h post-apply). JOIN template with `country_code='ITA'`, apply timestamp `2026-06-02 13:39:51+00`. Expected: ~25-40 strict resolutions per scope-doc projection.
+3. **Day-32 daily-diff** — Baseball trajectory data point 6 (continue refining hypothesis 1). Basketball trajectory data point 4 (compounding from Liga ACB + LBA).
+4. **Day-31 afternoon or Day-32 morning journal batch** — F7 LBA validation + EuroLeague workstream progress.
+
+---
+
 ## Session — 2026-06-01
 
 ### Day-30 afternoon: Italian LBA workstream #3 DESIGN-COMPLETE (PR #211, merged)
