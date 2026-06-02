@@ -142,12 +142,102 @@ Each apply teaches us something. Day-29 LBA apply teaches: does the ACB cross-sp
 
 If any pre-condition fails, sequencing decision re-evaluates before LBA scope-doc begins.
 
+## Re-sequencing decision (Day-31, post-LBA-apply)
+
+**Date:** 2026-06-02 (Day-31 afternoon, ~25 min after Italian LBA workstream #3 applied at 13:39 UTC)
+**Decision:** Israeli BSL selected as workstream #4 over EuroLeague-proper. EuroLeague demoted to workstream #8 as a small fill-in-the-gaps manifest after domestic-league bootstraps cover its constituent teams.
+**Context:** Workstreams #1-3 complete (LMB Day-28, Liga ACB Day-29, Italian LBA Day-31). Day-31 afternoon Pattern A.2 pre-scope discovery query for the next workstream revealed the unresolved Basketball population is dominated by domestic basketball leagues (Israeli BSL, Turkish BSL, Greek HEBA A1), NOT EuroLeague-proper.
+
+### Discovery query result (2026-06-02 ~14:00 UTC, ~25 min after LBA apply)
+
+Pattern A.2 discovery query ran against `sp.resolution_log` 7-day window for unresolved Basketball records with EuroLeague-team-pattern home/away forms. Returned 50 distinct provider-string pairs at occurrences ≥14.
+
+Provider-string attribution (by league):
+
+| League | Sample provider strings | Estimated occurrences/7d |
+|---|---|---:|
+| Israeli BSL / Winner League | Maccabi Rishon LeZion, Hapoel Tel-Aviv, Maccabi Haifa, Hapoel HaEmek, Bnei Herzliya, Elitzur Yavne, Maccabi Petah Tikva, Hapoel Beer Sheva, Maccabi Kiryat Gat, Maccabi Maale Adumim, Migdal Haemek, Ironi Kiryat Ata, Galil Elyon, Hapoel Galil Elyon, Elitzur Maccabi Netanya | ~300+ |
+| Turkish BSL (Basketbol Süper Ligi) | Galatasaray SK, Besiktas JK, Esenler Erokspor, Manisa, Fenerbahce Istanbul (domestic) | ~100+ |
+| Greek HEBA A1 | BC Olympiakos Piraeus, BC Kolossos Rhodes, BC AEK Athens | ~50+ |
+| Russian VTB United | BC Lokomotiv Kuban, CSKA Moscow, Unics Kazan, Enisey | ~150 |
+| Serbian KLS / ABA League (multi-country) | KK Crvena zvezda Belgrade, KK Partizan Belgrade, KK Bosna Royal Sarajevo, KK Buducnost Voli (Montenegrin) | ~40 |
+| Italian LBA (just-applied today, in-window pre-propagation) | Olimpia Milano, Reggiana, Brescia | ~74 (will drop post-LBA-apply propagation) |
+| EuroLeague-proper (cross-country aggregator residual) | Monaco vs Olympiakos *, AEK Athens vs Rytas *, BC Rytas Vilnius vs BC AEK Athens, Fenerbahce Istanbul vs BC Olympiakos Piraeus, FC Universitatea Cluj vs KK Buducnost Voli | ~50-80 (after subtracting domestic-league overlap) |
+
+### Findings from Day-31 discovery query
+
+**Finding 1**: EuroLeague-proper is NOT the highest-volume unresolved Basketball population. Israeli BSL alone (~300/7d) is 3× the EuroLeague-only estimate (~80/7d).
+
+**Finding 2**: Asterisk-suffix FL provider pattern generalizes — appears in `Olympiacos *`, `Rytas *`, `CSKA Moscow *`. Same pattern as Italian LBA's `Brescia *` and `Verona *` from Day-30. Confirms it's a general FL provider-side artifact, not LBA-specific. Manifests for ALL future leagues must handle asterisk-suffix variants.
+
+**Finding 3**: Two-form variants persist across leagues — "Maccabi Tel Aviv" vs "Maccabi Tel-Aviv" (hyphen), "Olympiacos" vs "Olympiakos" (transliteration), "Fenerbahce" vs "Fenerbahçe" (diacritic), "Fenerbahce" vs "Fenerbahce Istanbul" (city suffix). Aliases must cover ALL forms.
+
+**Finding 4**: Cross-sport collision discipline expands per-country for Turkish (Galatasaray, Besiktas, Fenerbahce all top-5 Turkish football clubs) and Greek (Olympiakos, Panathinaikos top-5 Greek football clubs). Israeli BSL has cross-sport overlap with Israeli Premier League soccer (Maccabi Tel Aviv FC, Hapoel Tel Aviv FC) — Maccabi/Hapoel naming pattern shared across many sports.
+
+**Finding 5**: Italian LBA records still appearing in the 7-day window pre-propagation. "Olimpia Milano vs Reggiana" 28/7d, "Brescia vs Olimpia Milano" 28/7d — these were unresolved BEFORE today's LBA apply at 13:39 UTC. Post-apply propagation will resolve them to strict-tier; expect them to drop out of subsequent discovery queries. Day-32 daily-diff will be the first measurement post-LBA-apply-propagation.
+
+**Finding 6**: ABA League multi-country complexity confirmed. KK Bosna Royal Sarajevo (Bosnia-Herzegovina) appears as a Partizan (Serbia) opponent. Serbian KLS / ABA League workstream would actually be multi-country (SRB+BIH+SVN+CRO+MNE) per ABA structure, not single-country.
+
+### Re-sequenced workstreams #4-9
+
+Per amendment #15 (bootstrap leverage ≠ total-daily-volume — production-data discovery overrides scope-doc defaults), the Day-28 sequencing decision is overridden by Day-31 empirical evidence.
+
+**Original Day-28 sequencing** (deprecated):
+- #4: EuroLeague (~250 records/7d per scope-doc estimate)
+- #5: Polish PLK
+- #6: German BBL
+- #7: VTB+others
+
+**Day-31 re-sequenced workstreams** (active):
+
+| # | League | Country | Est volume/7d | Methodology risk | Rationale |
+|---|---|---|---:|---|---|
+| 4 | Israeli BSL (Winner League) | ISR | ~300 | Low | Single country, highest unresolved volume, mirrors LBA methodology |
+| 5 | Turkish BSL (Basketbol Süper Ligi) | TUR | ~100+ | Medium | Single country, top-5-football-club cross-sport (Galatasaray, Besiktas, Fenerbahce) discipline required |
+| 6 | Greek HEBA A1 | GRC | ~50+ | Medium | Single country, top-5-football-club cross-sport (Olympiakos, Panathinaikos) discipline required |
+| 7 | Russian VTB United | RUS | ~150 | Low | Single country |
+| 8 | EuroLeague (cross-country aggregator) | Multi (10) | ~50-80 residual | High | Multi-country, but smaller residual after #4-7 cover domestic teams; many EuroLeague teams already in sp.teams from earlier workstreams |
+| 9 | Serbian KLS / ABA League | SRB+BIH+SVN+CRO+MNE | ~40 | Medium-high | Multi-country ABA structure; defer to last in series |
+
+Other previously-considered leagues (Polish PLK, German BBL, Lithuanian LKL, Spanish-side ACB-overlap) re-evaluated:
+
+| League | Status | Reason |
+|---|---|---|
+| Polish PLK | Deferred | Not surfaced in Day-31 discovery; original ~150/7d estimate may be stale or covered by Phase 2A.5 legacy |
+| German BBL | Deferred | Not surfaced in Day-31 discovery; same reason |
+| Lithuanian LKL | Out-of-scope for Phase 2D.5-A | EuroLeague crossover (Rytas) already in legacy per Day-30 F7 |
+
+### Implication of re-sequencing for EuroLeague workstream
+
+By the time EuroLeague-proper workstream lands (now #8), domestic-league bootstraps will have covered:
+- Greek teams (Olympiakos, Panathinaikos, AEK Athens) via Greek HEBA workstream #6
+- Turkish teams (Fenerbahce, Galatasaray, Anadolu Efes, Besiktas) via Turkish BSL workstream #5
+- Israeli teams (Maccabi Tel Aviv, Hapoel Tel Aviv, Hapoel Jerusalem) via Israeli BSL workstream #4
+- Russian teams (CSKA Moscow, Unics Kazan) via Russian VTB workstream #7
+
+EuroLeague workstream #8 then becomes a small "fill-in-the-gaps" manifest of EuroLeague-ONLY teams (Real Madrid Baloncesto and FC Barcelona already from Liga ACB, Olimpia Milano and Virtus Bologna already from Italian LBA, Greek/Turkish/Israeli/Russian from #4-7). Estimated EuroLeague-only residual: 4-6 teams (Žalgiris, Monaco, ASVEL, Paris Basketball, ALBA Berlin, FC Bayern Munich Basketball). Methodology risk substantially reduced from multi-country greenfield to multi-country gap-fill.
+
+This is the second empirical validation of amendment #15 (bootstrap leverage ≠ total-daily-volume; data overrides scope-doc defaults). Day-28 surfaced it on Liga ACB volume estimates; Day-31 surfaces it on EuroLeague composition.
+
+### Workstream #4 = Israeli BSL kickoff
+
+Proceeding immediately with Israeli BSL pre-scope work. Discovery query already done (this section's evidence). Next steps:
+
+1. Authoritative-source roster (Wikipedia 2025-26 Israeli Basketball Premier League / Winner League)
+2. Cross-reference Wikipedia roster against Day-31 discovery provider forms
+3. Cross-sport collision discipline for Israeli football overlaps (Maccabi Tel Aviv FC, Hapoel Tel Aviv FC, Hapoel Jerusalem FC, Beitar Jerusalem, etc.)
+4. Manifest, bootstrap script, tests, scope-doc per amendment #14 single-PR convention
+
 ## Document status
 
 - **Drafted**: 2026-05-28 (Day-28 evening)
-- **Status**: Decision recorded; execution begins Day-30+ pending Liga ACB Day-29 apply
-- **Supersedes**: Phase 2D.5-A scope-doc §5 sequencing default (for league #3 only; later sequence may revise further)
+- **Day-31 re-sequencing addendum**: 2026-06-02 afternoon (post-LBA-apply, post-EuroLeague-discovery-query)
+- **Status**: Decision recorded; workstreams #1-3 complete; workstream #4 (Israeli BSL) kicked off Day-31 afternoon
+- **Supersedes**: Phase 2D.5-A scope-doc §5 sequencing default (now overridden for workstreams #3 AND #4-9; Day-31 re-sequencing supersedes prior Day-28 re-sequencing for league #4 onward)
 - **Cross-references**:
   - `docs/bootstraps/phase-2d5a-data-driven-bootstrap.md` (parent scope-doc)
-  - PROJECT_STATE.md v1.5 amendment #15 (Pattern G extension)
+  - `docs/bootstraps/phase-2d5a-italian-lba.md` (workstream #3 design + apply context)
+  - PROJECT_STATE.md v1.5 amendment #15 (Pattern G extension; second empirical validation Day-31)
+  - PROJECT_STATE.md v1.5 amendment #21 (Pattern A.2 sequencing — pre-scope discovery before authoritative-source roster sourcing; methodology applied to this re-sequencing)
   - PR #204 (Liga ACB single-PR delivery, methodology maturity demonstration)
+  - PR #211 (Italian LBA single-PR delivery, amendment #21 first application)
