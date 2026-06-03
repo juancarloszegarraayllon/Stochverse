@@ -6,6 +6,159 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-06-03
+
+### Day-32 morning: F7 pre-remediation verifications (3 workstreams)
+
+F7 counts at ~16-18h post-apply (pre-remediation baseline):
+- Italian LBA: 34 strict resolutions / 12 team-pairs / apply 2026-06-02 13:39:51 UTC
+- Israeli BSL: 29 strict resolutions / 19 team-pairs / apply 2026-06-02 14:56:10 UTC
+- Turkish BSL: 35 strict resolutions / 20 team-pairs / apply 2026-06-02 16:52:01 UTC
+- Combined: 98 strict resolutions
+
+**Italian LBA F7 (34 resolutions):**
+- 11 distinct manifest teams resolving
+- BACKFILL branch validated: Olimpia Milano (14 resolutions), Virtus Bologna (11), Reyer Venezia (5)
+- INSERT branch validated: Aquila Basket Trento, Pallacanestro Brescia, Pallacanestro Reggiana, Derthona Basket, Universo Treviso Basket, Dinamo Sassari, Pallacanestro Varese
+- Cross-sport collision discipline validated: Olimpia Milano resolving without colliding with Inter Milan / AC Milan (6th empirical validation of Day-22 sport_id partition finding)
+
+**Israeli BSL F7 (29 resolutions — below 50-100 projection):**
+- 7 manifest teams resolving: Hapoel HaEmek, Hapoel Jerusalem, Hapoel Tel Aviv, Maccabi Tel Aviv, Bnei Herzliya, Ironi Kiryat Ata, Ironi Ness Ziona
+- Real Madrid Baloncesto appeared as EuroLeague crossover (4 resolutions)
+- 5 of 7 missing manifest teams have alias collisions (Maccabi Rishon LeZion, Hapoel Be'er Sheva/Dimona, Hapoel Galil Elyon, Elitzur Netanya, Maccabi Ironi Ra'anana) — below-projection explained by collision degradation
+- 2 missing teams (Maccabi Ironi Ramat Gan, Hapoel Holon) absent due to fixture-window absence
+- Nes Ziona (4456a86f-7757-4069-9376-093a7a76371a) appeared as home_team in breakdown — see dormant phantom discovery below
+
+**Turkish BSL F7 (35 resolutions — within 30-60 projection):**
+- 13 manifest teams resolving: Beşiktaş (11 res.), Fenerbahçe (14 res.), Galatasaray (9 res.), Anadolu Efes, Bahçeşehir Koleji, Esenler Erokspor, Bursaspor Basketbol, Karşıyaka Basket, Merkezefendi Basket, Petkim Spor, Trabzonspor (Basketbol)
+- Empirical-coverage F2 NEW validated: bare-form aliases (Galatasaray, Fenerbahçe, Beşiktaş) producing strict-tier resolutions
+- Dotless-ı handling validated: Karşıyaka Basket + Bahçeşehir Koleji resolving
+- Dormant phantom discipline validated: Manisa, Mersin SK, Turk Telekom (3 Option-2-remediated phantoms) resolving correctly to legacy stubs
+- EuroLeague crossover: Zalgiris Kaunas (2 resolutions)
+
+### Day-32 morning: Nes Ziona dormant phantom discovery (7th Israeli BSL dormant phantom)
+
+Nes Ziona (UUID: 4456a86f-7757-4069-9376-093a7a76371a) appeared as home_team in Israeli BSL F7 breakdown. Verification query confirmed:
+- canonical_name: "Nes Ziona"
+- sport_id: 3
+- country_code: NULL
+- created_at: 2026-05-08 (Phase 2A.5 legacy stub)
+
+Our manifest canonical "Ironi Ness Ziona" diverges from legacy "Nes Ziona" — provider strings sending "Nes Ziona" route to the legacy stub. This is canonical-name fragmentation / dormant phantom discipline, same pattern as Turkish BSL dormant phantoms.
+
+Israeli BSL dormant phantom count: 1 (Nes Ziona only — Turkish BSL dormant phantoms are a separate workstream).
+
+### Day-32 morning: Comprehensive collision audit (Pass 1 + Pass 2)
+
+Pass 1 (multi-team_id collision audit) confirmed 43-finding complete — no additional collisions beyond the Day-31 discovery.
+
+Pass 2 (Phase 2A.5 Basketball legacy stubs, created < 2026-05-28, country_code IS NULL) returned ~1,000+ rows covering the full Phase 2A.5 Basketball population. All 7 dormant phantoms identified; no new dormant phantoms beyond Nes Ziona.
+
+### Day-32 morning: Collision remediation — "43 → 5 → 0" arc
+
+Comprehensive collision remediation completed. Final state: 0 multi-team_id collisions in sp.team_aliases for sport_id=3.
+
+Remediation arc:
+1. Day-31 evening (3 DELETEs, already applied): `manisa`, `mersin sk`, `buyukcekmece basketbol` under bootstrap_league_coverage
+2. Day-32 morning investigation revealed the 43-collision audit sources column was aggregating across both team_ids, creating misleading {bootstrap_league_coverage, legacy_bootstrap} appearances for many entries
+3. Re-ran Pass 1 with simplified query: revealed 26 collisions, then 5, then 0 as investigation proceeded
+4. Actual collision shapes discovered:
+   - **Shape A**: bare alias on legacy stub under legacy_bootstrap only (`bahcesehir kol`, `anyang jungkwanjang`, and the ACB/LBA bare forms) — no bootstrap_league_coverage row to DELETE; these are read-only legacy collisions
+   - **Shape B**: alias_tier write-back collision — resolver auto-wrote alias for manifest team matching a legacy stub alias
+5. Final 6 DELETEs (Day-32 morning, alias_tier source):
+   - `bc andorra` / alias_tier / MoraBanc Andorra (e79aa98b)
+   - `elitzur netanya` / alias_tier / Elitzur Maccabi Netanya (af0002ec)
+   - `hapoel galil elyon` / alias_tier / Galil Elyon (c0b1aa48)
+   - `maccabi raanana` / alias_tier / Maccabi Raanana (281d160b)
+   - `maccabi raanana` / legacy_bootstrap / Maccabi Raanana (281d160b)
+   - `maccabi rishon lezion` / alias_tier / Maccabi Rishon (0114dc9f)
+
+**Methodology learning**: the Day-31 "43 collision" finding overstated the remediation scope. The PR #200 INSERT...WHERE NOT EXISTS alias-safety discipline was more effective than the audit suggested — many apparent collisions were legacy-only alias forms that our manifest never inserted under bootstrap_league_coverage. The real collision surface was ~6-9 rows (3 Day-31 DELETEs + 6 Day-32 DELETEs = 9 total), not 43.
+
+### Day-32 morning: Amendment #22 formal documentation
+
+**Pre-flight alias-claim audit before workstream apply is mandatory.** Manifest aliases under `source='bootstrap_league_coverage'` do not block on legacy aliases under `source='legacy_bootstrap'` or `source='alias_tier'` (PR #200 INSERT...WHERE NOT EXISTS only checks within-source). Multi-team_id collisions at the `(alias_normalized, sport_id)` index create strict-tier punt behavior. Future workstreams must run pre-apply audit query identifying any manifest-alias-normalized form that ALREADY has team_id mappings under any source, and resolve collisions before apply (omit the alias OR delete the legacy alias OR accept the alias-tier routing degradation).
+
+Audit query template (run pre-apply, scope to sport_id, scan all sources):
+
+```sql
+SELECT ta.alias_normalized, COUNT(DISTINCT ta.team_id) AS team_count,
+       ARRAY_AGG(DISTINCT t.canonical_name) AS canonicals,
+       ARRAY_AGG(DISTINCT ta.source) AS sources
+FROM sp.team_aliases ta
+JOIN sp.teams t ON t.id = ta.team_id
+WHERE t.sport_id = :target_sport_id
+  AND ta.alias_normalized IN (:manifest_alias_normalized_list)
+GROUP BY ta.alias_normalized
+HAVING COUNT(DISTINCT ta.team_id) > 0;
+```
+
+Amendment pile expands from 21 to 22 items.
+
+### Day-32 morning: Daily-diff — report_date 2026-06-02
+
+report_date: 2026-06-02, records: 12,079, matcher_capability_rate: 34.7% (scope-filtered)
+
+**Baseball trajectory point 6 (post-LMB):**
+- Day-27 (pre-LMB): 86.7%
+- Day-28 (apply day): 85.2%
+- Day-29 (1d post): 76.5%
+- Day-30 (4d post): 73.6%
+- Day-31 (5d post): 71.6%
+
+Continued monotonic decline, no stabilization signal yet. Consistent with compounding-denominator-inflation hypothesis — 7-day rolling window filling with LMB records.
+
+**Basketball trajectory point 4 (post-LBA + Israeli BSL + Turkish BSL):**
+- Day-29 (pre-LBA/BSL): 53.3%
+- Day-30 (1d post-LBA): 51.5%
+- Day-31 (1d post-Israeli BSL + Turkish BSL): 44.6%
+
+Compounding denominator inflation from 3 workstreams applied Day-31.
+
+sp.resolution_log volume (latest cron): 102,603 rows. Strict: 305. No_match: 89,709 (87%). Review_queue: 12,586.
+
+Amendment #20 confirmed: aggregate capability rate denominator-sensitive to record-mix. F7 workstream-specific queries remain canonical methodology validation.
+
+### Day-32 morning: Post-remediation F7 re-measurement
+
+Post-remediation F7 (same apply timestamps, ~20-22h post-apply):
+- Italian LBA: 34 (unchanged)
+- Israeli BSL: 29 (unchanged)
+- Turkish BSL: 35 (unchanged)
+- Combined: 98 (unchanged, 0 delta)
+
+Zero delta is expected and correct:
+1. F7 window opens at apply timestamp (yesterday) — counts ALL resolutions including pre-remediation period
+2. Remediation improvement will manifest in future cron passes (strict-tier now unblocked for previously-collision-degraded records)
+3. No regression confirmed — canonical routing intact
+
+### Day-32 morning: Env var drop pattern — promoted to small workstream candidate
+
+5th consecutive session with PowerShell env var drop (Day-29, Day-30, Day-31, Day-32, Day-32 second session). Pattern is now sufficiently consistent to promote from tech-debt observation to small workstream candidate.
+
+Three mitigation options (unchanged from prior sessions):
+- `.env` file with python-dotenv auto-load
+- PowerShell `$PROFILE` script export
+- Convenience script `scripts/setup_env.ps1` reading from gitignored `.env.local`
+
+### Phase 2D.5-A status: 5 of 9 leagues applied
+
+- ✅ Workstream #1 (LMB): Day-28 apply, Day-29 F7 (18 strict / 6 teams)
+- ✅ Workstream #2 (Liga ACB): Day-29 apply, Day-30 F7 (41 strict / 11 teams + 2 EuroLeague crossovers)
+- ✅ Workstream #3 (Italian LBA): Day-31 morning apply, Day-32 F7 (34 strict / 11 teams)
+- ✅ Workstream #4 (Israeli BSL): Day-31 afternoon apply, Day-32 F7 (29 strict / 7 teams + 1 EuroLeague crossover)
+- ✅ Workstream #5 (Turkish BSL): Day-31 evening apply, Day-32 F7 (35 strict / 13 teams)
+- ⏳ Workstream #6-9: Greek HEBA, Russian VTB, EuroLeague (gap-fill), Serbian/ABA
+
+### Pending — Day-32 afternoon agenda
+
+1. Turkish BSL baseline_shifts annotation INSERT (event_type='phase_2d5a_turkish_bsl_bootstrap', event_date=2026-06-02, apply 2026-06-02T16:52:01Z, 11 INSERTs, 5 BACKFILLs [Anadolu Efes ca2f4866, Bahçeşehir Koleji 052768a0, Bursaspor Basketbol 85c6d6bf, Petkim Spor c2cacf82, Tofas→Tofaş 7f3d7ec1], 6 dormant phantoms [Karşıyaka ff68785a, Turk Telekom d436ec55, Manisa 4de5ac1f, Mersin SK 80aac551, Buyukcekmece cd3ecf89, Bahcesehir Kol. e957ec25], 9 collision remediations total [3 Day-31 + 6 Day-32])
+2. Israeli BSL baseline_shifts annotation UPDATE (add Nes Ziona 4456a86f as 7th dormant phantom to notes field)
+3. Env var drop small workstream scoping
+4. Greek HEBA workstream #6 pre-scope Pattern A.2 discovery
+
+---
+
 ## Session — 2026-06-02
 
 ### Day-31 end-of-day: Turkish BSL APPLIED (workstream #5) + CROSS-WORKSTREAM COLLISION FINDING
