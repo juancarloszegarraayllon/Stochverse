@@ -157,6 +157,77 @@ Three mitigation options (unchanged from prior sessions):
 3. Env var drop small workstream scoping
 4. Greek HEBA workstream #6 pre-scope Pattern A.2 discovery
 
+### Day-32 afternoon: Turkish BSL baseline_shifts annotation INSERT
+
+Pre-flight SELECT confirmed 0 existing rows (amendment #19 idempotency discipline). INSERT executed successfully.
+
+Row inserted: event_type='phase_2d5a_turkish_bsl_bootstrap', event_date=2026-06-02.
+
+Key annotation details:
+- Apply: 2026-06-02T16:52:01Z, runtime 11.38s, PR #217
+- 11 INSERTs: Beşiktaş, Fenerbahçe, Galatasaray, Esenler Erokspor, Manisa Basket, Karşıyaka Basket, Mersin MSK, Büyükçekmece Basketbol, Trabzonspor (Basketbol), Türk Telekom Ankara, Merkezefendi Basket
+- 5 BACKFILLs: Anadolu Efes (ca2f4866), Bahçeşehir Koleji (052768a0), Bursaspor Basketbol (85c6d6bf), Petkim Spor (c2cacf82), Tofas→Tofaş (7f3d7ec1)
+- 6 dormant phantoms: Karşıyaka (ff68785a), Turk Telekom (d436ec55), Manisa (4de5ac1f), Mersin SK (80aac551), Buyukcekmece (cd3ecf89), Bahcesehir Kol. (e957ec25)
+- 9 total collision remediations (3 Day-31 + 6 Day-32)
+- F7 verified Day-32: 35 strict resolutions / 20 team-pairs
+- Cross-sport collision discipline: bare-form aliases INCLUDED per F2 NEW empirical-coverage discipline
+
+### Day-32 afternoon: Israeli BSL baseline_shifts annotation UPDATE
+
+Existing row e048283e-1e05-4fd2-afaf-a77b8e8b375f updated via notes || append.
+
+Addendum added: Nes Ziona (4456a86f-7757-4069-9376-093a7a76371a) confirmed as 7th Israeli BSL dormant phantom. Phase 2A.5 legacy stub (created 2026-05-08), sport_id=3, country_code=NULL. canonical_name='Nes Ziona' diverges from manifest canonical 'Ironi Ness Ziona'. Canonical-name fragmentation / dormant phantom discipline applies.
+
+### Day-32 afternoon: Greek HEBA workstream #6 pre-scope Pattern A.2 discovery
+
+Per amendment #21: production discovery run BEFORE authoritative-source roster sourcing.
+
+Discovery query against sp.resolution_log (no_match, Basketball, 7-day window) using ILIKE patterns for known HEBA A1 teams.
+
+**Volume finding**: ~50-70 Basketball unresolved records/7d attributable to HEBA — consistent with Day-31 sequencing estimate.
+
+**Active teams in FL coverage (playoffs only — other teams eliminated):**
+- Olympiakos: bare form `Olympiacos` + EuroCup form `BC Olympiakos Piraeus` (~41 records/7d combined)
+- AEK Athens: bare form `AEK Athens` + EuroCup form `BC AEK Athens` + asterisk variant `AEK Athens *` (~75 records/7d combined — highest volume)
+- Aris: bare form `Aris` + EuroCup form `BC Aris Thessaloniki` (~35 records/7d)
+- Kolossos Rhodes: bare form `Kolossos Rhodes` + EuroCup form `BC Kolossos Rhodes` (~28 records/7d)
+- Panathinaikos: bare form `Panathinaikos` + EuroCup form `Panathinaikos BC` (~14 records/7d)
+
+**Teams NOT appearing in 7-day window** (eliminated or not in FL coverage): Promitheas, Lavrio, Peristeri, Panionios, Iraklis, Maroussi, PAOK — these will need Wikipedia/authoritative-source verification for full 12-team roster.
+
+**Provider string inventory for manifest design:**
+- Bare domestic: Olympiacos, AEK Athens, Aris, Panathinaikos, Kolossos Rhodes
+- BC-prefixed EuroCup: BC Olympiakos Piraeus, BC AEK Athens, BC Aris Thessaloniki, BC Kolossos Rhodes, Panathinaikos BC
+- Asterisk-suffix variants: AEK Athens *, Olympiacos * (belt-and-suspenders aliases needed per Italian LBA Day-30 asterisk finding)
+
+**Cross-sport collision flags** (Greek Super League football overlaps):
+All 5 active HEBA teams have prominent Greek Super League football counterparts: Olympiakos FC, Panathinaikos FC, AEK Athens FC, Aris FC. Operator-clarity discipline applies (top-5 Greek football recognition). Amendment #22 pre-apply alias-claim audit required before manifest commit.
+
+**EuroCup crossovers confirmed**: Olympiakos and AEK Athens active in EuroCup — BC-prefixed forms appear in cross-league fixtures (Fenerbahce Istanbul vs BC Olympiakos Piraeus, BC Rytas Vilnius vs BC AEK Athens, Unicaja vs AEK Athens *). These will produce cross-league strict resolutions post-apply, same pattern as Liga ACB EuroLeague crossovers (Day-30) and Turkish BSL EuroLeague crossovers (Day-32 morning).
+
+**Dormant phantom risk**: Olympiakos and Panathinaikos almost certainly exist in Phase 2A.5 legacy stubs (high-profile EuroCup/EuroLeague teams). Pre-apply BACKFILL discovery query required.
+
+**Sequencing note**: Russian VTB (BC Lokomotiv Kuban / CSKA Moscow at 42 records/7d) also confirmed active in same discovery query. VTB remains workstream #7 per Day-31 re-sequencing.
+
+**Decision**: HEBA workstream #6 design deferred to Day-33 morning. Pre-scope discovery is complete; Day-33 opens with Wikipedia 2025-26 HEBA A1 season roster paste → manifest design → Claude Code PR.
+
+### Phase 2D.5-A status: 5 of 9 leagues applied, #6 pre-scope complete
+
+- ✅ Workstream #1 (LMB): Day-28 apply, Day-29 F7 (18 strict / 6 teams)
+- ✅ Workstream #2 (Liga ACB): Day-29 apply, Day-30 F7 (41 strict / 11 teams + 2 EuroCup crossovers)
+- ✅ Workstream #3 (Italian LBA): Day-31 apply, Day-32 F7 (34 strict / 11 teams)
+- ✅ Workstream #4 (Israeli BSL): Day-31 apply, Day-32 F7 (29 strict / 7 teams + 1 EuroCup crossover)
+- ✅ Workstream #5 (Turkish BSL): Day-31 apply, Day-32 F7 (35 strict / 13 teams)
+- 🟡 Workstream #6 (Greek HEBA A1): pre-scope Pattern A.2 discovery complete Day-32 afternoon; manifest design Day-33
+- ⏳ Workstream #7-9: Russian VTB, EuroLeague (gap-fill), Serbian/ABA
+
+### Pending — Day-33 morning agenda
+
+1. Greek HEBA A1 workstream #6 manifest design — operator pastes Wikipedia 2025-26 HEBA A1 season roster; Claude Code drafts manifest + script + tests + scope-doc per amendment #14 single-PR convention
+2. Amendment #22 pre-apply alias-claim audit for HEBA manifest (mandatory per amendment #22 before apply)
+3. HEBA dormant phantom discovery (Olympiakos/Panathinaikos likely in Phase 2A.5 legacy stubs)
+4. Env var drop small workstream scoping (5th consecutive session — promoted to small workstream candidate Day-32 morning)
+
 ---
 
 ## Session — 2026-06-02
