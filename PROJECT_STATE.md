@@ -6,6 +6,80 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-06-04
+
+### Day-33 morning: Greek HEBA A1 workstream #6 APPLIED (workstream #6 EMPIRICALLY APPLIED)
+
+Apply at 2026-06-04T23:04:07Z. Runtime 9.8s, 0 errors. Pattern D pre-flight → amendment #22 audit → dry-run → wet apply sequence completed cleanly.
+
+**Apply results:**
+- **4 new HEBA A1 canonicals inserted** (sp.teams, sport_id=3, country_code='GRC'): AEK Athens, Aris Thessaloniki, Olympiakos BC, GS Karditsa
+- **9 BACKFILLs from Phase 2A.5 Basketball stubs** (created 2026-05-08): Iraklis BC (c17fa0b9), Kolossos Rhodes (ca5f6d4a), Maroussi BC (d8e37aa5), Mykonos (2f32272a), PAOK BC (59eb93a6), Panathinaikos BC (6e1268f8), Panionios (380f47bc), Peristeri BC (6a00a818), Promitheas Patras BC Vikos Cola (eb0e7a18)
+- **44 aliases inserted**, 2 deduped within batch, 0 global conflicts
+- `bootstrap.heba.pattern_d.ok` confirmed production endpoint pre-write
+- `existing_teams_loaded`: 2,030 Basketball teams pre-apply (2,019 post-Turkish BSL + 11 = 2,030 sanity check passes); post-apply: 2,034
+- **Highest BACKFILL ratio of Phase 2D.5-A: 69%** (9 of 13 teams)
+
+**baseline_shifts annotation**: row inserted (event_type='phase_2d5a_heba_bootstrap', event_date=2026-06-04). Amendment #19 idempotency discipline applied via pre-flight SELECT (0 rows existed, safe to INSERT).
+
+### Day-33 morning: Amendment #22 pre-apply alias-claim audit
+
+Mandatory pre-apply audit per amendment #22. All 44 manifest aliases scanned against production sp.team_aliases for sport_id=3.
+
+**Result**: 15 pre-existing rows found, all team_count=1 (no multi-team_id collisions). All 15 are legacy_bootstrap rows pointing to Phase 2A.5 BACKFILL target stubs — exactly the team_ids we are BACKFILLing. Zero pre-existing collisions. Safe to apply confirmed.
+
+### Day-33 morning: Post-apply collision audit — 6 dormant phantoms discovered
+
+Post-apply Pass 1 query revealed **6 collisions** (one more than the 5 predicted pre-apply):
+
+| Alias | Collision shape | Dormant phantom UUID |
+|---|---|---|
+| iraklis | bootstrap_league_coverage (Iraklis BC) vs legacy_bootstrap (Iraklis) | b0602d2c |
+| kolossos rodou | bootstrap_league_coverage (Kolossos Rhodes) vs legacy_bootstrap (Kolossos Rodou) | 7260b8e5 |
+| maroussi | bootstrap_league_coverage (Maroussi BC) vs legacy_bootstrap (Maroussi) | 11fb2774 |
+| peristeri | bootstrap_league_coverage (Peristeri BC) vs legacy_bootstrap (Peristeri) | 0c6092b5 |
+| promitheas | bootstrap_league_coverage (Promitheas Patras BC Vikos Cola) vs legacy_bootstrap (Promitheas) | fca05a4b |
+| ao mykonou | bootstrap_league_coverage (Mykonos) vs legacy_bootstrap (AO Mykonou) | 01dac308 — **SURPRISE 6th** |
+
+**AO Mykonou (01dac308)** was the unexpected 6th dormant phantom — our manifest included 'ao mykonou' as a Greek transliteration alias for Mykonos, but a separate Phase 2A.5 legacy stub 'AO Mykonou' already held that alias under a different team_id.
+
+**Remediation**: 6 individual DELETEs against bootstrap_league_coverage source on manifest team_ids. Zero-collision verification confirmed: 0 rows from Pass 1 query post-remediation.
+
+### Day-33 morning: New methodology dimension — AO Mykonou surprise
+
+The `ao mykonou` collision adds a 4th HEBA methodology dimension: **legacy stub canonical_name may match our alias transliteration even when the stub team_id is unrelated to our manifest team**. AO Mykonou (01dac308) is a separate Greek club entity distinct from Mykonos (2f32272a). The collision was alias-level, not canonical-level — our 'ao mykonou' alias for Mykonos collided with AO Mykonou's own legacy alias under the same normalized form. Amendment #22 pre-apply audit caught this in the 15 pre-existing rows (team_count=1, so not flagged as collision pre-apply) but post-apply the bootstrap_league_coverage INSERT created the multi-team_id collision.
+
+**Methodology refinement**: amendment #22 pre-apply audit correctly identified the 15 pre-existing aliases but could not predict that inserting our bootstrap_league_coverage rows would create NEW collisions with those existing single-team rows. **The post-apply collision audit remains mandatory regardless of clean pre-apply audit results.**
+
+### Day-33 morning: Daily-diff
+
+Render at 2026-06-04T23:14:58Z. Latest data point: report_date 2026-06-02, 34.7% capability — same as Day-32 (Day-33 measurement pending tonight's cron pass; HEBA was applied at 23:04 UTC, too recent for current window).
+
+Basketball trajectory point 5 will be visible in Day-34 render.
+
+Baseline-shift events rendering correctly in report: LBA, Turkish BSL, Israeli BSL (with Nes Ziona addendum), ACB, LMB all present. HEBA annotation inserted post-render; will appear in Day-34.
+
+sp.resolution_log volume (latest cron): 102,603 rows. Strict: 305. No_match: 89,709 (87%). Review_queue: 12,586.
+
+### Phase 2D.5-A status: 6 of 9 leagues applied
+
+- ✅ Workstream #1 (LMB): Day-28 apply, Day-29 F7 (18 strict / 6 teams)
+- ✅ Workstream #2 (Liga ACB): Day-29 apply, Day-30 F7 (41 strict / 11 teams + 2 EuroCup crossovers)
+- ✅ Workstream #3 (Italian LBA): Day-31 apply, Day-32 F7 (34 strict / 11 teams)
+- ✅ Workstream #4 (Israeli BSL): Day-31 apply, Day-32 F7 (29 strict / 7 teams + 1 EuroCup crossover)
+- ✅ Workstream #5 (Turkish BSL): Day-31 apply, Day-32 F7 (35 strict / 13 teams)
+- ✅ Workstream #6 (Greek HEBA A1): Day-33 apply 2026-06-04T23:04:07Z (4 INSERT + 9 BACKFILL + 44 aliases); F7 window opens 2026-06-05T13:04:07Z
+- ⏳ Workstream #7-9: Russian VTB, EuroLeague (gap-fill), Serbian/ABA
+
+### Pending — Day-34 morning agenda
+
+1. Greek HEBA A1 F7 verification (opens ~13:04 UTC Day-34, ~14h post-apply) — JOIN template with `country_code='GRC'`, apply timestamp 2026-06-04T23:04:07Z. Expected: ~25-50 strict resolutions (playoffs-only window; 5 active teams confirmed in Day-32 discovery)
+2. Day-34 daily-diff — Basketball trajectory point 5 (compounding LBA + Israeli BSL + Turkish BSL + HEBA inflation per amendment #20)
+3. Russian VTB workstream #7 pre-scope Pattern A.2 discovery — BC Lokomotiv Kuban / CSKA Moscow confirmed at 42 records/7d in Day-33 discovery query
+4. Env var drop small workstream scoping (6th consecutive session)
+
+---
+
 ## Session — 2026-06-03
 
 ### Day-32 morning: F7 pre-remediation verifications (3 workstreams)
