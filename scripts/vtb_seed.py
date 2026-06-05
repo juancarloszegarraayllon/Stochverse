@@ -205,7 +205,7 @@ VTB_TEAMS_SEED: list[tuple[str, str, tuple[str, ...], str]] = [
      "amendment #22"),
 
     ("MBA Moscow", "RUS",
-     ("MBA Moscow", "MBA"),
+     ("MBA Moscow",),
      "VTB; INSERT or BACKFILL dynamically — Phase 2A.5 legacy stub "
      "MBA Moscow (1f5f991a) may exist (operator-flagged for runtime "
      "verification). Three-branch classifier handles dynamically: "
