@@ -6,6 +6,121 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-06-05
+
+### Day-34 morning: Greek HEBA A1 F7 verification
+
+F7 count at ~14h post-apply (2026-06-04T23:04:07Z apply → 2026-06-05T~13:04Z sample):
+- **25 strict resolutions / 21 distinct team-pairs**
+- Apply timestamp filter: `decided_at >= '2026-06-04 23:04:07+00'`, `country_code='GRC'`
+
+Per-team-pair breakdown:
+- AEK Athens vs Aris Thessaloniki: 3 resolutions (playoffs ✅)
+- Olympiakos BC vs Panathinaikos BC: 3 resolutions (playoffs ✅)
+- PAOK BC vs Panathinaikos BC: 3 resolutions ✅
+- Olympiakos BC vs Kolossos Rhodes: 2 resolutions ✅
+- PAOK BC vs Peristeri: 2 resolutions ✅
+- Mykonos vs Panathinaikos BC: 2 resolutions ✅
+- Olympiakos BC vs AEK Athens: 2 resolutions ✅
+- [7 additional single-resolution pairs]
+
+**8 distinct HEBA manifest teams resolving**: AEK Athens, Aris Thessaloniki, Olympiakos BC, Panathinaikos BC, Kolossos Rhodes, PAOK BC, Peristeri, Mykonos.
+
+EuroCup crossovers confirmed (4 non-GRC teams):
+- Fenerbahçe (TUR manifest) vs Olympiakos BC ✅
+- Valencia Basket (ESP manifest) vs Panathinaikos BC ✅
+- Monaco vs Olympiakos BC ✅
+- Unicaja / Unicaja Málaga vs AEK Athens ✅
+- Rytas vs AEK Athens ✅
+
+Teams not yet resolving (eliminated from playoffs): Iraklis BC, GS Karditsa, Maroussi BC, Panionios, Promitheas Patras BC Vikos Cola — consistent with Day-32 discovery showing these teams absent from 7-day window.
+
+### Day-34 morning: Daily-diff
+
+Render at 2026-06-05T19:23:34Z. Latest data point still report_date 2026-06-02 (34.7%) — Day-33/34 cron measurements not yet written. HEBA annotation (`phase_2d5a_heba_bootstrap`) now rendering correctly in baseline-shift-events section.
+
+Basketball trajectory point 5 deferred to Day-35 render (HEBA applied 2026-06-04T23:04Z; VTB applied 2026-06-05T20:17Z — both too recent for current window).
+
+### Day-34 morning: Russian VTB United League workstream #7 pre-scope Pattern A.2 discovery
+
+Production discovery query against sp.resolution_log (no_match, Basketball, 7-day window):
+
+| Provider string | Volume/7d | Notes |
+|---|---:|---|
+| BC Lokomotiv Kuban / Lokomotiv Kuban | ~105 | Two FL provider shapes |
+| CSKA Moscow / CSKA Moscow * | ~75+ | Dominant — appears in almost every pair |
+| BC Uniks Kazan / Unics Kazan | ~40 | Spelling variants |
+| Khimki M. | ~42 | Out-of-roster (not on 2025-26 Wikipedia VTB roster) |
+| Chelyabinsk | ~42 | OUT OF SCOPE — not on VTB roster, likely VTB.B regional |
+| Enisey | ~7 | |
+
+Total confirmed VTB volume: ~230+ records/7d (higher than Day-33 estimate of 42/7d which was single pair only).
+
+Legacy stub verification query confirmed BACKFILLs: Lokomotiv Kuban (1dae39ae), UNICS Kazan (b1d198b0), Enisey (eef30d44), Zenit Petersburg (d639c09a), Parma Perm (a1973c38), Khimki M. (b2fbeb14), MBA Moscow (1f5f991a).
+
+### Day-34 morning: Russian VTB workstream #7 APPLIED
+
+Apply at **2026-06-05T20:17:21Z**. Runtime 8.3s, 0 errors. Pattern D pre-flight → amendment #22 audit → manifest fix → dry-run → wet apply sequence completed.
+
+**Apply results:**
+- **4 INSERTs**: CSKA Moscow, BC Uralmash Yekaterinburg, BC Nizhny Novgorod, BC Avtodor
+- **7 BACKFILLs**: Lokomotiv Kuban (1dae39ae), UNICS Kazan (b1d198b0), Enisey (eef30d44), Zenit Petersburg (d639c09a), Parma Perm (a1973c38), Khimki M. (b2fbeb14), **MBA Moscow (1f5f991a — dynamic BACKFILL confirmed at apply time)**
+- 37 aliases inserted, 2 deduped within batch, 0 global conflicts
+- `existing_teams_loaded`: 2,034 pre-apply → 2,038 post-apply
+
+### Day-34 morning: Pre-apply manifest fix — `mba` bare alias collision
+
+Amendment #22 pre-apply audit discovered: alias `mba` in vtb_seed.py already maps to Mersin Basketbol (64b11777, Turkish team, legacy_bootstrap) under sport_id=3. Inserting `mba` under bootstrap_league_coverage for MBA Moscow would create a pre-existing multi-team_id collision.
+
+**Fix**: removed `MBA` bare alias from MBA Moscow alias list in vtb_seed.py (line 208: `("MBA Moscow", "MBA")` → `("MBA Moscow",)`). Separate patch PR filed (PR #224, claude/vtb-seed-mba-fix).
+
+**New amendment #22 audit finding pattern**: cross-language/cross-country false alias collision (Turkish `mba` abbreviation colliding with Russian `MBA Moscow` abbreviation). The amendment #22 audit caught it pre-apply — methodology working as designed.
+
+### Day-34 morning: Post-apply collision audit — 5 dormant phantoms
+
+Post-apply Pass 1 query revealed **5 collisions** (exactly matching 3 pre-identified + 2 Uralmash surprise variants):
+
+| Alias | Manifest team | Dormant phantom UUID |
+|---|---|---|
+| avtodor saratov | BC Avtodor | c0766622 (Avtodor Saratov) |
+| parma permsky kray | Parma Perm | 065f0ed5 (Parma Permsky Kray) |
+| pbc lokomotiv kuban | Lokomotiv Kuban | f4cd06c6 (PBC Lokomotiv-Kuban) |
+| uralmash ekaterinburg | BC Uralmash Yekaterinburg | ce125faf (Uralmash Ekaterinburg) |
+| uralmash yekaterinburg | BC Uralmash Yekaterinburg | 9684b3a4 (Uralmash Yekaterinburg) |
+
+**Uralmash spelling variants** (`uralmash ekaterinburg` + `uralmash yekaterinburg`) were the 2 surprises beyond the 3 pre-identified. Both Uralmash stubs (ce125faf, 9684b3a4) are separate Phase 2A.5 entities distinct from BC Uralmash Yekaterinburg.
+
+5 individual DELETEs against `bootstrap_league_coverage` source on manifest team_ids. Zero-collision verification confirmed: 0 rows post-remediation.
+
+### Day-34 morning: baseline_shifts annotation INSERT
+
+Pre-flight SELECT confirmed 0 existing rows (amendment #19). INSERT executed successfully.
+Row: event_type=`phase_2d5a_vtb_bootstrap`, event_date=2026-06-05.
+
+### Phase 2D.5-A status: 7 of 9 leagues applied
+
+- ✅ Workstream #1 (LMB): Day-28
+- ✅ Workstream #2 (Liga ACB): Day-29
+- ✅ Workstream #3 (Italian LBA): Day-31
+- ✅ Workstream #4 (Israeli BSL): Day-31
+- ✅ Workstream #5 (Turkish BSL): Day-31
+- ✅ Workstream #6 (Greek HEBA A1): Day-33, F7 validated Day-34 (25 strict / 8 teams + 5 EuroCup crossovers)
+- ✅ Workstream #7 (Russian VTB): Day-34 (2026-06-05T20:17:21Z), F7 opens 2026-06-06T10:17:21Z
+- ⏳ Workstream #8 (EuroLeague gap-fill): pending
+- ⏳ Workstream #9 (Serbian/ABA): ~40/7d
+
+sp.teams Basketball: **2,038**
+
+### Pending — Day-35 morning agenda
+
+1. VTB F7 verification (opens ~2026-06-06T10:17:21Z, ~14h post-apply). JOIN template with `country_code='RUS'`, apply timestamp `'2026-06-05 20:17:21+00'`. Expected: ~50-100 strict resolutions (~230+/7d discovery volume).
+2. Day-35 daily-diff — Basketball trajectory point 5 (compounding LBA + Israeli BSL + Turkish BSL + HEBA + VTB inflation per amendment #20)
+3. EuroLeague workstream #8 pre-scope Pattern A.2 discovery — gap-fill after #4-7
+4. Serbian/ABA workstream #9 pre-scope (~40/7d confirmed)
+5. Env var drop small workstream scoping (6th consecutive session)
+
+---
+
 ## Session — 2026-06-04
 
 ### Day-33 morning: Greek HEBA A1 workstream #6 APPLIED (workstream #6 EMPIRICALLY APPLIED)
