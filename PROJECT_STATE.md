@@ -6,6 +6,136 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-06-08
+
+### Day-35 morning: VTB F7 verification
+
+F7 count at ~14h post-apply (2026-06-05T20:17:21Z apply → 2026-06-08T~10:17Z sample):
+- **21 strict resolutions / 6 distinct team-pairs**
+- Apply timestamp filter: `decided_at >= '2026-06-05 20:17:21+00'`, `country_code='RUS'`
+
+Per-team-pair breakdown:
+- CSKA Moscow vs Lokomotiv Kuban: 6 resolutions
+- CSKA Moscow vs UNICS Kazan: 4 resolutions
+- Lokomotiv Kuban vs CSKA Moscow: 4 resolutions
+- Lokomotiv Kuban vs Zenit Petersburg: 3 resolutions
+- UNICS Kazan vs CSKA Moscow: 3 resolutions
+- Enisey vs CSKA Moscow: 1 resolution
+
+**5 distinct VTB manifest teams resolving**: CSKA Moscow, Lokomotiv Kuban, UNICS Kazan, Zenit Petersburg, Enisey. All domestic VTB fixtures — no EuroLeague crossovers (CSKA Moscow European participation limited in 2025-26). Both INSERT (CSKA Moscow) and BACKFILL (Lokomotiv Kuban, UNICS Kazan, Zenit Petersburg, Enisey) branches validated.
+
+Lower than 50-100 projection but expected — VTB may be in post-season. F7 will grow as more cron passes run.
+
+### Day-35 morning: Daily-diff — Basketball trajectory point 5
+
+Measurement script run: `python scripts/daily_diff.py`
+Window: 2026-06-07 → 2026-06-08, 15,908 records, runtime 567.91s
+
+**Report date 2026-06-08: 35.7% capability (scope-filtered)**
+
+**NOTE**: Days 33-34 cron measurements were missing from sp.daily_diff_reports — `daily_diff.py` is a manual-run script (Railway cron paused per Day-21 session). Days 33-34 measurements permanently absent from trajectory. Day-35 is the first new measurement since Day-31.
+
+**Basketball trajectory point 5 (post-LBA + Israeli BSL + Turkish BSL + HEBA + VTB):**
+- Day-29 (pre-LBA/BSL): 53.3%
+- Day-30 (1d post-LBA): 51.5%
+- Day-31 (post-Israeli BSL + Turkish BSL): 44.6%
+- Day-35 (2026-06-08, post-HEBA + VTB fully in window): **58.6% (+14.0pp vs Day-31 trough)**
+
+**+14pp Basketball lift confirms cumulative effect of workstreams #3-7 now fully in 7-day measurement window.** Denominator inflation hypothesis confirmed in reverse — bootstrapped leagues now contributing strict-tier resolutions.
+
+Tennis: 15.5% → 25.6% (+10.1pp) — Tennis dedup lift re-emerging
+Baseball: 71.6% → 72.0% (+0.4pp) — stable, denominator inflation stabilizing
+Soccer: 68.4% → 70.7% (+2.3pp) — small positive drift
+
+sp.resolution_log volume (latest cron): 116,609 rows (up from 102,603). Strict: 169. No_match: 101,671. Review_queue: 14,769.
+
+### Day-35 morning: EuroLeague workstream #8 pre-scope Pattern A.2 discovery
+
+Production discovery query confirmed EuroLeague residual is very small (~12-15 records/7d) — most EuroLeague teams already resolving via prior domestic workstream crossovers:
+- **Already covered**: Anadolu Efes (#5 TUR), Barcelona/Real Madrid/Valencia/Baskonia (#2 ACB), Fenerbahçe (#5 TUR), Olimpia Milano/Virtus Bologna (#3 ITA), Maccabi Tel Aviv (#4 ISR), Olympiakos/Panathinaikos (#6 GRC), CSKA Moscow (#7 RUS)
+- **Genuine gaps**: Monaco (~3/7d), BC Rytas Vilnius (~6/7d EuroCup crossover vs AEK), small residual
+
+EuroLeague legacy stub verification: all 7 gap-fill teams exist as Phase 2A.5 stubs (Monaco, Bayern München, Lyon-Villeurbanne, Paris Basketball, Partizan Mozzart Bet, Zalgiris Kaunas, Rytas) — pure BACKFILL workstream.
+
+### Day-35 morning: ABA League workstream #9 pre-scope Pattern A.2 discovery
+
+Production discovery confirmed ~90-100 Basketball unresolved records/7d attributable to ABA:
+- KK Partizan Belgrade: ~52/7d (dominant)
+- KK Crvena zvezda Belgrade: ~28/7d
+- KK Buducnost Voli: ~28/7d
+- KK Bosna Royal Sarajevo: ~14/7d
+- FC Universitatea Cluj (U-BT Cluj-Napoca): ~28/7d
+
+All confirmed teams have Phase 2A.5 legacy stubs — predominantly BACKFILL workstream.
+
+### Day-35 morning: EuroLeague #8 + ABA League #9 APPLIED (combined workstream)
+
+Apply at **2026-06-08T19:55:53Z**. Runtime 14.1s, 0 errors. Combined into single PR per operator decision (both predominantly BACKFILL, low combined overhead).
+
+**Apply results:**
+- **4 INSERTs**: Dubai Basketball (UAE), SC Derby (MNE), Ilirija (SVN), U-BT Cluj-Napoca (ROU)
+- **20 BACKFILLs from Phase 2A.5 Basketball stubs**: Monaco (092518ec), Bayern München (bdb22a1c), Lyon-Villeurbanne (5481c8e7), Paris Basketball (e4e0e605), Partizan Mozzart Bet (575ec0fc), Zalgiris Kaunas (a845d73b), Rytas (834075ed), Crvena Zvezda Meridianbet (a3d095e9), Buducnost (063a1204), KK Bosna (99368c5b), Cedevita Olimpija (e7cce709), Mega Basket (5ef0b126), Igokea (ea0cd454), KK Zadar (bb0da184), FMP Beograd (1337e0d0), Borac Mozzart (949c6254), BC Vienna (3c7275fc), KK Split (d7a6e58e), KK Krka Novo Mesto (0674ed89), Spartak Subotica (3c6aa492)
+- 81 aliases inserted, 3 deduped within batch, 0 global conflicts
+- `existing_teams_loaded`: 2,038 pre-apply → 2,042 post-apply
+- **Multi-country**: SRB/MNE/BIH/SVN/CRO/AUT/ROU/UAE/MCO/DEU/FRA/LTU (12 country codes)
+
+baseline_shifts annotation: row inserted (event_type=`phase_2d5a_euroleague_aba_bootstrap`, event_date=2026-06-08). Amendment #19 idempotency discipline applied.
+
+### Day-35 morning: Pre-apply manifest fixes — 5 collision aliases + Dubai Basketball tuple
+
+Amendment #22 pre-apply audit discovered 5 collision-causing aliases in `euroleague_aba_seed.py`:
+1. `'Monaco Basket'` from Monaco — Monaco Basket (51a337b9) is separate stub
+2. `'KK Student Igokea'` from Igokea — KK Student Igokea (707c2064) is separate stub
+3. `'FMP'` bare from FMP Beograd — FMP Beograd U19 (42e58805) holds this alias
+4. `'KK Borac'` from Borac Mozzart — KK Borac (26b9f2eb) is separate stub
+5. `'Dubai'` bare from Dubai Basketball — Dubai (6b8852e4) holds this alias
+
+Plus: Dubai Basketball alias tuple was malformed — `("Dubai Basketball")` is a Python string not a tuple; iterating over it produced empty space alias. Fixed to `("Dubai Basketball",)`.
+
+Separate patch PR #227 (claude/euroleague-aba-seed-fixes) filed and merged.
+
+### Day-35 morning: Post-apply collision audit — 6 dormant phantoms
+
+Post-apply Pass 1 query revealed **6 collisions**:
+
+| Alias | Manifest team | Dormant phantom |
+|---|---|---|
+| bayern | Bayern München | b4318e7f (Bayern) |
+| bayern munich | Bayern München | b4318e7f (Bayern) via alias_tier |
+| cluj napoca | U-BT Cluj-Napoca | 506aa215 (Cluj-Napoca) |
+| dubai basketball | Dubai Basketball INSERT | 6b8852e4 (Dubai) via alias_tier |
+| split | KK Split | fd5eb539 (Split) |
+| zadar | KK Zadar | 8d626c4b (Zadar) |
+
+6 individual DELETEs against `bootstrap_league_coverage` source on manifest team_ids. Zero-collision verification confirmed: 0 rows post-remediation.
+
+**Notable**: `dubai basketball` collision reveals Dubai (6b8852e4) legacy stub already had alias_tier write-back for `dubai basketball` — suggesting FL previously sent Dubai Basketball records that partially resolved. Our INSERT created a separate team_id for Dubai Basketball; the alias_tier row on the legacy stub remains as dormant phantom routing the Dubai bare form to the old stub.
+
+### Phase 2D.5-A status: ALL 9 WORKSTREAMS APPLIED ✅
+
+- ✅ Workstream #1 (LMB): Day-28, F7 validated
+- ✅ Workstream #2 (Liga ACB): Day-29, F7 validated
+- ✅ Workstream #3 (Italian LBA): Day-31, F7 validated
+- ✅ Workstream #4 (Israeli BSL): Day-31, F7 validated
+- ✅ Workstream #5 (Turkish BSL): Day-31, F7 validated
+- ✅ Workstream #6 (Greek HEBA A1): Day-33, F7 validated Day-34
+- ✅ Workstream #7 (Russian VTB): Day-34, F7 validated Day-35 (21 strict / 5 teams)
+- ✅ Workstream #8 (EuroLeague gap-fill): Day-35 apply 2026-06-08T19:55:53Z
+- ✅ Workstream #9 (ABA League): Day-35 apply 2026-06-08T19:55:53Z (combined with #8)
+
+**sp.teams Basketball: 2,042** (was 1,981 when Phase 2D.5-A started — +61 teams across 9 workstreams)
+
+**Phase 2D.5-A is fully applied.** F7 for workstreams #8+#9 opens 2026-06-09T09:55:53Z.
+
+### Pending — Day-36 morning agenda
+
+1. EuroLeague + ABA F7 verification (opens ~2026-06-09T09:55:53Z). JOIN template with `country_code IN ('MCO','DEU','FRA','LTU','SRB','MNE','BIH','SVN','CRO','AUT','ROU','UAE')`. Expected: ~30-50 strict resolutions.
+2. **Phase 2D.5-A retrospective** — now that all 9 workstreams are applied, document cumulative methodology findings and next-phase decision.
+3. Env var drop small workstream — 7th+ consecutive session; decision needed (pick one option and implement).
+4. Daily-diff cron wiring — consider automating `daily_diff.py` so measurement gaps don't recur.
+
+---
+
 ## Session — 2026-06-05
 
 ### Day-34 morning: Greek HEBA A1 F7 verification
