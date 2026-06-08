@@ -172,7 +172,7 @@ EUROLEAGUE_ABA_TEAMS_SEED: list[tuple[str, str, tuple[str, ...], str]] = [
     # ═════════════════════════════════════════════════════════════
 
     ("Monaco", "MCO",
-     ("Monaco", "AS Monaco", "Monaco Basket", "AS Monaco Basket"),
+     ("Monaco", "AS Monaco", "AS Monaco Basket"),
      "EuroLeague #8 BACKFILL — Phase 2A.5 stub "
      "092518ec-4e4e-4523-9235-8a938de1d2e7. AS Monaco Basketball. "
      "Day-35 discovery: 'Monaco vs Olympiacos *' (3/7d). DORMANT "
@@ -231,7 +231,7 @@ EUROLEAGUE_ABA_TEAMS_SEED: list[tuple[str, str, tuple[str, ...], str]] = [
      "adjacent gap-fill"),
 
     ("Dubai Basketball", "UAE",
-     ("Dubai Basketball", "Dubai"),
+     ("Dubai Basketball",),
      "EuroLeague #8 + ABA #9 INSERT — new UAE franchise, no Phase "
      "2A.5 senior legacy stub. SEPARATE STUBS not aliased here: "
      "Dubai (6b8852e4) + BC Dubai (ccfa9b0e). Appears in both "
@@ -282,7 +282,7 @@ EUROLEAGUE_ABA_TEAMS_SEED: list[tuple[str, str, tuple[str, ...], str]] = [
      "changes — 'MIS', 'Bemax' historical sponsors"),
 
     ("Igokea", "BIH",
-     ("Igokea", "Igokea m:tel", "KK Igokea", "KK Student Igokea"),
+     ("Igokea", "Igokea m:tel", "KK Igokea"),
      "ABA #9 BACKFILL — Phase 2A.5 stub "
      "ea0cd454-6efc-4cc2-a3a8-f357ada59e55. Aleksandrovac-based "
      "(Bosnian Serb Republic). DORMANT PHANTOM RISK: KK Student "
@@ -295,13 +295,13 @@ EUROLEAGUE_ABA_TEAMS_SEED: list[tuple[str, str, tuple[str, ...], str]] = [
      "DORMANT PHANTOM RISK: Zadar (8d626c4b) — separate bare stub"),
 
     ("FMP Beograd", "SRB",
-     ("FMP Beograd", "FMP", "KK FMP"),
+     ("FMP Beograd", "KK FMP"),
      "ABA #9 BACKFILL — Phase 2A.5 stub "
      "1337e0d0-31f5-4021-9574-e3c8683aed0e. FMP Beograd U19 "
      "(42e58805) is SEPARATE youth stub"),
 
     ("Borac Mozzart", "SRB",
-     ("Borac Mozzart", "KK Borac", "Borac Cacak", "KK Borac Cacak"),
+     ("Borac Mozzart", "Borac Cacak", "KK Borac Cacak"),
      "ABA #9 BACKFILL — Phase 2A.5 stub "
      "949c6254-c8b2-4500-a0ee-edd03c47a206. Čačak-based. DORMANT "
      "PHANTOM RISK: KK Borac (26b9f2eb) collides with 'KK Borac' "
