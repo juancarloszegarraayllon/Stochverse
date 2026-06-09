@@ -117,19 +117,25 @@ class ClassifiedTeam:
 # ──────────────────────────────────────────────────────────────────────
 
 
-async def discover_bbl_stage(
+async def discover_bbl_candidates(
     league_hint: str,
     country_hint: str,
     log,
-) -> dict:
-    """Walk /v1/tournaments/list to find the BBL stage + season IDs.
+) -> list[dict]:
+    """Walk /v1/tournaments/list and return ALL candidate stages
+    matching the hints, sorted preference-first.
 
-    Returns {'stage_id', 'season_id', 'stage_name', 'league_name',
-    'country'} or empty dict if no match.
+    Each candidate dict: {'stage_id', 'season_id', 'stage_name',
+    'league_name', 'country', '_league_score', '_stage_score'}.
 
-    Prefers exact LEAGUE_NAME match within Germany. Falls back to
-    substring match. Logs every candidate considered so the operator
-    can refine --league-hint if pilot defaults miss.
+    Returns empty list if no match.
+
+    Day-35 operator finding: caller MUST try candidates in order with
+    standings-404 fallback. `/v1/tournaments/standings` only exists
+    for league-table stages; knockout stages return 404 even when
+    league_score is perfect. `_stage_rank` ranks regular-season stages
+    above knockout, but the fallback loop in `harvest_roster_with_
+    fallback` is the safety net.
     """
     from flashlive_feed import _fl_get
 
@@ -211,40 +217,126 @@ async def discover_bbl_stage(
             score=(c["_league_score"], c["_stage_score"]),
         )
 
-    if not candidates:
-        return {}
-
     # Prefer highest league score, then highest stage score (regular
-    # season > playoff > qualification etc.)
+    # season > knockout etc. per _stage_rank).
     candidates.sort(
         key=lambda c: (c["_league_score"], c["_stage_score"]),
         reverse=True,
     )
-    best = candidates[0]
-    return {
-        "stage_id": best["stage_id"],
-        "season_id": best["season_id"],
-        "stage_name": best["stage_name"],
-        "league_name": best["league_name"],
-        "country": best["country"],
-    }
+    return candidates
+
+
+async def harvest_roster_with_fallback(
+    candidates: list[dict],
+    log,
+) -> tuple[dict, list[dict]]:
+    """Try `/v1/tournaments/standings` against each candidate stage in
+    rank order. Return (chosen_stage_meta, roster_list) on first
+    candidate that produces a non-empty roster.
+
+    Day-35 operator fix C: standings 404 on knockout stages must not
+    abort the pilot. Fall back to next candidate, log the skip.
+
+    `chosen_stage_meta` keys: stage_id, season_id, stage_name,
+    league_name, country (drops the _score fields).
+    """
+    for idx, c in enumerate(candidates):
+        log.info(
+            "fl_universe.standings.attempt",
+            attempt=idx + 1,
+            of=len(candidates),
+            stage_id=c["stage_id"],
+            stage_name=c["stage_name"],
+            league_name=c["league_name"],
+            league_score=c["_league_score"],
+            stage_score=c["_stage_score"],
+        )
+        roster = await fetch_bbl_roster(
+            stage_id=c["stage_id"],
+            season_id=c["season_id"],
+            log=log,
+        )
+        if roster:
+            log.info(
+                "fl_universe.standings.success",
+                stage_id=c["stage_id"],
+                stage_name=c["stage_name"],
+                team_count=len(roster),
+            )
+            return ({
+                "stage_id": c["stage_id"],
+                "season_id": c["season_id"],
+                "stage_name": c["stage_name"],
+                "league_name": c["league_name"],
+                "country": c["country"],
+            }, roster)
+        log.warning(
+            "fl_universe.standings.fallback",
+            stage_id=c["stage_id"],
+            stage_name=c["stage_name"],
+            reason="empty_or_404",
+        )
+    return {}, []
 
 
 def _stage_rank(stage_name: str) -> int:
-    """Lifted from enrichment/stage_discovery.py — prefer regular-
-    season / league-stage stages over playoffs / qualification when
-    selecting the canonical roster source."""
-    s = (stage_name or "").lower()
-    if any(kw in s for kw in ("group", "league phase", "league stage",
-                              "regular season", "regular_season")):
-        return 50
-    if "playoff" in s or "play-off" in s or "play off" in s:
-        return 35
-    if any(kw in s for kw in ("final", "knockout", "round of")):
-        return 30
-    if "qualif" in s or "preliminary" in s or "qualifying" in s:
-        return 10
-    return 25
+    """Rank a stage by how likely `/v1/tournaments/standings` is to
+    return a populated league table.
+
+    First-run finding (Day-35 operator pilot): FL's
+    `/v1/tournaments/standings` only exists for league-table stages
+    (round-robin regular seasons). Knockout / playoff / play-in
+    stages have no standings table — they return HTTP 404.
+
+    For roster harvesting we want the REGULAR-SEASON stage. The
+    scoring below prefers regular-season labels and actively de-
+    prioritizes knockout-shaped stages.
+
+    Known regular-season labels by league: BBL uses "Main"; many
+    European leagues use "Regular Season" / "League Phase" /
+    "League Stage" / "Group". Unknown labels get a neutral default
+    above the knockout floor — a guessed stage at least won't lose
+    to a known-404 stage.
+    """
+    s = (stage_name or "").lower().strip()
+    if not s:
+        return 25  # neutral
+
+    # League-table / regular-season stages — what we want for roster
+    REGULAR_KEYWORDS = (
+        "main", "regular season", "regular_season", "regular-season",
+        "league phase", "league stage", "league table",
+        "league_phase", "league_stage", "group", "season",
+    )
+    if any(kw == s or kw in s for kw in REGULAR_KEYWORDS):
+        return 100
+
+    # Knockout / playoff / play-in / final stages — `/standings`
+    # returns 404 for these. Actively de-prioritized.
+    KNOCKOUT_KEYWORDS = (
+        "play offs", "play-offs", "play-off", "play off", "playoff",
+        "playoffs", "play in", "play-in", "play ins", "play-ins",
+        "knockout", "knock-out", "knock out",
+        "final", "semifinal", "semi-final", "semi final",
+        "quarterfinal", "quarter-final", "quarter final",
+        "round of", "round_of",
+    )
+    if any(kw in s for kw in KNOCKOUT_KEYWORDS):
+        return 5  # below the neutral default — actively avoid
+
+    # Qualification / preliminary — useful only for round-robin
+    # qualifiers; mostly low-roster relevance for top tiers.
+    QUALIFICATION_KEYWORDS = (
+        "qualif", "preliminary", "qualifying", "pre-season",
+        "pre_season", "preseason",
+    )
+    if any(kw in s for kw in QUALIFICATION_KEYWORDS):
+        return 15
+
+    # Unknown labels — neutral default, above knockout floor. Lets
+    # an unfamiliar regular-season label still win against a known
+    # knockout one.
+    return 50
 
 
 async def fetch_bbl_roster(stage_id: str, season_id: str, log) -> list[dict]:
@@ -616,44 +708,72 @@ async def run(args, log) -> int:
 
     started = time.monotonic()
 
-    # ── Step 1+2: Discover BBL stage_id + season_id ─────────────
-    log.info("fl_universe.discover.start",
-             league_hint=args.league_hint,
-             country_hint=args.country_hint)
-    stage_meta = await discover_bbl_stage(
-        league_hint=args.league_hint,
-        country_hint=args.country_hint,
-        log=log,
-    )
-    if not stage_meta or not stage_meta.get("stage_id"):
-        print(
-            f"ERROR: No FL stage_id matched league_hint="
-            f"{args.league_hint!r} in country={args.country_hint!r}. "
-            "Try a different --league-hint (e.g. 'BBL' or "
-            "'Basketball Bundesliga') or omit --country-hint.",
-            file=sys.stderr,
+    # ── Step 1+2+3: Discover BBL stage_id + season_id + harvest ─
+    # Three paths:
+    #   (a) --stage-id provided: skip discovery, use it directly.
+    #   (b) Discover ranked candidates, try each with standings-404
+    #       fallback (Day-35 operator fix B + C).
+    if args.stage_id:
+        log.info("fl_universe.discover.override",
+                 stage_id=args.stage_id,
+                 season_id=args.season_id or "(unspecified)")
+        roster = await fetch_bbl_roster(
+            stage_id=args.stage_id,
+            season_id=args.season_id or "",
+            log=log,
         )
-        return 3
-    log.info("fl_universe.discover.resolved",
-             stage_id=stage_meta["stage_id"],
-             season_id=stage_meta["season_id"],
-             stage_name=stage_meta["stage_name"],
-             league_name=stage_meta["league_name"])
-
-    # ── Step 3: Pull roster ─────────────────────────────────────
-    roster = await fetch_bbl_roster(
-        stage_id=stage_meta["stage_id"],
-        season_id=stage_meta["season_id"],
-        log=log,
-    )
-    if not roster:
-        print(
-            f"ERROR: FL standings returned no teams for stage_id="
-            f"{stage_meta['stage_id']!r}. Stage may be empty (off-season) "
-            "or shape may have changed — re-run with FL_OBS=1 to inspect.",
-            file=sys.stderr,
+        if not roster:
+            print(
+                f"ERROR: --stage-id {args.stage_id!r} returned no teams. "
+                "Verify the stage_id matches a league-table stage "
+                "(/standings does not exist for knockout stages).",
+                file=sys.stderr,
+            )
+            return 4
+        stage_meta = {
+            "stage_id": args.stage_id,
+            "season_id": args.season_id or "",
+            "stage_name": "(operator override)",
+            "league_name": args.league_hint,
+            "country": args.country_hint or "",
+        }
+    else:
+        log.info("fl_universe.discover.start",
+                 league_hint=args.league_hint,
+                 country_hint=args.country_hint)
+        candidates = await discover_bbl_candidates(
+            league_hint=args.league_hint,
+            country_hint=args.country_hint,
+            log=log,
         )
-        return 4
+        if not candidates:
+            print(
+                f"ERROR: No FL stage_id matched league_hint="
+                f"{args.league_hint!r} in country={args.country_hint!r}. "
+                "Try a different --league-hint (e.g. 'BBL' or "
+                "'Basketball Bundesliga') or omit --country-hint, or "
+                "pass --stage-id directly if you know it.",
+                file=sys.stderr,
+            )
+            return 3
+        stage_meta, roster = await harvest_roster_with_fallback(
+            candidates=candidates, log=log,
+        )
+        if not roster:
+            print(
+                f"ERROR: All {len(candidates)} candidate stages returned "
+                "empty rosters or 404 from /v1/tournaments/standings. "
+                "Likely off-season, or FL's stage labels for this league "
+                "are unusual. Try --stage-id <id> with a known good "
+                "regular-season stage_id.",
+                file=sys.stderr,
+            )
+            return 4
+        log.info("fl_universe.discover.resolved",
+                 stage_id=stage_meta["stage_id"],
+                 season_id=stage_meta["season_id"],
+                 stage_name=stage_meta["stage_name"],
+                 league_name=stage_meta["league_name"])
 
     # ── Step 4: Per-team detail ─────────────────────────────────
     fl_teams: list[FLTeam] = []
@@ -744,6 +864,20 @@ def main(argv: list[str] | None = None) -> int:
         "--no-classify", action="store_true",
         help="Skip the sp.teams cross-reference (FL crawl only; useful "
              "when DATABASE_URL isn't available).",
+    )
+    parser.add_argument(
+        "--stage-id", default="",
+        help="Operator-supplied FL tournament_stage_id. Skips the "
+             "/v1/tournaments/list discovery step entirely. Useful when "
+             "FL's stage labels are unusual or when the auto-selected "
+             "stage's /standings returns 404 across all candidates. "
+             "Combine with --season-id when known. Day-35 fix B.",
+    )
+    parser.add_argument(
+        "--season-id", default="",
+        help="Operator-supplied FL tournament_season_id. Required when "
+             "passing --stage-id for accurate standings (FL standings "
+             "can return wrong-season rosters when season_id is empty).",
     )
     args = parser.parse_args(argv)
     log = get_logger("fl_universe_seed")
