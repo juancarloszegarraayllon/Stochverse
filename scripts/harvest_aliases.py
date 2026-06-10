@@ -25,6 +25,25 @@ Real provider strings from production are higher-quality input:
     authoritative-source) generalizes to alias variants the same way
     it does to roster discovery
 
+## Methodology questions surfaced (BBL pilot validation, Day-N+1)
+
+CANONICAL FRAGMENTATION AT SCALE: BBL has both the city-stub
+("Oldenburg") AND the full-name club ("EWE Baskets Oldenburg") as
+TWO SEPARATE sp.teams rows / team_ids. Same pattern repeats for
+Ludwigsburg/MHP Riesen, Rostock/Rostock Seawolves, Hamburg/Hamburg
+Towers, Braunschweig/Löwen Braunschweig, Wurzburg/Fitness First
+Würzburg Baskets, Syntainics MBC/SYNTAINICS Mitteldeutscher BC.
+
+This is dormant-phantom fragmentation at the *roster* level (Phase
+2A.5 legacy seeded both forms from different feed sources during
+live discovery). The BACKFILL plan for any league with this shape
+needs to decide per team: which sp.teams row is canonical, do we
+merge, do we alias-link? The harvester surfaces it (when both stubs
+are in the roster, both attract candidates) — the *resolution* is a
+methodology decision the operator makes during manifest curation.
+
+Not a harvester bug. Captured here so future workstreams remember.
+
 ## Pipeline
 
   1. Caller supplies a target roster: list of (team_id, canonical_name)
@@ -63,6 +82,38 @@ Where `--roster-json` is a list of dicts:
 beyond canonical_name — useful when FL's short-form provider string
 ("Bonn", "Bayern") differs from the sp.teams canonical.
 
+**Recommended `reference_forms` source: FL-derived, not human-guessed.**
+
+The BBL pilot Day-N+1 validation found that human-guessed reference
+forms (operator general-knowledge club names like "EWE Baskets
+Oldenburg") surface real production strings that collide with
+SEPARATE Phase 2A.5 stubs (the canonical-fragmentation pattern; see
+module docstring). FL-derived forms — `SHORT_NAME` + `NAME` from
+`/v1/teams/data` — track the actual provider vocabulary and avoid
+this pitfall.
+
+Construction recipe from `scripts/fl_universe_seed.py` pilot output:
+
+    # Pseudo-code: convert fl_bbl_intermediate.json → roster.json
+    intermediate = json.load(open("fl_bbl_intermediate.json"))
+    classification = json.load(open("fl_bbl_classification.md"))  # parse
+    roster = []
+    for team in intermediate["teams"]:
+        # Match this team to a sp.teams row from the classification
+        sp_team_id = lookup_sp_team_id(team["team_id"], classification)
+        if not sp_team_id:
+            continue  # INSERT-only; no sp.teams row to harvest aliases for
+        reference_forms = []
+        for k in ("SHORT_NAME", "NAME", "PARTICIPANT_NAME"):
+            v = team["raw"].get(k)
+            if isinstance(v, str) and v.strip():
+                reference_forms.append(v.strip())
+        roster.append({
+            "team_id": sp_team_id,
+            "canonical_name": ...,  # sp.teams canonical OR fl_canonical
+            "reference_forms": reference_forms,
+        })
+
 ## Exit codes
 
   0 — success (outputs written; check report for clean/colliding counts)
@@ -98,7 +149,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import text  # noqa: E402
-from rapidfuzz import fuzz  # noqa: E402
 
 from db import async_session  # noqa: E402
 from observability import get_logger  # noqa: E402
@@ -108,6 +158,32 @@ from resolver.collision_audit import (  # noqa: E402
     audit_alias_collisions,
     propose_alias,
 )
+from resolver.text_match import fuzzy_match_distinctive_score  # noqa: E402
+
+
+# Defensive: BBL pilot discovered failure records with several
+# possible country-hint field names depending on which phase recorded
+# them. Caller's --country-filter is checked against any non-empty
+# match.
+COUNTRY_HINT_KEYS = (
+    "home_country", "away_country",
+    "country", "country_name",
+    "tournament_country", "league_country",
+    "home_country_name", "away_country_name",
+)
+
+
+def _extract_country_hint(reason_detail: dict) -> str:
+    """Pull a country string from reason_detail across the known key
+    shapes. Returns empty string if no hint present (defensive: empty
+    means 'don't filter this record')."""
+    if not isinstance(reason_detail, dict):
+        return ""
+    for k in COUNTRY_HINT_KEYS:
+        v = reason_detail.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -192,14 +268,19 @@ async def mine_failure_strings(
     sport_id: int,
     window_days: int,
     log,
-) -> list[tuple[str, str]]:
-    """Return list of (raw_provider_string, normalized) extracted
-    from no_match / asymmetric records in the past `window_days`.
+) -> list[tuple[str, str, str]]:
+    """Return list of (raw_provider_string, normalized, country_hint)
+    triples from no_match / review_queue records in the past
+    `window_days`.
 
     Walks `sp.resolution_log.reason_detail` JSON for the home/away
-    provider-name fields the resolver records on failure. Defensive
-    over multiple possible field names since the resolver has carried
-    different shapes across phases.
+    provider-name fields the resolver records on failure, plus the
+    country hint via `_extract_country_hint`. Defensive over multiple
+    possible field names since the resolver has carried different
+    shapes across phases.
+
+    `country_hint` is empty string when no hint key present — caller
+    treats empty as "don't filter".
     """
     sport_name_row = (await session.execute(
         text("SELECT name FROM sp.sports WHERE id = :sid"),
@@ -234,17 +315,18 @@ async def mine_failure_strings(
         "home", "away",
     )
 
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
     for row in rows:
         rd = row.reason_detail
         if not isinstance(rd, dict):
             continue
+        country_hint = _extract_country_hint(rd)
         for key in PROVIDER_NAME_KEYS:
             v = rd.get(key)
             if isinstance(v, str) and v.strip():
                 normed = normalize_name(v)
                 if normed:
-                    out.append((v.strip(), normed))
+                    out.append((v.strip(), normed, country_hint))
     log.info(
         "harvest.failure_strings_mined",
         sport_id=sport_id,
@@ -262,34 +344,63 @@ async def mine_failure_strings(
 
 
 def fuzzy_match_failures(
-    failures: list[tuple[str, str]],
+    failures: list[tuple[str, str, str]],
     reference_index: list[tuple[str, str, str]],
     threshold: float,
-) -> dict[tuple[str, str], Candidate]:
-    """For each failure string, find the best matching reference.
+    country_filter: str = "",
+) -> tuple[dict[tuple[str, str], Candidate], dict[str, int]]:
+    """For each failure string, find the best matching reference using
+    the distinctive-token fuzzy primitive from `resolver.text_match`.
 
-    Returns dict keyed on (alias_normalized, target_team_id) →
-    aggregated Candidate. Same normalized form targeting the SAME
-    team_id aggregates into one candidate with summed occurrences.
+    Returns (bucket, stats) where:
+      bucket: dict keyed on (alias_normalized, target_team_id) →
+              aggregated Candidate.
+      stats:  counts of inputs/rejections by category for the report.
 
-    Threshold is rapidfuzz `token_set_ratio / 100` (range 0.0 → 1.0).
+    Failures whose country_hint contradicts `country_filter` (when
+    set non-empty) are skipped. Empty country_hint is permissive —
+    don't filter records that lack country info.
+
+    Day-N+1 BBL pilot validation fixes:
+      1. Distinctive-token matching (resolver.text_match) — strips
+         generic sport tokens before comparison so "Paris Basketball"
+         doesn't match "Basketball Braunschweig".
+      2. Threshold bumped default 0.75 → 0.85 (caller-supplied; this
+         function honors whatever threshold is passed).
+      3. Country-filter option blocks cross-country false positives
+         (Jaen ↔ Jena class).
     """
     bucket: dict[tuple[str, str], Candidate] = {}
+    stats = {
+        "input": 0,
+        "country_filtered": 0,
+        "below_threshold": 0,
+        "matched": 0,
+    }
+    country_filter_norm = country_filter.lower().strip()
 
-    for raw_failure, norm_failure in failures:
+    for raw_failure, norm_failure, country_hint in failures:
+        stats["input"] += 1
+        if country_filter_norm and country_hint:
+            if country_filter_norm not in country_hint.lower():
+                stats["country_filtered"] += 1
+                continue
         best_score = 0.0
         best_target_id = ""
         best_reference = ""
         for ref_normed, ref_raw, team_id in reference_index:
-            # token_set_ratio handles word-order changes + partial
-            # overlap gracefully. Range 0-100.
-            score = fuzz.token_set_ratio(norm_failure, ref_normed) / 100.0
+            score = fuzzy_match_distinctive_score(
+                failure_normalized=norm_failure,
+                reference_normalized=ref_normed,
+            )
             if score > best_score:
                 best_score = score
                 best_target_id = team_id
                 best_reference = ref_raw
         if best_score < threshold:
+            stats["below_threshold"] += 1
             continue
+        stats["matched"] += 1
 
         key = (norm_failure, best_target_id)
         c = bucket.get(key)
@@ -305,12 +416,11 @@ def fuzzy_match_failures(
         c.occurrence_count += 1
         if raw_failure not in c.raw_examples:
             c.raw_examples.append(raw_failure)
-        # Keep the highest confidence seen for this candidate.
         if best_score > c.fuzzy_confidence:
             c.fuzzy_confidence = best_score
             c.matched_reference = best_reference
 
-    return bucket
+    return bucket, stats
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -326,6 +436,8 @@ def write_harvest_report(
     sport_id: int,
     window_days: int,
     threshold: float,
+    country_filter: str,
+    match_stats: dict,
     failures_mined: int,
     roster_size: int,
     elapsed_sec: float,
@@ -340,10 +452,23 @@ def write_harvest_report(
     lines.append("")
     lines.append(f"- sport_id: {sport_id}")
     lines.append(f"- window: {window_days}d")
-    lines.append(f"- fuzzy threshold: {threshold:.2f} (token_set_ratio / 100)")
+    lines.append(f"- fuzzy threshold: {threshold:.2f} "
+                 "(distinctive-token score)")
+    cf_display = repr(country_filter) if country_filter else "off"
+    lines.append(f"- country filter: {cf_display}")
     lines.append(f"- roster size: {roster_size} teams")
     lines.append(f"- failure strings mined: {failures_mined}")
     lines.append(f"- elapsed: {elapsed_sec:.2f}s")
+    lines.append("")
+    lines.append("## Match-stage funnel")
+    lines.append("")
+    lines.append(f"- failure strings input: {match_stats.get('input', 0)}")
+    lines.append(f"- dropped by country filter: "
+                 f"{match_stats.get('country_filtered', 0)}")
+    lines.append(f"- dropped below fuzzy threshold: "
+                 f"{match_stats.get('below_threshold', 0)}")
+    lines.append(f"- matched into candidate bucket: "
+                 f"{match_stats.get('matched', 0)}")
     lines.append("")
     lines.append("## Summary")
     lines.append("")
@@ -489,6 +614,21 @@ async def run(args, log) -> int:
         return 3
     log.info("harvest.roster_loaded", count=len(roster),
              path=args.roster_json)
+
+    # Reference-forms quality warning (BBL pilot finding 3).
+    teams_without_refs = sum(1 for e in roster if not e.reference_forms)
+    if teams_without_refs > 0:
+        print(
+            f"WARN: {teams_without_refs} of {len(roster)} teams have no "
+            "reference_forms. Recommended: populate from FL's "
+            "/v1/teams/data SHORT_NAME + NAME fields (the FL universe "
+            "seed script can emit this). Human-guessed reference_forms "
+            "may surface real-name production strings that collide "
+            "with separate Phase 2A.5 stubs (canonical-fragmentation "
+            "pattern documented in module docstring).",
+            file=sys.stderr,
+        )
+
     reference_index = build_reference_index(roster)
     log.info("harvest.reference_index_built",
              reference_count=len(reference_index))
@@ -515,16 +655,19 @@ async def run(args, log) -> int:
         )
         return 4
 
-    # ── Fuzzy match ─────────────────────────────────────────────
-    bucket = fuzzy_match_failures(
+    # ── Fuzzy match (distinctive-token primitive) ───────────────
+    bucket, match_stats = fuzzy_match_failures(
         failures=failures,
         reference_index=reference_index,
         threshold=args.fuzzy_threshold,
+        country_filter=args.country_filter,
     )
     log.info("harvest.fuzzy_match.complete",
              candidate_count=len(bucket),
              failures_in=len(failures),
-             threshold=args.fuzzy_threshold)
+             threshold=args.fuzzy_threshold,
+             country_filter=args.country_filter or "(off)",
+             stats=match_stats)
 
     if not bucket:
         print(
@@ -599,6 +742,8 @@ async def run(args, log) -> int:
         sport_id=args.sport_id,
         window_days=args.window_days,
         threshold=args.fuzzy_threshold,
+        country_filter=args.country_filter,
+        match_stats=match_stats,
         failures_mined=len(failures),
         roster_size=len(roster),
         elapsed_sec=elapsed,
@@ -612,6 +757,8 @@ async def run(args, log) -> int:
             "sport_id": args.sport_id,
             "window_days": args.window_days,
             "fuzzy_threshold": args.fuzzy_threshold,
+            "country_filter": args.country_filter,
+            "match_stats": match_stats,
             "roster_size": len(roster),
             "failures_mined": len(failures),
             "candidates_total": len(bucket),
@@ -646,10 +793,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--window-days", type=int, default=7,
                         help="sp.resolution_log lookback window. "
                              "Default 7d.")
-    parser.add_argument("--fuzzy-threshold", type=float, default=0.75,
-                        help="rapidfuzz token_set_ratio threshold "
-                             "(0.0-1.0). Default 0.75. Lower → more "
-                             "candidates, more false positives.")
+    parser.add_argument("--fuzzy-threshold", type=float, default=0.85,
+                        help="Distinctive-token fuzzy score threshold "
+                             "(0.0-1.0). Default 0.85 — bumped from 0.75 "
+                             "after BBL pilot found 'Jaen' ↔ 'Jena' "
+                             "edge case. Lower → more candidates, more "
+                             "false positives; 0.85+ is the post-fix "
+                             "safe default.")
+    parser.add_argument("--country-filter", default="",
+                        help="If supplied (e.g. 'Germany'), exclude "
+                             "candidates whose source resolution_log "
+                             "record carries a country hint that does "
+                             "NOT contain this substring. Records with "
+                             "empty country hint pass through "
+                             "unfiltered. Defensive: keep wide unless "
+                             "needed.")
     parser.add_argument("--out-dir", default="./harvest_output",
                         help="Output directory for harvest_report.md "
                              "and harvest_candidates.json.")
