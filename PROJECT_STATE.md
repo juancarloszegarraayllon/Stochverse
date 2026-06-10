@@ -6,6 +6,123 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-06-10
+
+### Day-37: Phase 2D.5-A retrospective committed
+
+`docs/bootstraps/phase-2d5a-retrospective.md` — comprehensive close-out doc covering the 9 applied workstreams, institutionalized methodology runbook, amendments #12-#22 produced, three surprises (BACKFILL not prominence-correlated, collision discipline post-apply-mandatory, off-season F7 low-but-valid), the Day-36/37 automation pivot, Day-37 LOCKED fragmentation rule, and the next-phase decision.
+
+Headline numbers (verified Day-37 via SELECT against production):
+- `sp.teams` Basketball: 1,981 → **2,042** (+61 teams)
+- 122 Basketball teams now carry `country_code`
+- Basketball matcher capability: 53.3% → 58.6% (trough 44.6% Day-31, recovered +14.0pp as bootstrapped denominator lifted strict-tier resolutions)
+- 9 workstreams / 8 baseline_shifts annotations (EuroLeague + ABA combined into one annotation row)
+
+### Day-37: Fragmentation resolution rule LOCKED (Amendment #25)
+
+Day-37 production analysis of 7 BBL fragmented pairs LOCKED the resolution rule:
+
+> For each city-stub / full-name pair, compare fixture counts:
+> - **One side has zero fixtures → ALIAS-LINK** (automatable). Canonical winner = the side WITH fixture history (Option A, fixture-history wins, per F1 production-anchor discipline). Full-name form becomes an alias on the live stub; dormant duplicate flagged as phantom (not deleted by automation).
+> - **Both sides have fixtures → MERGE REQUIRED** (operator-driven, never auto-applied). Reuses Tennis-dedup FK-cascade machinery.
+
+BBL distribution: 5 alias-link (Oldenburg, Ludwigsburg, Braunschweig, Würzburg, Syntainics MBC) + 2 merge-required (Rostock 5+3, Hamburg 2+1). The fixture-count fork is the safe automation boundary.
+
+This generalizes to every league whose legacy `public.entities` accumulator captured both short and full forms — that's most of them.
+
+### Day-37: Component 3 — fragmentation detection primitive built
+
+`resolver/fragmentation.py` + `tests/test_fragmentation.py` (16/16 tests passing).
+
+- Pure / impure split same pattern as `collision_audit` + `text_match`
+- `find_fragmentation_candidates_pure` + `find_all_fragmentation_pairs_pure` + `classify_fragmentation_pair_pure`
+- Encodes Day-37 LOCKED rule end-to-end
+- Token-subset detection over distinctive-only tokens (reuses `resolver.text_match.distinctive_tokens`)
+- Catches the 7 BBL pairs; correctly rejects Real Madrid vs Real Sociedad (no subset) and identical-distinctive duplicates (defer to collision audit)
+- All 4 verdict shapes tested (ALIAS-LINK anchor-side / partner-side, MERGE-REQUIRED both-fixtures / both-zero degenerate)
+
+**Engine test total: 54/54** (14 collision_audit + 24 text_match + 16 fragmentation).
+
+**Component 3 batch orchestrator (`scripts/fl_universe_batch.py`) NOT YET BUILT** — fragmentation primitive ready to wire in.
+
+### Day-36: EuroLeague + ABA F7 verification (off-season baseline)
+
+F7 verification at ~14h post-apply (apply 2026-06-08T19:55:53Z → sample ~10:00 UTC Day-36):
+- **9 strict resolutions / 7 distinct team-pairs**
+- Multi-country JOIN filter spanning all 12 codes (MCO, DEU, FRA, LTU, SRB, MNE, BIH, SVN, CRO, AUT, ROU, UAE)
+- Below 30-50 projection but EXPLAINED — EuroLeague and ABA seasons end May/June; off-season baseline. Not a methodology failure.
+- Methodology note: off-season F7 volume is low but valid (Surprise #3 in retrospective §4).
+
+### Day-36: Env var drop pattern RESOLVED
+
+6th+ consecutive session was the breaking point. Resolved via PowerShell `$PROFILE` script export — `DATABASE_URL`, `EXPECTED_PRODUCTION_DB_NAME`, `EXPECTED_PRODUCTION_DB_HOST` now auto-loaded on session start. Per-team workstream friction eliminated.
+
+### Day-36: Automation strategy decided — Path B durable engine
+
+After 9 manual workstreams the question became: can we build the universe faster than one-league-at-a-time?
+
+Claude Code conducted a survey of existing sports-data integrations + credentials + FL API capabilities. Result: **FL already exposes a full team-master-data API** (`/v1/tournaments/standings` for rosters, `/v1/teams/data` for canonical + country) — no external encyclopedia (Wikidata / TheSportsDB) needed.
+
+Decision: Path B durable engine. Build automation that re-seeds from authoritative FL rosters rather than the provider-snapshot-bounded legacy accumulator. Three components:
+- **Component 1**: collision audit (amendment #22 as tested function)
+- **Component 2**: production-failure alias harvester
+- **Component 3**: batch multi-league crawl + fragmentation detection
+
+### Day-36: BBL pilot built + validated
+
+`scripts/fl_universe_seed.py` (branch `claude/fl-universe-seed-pilot`) — German BBL proof-of-concept of the FL crawl pipeline.
+
+Validation results:
+- FL crawl returned **complete roster (18/18 BBL teams)**
+- BACKFILL detection: **15/15 correct**, all verified `name_count=1`, `sport_id=3`, `country_code` NULL, Phase 2A.5 origin
+- Clean country codes (Germany → DEU)
+- **13s runtime** vs ~40 min manual
+
+**LIMITATION (confirmed): FL canonical = provider short-form ("Bonn"), NOT a usable canonical_name.** It IS useful as an alias. Real canonicals still come from operator for INSERTs only; BACKFILLs keep their existing Phase 2A.5 canonical per F1 discipline. (Captured as Amendment #24.)
+
+Stage-selection bug discovered + fixed: `/v1/tournaments/standings` only exists for league-table stages (Play Offs returns 404). Stage-rank heuristic now prefers regular-season stages; 404 fallback iterates remaining candidates. (Captured as Amendment #23.)
+
+### Day-36: Alias harvester built + precision-tuned + validated against production
+
+`scripts/harvest_aliases.py` + `resolver/collision_audit.py` + `resolver/text_match.py` (branch `claude/fl-universe-engine`).
+
+Initial implementation over-proposed via false-positive fuzzy matches (Paris/Dubai/EBAA→Braunschweig class). Precision-tuning shipped:
+- Distinctive-token matching (`resolver/text_match.py`) — strips generic sport tokens before fuzzy comparison
+- Threshold default 0.75 → 0.85
+- `--country-filter` flag with defensive country-hint extraction across 8 reason_detail key shapes
+- Reference-forms quality warning (operator-supplied human-guessed forms surface real production strings that collide with separate Phase 2A.5 stubs — recommend FL-derived `SHORT_NAME` / `NAME` instead)
+
+Production re-run validation (BBL, threshold 0.85, --country-filter Germany):
+- 45,256 strings mined → **44,766 rejected below threshold** (pre-audit) → 14 candidates → 0 clean / 7 collision / 7 same-team
+- Paris/Dubai/EBAA → Braunschweig false-positive class **structurally eliminated** — not the collision audit catching them, but the distinctive-token matcher upstream
+- 7 remaining collisions are the canonical-fragmentation pattern (legitimate full-name BBL clubs) — surfaced the Day-37 LOCKED rule
+- `clean=0` is the correct result for a well-covered league — harvester correctly refused to emit junk
+
+**Engine test total at end of Day-36: 38/38** (14 collision + 24 text_match).
+
+### Day-37: v1.5 amendment pile 22 → 25 (NEW: #23, #24, #25)
+
+- **#23** — FL standings exist only for league-table stages, not knockout (Play Offs 404 → Main success); stage-rank heuristic prefers regular-season stages. Discovered Day-36 BBL pilot.
+- **#24** — FL canonical = provider short-form, not canonical_name; FL automates structure (roster / BACKFILL / country), humans + authoritative sources own identity. Confirmed Day-36 BBL pilot.
+- **#25** — Canonical fragmentation resolution: city-stub / full-name pairs route by fixture-count (alias-link if one side zero / merge-required if both); fixture-history wins canonical per F1 production-anchor discipline; merge never auto-applied. Locked Day-37 from BBL production analysis.
+
+Pile expanded from 22 to 25 items.
+
+### Pending — next-session agenda
+
+1. **Component 3 batch orchestrator** — `scripts/fl_universe_batch.py`. Primitive done; orchestrator remains. Per Day-37 brief: enumerate basketball leagues via `/v1/tournaments/list?sport_id=3`, per league pick league-table stage (404 fallback), harvest roster, classify INSERT/BACKFILL/SKIP, run fragmentation primitive on BACKFILL/SKIP teams, run collision audit, emit per-league bundles. `--max-leagues` cap. NO auto-apply.
+2. **Rostock + Hamburg BBL merges** (operator task, deferred). Reuse Tennis-dedup FK-cascade machinery. Blocks nothing.
+3. **Daily-diff cron wiring** — still unaddressed since Day-21; Days 33-34 measurements permanently missing from sp.daily_diff_reports trajectory. Worth resolving before Component 3 ships to avoid measurement blackouts.
+
+### Branches open, no PR yet
+
+- `claude/fl-universe-seed-pilot` — FL pilot (BBL proof-of-concept) + stage-selection fix
+- `claude/fl-universe-engine` — Components 1+2 + fragmentation primitive (Component 3 partial)
+
+PR consolidation deferred per operator directive. This entry's PR is the only one open against `main`.
+
+---
+
 ## Session — 2026-06-08
 
 ### Day-35 morning: VTB F7 verification
