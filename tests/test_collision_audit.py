@@ -362,6 +362,134 @@ class TestEmitSetAndMixedInputs:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# excluded_team_ids — Day-37 BBL gate Finding 2 (phantom-release)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestExcludedTeamIdsPhantomRelease:
+    """Day-37 BBL gate Finding 2: ALIAS-LINK is a two-part operation.
+    The dormant phantom owns the canonical_name; alias-add cannot
+    succeed while the phantom exists. The collision audit must treat
+    rows belonging to soon-to-be-released phantoms as gone."""
+
+    def test_excluded_owner_makes_proposal_clean(self):
+        """The single owner of the colliding alias is scheduled for
+        release → proposal becomes clean."""
+        existing = [
+            ExistingAliasMapping(
+                alias_normalized="ewe baskets oldenburg",
+                team_id="ewe-baskets-phantom-uuid",
+                canonical_name="EWE Baskets Oldenburg",
+                source="legacy_bootstrap",
+            ),
+        ]
+        p = propose_alias(
+            "ewe baskets oldenburg",
+            "EWE Baskets Oldenburg",
+            "oldenburg-live-uuid",
+        )
+        report = audit_alias_collisions_pure(
+            proposed=[p], existing=existing, sport_id=3,
+            excluded_team_ids=("ewe-baskets-phantom-uuid",),
+        )
+        assert report.clean == (p,)
+        assert report.colliding == tuple()
+        assert report.emit_set == (p,)
+
+    def test_excluded_irrelevant_team_id_has_no_effect(self):
+        existing = [
+            ExistingAliasMapping(
+                alias_normalized="mba",
+                team_id="mersin-basketbol-uuid",
+                canonical_name="Mersin Basketbol",
+                source="legacy_bootstrap",
+            ),
+        ]
+        p = propose_alias("mba", "MBA", "mba-moscow-uuid")
+        # Excluding some unrelated team_id should not rescue this.
+        report = audit_alias_collisions_pure(
+            proposed=[p], existing=existing, sport_id=3,
+            excluded_team_ids=("some-unrelated-uuid",),
+        )
+        assert len(report.colliding) == 1
+
+    def test_multiple_owners_only_some_excluded_still_collides(self):
+        """Phantom A scheduled for release, but phantom B also owns
+        the same form → still colliding against B."""
+        existing = [
+            ExistingAliasMapping(
+                alias_normalized="zadar",
+                team_id="zadar-phantom-A",
+                canonical_name="Zadar",
+                source="legacy_bootstrap",
+            ),
+            ExistingAliasMapping(
+                alias_normalized="zadar",
+                team_id="zadar-phantom-B",
+                canonical_name="Zadar (legacy variant)",
+                source="alias_tier",
+            ),
+        ]
+        p = propose_alias("zadar", "Zadar", "kk-zadar-new-uuid")
+        report = audit_alias_collisions_pure(
+            proposed=[p], existing=existing, sport_id=3,
+            excluded_team_ids=("zadar-phantom-A",),
+        )
+        # Phantom B still owns it → still colliding.
+        assert len(report.colliding) == 1
+        # Only B reported as conflict (A was filtered out)
+        team_ids = {
+            m.team_id
+            for m in report.colliding[0].conflicting_mappings
+        }
+        assert team_ids == {"zadar-phantom-B"}
+
+    def test_all_owners_excluded_makes_proposal_clean(self):
+        existing = [
+            ExistingAliasMapping(
+                alias_normalized="zadar",
+                team_id="zadar-phantom-A",
+                canonical_name="Zadar",
+                source="legacy_bootstrap",
+            ),
+            ExistingAliasMapping(
+                alias_normalized="zadar",
+                team_id="zadar-phantom-B",
+                canonical_name="Zadar (variant)",
+                source="alias_tier",
+            ),
+        ]
+        p = propose_alias("zadar", "Zadar", "kk-zadar-new-uuid")
+        report = audit_alias_collisions_pure(
+            proposed=[p], existing=existing, sport_id=3,
+            excluded_team_ids=("zadar-phantom-A", "zadar-phantom-B"),
+        )
+        assert report.clean == (p,)
+
+    def test_empty_excluded_set_unchanged_behavior(self):
+        """Backwards compat — empty / default excluded_team_ids
+        produces identical results to the pre-Finding-2 behavior."""
+        existing = [
+            ExistingAliasMapping(
+                alias_normalized="mba",
+                team_id="mersin-basketbol-uuid",
+                canonical_name="Mersin Basketbol",
+                source="legacy_bootstrap",
+            ),
+        ]
+        p = propose_alias("mba", "MBA", "mba-moscow-uuid")
+        report_default = audit_alias_collisions_pure(
+            proposed=[p], existing=existing, sport_id=3,
+        )
+        report_empty = audit_alias_collisions_pure(
+            proposed=[p], existing=existing, sport_id=3,
+            excluded_team_ids=(),
+        )
+        assert len(report_default.colliding) == 1
+        assert len(report_empty.colliding) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Regression: Day-34 Uralmash variants
 # ──────────────────────────────────────────────────────────────────────
 

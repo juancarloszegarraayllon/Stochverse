@@ -30,6 +30,38 @@ from scripts/fl_universe_seed.py — the pilot script lives on a separate
 branch (claude/fl-universe-seed-pilot). Duplication accepted; unify at
 consolidation, don't fight cross-branch imports.
 
+## Day-37 BBL gate findings (post-build refinement)
+
+**Finding 1 — Full-pool fragmentation scan is authoritative.**
+Manual harvester-surfaced fragmentation is INCOMPLETE. BBL gate run
+exposed 11 pairs (7 ALIAS-LINK + 4 MERGE-REQUIRED) where manual hand
+analysis had found only 5+2=7. The harvester didn't surface every
+partner sp.teams row, so manual spot-checks missed real fragmentation.
+The orchestrator's `find_all_fragmentation_pairs_pure` over the full
+distinctive-token partner pool catches them all — including the
+critical Vechta / Rasta Vechta misclassification the manual pass made
+(Vechta WAS classified alias-link by hand; production verify showed
+both sides have substantial fixtures → MERGE-REQUIRED). Had the
+manual plan been applied, 8 fixtures of Rasta Vechta history would
+have been silently corrupted. **Lesson: full-pool scan over
+harvester-surfaced pairs.**
+
+**Finding 2 — ALIAS-LINK is a two-part operation, not zero-migration.**
+The dormant phantom still owns its `canonical_name`; an alias add on
+the live winner collides with that ownership unless the phantom is
+removed first. The two-part operation:
+  1. DELETE the 0-fixture dormant phantom (releases its canonical-name
+     claim; no fixture history to migrate — the rule's precondition
+     guarantees 0 fixtures).
+  2. Add the phantom's canonical as alias on the live winner team_id.
+
+Implementation: the orchestrator collects ALIAS-LINK phantom team_ids
+into `phantoms_to_release` and passes them as `excluded_team_ids` to
+`audit_alias_collisions`, which treats those team_ids' rows as gone.
+The per-league output now includes `phantom_release.md` for Part 1
+and the existing `aliases_audited.md` for Part 2 (with "clean" relabeled
+to make the post-phantom-release precondition explicit).
+
 ## Output structure
 
   <out_dir>/
@@ -595,7 +627,12 @@ class LeagueBundle:
     merge_required_count: int
     proposed_aliases: list[ProposedAlias]
     collision_report: Any  # CollisionReport
-    elapsed_sec: float
+    # Day-37 BBL gate Finding 2: ALIAS-LINK is a two-part operation.
+    # phantoms_to_release contains team_ids that must be DELETEd from
+    # sp.teams BEFORE the alias proposals are applied. Each phantom
+    # corresponds to an ALIAS-LINK verdict's dormant_phantom_team_id.
+    phantoms_to_release: list[str] = field(default_factory=list)
+    elapsed_sec: float = 0.0
 
 
 async def process_league(
@@ -760,11 +797,26 @@ async def process_league(
             target_team_id=v.canonical_winner_team_id,
         ))
 
+    # ── Phantom-release plan (Day-37 BBL gate Finding 2) ──
+    # ALIAS-LINK is a two-part operation: (1) DELETE 0-fixture dormant
+    # phantom (releases its claim on the canonical_name); (2) add the
+    # phantom's canonical as alias on the live winner. The phantom is
+    # 0 fixtures by definition (the Day-37 rule's precondition) so
+    # there is no fixture history to migrate.
+    # Forward the phantom team_ids to the collision audit via
+    # excluded_team_ids — emitting an alias for a name owned only by
+    # a soon-to-be-released phantom is safe, not colliding.
+    phantoms_to_release: list[str] = [
+        v.dormant_phantom_team_id for v in verdicts
+        if v.classification == "ALIAS-LINK" and v.dormant_phantom_team_id
+    ]
+
     # Collision audit.
     report = await audit_alias_collisions(
         session=session,
         proposed_aliases=proposals,
         sport_id=sport_id,
+        excluded_team_ids=phantoms_to_release,
     )
     log.info(
         "fl_batch.league.collision_audit",
@@ -799,6 +851,7 @@ async def process_league(
         merge_required_count=merge_required_count,
         proposed_aliases=proposals,
         collision_report=report,
+        phantoms_to_release=phantoms_to_release,
         elapsed_sec=elapsed,
     )
 
@@ -857,10 +910,109 @@ def write_league_bundle(out_dir: Path, bundle: LeagueBundle) -> Path:
     # aliases_audited.md
     _write_aliases_md(league_dir / "aliases_audited.md", bundle)
 
+    # phantom_release.md (Day-37 BBL gate Finding 2 — two-part operation)
+    _write_phantom_release_md(league_dir / "phantom_release.md", bundle)
+
     # seed.py.draft
     _write_seed_draft(league_dir / "seed.py.draft", bundle)
 
     return league_dir
+
+
+def _write_phantom_release_md(path: Path, bundle: LeagueBundle) -> None:
+    """Per Day-37 BBL gate Finding 2: ALIAS-LINK is a two-part operation.
+    Part 1 (this file) — DELETE 0-fixture dormant phantoms whose claim
+    on the canonical_name must be released before Part 2 can land.
+    Part 2 — aliases_audited.md's clean set.
+
+    The collision audit already excluded these phantom team_ids when
+    classifying proposals, so the aliases shown as "clean" become valid
+    AFTER phantom-release executes.
+    """
+    lines = [
+        f"# {bundle.league_info.league_name} — Phantom-release plan",
+        "",
+        "## Day-37 BBL gate Finding 2 — two-part ALIAS-LINK operation",
+        "",
+        "ALIAS-LINK is not a zero-operation. The dormant phantom",
+        "still owns its canonical_name; an alias add on the winner",
+        "collides with that ownership unless the phantom is removed",
+        "first.",
+        "",
+        "Two-part operation:",
+        "  1. (this file) DELETE the 0-fixture dormant phantoms",
+        "     listed below. Each is 0 fixtures by definition of the",
+        "     Day-37 ALIAS-LINK rule — no fixture history to migrate.",
+        "  2. (aliases_audited.md) Add the phantom's canonical as",
+        "     alias on the live winner team_id. The collision audit",
+        "     for this league EXCLUDED the phantom team_ids before",
+        "     classifying — so the 'clean' alias set is valid post-",
+        "     phantom-release.",
+        "",
+    ]
+    if not bundle.phantoms_to_release:
+        lines.append("No phantoms to release for this league "
+                     "(no ALIAS-LINK verdicts).")
+        path.write_text("\n".join(lines))
+        return
+
+    # Build a phantom_id → verdict lookup for context.
+    by_phantom = {
+        v.dormant_phantom_team_id: v
+        for v in bundle.fragmentation_verdicts
+        if v.classification == "ALIAS-LINK" and v.dormant_phantom_team_id
+    }
+    lines.append(f"## {len(bundle.phantoms_to_release)} phantom(s) to release")
+    lines.append("")
+    lines.append(
+        "| Phantom team_id | Phantom canonical | "
+        "Fixtures (must be 0) | Winner team_id | Winner canonical | "
+        "Alias to add post-release |"
+    )
+    lines.append("|---|---|---:|---|---|---|")
+    for phantom_id in bundle.phantoms_to_release:
+        v = by_phantom.get(phantom_id)
+        if not v:
+            lines.append(
+                f"| `{phantom_id}` | (verdict-not-found) | ? | "
+                "? | ? | ? |"
+            )
+            continue
+        # Identify which side is phantom vs winner.
+        if v.pair.anchor.team_id == phantom_id:
+            phantom_canon = v.pair.anchor.canonical_name
+            phantom_fc = v.anchor_fixture_count
+            winner_canon = v.pair.partner.canonical_name
+        else:
+            phantom_canon = v.pair.partner.canonical_name
+            phantom_fc = v.partner_fixture_count
+            winner_canon = v.pair.anchor.canonical_name
+        lines.append(
+            f"| `{phantom_id}` | {phantom_canon} | {phantom_fc} | "
+            f"`{v.canonical_winner_team_id}` | {winner_canon} | "
+            f"{v.proposed_alias_form} |"
+        )
+    lines.append("")
+    lines.append("## Suggested ordered execution")
+    lines.append("")
+    lines.append("```sql")
+    lines.append("-- Part 1: release the dormant phantoms (0 fixtures by")
+    lines.append("--         definition — no FK-cascade migration needed)")
+    for phantom_id in bundle.phantoms_to_release:
+        lines.append(f"DELETE FROM sp.teams WHERE id = '{phantom_id}';")
+    lines.append("")
+    lines.append("-- Part 2: apply the alias-link additions per the")
+    lines.append("--         clean set in aliases_audited.md (insert")
+    lines.append("--         each as sp.team_aliases row on the")
+    lines.append("--         canonical winner team_id).")
+    lines.append("```")
+    lines.append("")
+    lines.append("**Verification (after both parts):**")
+    lines.append("- Re-run amendment #22 collision audit; expect 0 collisions.")
+    lines.append("- Confirm no `sp.fixtures` rows referenced the released")
+    lines.append("  phantoms (each was 0 fixtures pre-release; the rule's")
+    lines.append("  precondition guarantees this).")
+    path.write_text("\n".join(lines))
 
 
 def _write_classification_md(path: Path, bundle: LeagueBundle) -> None:
@@ -926,6 +1078,16 @@ def _write_fragmentation_md(path: Path, bundle: LeagueBundle) -> None:
         lines.append("## ALIAS-LINK candidates (Day-37 LOCKED rule)")
         lines.append("")
         lines.append(
+            "**Two-part operation (Day-37 BBL gate Finding 2):** each "
+            "ALIAS-LINK below requires (1) DELETE the dormant phantom "
+            "team_id (releases its claim on the canonical_name), then "
+            "(2) add the phantom's canonical as alias on the winner. "
+            "See `phantom_release.md` for the consolidated Part-1 plan "
+            "and `aliases_audited.md` for the Part-2 alias set "
+            "(collision-audited with phantoms excluded — clean post-release)."
+        )
+        lines.append("")
+        lines.append(
             "| Anchor | Anchor fixtures | Partner | Partner fixtures | "
             "Canonical winner team_id | Dormant phantom team_id | "
             "Proposed alias | Shared distinctive |"
@@ -970,15 +1132,30 @@ def _write_fragmentation_md(path: Path, bundle: LeagueBundle) -> None:
 
 def _write_aliases_md(path: Path, bundle: LeagueBundle) -> None:
     r = bundle.collision_report
+    has_phantoms = bool(bundle.phantoms_to_release)
+    clean_label = (
+        "Clean post-phantom-release (safe to emit AFTER Part 1)"
+        if has_phantoms
+        else "Clean (safe to emit)"
+    )
     lines = [
         f"# {bundle.league_info.league_name} — Alias proposals (collision-audited)",
         "",
-        f"- Total proposed: {len(bundle.proposed_aliases)}",
-        f"- Clean (safe to emit): {len(r.clean)}",
-        f"- Same team already present: {len(r.same_team_already_present)}",
-        f"- Colliding (dropped): {len(r.colliding)}",
-        "",
     ]
+    if has_phantoms:
+        lines.append(
+            f"**Day-37 BBL gate Finding 2 — two-part operation.** This "
+            f"audit excluded {len(bundle.phantoms_to_release)} dormant "
+            "phantom team_id(s) per the ALIAS-LINK plan in "
+            "`phantom_release.md`. The 'clean' set below is valid AFTER "
+            "Part 1 (phantom DELETEs) executes. Apply order is mandatory."
+        )
+        lines.append("")
+    lines.append(f"- Total proposed: {len(bundle.proposed_aliases)}")
+    lines.append(f"- {clean_label}: {len(r.clean)}")
+    lines.append(f"- Same team already present: {len(r.same_team_already_present)}")
+    lines.append(f"- Colliding (dropped): {len(r.colliding)}")
+    lines.append("")
     if r.clean:
         lines.append("## Clean — safe to emit")
         lines.append("")
@@ -1123,6 +1300,9 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
     total_merge_required = sum(b.merge_required_count for b in bundles)
     total_clean = sum(len(b.collision_report.clean) for b in bundles)
     total_colliding = sum(len(b.collision_report.colliding) for b in bundles)
+    total_phantoms_to_release = sum(
+        len(b.phantoms_to_release) for b in bundles
+    )
 
     md_lines = [
         f"# FL universe batch crawl — index",
@@ -1142,7 +1322,10 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
         f"- SKIP: {total_skip}",
         f"- Fragmentation ALIAS-LINK: {total_alias_link}",
         f"- Fragmentation MERGE-REQUIRED: {total_merge_required}",
-        f"- Clean aliases (post-audit): {total_clean}",
+        f"- Phantoms to release (Part 1 of ALIAS-LINK): "
+        f"{total_phantoms_to_release}",
+        f"- Clean aliases (post-audit, post-phantom-release): "
+        f"{total_clean}",
         f"- Colliding aliases (dropped): {total_colliding}",
         "",
         "## Per-league summary",
@@ -1182,6 +1365,7 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
             "skip": total_skip,
             "fragmentation_alias_link": total_alias_link,
             "fragmentation_merge_required": total_merge_required,
+            "phantoms_to_release": total_phantoms_to_release,
             "aliases_clean": total_clean,
             "aliases_colliding": total_colliding,
         },
@@ -1201,6 +1385,7 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
                     "alias_link": b.alias_link_count,
                     "merge_required": b.merge_required_count,
                 },
+                "phantoms_to_release": list(b.phantoms_to_release),
                 "aliases": {
                     "clean": len(b.collision_report.clean),
                     "colliding": len(b.collision_report.colliding),

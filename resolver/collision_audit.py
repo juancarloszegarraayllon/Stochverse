@@ -159,6 +159,7 @@ def audit_alias_collisions_pure(
     proposed: Sequence[ProposedAlias],
     existing: Sequence[ExistingAliasMapping],
     sport_id: int,
+    excluded_team_ids: Sequence[str] = (),
 ) -> CollisionReport:
     """Classify `proposed` aliases as clean / same-team-already-present
     / colliding against the `existing` set.
@@ -170,7 +171,18 @@ def audit_alias_collisions_pure(
     `existing` should already be filtered to the same `sport_id` as
     the proposals. This function does not enforce that — caller's
     contract.
+
+    `excluded_team_ids` (Day-37 BBL gate Finding 2): team_ids that the
+    caller plans to DELETE before applying the alias set. Used by the
+    ALIAS-LINK phantom-release flow — emitting an alias for a name
+    whose only existing owner is a phantom we're about to remove is
+    safe, not colliding. Rows in `existing` belonging to these
+    team_ids are filtered out before classification.
     """
+    excluded = set(excluded_team_ids)
+    if excluded:
+        existing = [m for m in existing if m.team_id not in excluded]
+
     # Bucket existing rows by alias_normalized for O(1) lookup.
     by_normalized: dict[str, list[ExistingAliasMapping]] = {}
     for m in existing:
@@ -222,12 +234,17 @@ async def audit_alias_collisions(
     session,  # sqlalchemy.ext.asyncio.AsyncSession
     proposed_aliases: Iterable[ProposedAlias],
     sport_id: int,
+    excluded_team_ids: Iterable[str] = (),
 ) -> CollisionReport:
     """Async DB wrapper: fetch existing aliases for the proposed
     normalized forms within `sport_id`, then delegate to
     `audit_alias_collisions_pure`.
 
     `proposed_aliases` may be a generator or list; consumed once.
+
+    `excluded_team_ids` (Day-37 BBL gate Finding 2): team_ids the
+    caller plans to DELETE before applying. Forwarded to the pure
+    function for filtering.
 
     Returns CollisionReport. Caller decides whether to emit
     `report.emit_set` (default auto-drop) or surface
