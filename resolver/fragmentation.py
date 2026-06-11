@@ -33,21 +33,35 @@ Pair candidate iff:
   - The shorter side's distinctive tokens are a SUBSET of the longer
     side's (strict subset, after generic-token strip)
   - The shared tokens carry real content (non-generic)
+  - **Reserve-team guard** (Day-N+1 France LNB finding): NEITHER side
+    carries a reserve/junior marker that the other side lacks. Senior-
+    vs-reserve teams are distinct entities with their own fixtures and
+    competitions; pairing them would corrupt both teams' history. See
+    `_has_reserve_marker` for the marker list (U21..U24 age groups,
+    Espoirs, Reserve(s), Junior(s)/Jr, trailing standalone II/B).
 
 Examples that match:
   - "Oldenburg" {oldenburg} ⊆ "EWE Baskets Oldenburg" {ewe, oldenburg}
   - "Real Madrid" {real, madrid} ⊆ "Real Madrid Baloncesto"
     {real, madrid, baloncesto}
   - "Hamburg" {hamburg} ⊆ "Hamburg Towers" {hamburg, towers}
+  - "Gravelines-Dunkerque" vs "BCM Gravelines-Dunkerque" (real LNB
+    fragment, no reserve markers either side)
 
-Examples that do NOT match:
+Examples that do NOT match (reserve-team guard):
+  - "Monaco" vs "Monaco U21" (senior vs reserve squad)
+  - "Monaco" vs "Monaco Espoirs U21" (senior vs reserve)
+  - "Real Madrid" vs "Real Madrid B" (senior vs reserve)
+  - "Nanterre" vs "Nanterre 92 Espoirs" (senior vs reserve)
+
+Examples that do NOT match (other rules):
   - "Real Madrid" {real, madrid} vs "Real Sociedad" {real, sociedad}
     — neither is subset of the other
   - "Bayern" vs "FC Barcelona" — no shared distinctive token
 
 The rule is conservative — it catches strict subset relationships
 (true fragmentation shape) without overmatching distinct clubs that
-share only generic disambiguators.
+share only generic disambiguators or senior-vs-reserve splits.
 
 ## Architecture
 
@@ -64,10 +78,69 @@ batch-queries fixture counts.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Sequence
 
 from resolver.text_match import distinctive_tokens
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Reserve / junior marker detection (Day-N+1 France LNB finding)
+# ──────────────────────────────────────────────────────────────────────
+
+
+# Age-group markers: U15..U24 with optional separator (hyphen or
+# whitespace). Captures "U21", "U-21", "U 21" (which is what the
+# normalizer produces from "U-21" via the punct → space rule).
+_AGE_GROUP_RE = re.compile(r"(?i)\bU[-\s]?(?:1[5-9]|2[0-4])\b")
+
+# Named reserve / junior markers. Word-bounded so embedded substrings
+# don't false-positive (e.g. "Espoirs" hits, "Réespoir" does not).
+_NAMED_MARKER_RE = re.compile(
+    r"(?i)\b(?:espoir|espoirs|reserve|reserves|junior|juniors|jr\.?)\b"
+)
+
+# Trailing standalone "II" or "B". The trailing-only rule is critical:
+# we must NOT strip "B" from "BC" (a generic club prefix) or "II" from
+# "III" / other sequences. Anchored to end of string with optional
+# trailing whitespace; word-boundary before guards against matching
+# inside other words.
+#
+#   "Real Madrid B"   → matches (trailing standalone B)
+#   "Barcelona II"    → matches (trailing standalone II)
+#   "BC Vienna"       → no match (B is part of "BC", not trailing)
+#   "Real B Madrid"   → no match (B is standalone but not trailing)
+_TRAILING_B_OR_II_RE = re.compile(r"(?i)\b(?:II|B)\s*$")
+
+
+def _has_reserve_marker(canonical_name: str) -> bool:
+    """True if `canonical_name` contains any reserve / junior /
+    secondary-squad marker per the Day-N+1 France LNB finding.
+
+    Markers (case-insensitive, word-boundary matched):
+      - U15..U24 age groups, with optional hyphen or space
+        ("U21", "U-21", "U 21")
+      - Espoir / Espoirs (French reserve-squad label)
+      - Reserve / Reserves
+      - Junior / Juniors / Jr / Jr.
+      - Trailing standalone "II" or "B" (caution: NOT embedded "B"
+        inside "BC" / other words)
+
+    Returns False on empty input.
+    """
+    if not canonical_name:
+        return False
+    s = canonical_name.strip()
+    if not s:
+        return False
+    if _AGE_GROUP_RE.search(s):
+        return True
+    if _NAMED_MARKER_RE.search(s):
+        return True
+    if _TRAILING_B_OR_II_RE.search(s):
+        return True
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -136,10 +209,18 @@ def find_fragmentation_candidates_pure(
 
     Empty distinctive-tokens on either side → not a candidate (no
     real content to fragment on).
+
+    Reserve-team guard (Day-N+1): if exactly one side carries a
+    reserve / junior marker (U21, Espoirs, B, II, etc.), they're a
+    senior-vs-reserve split — distinct entities, NOT a fragmentation
+    pair. Pairs where BOTH sides have markers OR NEITHER does still
+    proceed (two reserves of the same club, or two senior variants,
+    can legitimately be fragments of each other).
     """
     anchor_tokens = set(distinctive_tokens(anchor.normalized_name))
     if not anchor_tokens:
         return []
+    anchor_has_reserve = _has_reserve_marker(anchor.canonical_name)
 
     pairs: list[FragmentationPair] = []
     seen_partner_ids: set[str] = set()
@@ -166,6 +247,13 @@ def find_fragmentation_candidates_pure(
             narrower_id = other.team_id
             shared = tuple(sorted(other_tokens))
         else:
+            continue
+        # Reserve-team guard (Day-N+1 France LNB finding).
+        other_has_reserve = _has_reserve_marker(other.canonical_name)
+        if anchor_has_reserve != other_has_reserve:
+            # Exactly one side is a reserve / junior squad — distinct
+            # entity from the senior club despite the token-subset
+            # match. Skip pair.
             continue
         pairs.append(FragmentationPair(
             anchor=anchor, partner=other,
