@@ -81,6 +81,47 @@ to make the post-phantom-release precondition explicit).
         aliases_audited.md            # proposed aliases → collision audit
         seed.py.draft                 # manifest skeleton
 
+## Curated-target mode (--leagues-file)
+
+Path B durable artifact. The 525-group --enumerate-only recon
+confirmed ~475 of FL's basketball groups are non-senior-club noise
+(national teams, youth, women's, 3x3, cups). Blind enumeration is
+wrong; the curated file is the right answer + a reusable annual-
+refresh target list.
+
+File format — one entry per line:
+
+    # Top European basketball leagues — annual refresh batch 1
+    Germany|BBL
+    Spain|Liga ACB
+    Italy|LBA
+    France|Pro A LNB
+    # Greece (commented out until next season starts)
+    # Greece|Basket League
+
+Matching: case-insensitive exact match on (country, league_name)
+against the same grouping /v1/tournaments/list produces.
+
+Behavior:
+  - Takes PRECEDENCE over --league-hint / --country-hint (logged
+    warning if both given; hints ignored).
+  - --max-leagues still works as a safety cap on top
+    (e.g. --leagues-file X --max-leagues 3 for a 3-league smoke).
+  - Unmatched entries logged as WARNING and surfaced in
+    index.md / index.json so the operator sees what didn't crawl.
+  - Batch continues on individual unmatched entries — a typo or
+    off-season league shouldn't kill the run.
+  - If ZERO entries match, hard error (likely typo on every line).
+
+Read-only. No DB writes.
+
+    DATABASE_URL=<url> FLASHLIVE_API_KEY=<key> \\
+      python scripts/fl_universe_batch.py \\
+        --sport-id 3 \\
+        --leagues-file ./leagues_eu_batch1.txt \\
+        --max-leagues 3 \\
+        --out-dir ./batch_eu_smoke/
+
 ## Reconnaissance mode (--enumerate-only)
 
 Before any full crawl, dump the complete FL catalog for a sport to
@@ -1294,6 +1335,93 @@ def _country_to_iso3(country_name: str) -> str | None:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# leagues-file (curated explicit-target list)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def load_leagues_file(path: Path) -> list[tuple[str, str]]:
+    """Parse a leagues-file: one entry per line as 'Country|League_Name'
+    (FL's exact COUNTRY_NAME / LEAGUE_NAME labels). Lines starting with
+    `#` are comments; blank lines ignored. Duplicates silently de-duped.
+
+    Returns list of (country, league_name) tuples in FILE ORDER —
+    matched groups are processed in the order they appear.
+
+    Raises ValueError on malformed lines (missing `|` separator or
+    empty country/league).
+    """
+    entries: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for line_no, raw in enumerate(path.read_text().splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "|" not in line:
+            raise ValueError(
+                f"leagues-file line {line_no}: missing '|' separator: "
+                f"{line!r}"
+            )
+        parts = line.split("|", 1)
+        country = parts[0].strip()
+        league = parts[1].strip()
+        if not country or not league:
+            raise ValueError(
+                f"leagues-file line {line_no}: empty country or "
+                f"league: {line!r}"
+            )
+        key = (country.lower(), league.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append((country, league))
+    return entries
+
+
+def filter_groups_by_leagues_file(
+    sorted_groups: list[list[LeagueCandidate]],
+    entries: list[tuple[str, str]],
+    log,
+) -> tuple[list[list[LeagueCandidate]], list[tuple[str, str]]]:
+    """Match curated entries against the FL grouping. Case-insensitive
+    exact match on (country, league_name).
+
+    Returns (matched_groups_in_file_order, unmatched_entries). Each
+    unmatched entry is logged as a warning so the operator sees the
+    miss in real time without aborting the batch.
+    """
+    # Build (country_lower, league_lower) → group lookup.
+    # First-seen wins (FL shouldn't have dupes, but defensive).
+    lookup: dict[tuple[str, str], list[LeagueCandidate]] = {}
+    for group in sorted_groups:
+        if not group:
+            continue
+        first = group[0]
+        key = (first.country.lower(), first.league_name.lower())
+        if key not in lookup:
+            lookup[key] = group
+
+    matched: list[list[LeagueCandidate]] = []
+    unmatched: list[tuple[str, str]] = []
+    for country, league in entries:
+        key = (country.lower(), league.lower())
+        group = lookup.get(key)
+        if group is None:
+            log.warning(
+                "fl_batch.leagues_file.not_found",
+                country=country,
+                league=league,
+            )
+            unmatched.append((country, league))
+            continue
+        matched.append(group)
+    log.info("fl_batch.leagues_file.matched",
+             entries_in=len(entries),
+             matched=len(matched),
+             unmatched=len(unmatched))
+    return matched, unmatched
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Enumeration-only mode (--enumerate-only)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -1456,8 +1584,16 @@ def write_enumeration(
 
 def write_index(out_dir: Path, bundles: list[LeagueBundle],
                 failed: list[tuple[str, str, str]],
-                metadata: dict) -> tuple[Path, Path]:
-    """Top-level summary across all leagues processed."""
+                metadata: dict,
+                unmatched_leagues_file: list[tuple[str, str]] | None = None,
+                ) -> tuple[Path, Path]:
+    """Top-level summary across all leagues processed.
+
+    `unmatched_leagues_file` (optional): entries from --leagues-file
+    that didn't match any FL enumeration group. Surfaced in both
+    index.md and index.json so the operator sees what didn't crawl.
+    """
+    unmatched_leagues_file = unmatched_leagues_file or []
     md_path = out_dir / "index.md"
     json_path = out_dir / "index.json"
 
@@ -1530,6 +1666,36 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
         for c, l, reason in failed:
             md_lines.append(f"| {c} | {l} | {reason} |")
 
+    if unmatched_leagues_file:
+        md_lines.append("")
+        md_lines.append(
+            "## Unmatched leagues-file entries (WARNING — did NOT crawl)"
+        )
+        md_lines.append("")
+        md_lines.append(
+            "These entries appeared in `--leagues-file` but did not match "
+            "any group in FL's `/v1/tournaments/list` enumeration "
+            "(case-insensitive exact match on country + league_name). "
+            "Possible causes:"
+        )
+        md_lines.append(
+            "- Typo in the file vs FL's exact COUNTRY_NAME / LEAGUE_NAME "
+            "labels. Re-verify against `--enumerate-only` output."
+        )
+        md_lines.append(
+            "- League is off-season / not currently in FL's enumeration "
+            "for this sport_id."
+        )
+        md_lines.append(
+            "- FL relabeled the league since the curated file was written. "
+            "Update the file to match current FL labels."
+        )
+        md_lines.append("")
+        md_lines.append("| Country (file) | League (file) |")
+        md_lines.append("|---|---|")
+        for country, league in unmatched_leagues_file:
+            md_lines.append(f"| {country} | {league} |")
+
     md_path.write_text("\n".join(md_lines))
 
     json_path.write_text(json.dumps({
@@ -1576,6 +1742,10 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
             {"country": c, "league_name": l, "reason": reason}
             for c, l, reason in failed
         ],
+        "unmatched_leagues_file": [
+            {"country": country, "league_name": league}
+            for country, league in unmatched_leagues_file
+        ],
     }, indent=2, ensure_ascii=False))
 
     return md_path, json_path
@@ -1612,6 +1782,41 @@ async def run(args, log) -> int:
     sport_id_str = str(args.sport_id)
     sport_id_int = int(args.sport_id)
 
+    # ── Parse --leagues-file early (validate before any FL call) ──
+    leagues_file_entries: list[tuple[str, str]] | None = None
+    if args.leagues_file:
+        try:
+            leagues_file_entries = load_leagues_file(Path(args.leagues_file))
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            print(f"ERROR: leagues-file invalid: {exc}",
+                  file=sys.stderr)
+            return 2
+        log.info("fl_batch.leagues_file.loaded",
+                 path=args.leagues_file,
+                 entry_count=len(leagues_file_entries))
+        if not leagues_file_entries:
+            print(
+                f"ERROR: leagues-file {args.leagues_file!r} parsed "
+                "OK but produced zero entries (only comments/blank "
+                "lines?).",
+                file=sys.stderr,
+            )
+            return 2
+        # Hint conflict: warn + ignore. The curated file IS the
+        # restriction.
+        if args.league_hint or args.country_hint:
+            log.warning(
+                "fl_batch.leagues_file.hints_ignored",
+                league_hint=args.league_hint,
+                country_hint=args.country_hint,
+                note="--leagues-file takes precedence; hints ignored",
+            )
+        effective_league_hint = ""
+        effective_country_hint = ""
+    else:
+        effective_league_hint = args.league_hint
+        effective_country_hint = args.country_hint
+
     # Track FL call count for index metadata. We approximate by counting
     # cache lookups vs misses on /v1/teams/data; tournaments_list +
     # standings calls are constant-bounded.
@@ -1620,12 +1825,13 @@ async def run(args, log) -> int:
     # League enumeration.
     log.info("fl_batch.enumerate.start",
              sport_id=sport_id_str,
-             league_hint=args.league_hint or "(any)",
-             country_hint=args.country_hint or "(any)")
+             league_hint=effective_league_hint or "(any)",
+             country_hint=effective_country_hint or "(any)",
+             leagues_file=args.leagues_file or "(none)")
     sorted_groups = await enumerate_leagues(
         sport_id=sport_id_str,
-        league_hint=args.league_hint,
-        country_hint=args.country_hint,
+        league_hint=effective_league_hint,
+        country_hint=effective_country_hint,
         log=log,
     )
     fl_calls += 1
@@ -1663,13 +1869,35 @@ async def run(args, log) -> int:
         print(f"  - {json_path}")
         return 0
 
+    # ── --leagues-file filter (curated explicit-target list) ──
+    unmatched_leagues_file: list[tuple[str, str]] = []
+    if leagues_file_entries is not None:
+        filtered_groups, unmatched_leagues_file = (
+            filter_groups_by_leagues_file(
+                sorted_groups=sorted_groups,
+                entries=leagues_file_entries,
+                log=log,
+            )
+        )
+        if not filtered_groups and unmatched_leagues_file:
+            print(
+                f"ERROR: leagues-file produced 0 matches against FL "
+                f"enumeration ({len(unmatched_leagues_file)} entries, "
+                "none matched). Re-run with --enumerate-only to verify "
+                "exact FL labels.",
+                file=sys.stderr,
+            )
+            return 3
+        sorted_groups = filtered_groups
+
     capped_groups = (
         sorted_groups[:args.max_leagues]
         if args.max_leagues > 0 else sorted_groups
     )
     log.info("fl_batch.enumerate.complete",
              total_groups=len(sorted_groups),
-             will_process=len(capped_groups))
+             will_process=len(capped_groups),
+             unmatched_leagues_file=len(unmatched_leagues_file))
 
     # Bulk-load sp.teams ONCE for the sport.
     async with async_session() as session:
@@ -1739,6 +1967,12 @@ async def run(args, log) -> int:
         "sport_id": sport_id_int,
         "league_hint": args.league_hint,
         "country_hint": args.country_hint,
+        "leagues_file": args.leagues_file or None,
+        "leagues_file_entries": (
+            len(leagues_file_entries)
+            if leagues_file_entries is not None else None
+        ),
+        "leagues_file_unmatched": len(unmatched_leagues_file),
         "max_leagues": args.max_leagues,
         "leagues_attempted": len(capped_groups),
         "leagues_succeeded": len(bundles),
@@ -1749,6 +1983,7 @@ async def run(args, log) -> int:
     }
     md_path, json_path = write_index(
         out_dir=out_dir, bundles=bundles, failed=failed,
+        unmatched_leagues_file=unmatched_leagues_file,
         metadata=metadata,
     )
 
@@ -1788,6 +2023,19 @@ def main(argv: list[str] | None = None) -> int:
                              "Empty = enumerate all countries.")
     parser.add_argument("--out-dir", default="./batch_output",
                         help="Top-level output directory.")
+    parser.add_argument("--leagues-file", default="",
+                        help="Path to a curated leagues file. Format: "
+                             "one entry per line as 'Country|League_Name' "
+                             "(FL's exact COUNTRY_NAME / LEAGUE_NAME "
+                             "labels from --enumerate-only output). "
+                             "Lines starting with '#' are comments; "
+                             "blank lines ignored. Case-insensitive "
+                             "exact match. TAKES PRECEDENCE over "
+                             "--league-hint / --country-hint (hints "
+                             "ignored when this is set). --max-leagues "
+                             "still works as a safety cap on top. "
+                             "Unmatched entries logged as WARNING and "
+                             "surfaced in index.md; batch continues.")
     parser.add_argument("--enumerate-only", action="store_true",
                         help="Reconnaissance mode: emit a catalog of "
                              "all leagues FL exposes for --sport-id, "
