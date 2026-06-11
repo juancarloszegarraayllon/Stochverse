@@ -81,6 +81,22 @@ to make the post-phantom-release precondition explicit).
         aliases_audited.md            # proposed aliases → collision audit
         seed.py.draft                 # manifest skeleton
 
+## Reconnaissance mode (--enumerate-only)
+
+Before any full crawl, dump the complete FL catalog for a sport to
+scope filtering strategy. Per Day-N+1 5-league staging finding,
+blind enumeration front-loads national-team / youth / women's /
+qualifier tournaments (AfroBasket, AfroCan, AfroBasket Women,
+African Championship U18, etc.) rather than senior club leagues.
+
+    FLASHLIVE_API_KEY=<key> python scripts/fl_universe_batch.py \\
+      --sport-id 3 \\
+      --enumerate-only \\
+      --out-dir ./recon_basketball/
+
+Writes enumeration.md + enumeration.json. No standings or team_data
+calls. DATABASE_URL not required in this mode. ~1 FL call.
+
 ## Operator's first-validation gate
 
 Re-run BBL through the full batch path:
@@ -1277,6 +1293,167 @@ def _country_to_iso3(country_name: str) -> str | None:
     return m.get(country_name.strip().lower())
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Enumeration-only mode (--enumerate-only)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def write_enumeration(
+    out_dir: Path,
+    groups: list[list[LeagueCandidate]],
+    metadata: dict,
+) -> tuple[Path, Path]:
+    """Reconnaissance output: full catalog of FL's enumeration for a
+    sport_id, with NO standings/team_data calls.
+
+    Per Day-N+1 5-league staging finding: blind enumeration front-
+    loads national-team / youth / women's / qualifier tournaments
+    (AfroBasket, AfroCan, AfroBasket Women, African Championship U18).
+    Operator filters from this catalog before running the actual
+    crawl.
+
+    Sort: country (asc, "Unknown" last), then league_name (asc).
+    """
+    md_path = out_dir / "enumeration.md"
+    json_path = out_dir / "enumeration.json"
+
+    # Normalize each group into a row record. Stages within a group
+    # are de-duplicated by (stage_id, stage_name) to keep the row
+    # compact.
+    rows: list[dict] = []
+    for group in groups:
+        if not group:
+            continue
+        first = group[0]
+        seen_stage_ids: set[str] = set()
+        stages: list[dict] = []
+        for c in group:
+            if c.stage_id in seen_stage_ids:
+                continue
+            seen_stage_ids.add(c.stage_id)
+            stages.append({
+                "stage_id": c.stage_id,
+                "stage_name": c.stage_name,
+            })
+        rows.append({
+            "country": first.country or "Unknown",
+            "league_name": first.league_name,
+            "season_id": first.season_id,
+            "stage_count": len(stages),
+            "stages": stages,
+        })
+
+    def _country_sort_key(c: str) -> tuple[int, str]:
+        # "Unknown" last; otherwise alphabetical case-insensitive.
+        if not c or c.lower() == "unknown":
+            return (1, "")
+        return (0, c.lower())
+
+    rows.sort(
+        key=lambda r: (_country_sort_key(r["country"]),
+                       (r["league_name"] or "").lower()),
+    )
+
+    md_lines: list[str] = []
+    md_lines.append(
+        f"# FL universe enumeration — sport_id={metadata['sport_id']}"
+    )
+    md_lines.append("")
+    md_lines.append(
+        f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}"
+    )
+    md_lines.append(
+        f"Mode: --enumerate-only (no standings/team_data fetches)"
+    )
+    md_lines.append(
+        f"FL calls: {metadata['fl_call_count']}"
+    )
+    md_lines.append(
+        f"Total league groups: {len(rows)}"
+    )
+    if metadata.get("league_hint"):
+        md_lines.append(
+            f"League hint filter: `{metadata['league_hint']}`"
+        )
+    if metadata.get("country_hint"):
+        md_lines.append(
+            f"Country hint filter: `{metadata['country_hint']}`"
+        )
+    md_lines.append(f"Elapsed: {metadata['elapsed_sec']:.2f}s")
+    md_lines.append("")
+    md_lines.append("## Country distribution")
+    md_lines.append("")
+    country_counts = Counter(r["country"] for r in rows)
+    md_lines.append("| Country | League groups |")
+    md_lines.append("|---|---:|")
+    for country, count in sorted(
+        country_counts.items(),
+        key=lambda kv: (_country_sort_key(kv[0]), kv[0]),
+    ):
+        md_lines.append(f"| {country} | {count} |")
+    md_lines.append("")
+    md_lines.append(
+        "## Per-group catalog (sorted by country, then league name)"
+    )
+    md_lines.append("")
+    md_lines.append(
+        "| Country | League | Stages | Stage names |"
+    )
+    md_lines.append("|---|---|---:|---|")
+    for r in rows:
+        stage_names = ", ".join(s["stage_name"] or "(unnamed)"
+                                for s in r["stages"])
+        # Escape pipe chars in names so the table renders.
+        league_safe = (r["league_name"] or "").replace("|", "\\|")
+        stage_safe = stage_names.replace("|", "\\|")
+        md_lines.append(
+            f"| {r['country']} | {league_safe} | {r['stage_count']} | "
+            f"{stage_safe} |"
+        )
+    md_lines.append("")
+    md_lines.append(
+        "## Filter strategy guidance (operator)"
+    )
+    md_lines.append("")
+    md_lines.append(
+        "Recommended: review this catalog and identify the senior-"
+        "club-league subset worth bootstrapping. Common noise patterns "
+        "to filter:"
+    )
+    md_lines.append(
+        "  - National-team tournaments (AfroBasket, EuroBasket, "
+        "AmeriCup, FIBA Asia Cup, etc.)"
+    )
+    md_lines.append(
+        "  - Youth competitions (U18, U19, U20, Junior, Espoirs)"
+    )
+    md_lines.append(
+        "  - Women's competitions (often labeled with 'Women', 'W', "
+        "'Femenina', 'Damen', 'Femminile')"
+    )
+    md_lines.append(
+        "  - Qualification rounds (already de-prioritized by "
+        "stage-rank, but the league-group itself may also be a "
+        "qualifier-only tournament)"
+    )
+    md_lines.append(
+        "  - International cups vs domestic top tiers (different scope)"
+    )
+    md_lines.append("")
+    md_lines.append(
+        "Once the subset is identified, re-run without --enumerate-"
+        "only, optionally with --league-hint / --country-hint to "
+        "narrow the crawl."
+    )
+
+    md_path.write_text("\n".join(md_lines))
+    json_path.write_text(json.dumps(
+        {"metadata": metadata, "groups": rows},
+        indent=2, ensure_ascii=False,
+    ))
+    return md_path, json_path
+
+
 def write_index(out_dir: Path, bundles: list[LeagueBundle],
                 failed: list[tuple[str, str, str]],
                 metadata: dict) -> tuple[Path, Path]:
@@ -1413,16 +1590,22 @@ async def run(args, log) -> int:
     if not os.environ.get("FLASHLIVE_API_KEY", "").strip():
         print("ERROR: FLASHLIVE_API_KEY not set", file=sys.stderr)
         return 1
-    if not os.environ.get("DATABASE_URL", "").strip():
-        print("ERROR: DATABASE_URL not set", file=sys.stderr)
-        return 1
-    if async_session is None:
-        print("ERROR: DATABASE_URL did not produce a session",
-              file=sys.stderr)
-        return 1
+    # DATABASE_URL is NOT required in --enumerate-only mode
+    # (no sp.teams lookups, no fixture queries).
+    if not args.enumerate_only:
+        if not os.environ.get("DATABASE_URL", "").strip():
+            print("ERROR: DATABASE_URL not set", file=sys.stderr)
+            return 1
+        if async_session is None:
+            print("ERROR: DATABASE_URL did not produce a session",
+                  file=sys.stderr)
+            return 1
 
     out_dir = Path(args.out_dir)
-    (out_dir / "leagues").mkdir(parents=True, exist_ok=True)
+    if args.enumerate_only:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        (out_dir / "leagues").mkdir(parents=True, exist_ok=True)
 
     started = time.monotonic()
 
@@ -1454,6 +1637,31 @@ async def run(args, log) -> int:
             file=sys.stderr,
         )
         return 3
+
+    # ── --enumerate-only early return ────────────────────────────
+    # Reconnaissance mode: emit the full catalog and stop. No
+    # standings / team_data calls; no DB lookups.
+    if args.enumerate_only:
+        elapsed = time.monotonic() - started
+        meta = {
+            "sport_id": sport_id_int,
+            "league_hint": args.league_hint,
+            "country_hint": args.country_hint,
+            "fl_call_count": fl_calls,
+            "total_groups": len(sorted_groups),
+            "elapsed_sec": elapsed,
+        }
+        md_path, json_path = write_enumeration(
+            out_dir=out_dir, groups=sorted_groups, metadata=meta,
+        )
+        print(f"\nFL enumeration-only complete in {elapsed:.1f}s.")
+        print(f"  sport_id: {sport_id_int}")
+        print(f"  league groups: {len(sorted_groups)}")
+        print(f"  FL calls: {fl_calls}")
+        print(f"\nOutputs:")
+        print(f"  - {md_path}")
+        print(f"  - {json_path}")
+        return 0
 
     capped_groups = (
         sorted_groups[:args.max_leagues]
@@ -1580,6 +1788,17 @@ def main(argv: list[str] | None = None) -> int:
                              "Empty = enumerate all countries.")
     parser.add_argument("--out-dir", default="./batch_output",
                         help="Top-level output directory.")
+    parser.add_argument("--enumerate-only", action="store_true",
+                        help="Reconnaissance mode: emit a catalog of "
+                             "all leagues FL exposes for --sport-id, "
+                             "WITHOUT calling /v1/tournaments/standings "
+                             "or /v1/teams/data. Writes enumeration.md "
+                             "(human-readable) + enumeration.json "
+                             "(structured) to --out-dir, then stops. "
+                             "Use to scope filtering strategy before "
+                             "running the actual crawl. Read-only; ~1 "
+                             "FL call. DATABASE_URL not required in "
+                             "this mode.")
     args = parser.parse_args(argv)
     log = get_logger("fl_universe_batch")
     return asyncio.run(run(args, log))
