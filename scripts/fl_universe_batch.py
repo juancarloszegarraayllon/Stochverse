@@ -941,7 +941,7 @@ def write_league_bundle(out_dir: Path, bundle: LeagueBundle) -> Path:
             }
             for c in bundle.league_info.candidates_tried
         ],
-    }, indent=2, ensure_ascii=False))
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # fl_intermediate.json
     (league_dir / "fl_intermediate.json").write_text(json.dumps({
@@ -956,7 +956,7 @@ def write_league_bundle(out_dir: Path, bundle: LeagueBundle) -> Path:
             }
             for t in bundle.fl_teams
         ],
-    }, indent=2, ensure_ascii=False))
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # classification.md
     _write_classification_md(league_dir / "classification.md", bundle)
@@ -1010,7 +1010,7 @@ def _write_phantom_release_md(path: Path, bundle: LeagueBundle) -> None:
     if not bundle.phantoms_to_release:
         lines.append("No phantoms to release for this league "
                      "(no ALIAS-LINK verdicts).")
-        path.write_text("\n".join(lines))
+        path.write_text("\n".join(lines), encoding="utf-8")
         return
 
     # Build a phantom_id → verdict lookup for context.
@@ -1069,7 +1069,7 @@ def _write_phantom_release_md(path: Path, bundle: LeagueBundle) -> None:
     lines.append("- Confirm no `sp.fixtures` rows referenced the released")
     lines.append("  phantoms (each was 0 fixtures pre-release; the rule's")
     lines.append("  precondition guarantees this).")
-    path.write_text("\n".join(lines))
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_classification_md(path: Path, bundle: LeagueBundle) -> None:
@@ -1107,7 +1107,7 @@ def _write_classification_md(path: Path, bundle: LeagueBundle) -> None:
             f"{c.name_count} | "
             f"{c.notes} |"
         )
-    path.write_text("\n".join(lines))
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_fragmentation_md(path: Path, bundle: LeagueBundle) -> None:
@@ -1124,7 +1124,7 @@ def _write_fragmentation_md(path: Path, bundle: LeagueBundle) -> None:
         lines.append("No fragmentation pairs detected. Per Day-37 rule, "
                      "no alias-link proposals or merge flags from this "
                      "league.")
-        path.write_text("\n".join(lines))
+        path.write_text("\n".join(lines), encoding="utf-8")
         return
 
     alias_links = [
@@ -1184,7 +1184,7 @@ def _write_fragmentation_md(path: Path, bundle: LeagueBundle) -> None:
                 f"{v.partner_fixture_count} | "
                 f"{v.notes} |"
             )
-    path.write_text("\n".join(lines))
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_aliases_md(path: Path, bundle: LeagueBundle) -> None:
@@ -1248,7 +1248,7 @@ def _write_aliases_md(path: Path, bundle: LeagueBundle) -> None:
             lines.append(
                 f"| `{p.alias_normalized}` | `{p.target_team_id}` |"
             )
-    path.write_text("\n".join(lines))
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_seed_draft(path: Path, bundle: LeagueBundle) -> None:
@@ -1306,7 +1306,7 @@ def _write_seed_draft(path: Path, bundle: LeagueBundle) -> None:
         lines.append(f'     "{note}"),')
         lines.append('')
     lines.append(']')
-    path.write_text("\n".join(lines))
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _country_to_iso3(country_name: str) -> str | None:
@@ -1352,7 +1352,11 @@ def load_leagues_file(path: Path) -> list[tuple[str, str]]:
     """
     entries: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for line_no, raw in enumerate(path.read_text().splitlines(), start=1):
+    # utf-8-sig tolerates a BOM at the head of file (some editors
+    # insert one) so line 1 doesn't break with a phantom 0xEF byte.
+    for line_no, raw in enumerate(
+        path.read_text(encoding="utf-8-sig").splitlines(), start=1,
+    ):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -1574,11 +1578,11 @@ def write_enumeration(
         "narrow the crawl."
     )
 
-    md_path.write_text("\n".join(md_lines))
+    md_path.write_text("\n".join(md_lines), encoding="utf-8")
     json_path.write_text(json.dumps(
         {"metadata": metadata, "groups": rows},
         indent=2, ensure_ascii=False,
-    ))
+    ), encoding="utf-8")
     return md_path, json_path
 
 
@@ -1696,7 +1700,7 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
         for country, league in unmatched_leagues_file:
             md_lines.append(f"| {country} | {league} |")
 
-    md_path.write_text("\n".join(md_lines))
+    md_path.write_text("\n".join(md_lines), encoding="utf-8")
 
     json_path.write_text(json.dumps({
         "metadata": metadata,
@@ -1746,7 +1750,7 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
             {"country": country, "league_name": league}
             for country, league in unmatched_leagues_file
         ],
-    }, indent=2, ensure_ascii=False))
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return md_path, json_path
 
