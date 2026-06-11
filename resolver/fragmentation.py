@@ -33,12 +33,17 @@ Pair candidate iff:
   - The shorter side's distinctive tokens are a SUBSET of the longer
     side's (strict subset, after generic-token strip)
   - The shared tokens carry real content (non-generic)
-  - **Reserve-team guard** (Day-N+1 France LNB finding): NEITHER side
-    carries a reserve/junior marker that the other side lacks. Senior-
-    vs-reserve teams are distinct entities with their own fixtures and
-    competitions; pairing them would corrupt both teams' history. See
-    `_has_reserve_marker` for the marker list (U21..U24 age groups,
-    Espoirs, Reserve(s), Junior(s)/Jr, trailing standalone II/B).
+  - **Distinct-entity guard** (Day-N+1 / Day-N+1+1 findings): NEITHER
+    side carries a distinct-entity marker that the other lacks. Two
+    flavors of marker, same mechanism:
+      * Reserve/junior (Day-N+1 France LNB): U21..U24, Espoirs,
+        Reserve(s), Junior(s)/Jr, trailing standalone II/B.
+      * Women's-team (Day-N+1+1 FIBA Europe Cup): Women(s)/Woman/
+        Ladies, Femenino/Femenina, Femminile, Féminin(es), Damen,
+        Kobiet/Kobiety, trailing standalone W.
+    Senior-vs-reserve and men's-vs-women's are distinct entities with
+    their own fixtures and competitions; pairing them would corrupt
+    both teams' history. See `_has_distinct_entity_marker`.
 
 Examples that match:
   - "Oldenburg" {oldenburg} ⊆ "EWE Baskets Oldenburg" {ewe, oldenburg}
@@ -46,13 +51,19 @@ Examples that match:
     {real, madrid, baloncesto}
   - "Hamburg" {hamburg} ⊆ "Hamburg Towers" {hamburg, towers}
   - "Gravelines-Dunkerque" vs "BCM Gravelines-Dunkerque" (real LNB
-    fragment, no reserve markers either side)
+    fragment, no distinct-entity markers either side)
 
 Examples that do NOT match (reserve-team guard):
   - "Monaco" vs "Monaco U21" (senior vs reserve squad)
   - "Monaco" vs "Monaco Espoirs U21" (senior vs reserve)
   - "Real Madrid" vs "Real Madrid B" (senior vs reserve)
   - "Nanterre" vs "Nanterre 92 Espoirs" (senior vs reserve)
+
+Examples that do NOT match (women's-team guard):
+  - "Basket Zaragoza" vs "Casademont Zaragoza Femenino"
+    (men's vs women's squad)
+  - "Basket Zaragoza" vs "Zaragoza W" (trailing standalone W)
+  - "Bayern München" vs "Bayern München Damen" (German women's)
 
 Examples that do NOT match (other rules):
   - "Real Madrid" {real, madrid} vs "Real Sociedad" {real, sociedad}
@@ -79,6 +90,7 @@ batch-queries fixture counts.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -86,9 +98,25 @@ from resolver.text_match import distinctive_tokens
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Reserve / junior marker detection (Day-N+1 France LNB finding)
+# Distinct-entity marker detection
 # ──────────────────────────────────────────────────────────────────────
+#
+# Two finding-driven additions:
+#   - Day-N+1 (France LNB): reserve / junior squads (U21, Espoirs,
+#     trailing B / II, Junior / Jr) are distinct entities from the
+#     senior club — must NOT pair with the senior squad.
+#   - Day-N+1+1 (FIBA Europe Cup, Basket Zaragoza ↔ Casademont
+#     Zaragoza Femenino): women's teams are distinct entities from
+#     the men's club — same guard.
+#
+# Both are handled by the same pairing logic: if exactly one side
+# carries a distinct-entity marker, they're not a fragmentation
+# pair. _has_distinct_entity_marker is the aggregate the pairing
+# logic uses; _has_reserve_marker and _has_gender_marker remain
+# separately testable for clarity.
 
+
+# --- Reserve / junior markers (Day-N+1 France LNB) -----------------
 
 # Age-group markers: U15..U24 with optional separator (hyphen or
 # whitespace). Captures "U21", "U-21", "U 21" (which is what the
@@ -112,6 +140,43 @@ _NAMED_MARKER_RE = re.compile(
 #   "BC Vienna"       → no match (B is part of "BC", not trailing)
 #   "Real B Madrid"   → no match (B is standalone but not trailing)
 _TRAILING_B_OR_II_RE = re.compile(r"(?i)\b(?:II|B)\s*$")
+
+
+# --- Gender / women's markers (Day-N+1+1 FIBA Europe Cup) ---------
+
+# Named women's-team markers. We apply these to an accent-stripped
+# lowercase form of canonical_name so French "féminin", Italian
+# "femminile", etc. all match regardless of source-language accents.
+_GENDER_NAMED_RE = re.compile(
+    r"\b(?:"
+    r"women|womens|woman|ladies|"
+    r"femenino|femenina|"        # Spanish
+    r"femminile|"                # Italian
+    r"feminin|feminins|feminines|"  # French (post NFD)
+    r"damen|"                    # German
+    r"kobiet|kobiety"            # Polish
+    r")\b"
+)
+
+# Trailing standalone "W" — analogous to B/II trailing rule. Must NOT
+# strip "W" from inside "BW" / "BWB" / other words.
+#
+#   "Zaragoza W"  → matches (trailing standalone W)
+#   "BW"          → no match (W not preceded by word boundary)
+#   "BWB"         → no match (W not trailing)
+#   "Wroclaw"     → no match (ends in w but no boundary before)
+_TRAILING_W_RE = re.compile(r"(?i)\bW\s*$")
+
+
+def _strip_accents_lower(s: str) -> str:
+    """NFD-strip + lowercase. Used by `_has_gender_marker` so source-
+    language accents (féminin, féminines) match against ASCII-form
+    regex patterns."""
+    decomposed = unicodedata.normalize("NFD", s)
+    no_combining = "".join(
+        c for c in decomposed if not unicodedata.combining(c)
+    )
+    return no_combining.lower()
 
 
 def _has_reserve_marker(canonical_name: str) -> bool:
@@ -141,6 +206,54 @@ def _has_reserve_marker(canonical_name: str) -> bool:
     if _TRAILING_B_OR_II_RE.search(s):
         return True
     return False
+
+
+def _has_gender_marker(canonical_name: str) -> bool:
+    """True if `canonical_name` carries a women's-team / gender
+    marker per the Day-N+1+1 FIBA Europe Cup finding.
+
+    Markers (case-insensitive, accent-insensitive, word-boundary):
+      - Women / Womens / Woman / Ladies (English)
+      - Femenino / Femenina (Spanish)
+      - Femminile (Italian)
+      - Féminin / Féminins / Féminines (French; accent stripped)
+      - Damen (German)
+      - Kobiet / Kobiety (Polish)
+      - Trailing standalone "W" (caution: NOT embedded "W" inside
+        "BW" / "BWB" / other words)
+
+    Returns False on empty input.
+    """
+    if not canonical_name:
+        return False
+    s = canonical_name.strip()
+    if not s:
+        return False
+    # Trailing W check on the original case — case-insensitive regex
+    # handles upper/lower internally.
+    if _TRAILING_W_RE.search(s):
+        return True
+    # Accent-strip + lowercase for the named-marker check so French
+    # "Féminin", Italian "Femminile" etc. all match.
+    s_stripped = _strip_accents_lower(s)
+    if _GENDER_NAMED_RE.search(s_stripped):
+        return True
+    return False
+
+
+def _has_distinct_entity_marker(canonical_name: str) -> bool:
+    """Aggregate of `_has_reserve_marker` + `_has_gender_marker`.
+
+    Used by the fragmentation pairing logic: if EITHER side has a
+    distinct-entity marker the other lacks, they're not a
+    fragmentation pair — they're senior-vs-reserve OR men's-vs-
+    women's, both being distinct entities with their own fixture
+    histories.
+    """
+    return (
+        _has_reserve_marker(canonical_name)
+        or _has_gender_marker(canonical_name)
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -210,17 +323,18 @@ def find_fragmentation_candidates_pure(
     Empty distinctive-tokens on either side → not a candidate (no
     real content to fragment on).
 
-    Reserve-team guard (Day-N+1): if exactly one side carries a
-    reserve / junior marker (U21, Espoirs, B, II, etc.), they're a
-    senior-vs-reserve split — distinct entities, NOT a fragmentation
+    Distinct-entity guard (Day-N+1 / Day-N+1+1): if exactly one side
+    carries a distinct-entity marker (reserve: U21/Espoirs/B/II/...;
+    women's: W/Femenino/Damen/...), they're a senior-vs-reserve OR
+    men's-vs-women's split — distinct entities, NOT a fragmentation
     pair. Pairs where BOTH sides have markers OR NEITHER does still
-    proceed (two reserves of the same club, or two senior variants,
+    proceed (two reserves, two women's teams, or two senior variants
     can legitimately be fragments of each other).
     """
     anchor_tokens = set(distinctive_tokens(anchor.normalized_name))
     if not anchor_tokens:
         return []
-    anchor_has_reserve = _has_reserve_marker(anchor.canonical_name)
+    anchor_has_marker = _has_distinct_entity_marker(anchor.canonical_name)
 
     pairs: list[FragmentationPair] = []
     seen_partner_ids: set[str] = set()
@@ -248,12 +362,15 @@ def find_fragmentation_candidates_pure(
             shared = tuple(sorted(other_tokens))
         else:
             continue
-        # Reserve-team guard (Day-N+1 France LNB finding).
-        other_has_reserve = _has_reserve_marker(other.canonical_name)
-        if anchor_has_reserve != other_has_reserve:
-            # Exactly one side is a reserve / junior squad — distinct
-            # entity from the senior club despite the token-subset
-            # match. Skip pair.
+        # Distinct-entity guard (Day-N+1 France LNB reserve teams +
+        # Day-N+1+1 FIBA Europe Cup women's teams). Same mechanism.
+        other_has_marker = _has_distinct_entity_marker(
+            other.canonical_name
+        )
+        if anchor_has_marker != other_has_marker:
+            # Exactly one side carries a distinct-entity marker
+            # (reserve/junior or women's). Despite the token-subset
+            # match they're distinct clubs/squads. Skip pair.
             continue
         pairs.append(FragmentationPair(
             anchor=anchor, partner=other,

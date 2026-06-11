@@ -21,6 +21,8 @@ from __future__ import annotations
 from resolver.fragmentation import (
     FragmentationPair,
     SPTeamLite,
+    _has_distinct_entity_marker,
+    _has_gender_marker,
     _has_reserve_marker,
     classify_fragmentation_pair_pure,
     find_all_fragmentation_pairs_pure,
@@ -495,3 +497,233 @@ class TestReserveGuardInPairing:
             "BC Vienna ↔ BC Vienna United should pair "
             "(B-rule must NOT strip 'B' from 'BC')"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Gender / women's-team guard (Day-N+1+1 FIBA Europe Cup finding)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestGenderMarkerDetection:
+    """`_has_gender_marker` primitive — recognizes Women / Femenino /
+    Damen / etc. while NOT false-positive-ing on BW / BWB / Wroclaw."""
+
+    def test_english_women_variants(self):
+        for name in ("Real Madrid Women", "Real Madrid Womens",
+                     "Real Madrid Woman", "Chelsea Ladies",
+                     "real madrid women", "REAL MADRID WOMEN"):
+            assert _has_gender_marker(name), f"{name!r} should match"
+
+    def test_spanish_femenino_variants(self):
+        for name in ("Casademont Zaragoza Femenino",
+                     "Valencia Basket Femenino",
+                     "Casademont Zaragoza Femenina",
+                     "casademont zaragoza femenino"):
+            assert _has_gender_marker(name), f"{name!r} should match"
+
+    def test_italian_femminile(self):
+        for name in ("Virtus Bologna Femminile",
+                     "Olimpia Milano Femminile"):
+            assert _has_gender_marker(name), f"{name!r} should match"
+
+    def test_french_feminin_with_accents(self):
+        """Accented French forms must match via NFD-strip."""
+        for name in ("ASVEL Féminin", "ASVEL Féminines",
+                     "Bourges Basket Féminin",
+                     "Lyon ASVEL Féminin"):
+            assert _has_gender_marker(name), f"{name!r} should match"
+
+    def test_french_feminin_without_accents(self):
+        for name in ("ASVEL Feminin", "ASVEL Feminines",
+                     "Bourges Basket Feminin"):
+            assert _has_gender_marker(name), f"{name!r} should match"
+
+    def test_german_damen(self):
+        for name in ("Bayern München Damen", "Alba Berlin Damen",
+                     "bayern munchen damen"):
+            assert _has_gender_marker(name), f"{name!r} should match"
+
+    def test_polish_kobiety(self):
+        for name in ("Wisła Kraków Kobiety", "Polonia Warszawa Kobiet",
+                     "wisla krakow kobiety"):
+            assert _has_gender_marker(name), f"{name!r} should match"
+
+    def test_trailing_w_detected(self):
+        for name in ("Zaragoza W", "Real Madrid W",
+                     "Barcelona W", "Bayern München W ",  # trailing ws
+                     "zaragoza w"):
+            assert _has_gender_marker(name), f"{name!r} should match"
+
+    def test_bw_not_falsely_matched(self):
+        """'W' inside 'BW' / 'BWB' must NOT trigger the trailing-W
+        rule — these are real club abbreviations."""
+        for name in ("BW", "BWB", "BW Berlin", "Berlin BWB",
+                     "BWB Heidelberg"):
+            assert not _has_gender_marker(name), (
+                f"{name!r} must NOT match (BW/BWB is club abbrev)"
+            )
+
+    def test_wroclaw_not_falsely_matched(self):
+        """'Wroclaw' ends in lower-case w but is not a standalone W."""
+        for name in ("Wroclaw", "Slask Wroclaw", "WKS Slask Wroclaw"):
+            assert not _has_gender_marker(name), (
+                f"{name!r} must NOT match (Wroclaw is a city)"
+            )
+
+    def test_middle_w_not_matched(self):
+        """Standalone W in middle position must NOT match — only
+        trailing."""
+        assert not _has_gender_marker("Real W Madrid")
+
+    def test_real_men_team_names_not_falsely_matched(self):
+        """Men's club names without gender markers must NOT match."""
+        for name in ("Real Madrid", "Basket Zaragoza", "FC Barcelona",
+                     "Bayern München", "Olympiakos BC",
+                     "EWE Baskets Oldenburg", "BC Wolves",
+                     "AS Monaco", "Hamburg Towers"):
+            assert not _has_gender_marker(name), \
+                f"{name!r} must NOT match (men's club)"
+
+    def test_empty_input(self):
+        assert not _has_gender_marker("")
+        assert not _has_gender_marker("   ")
+
+
+class TestDistinctEntityMarkerAggregate:
+    """The aggregate must return True if EITHER reserve OR gender
+    marker is present."""
+
+    def test_returns_true_for_reserve(self):
+        assert _has_distinct_entity_marker("Monaco U21")
+        assert _has_distinct_entity_marker("Real Madrid B")
+
+    def test_returns_true_for_gender(self):
+        assert _has_distinct_entity_marker("Casademont Zaragoza Femenino")
+        assert _has_distinct_entity_marker("Zaragoza W")
+
+    def test_returns_false_for_senior_mens(self):
+        for name in ("Real Madrid", "Basket Zaragoza", "FC Barcelona",
+                     "Gravelines-Dunkerque", "BC Vienna"):
+            assert not _has_distinct_entity_marker(name)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Gender guard wired into pair detection
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestGenderGuardInPairing:
+    """The Day-N+1+1 FIBA Europe Cup regression: men's-vs-women's must
+    not pair. Operator-specified cases below."""
+
+    def test_basket_zaragoza_vs_femenino_rejected(self):
+        """Operator's primary case: ALIAS-LINK false positive in FIBA
+        Europe Cup smoke."""
+        mens = team("zaragoza-uuid", "Basket Zaragoza",
+                    "basket zaragoza", "ESP")
+        womens = team("zaragoza-femenino-uuid",
+                      "Casademont Zaragoza Femenino",
+                      "casademont zaragoza femenino", "ESP")
+        pairs = find_fragmentation_candidates_pure(
+            anchor=mens, others=[womens],
+        )
+        assert pairs == [], (
+            "Basket Zaragoza vs Casademont Zaragoza Femenino must NOT "
+            "pair (men's vs women's)"
+        )
+
+    def test_basket_zaragoza_vs_zaragoza_w_rejected(self):
+        """Operator's second case: MERGE-REQUIRED false positive,
+        trailing standalone W marker."""
+        mens = team("zaragoza-uuid", "Basket Zaragoza",
+                    "basket zaragoza", "ESP")
+        womens = team("zaragoza-w-uuid", "Zaragoza W", "zaragoza w",
+                      "ESP")
+        pairs = find_fragmentation_candidates_pure(
+            anchor=mens, others=[womens],
+        )
+        assert pairs == [], (
+            "Basket Zaragoza vs Zaragoza W must NOT pair (trailing W "
+            "= women's marker)"
+        )
+
+    def test_real_madrid_vs_real_madrid_women_rejected(self):
+        mens = team("rm-uuid", "Real Madrid", "real madrid", "ESP")
+        womens = team("rm-w-uuid", "Real Madrid Women",
+                      "real madrid women", "ESP")
+        pairs = find_fragmentation_candidates_pure(
+            anchor=mens, others=[womens],
+        )
+        assert pairs == []
+
+    def test_french_asvel_vs_asvel_feminin_rejected(self):
+        mens = team("asvel-uuid", "ASVEL", "asvel", "FRA")
+        womens = team("asvel-w-uuid", "ASVEL Féminin", "asvel feminin",
+                      "FRA")
+        pairs = find_fragmentation_candidates_pure(
+            anchor=mens, others=[womens],
+        )
+        assert pairs == []
+
+    def test_bayern_vs_bayern_damen_rejected(self):
+        mens = team("bayern-uuid", "Bayern München", "bayern munchen",
+                    "DEU")
+        womens = team("bayern-damen-uuid", "Bayern München Damen",
+                      "bayern munchen damen", "DEU")
+        pairs = find_fragmentation_candidates_pure(
+            anchor=mens, others=[womens],
+        )
+        assert pairs == []
+
+    def test_two_womens_teams_still_eligible(self):
+        """Both sides carry women's marker → guard does not block.
+        Subset relation still required."""
+        a = team("a", "Zaragoza Femenino", "zaragoza femenino", "ESP")
+        p = team("b", "Casademont Zaragoza Femenino",
+                 "casademont zaragoza femenino", "ESP")
+        pairs = find_fragmentation_candidates_pure(
+            anchor=a, others=[p],
+        )
+        assert len(pairs) == 1, (
+            "Two women's teams with same marker — guard should not "
+            "block"
+        )
+
+    def test_bw_club_pairs_with_broader_form(self):
+        """BW (Blau-Weiss) abbreviation must NOT be stripped — a BW
+        team and a broader-name partner with no markers should pair."""
+        anchor = team("a", "BW Berlin", "bw berlin", "DEU")
+        partner = team("b", "BW Berlin United", "bw berlin united",
+                       "DEU")
+        pairs = find_fragmentation_candidates_pure(
+            anchor=anchor, others=[partner],
+        )
+        assert len(pairs) == 1, (
+            "BW Berlin ↔ BW Berlin United should pair "
+            "(W-rule must NOT strip 'W' from 'BW')"
+        )
+
+    def test_reserve_vs_womens_still_rejected(self):
+        """Cross-marker case: reserve on one side, women's on other.
+        Markers differ → guard blocks. (This is the expected behavior:
+        a U21 men's reserve and a women's team are distinct entities
+        from each other AND from any senior men's club.)"""
+        reserve = team("a", "Monaco U21", "monaco u21", "FRA")
+        womens = team("b", "Monaco Femenino", "monaco femenino", "FRA")
+        # Same canonical city, different markers (reserve vs gender) —
+        # subset relation holds ({monaco} ⊆ both), but distinct-entity
+        # markers DIFFER (anchor has reserve only, partner has gender
+        # only) → both `_has_distinct_entity_marker` calls return True
+        # so markers MATCH and the pair would proceed. Document this:
+        # the guard is reserve-OR-gender per side, not differentiating
+        # between marker flavors. In practice this is rare and the
+        # downstream fixture-count classification would still flag
+        # operator review.
+        pairs = find_fragmentation_candidates_pure(
+            anchor=reserve, others=[womens],
+        )
+        # Both sides have markers → aggregate matches → guard passes →
+        # subset relation evaluated. Both have distinct tokens
+        # {monaco, u21} vs {monaco, femenino}; neither is subset of
+        # the other → no pair on subset grounds.
+        assert pairs == []

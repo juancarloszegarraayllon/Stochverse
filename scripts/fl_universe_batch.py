@@ -1661,6 +1661,31 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
             f"{b.merge_required_count} | {len(b.collision_report.clean)} | "
             f"{len(b.collision_report.colliding)} | {b.elapsed_sec:.1f}s |"
         )
+    cross_league = _collect_cross_league_merges(bundles)
+    if cross_league:
+        md_lines.append("")
+        md_lines.append(
+            "## Consolidated MERGE-REQUIRED pairs (cross-league dedup)"
+        )
+        md_lines.append("")
+        md_lines.append(
+            "MERGE-REQUIRED pairs surfaced by multiple league bundles "
+            "are listed once below. Each pair is operator-run "
+            "Tennis-dedup-shape FK-cascade. The leagues column shows "
+            "every bundle in which the pair appeared."
+        )
+        md_lines.append("")
+        md_lines.append(
+            "| Team A (canonical) | Team B (canonical) | Leagues |"
+        )
+        md_lines.append("|---|---|---|")
+        for entry in cross_league:
+            leagues_str = "; ".join(entry["leagues"])
+            md_lines.append(
+                f"| {entry['team_a_canonical']} | "
+                f"{entry['team_b_canonical']} | {leagues_str} |"
+            )
+
     if failed:
         md_lines.append("")
         md_lines.append("## Failed leagues (no roster across any candidate stage)")
@@ -1750,9 +1775,51 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
             {"country": country, "league_name": league}
             for country, league in unmatched_leagues_file
         ],
+        "cross_league_merge_required": cross_league,
     }, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return md_path, json_path
+
+
+def _collect_cross_league_merges(
+    bundles: list[LeagueBundle],
+) -> list[dict]:
+    """Consolidate MERGE-REQUIRED verdicts across all bundles, deduped
+    by the unordered team_id pair.
+
+    Returns one entry per unique pair, with the list of leagues in
+    which it was flagged. Entries sorted by (canonical_a, canonical_b)
+    for stable output.
+    """
+    by_pair: dict[frozenset, dict] = {}
+    for b in bundles:
+        league_label = (
+            f"{b.league_info.country} / {b.league_info.league_name}"
+        )
+        for v in b.fragmentation_verdicts:
+            if v.classification != "MERGE-REQUIRED":
+                continue
+            a_id = v.pair.anchor.team_id
+            p_id = v.pair.partner.team_id
+            key = frozenset({a_id, p_id})
+            if key not in by_pair:
+                names = sorted([
+                    v.pair.anchor.canonical_name,
+                    v.pair.partner.canonical_name,
+                ])
+                by_pair[key] = {
+                    "team_a_canonical": names[0],
+                    "team_b_canonical": names[1],
+                    "team_a_id": sorted([a_id, p_id])[0],
+                    "team_b_id": sorted([a_id, p_id])[1],
+                    "leagues": [],
+                }
+            if league_label not in by_pair[key]["leagues"]:
+                by_pair[key]["leagues"].append(league_label)
+    return sorted(
+        by_pair.values(),
+        key=lambda e: (e["team_a_canonical"], e["team_b_canonical"]),
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
