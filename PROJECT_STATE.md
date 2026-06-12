@@ -6,6 +6,64 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Session — 2026-06-12
+
+### Day-36 afternoon: FL-universe BBL pilot RUN + evaluated (operator-driven, read-only)
+
+Operator ran `scripts/fl_universe_seed.py` from `claude/fl-universe-seed-pilot` against production FL API + Neon (read-only; no DB writes). First operator-driven run of the pilot.
+
+Discovery finding: `--league-hint 'Bundesliga'` returned 0 candidates; `'Basketball Bundesliga'` returned 0; `'BBL'` returned 5 candidates. FL labels German top-flight basketball as "BBL", not "Bundesliga". The default `--league-hint` baked into the script (`'Bundesliga'`) is wrong for this league. Same class as Amendment #23 (heuristic assumption ≠ FL response reality).
+
+Stage-rank fix (#23) confirmed working: 5 candidates surfaced — BBL Main [100,100], BBL Play-in [100,5], BBL Play Offs [100,5], DBBL Women Main [80,100], DBBL Women Play Offs [80,5]. Script correctly selected BBL Main (stage_id `rXnrx7Ca`, season_id `O6TXI3cK`); regular-season scored 100, knockout de-prioritized to 5, women's league scored lower on league-name (80) and was not selected. Standings returned 18 teams, no 404.
+
+Roster result: 18/18 teams harvested, 15.8s runtime. Classification: INSERT=3 (Bamberg, Bonn, Ulm), BACKFILL=15, SKIP=0.
+
+Authoritative-source verification (Wikipedia 2025-26 Basketball Bundesliga, amendment #13 discipline): roster count 18 confirmed exact — 0 missing, 0 phantom teams. FL structure layer (roster discovery, country=DEU population, FL crawl) validated as complete and correct.
+
+### Day-36 afternoon: FALSE-INSERT discovered — pilot classification layer NOT production-safe
+
+The 3 INSERTs were checked against production `sp.teams` via ILIKE/substring search (NOT exact normalized_name — the classifier already did exact-match and said "no match"). Result:
+
+| FL INSERT | Production reality | Verdict |
+|---|---|---|
+| Bamberg | `sp.teams` stub "Bamberg Baskets" EXISTS (id `7370e1f3-faff-40be-9139-25075d40dd62`, Phase 2A.5, country_code NULL) | FALSE-INSERT — should be BACKFILL |
+| Bonn | no stub under bonn/telekom (DEU) | genuine INSERT (authoritative: Telekom Baskets Bonn) |
+| Ulm | no stub under ulm/ratiopharm | genuine INSERT (authoritative: Ratiopharm Ulm) |
+
+False-INSERT rate: 1 of 3. Applying the pilot draft (`bbl_seed.py.draft`) as-is would have created a SECOND Bamberg team_id, fragmenting resolution (dormant-phantom failure mode).
+
+Mechanism: FL sends bare-city form ("Bamberg" → normalized "bamberg"); legacy stub carries fuller canonical ("Bamberg Baskets" → "bamberg baskets"). Exact normalized_name comparison cannot catch the substring relationship (`bamberg ⊆ bamberg baskets`). FL bare-city names systematically UNDER-MATCH legacy canonicals that carry suffixes ("Baskets", "Towers", sponsor names) — and this hits the most prominent, most internationally-active clubs hardest (the ones legacy bootstrap stored under fuller names).
+
+Epistemic note: `bbl_seed.py.draft` confidently labeled Bamberg "PILOT INSERT" with no UUID while production held a matching stub. The artifact looked authoritative but disagreed with production reality — same amendment #12/#18 shape (artifact verification over apparent-cleanliness). The 14/15 correct BACKFILLs are only as trustworthy as exact normalized_name matching happened to be; Bamberg proves the method can silently miss.
+
+### v1.5 amendment #26 (NEW)
+
+FL-universe automated INSERT/BACKFILL classification requires a fuzzy/substring reconciliation pass against existing `sp.teams` canonicals BEFORE apply. Exact normalized_name matching produces FALSE-INSERTs when FL's bare-city form is a substring of a fuller legacy canonical (Bamberg → Bamberg Baskets, Day-36 BBL pilot). The classifier's "no normalized match → INSERT" branch must be augmented: before emitting INSERT, run an ILIKE/substring/trigram check on the city/distinctive token against `sp.teams` (sport-scoped); any hit becomes a BACKFILL candidate for operator confirmation, not a silent INSERT. Pile expands 25 → 26.
+
+(Numbering note: briefing-draft labeled this #25; the existing v1.5 pile already holds #25 — the Day-37 canonical fragmentation resolution rule. This finding takes the next slot, #26.)
+
+### Day-36 afternoon: Engine-branch merge GATE
+
+`claude/fl-universe-engine` (108 tests, Components 1+2 + orchestrator + cross-league dedup) MUST NOT merge until the fuzzy-reconciliation layer (amendment #26) is built into the classifier AND tested. Rationale: if a single pilot league produced a false-INSERT, generalizing the engine across all leagues propagates the failure mode at scale. The engine's INSERT/BACKFILL output is unsafe until #26 is addressed.
+
+Scoped fix (engine branch, before merge):
+1. Augment `classify_against_sp_teams`: add substring/ILIKE/trigram reconciliation pass on distinctive token before emitting INSERT. Hit → BACKFILL candidate (operator-confirm), not silent INSERT.
+2. Re-run BBL pilot through the fixed classifier; assert Bamberg now classifies BACKFILL onto `7370e1f3`.
+3. Add regression test: bare-city FL name vs suffixed legacy canonical → BACKFILL, not INSERT.
+
+### Day-36 pilot evaluation — VERDICT
+
+FL-universe pilot SUCCEEDS as a structure-harvesting tool, FAILS as an apply-ready autopilot. Structure layer (roster/country/crawl) is excellent and genuinely 40min → 16s. Classification layer (INSERT/BACKFILL) is NOT production-safe without the amendment #26 fuzzy-reconciliation pass. Decision: keep the engine as a front-end scaffold; build #26 fix before engine merge; BBL can proceed as workstream #10 manual-finished from the CORRECTED scaffold (flip Bamberg INSERT → BACKFILL onto `7370e1f3`; keep Bonn/Ulm as genuine INSERTs; run Pattern A.2 alias discovery; amendment #22 audit; apply; F7).
+
+### Pending — Day-37 (updated)
+1. Build amendment #26 fuzzy-reconciliation layer into `fl-universe-engine` classifier; re-validate BBL; THEN reconsider engine merge.
+2. BBL workstream #10 manual-finish from corrected scaffold (optional — can wait for #26-fixed engine to regenerate clean).
+3. Daily-diff cron wiring (Days 33-34 measurement gaps).
+4. Review_queue operator work (16,755 pending, 9 lifetime processed).
+5. Tennis surname workstream (21.5% ceiling).
+
+---
+
 ## Session — 2026-06-10
 
 ### Day-37: Phase 2D.5-A retrospective committed
