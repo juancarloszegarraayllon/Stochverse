@@ -209,9 +209,11 @@ from resolver.collision_audit import (  # noqa: E402
 )
 from resolver.fragmentation import (  # noqa: E402
     SPTeamLite,
+    _has_distinct_entity_marker,
     classify_fragmentation_pair_pure,
     find_all_fragmentation_pairs_pure,
 )
+from resolver.text_match import distinctive_tokens  # noqa: E402
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -259,15 +261,33 @@ class FLTeam:
 
 @dataclass
 class ClassifiedTeam:
-    """FL team + sp.teams cross-reference verdict."""
+    """FL team + sp.teams cross-reference verdict.
+
+    Classifications:
+      - INSERT             — no exact match AND no Amendment #26
+                             reconciliation hit; genuine new team.
+      - BACKFILL           — exact `normalized_name` match on sp.teams
+                             row whose `country_code` is NULL.
+      - BACKFILL-CANDIDATE — Amendment #26 reconciliation match
+                             (distinctive-token subset/equality after
+                             generic-token strip; e.g. FL "Bamberg"
+                             onto sp.teams "Bamberg Baskets"). Requires
+                             operator confirmation before becoming a
+                             real BACKFILL apply.
+      - SKIP               — exact match AND country_code already set,
+                             OR FL canonical normalizes to empty.
+    """
     fl: FLTeam
-    classification: str  # INSERT | BACKFILL | SKIP
+    classification: str  # INSERT | BACKFILL | BACKFILL-CANDIDATE | SKIP
     sp_team_id: str | None = None
     sp_canonical: str | None = None
     sp_country_code: str | None = None
     sp_sport_id: int | None = None
     sp_created_at: str | None = None
     name_count: int = 0  # how many sp.teams rows share this normalized name
+    # Amendment #26 reconciliation evidence (BACKFILL-CANDIDATE only).
+    reconciliation_basis: str | None = None  # "exact-distinctive" | "subset-distinctive"
+    reconciliation_candidates: int = 0       # total sp.teams that reconciled (ambiguity flag)
     notes: str = ""
 
 
@@ -555,14 +575,25 @@ async def fetch_team_detail(
 
 async def load_sp_teams_for_sport(
     session, sport_id: int, log,
-) -> tuple[list[SPTeamLite], dict[str, list[SPTeamLite]]]:
+) -> tuple[
+    list[SPTeamLite],
+    dict[str, list[SPTeamLite]],
+    dict[str, list[SPTeamLite]],
+]:
     """Bulk-load every sp.teams row for the given sport. Returns
-    (all_teams, by_normalized) where by_normalized maps
-    normalized_name → list of teams sharing that name (name_count =
-    len of list).
+    `(all_teams, by_normalized, by_distinctive_token)` where:
 
-    SPTeamLite is reused from resolver.fragmentation; the same shape
-    feeds both classification and fragmentation detection.
+      - `by_normalized` maps `normalized_name` → list of teams sharing
+        that exact normalized name (name_count = len of list).
+      - `by_distinctive_token` (Amendment #26) maps each individual
+        distinctive token (post-generic-strip) → list of teams whose
+        normalized canonical contains that token. Used by
+        `classify_team_pure` for the reconciliation pass that catches
+        FL bare-city → fuller legacy canonical (Bamberg → Bamberg
+        Baskets, Day-36 BBL pilot finding).
+
+    SPTeamLite is reused from `resolver.fragmentation`; the same shape
+    feeds classification, reconciliation, and fragmentation detection.
     """
     rows = (await session.execute(
         text(
@@ -585,56 +616,159 @@ async def load_sp_teams_for_sport(
         for r in rows
     ]
     by_normalized: dict[str, list[SPTeamLite]] = {}
+    by_distinctive_token: dict[str, list[SPTeamLite]] = {}
     for t in all_teams:
         by_normalized.setdefault(t.normalized_name, []).append(t)
+        for tok in distinctive_tokens(t.normalized_name):
+            by_distinctive_token.setdefault(tok, []).append(t)
     log.info("fl_batch.sp_teams.loaded",
-             sport_id=sport_id, count=len(all_teams))
-    return all_teams, by_normalized
+             sport_id=sport_id, count=len(all_teams),
+             distinctive_tokens=len(by_distinctive_token))
+    return all_teams, by_normalized, by_distinctive_token
+
+
+def _reconcile_distinctive(
+    fl_distinctive: tuple[str, ...],
+    fl_canonical: str,
+    sp_distinctive_index: dict[str, list[SPTeamLite]],
+) -> list[tuple[SPTeamLite, str]]:
+    """Amendment #26 reconciliation pass.
+
+    Given FL's distinctive tokens (generic sport tokens stripped via
+    `resolver.text_match.distinctive_tokens`), return every sp.teams
+    row whose own distinctive tokens are equal to, a strict subset of,
+    or a strict superset of FL's. This catches the Day-36 BBL pilot
+    Bamberg shape: FL `"Bamberg"` → distinctive `("bamberg",)`; sp
+    stub `"Bamberg Baskets"` → distinctive `("bamberg",)` (generic
+    "baskets" stripped) → equal sets → reconciliation hit.
+
+    Distinct-entity-marker guard (Amendments #25/#26 share this
+    machinery): if FL and the sp candidate disagree on
+    reserve/junior/gender marker presence, skip — they're senior-vs-
+    reserve / men-vs-women, not the same club.
+
+    Each output is `(sp_team, match_basis)` where `match_basis` is
+    `"exact-distinctive"` (equal sets) or `"subset-distinctive"`
+    (strict subset/superset).
+    """
+    if not fl_distinctive:
+        return []
+    fl_set = set(fl_distinctive)
+    # Gather candidates: any sp.team that shares >= 1 distinctive token.
+    candidates: dict[str, SPTeamLite] = {}
+    for tok in fl_set:
+        for sp in sp_distinctive_index.get(tok, []):
+            candidates[sp.team_id] = sp
+    out: list[tuple[SPTeamLite, str]] = []
+    fl_has_marker = _has_distinct_entity_marker(fl_canonical)
+    for sp in candidates.values():
+        sp_set = set(distinctive_tokens(sp.normalized_name))
+        if not sp_set:
+            continue
+        if fl_has_marker != _has_distinct_entity_marker(sp.canonical_name):
+            continue
+        if fl_set == sp_set:
+            out.append((sp, "exact-distinctive"))
+        elif fl_set < sp_set or sp_set < fl_set:
+            out.append((sp, "subset-distinctive"))
+    return out
 
 
 def classify_team_pure(
     fl: FLTeam,
     by_normalized: dict[str, list[SPTeamLite]],
     sport_id: int,
+    sp_distinctive_index: dict[str, list[SPTeamLite]] | None = None,
 ) -> ClassifiedTeam:
-    """Pure classification: INSERT / BACKFILL / SKIP, with verify-
-    don't-trust columns on any match."""
+    """Pure classification: INSERT / BACKFILL / BACKFILL-CANDIDATE /
+    SKIP, with verify-don't-trust columns on any match.
+
+    Two-pass design:
+
+      1. Exact `normalized_name` match (fast path). Hit + country_code
+         set → SKIP; hit + country_code NULL → BACKFILL.
+      2. **Amendment #26 reconciliation pass.** No exact match → try
+         `_reconcile_distinctive` against `sp_distinctive_index`. Hit
+         → BACKFILL-CANDIDATE (operator-confirm); no hit → genuine
+         INSERT.
+
+    `sp_distinctive_index` is optional for backwards compatibility:
+    callers that pass `None` get only the exact-match pass and the
+    pre-#26 behavior (silent INSERT on no exact hit). Production
+    callers MUST pass the index built by `load_sp_teams_for_sport`.
+    """
     normed = fl.normalized
     if not normed:
         return ClassifiedTeam(
             fl=fl, classification="SKIP",
             notes="FL canonical normalizes to empty",
         )
+    # Pass 1: exact normalized_name match.
     matches = by_normalized.get(normed, [])
-    if not matches:
+    if matches:
+        name_count = len(matches)
+        sp = matches[0]
+        classification = "SKIP" if sp.country_code else "BACKFILL"
+        notes = (
+            "match found; country_code already set"
+            if sp.country_code
+            else "match found; country_code is NULL"
+        )
+        if name_count > 1:
+            notes += (
+                f"; AMBIGUOUS: {name_count} sp.teams rows share this "
+                "normalized_name — operator spot-check required"
+            )
         return ClassifiedTeam(
-            fl=fl, classification="INSERT",
-            notes="no normalized_name match in sp.teams",
+            fl=fl, classification=classification,
+            sp_team_id=sp.team_id,
+            sp_canonical=sp.canonical_name,
+            sp_country_code=sp.country_code,
+            sp_sport_id=sport_id,
+            sp_created_at=sp.created_at,
+            name_count=name_count,
+            notes=notes,
         )
-    name_count = len(matches)
-    # Pick the first match (caller is alerted via name_count > 1 if
-    # ambiguous — multi-team_id spot-check).
-    sp = matches[0]
-    classification = "SKIP" if sp.country_code else "BACKFILL"
-    notes = (
-        "match found; country_code already set"
-        if sp.country_code
-        else "match found; country_code is NULL"
-    )
-    if name_count > 1:
-        notes += (
-            f"; AMBIGUOUS: {name_count} sp.teams rows share this "
-            "normalized_name — operator spot-check required"
+    # Pass 2: Amendment #26 distinctive-token reconciliation.
+    if sp_distinctive_index is not None:
+        fl_dist = distinctive_tokens(normed)
+        recon = _reconcile_distinctive(
+            fl_distinctive=fl_dist,
+            fl_canonical=fl.fl_canonical,
+            sp_distinctive_index=sp_distinctive_index,
         )
+        if recon:
+            sp, basis = recon[0]
+            n_candidates = len(recon)
+            notes = (
+                f"Amendment #26 reconciliation hit ({basis}): "
+                f"FL distinctive {list(fl_dist)} → "
+                f"sp.teams.id={sp.team_id} canonical="
+                f"{sp.canonical_name!r}"
+            )
+            if n_candidates > 1:
+                notes += (
+                    f"; AMBIGUOUS: {n_candidates} sp.teams candidates "
+                    "reconciled — operator must select"
+                )
+            return ClassifiedTeam(
+                fl=fl, classification="BACKFILL-CANDIDATE",
+                sp_team_id=sp.team_id,
+                sp_canonical=sp.canonical_name,
+                sp_country_code=sp.country_code,
+                sp_sport_id=sport_id,
+                sp_created_at=sp.created_at,
+                name_count=n_candidates,
+                reconciliation_basis=basis,
+                reconciliation_candidates=n_candidates,
+                notes=notes,
+            )
     return ClassifiedTeam(
-        fl=fl, classification=classification,
-        sp_team_id=sp.team_id,
-        sp_canonical=sp.canonical_name,
-        sp_country_code=sp.country_code,
-        sp_sport_id=sport_id,
-        sp_created_at=sp.created_at,
-        name_count=name_count,
-        notes=notes,
+        fl=fl, classification="INSERT",
+        notes=(
+            "no normalized_name match AND no Amendment #26 "
+            "distinctive-token reconciliation match in sp.teams"
+        ),
     )
 
 
@@ -699,6 +833,7 @@ async def process_league(
     session,
     sp_teams_all: list[SPTeamLite],
     by_normalized: dict[str, list[SPTeamLite]],
+    by_distinctive_token: dict[str, list[SPTeamLite]],
     team_data_cache: dict[str, FLTeam],
     log,
 ) -> LeagueBundle | None:
@@ -754,10 +889,15 @@ async def process_league(
                 team_data_cache[tid] = ft
                 fl_teams.append(ft)
 
-    # Classify.
+    # Classify (Amendment #26: pass distinctive-token index for the
+    # reconciliation pass that turns FL-bare-city → fuller-legacy-
+    # canonical from silent INSERT into BACKFILL-CANDIDATE).
     classified = [
         classify_team_pure(
-            fl=t, by_normalized=by_normalized, sport_id=sport_id,
+            fl=t,
+            by_normalized=by_normalized,
+            sport_id=sport_id,
+            sp_distinctive_index=by_distinctive_token,
         )
         for t in fl_teams
     ]
@@ -891,6 +1031,10 @@ async def process_league(
         insert=sum(1 for c in classified if c.classification == "INSERT"),
         backfill=sum(1 for c in classified
                      if c.classification == "BACKFILL"),
+        backfill_candidate=sum(
+            1 for c in classified
+            if c.classification == "BACKFILL-CANDIDATE"
+        ),
         skip=sum(1 for c in classified if c.classification == "SKIP"),
         alias_link=alias_link_count,
         merge_required=merge_required_count,
@@ -1086,14 +1230,20 @@ def _write_classification_md(path: Path, bundle: LeagueBundle) -> None:
         "",
         f"- INSERT: {counts.get('INSERT', 0)}",
         f"- BACKFILL: {counts.get('BACKFILL', 0)}",
+        f"- BACKFILL-CANDIDATE (Amendment #26, operator-confirm): "
+        f"{counts.get('BACKFILL-CANDIDATE', 0)}",
         f"- SKIP: {counts.get('SKIP', 0)}",
         "",
         "## Per-team detail (verify-don't-trust columns)",
         "",
+        "BACKFILL-CANDIDATE rows are the Amendment #26 reconciliation "
+        "hits — operator must confirm the matched `sp.team_id` before "
+        "treating them as real BACKFILLs.",
+        "",
         "| Class | FL team_id | FL canonical | Country | "
         "sp.teams canonical | sp.team_id | sp_country_code | "
-        "sp_sport_id | created_at | name_count | Notes |",
-        "|---|---|---|---|---|---|---|---|---|---:|---|",
+        "sp_sport_id | created_at | name_count | Recon basis | Notes |",
+        "|---|---|---|---|---|---|---|---|---|---:|---|---|",
     ]
     for c in bundle.classified:
         lines.append(
@@ -1105,6 +1255,7 @@ def _write_classification_md(path: Path, bundle: LeagueBundle) -> None:
             f"{c.sp_sport_id if c.sp_sport_id is not None else '—'} | "
             f"{c.sp_created_at or '—'} | "
             f"{c.name_count} | "
+            f"{c.reconciliation_basis or '—'} | "
             f"{c.notes} |"
         )
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -1609,6 +1760,11 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
         sum(1 for c in b.classified if c.classification == "BACKFILL")
         for b in bundles
     )
+    total_backfill_candidate = sum(
+        sum(1 for c in b.classified
+            if c.classification == "BACKFILL-CANDIDATE")
+        for b in bundles
+    )
     total_skip = sum(
         sum(1 for c in b.classified if c.classification == "SKIP")
         for b in bundles
@@ -1636,6 +1792,7 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
         "",
         f"- INSERT: {total_insert}",
         f"- BACKFILL: {total_backfill}",
+        f"- BACKFILL-CANDIDATE (Amendment #26): {total_backfill_candidate}",
         f"- SKIP: {total_skip}",
         f"- Fragmentation ALIAS-LINK: {total_alias_link}",
         f"- Fragmentation MERGE-REQUIRED: {total_merge_required}",
@@ -1648,8 +1805,8 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
         "## Per-league summary",
         "",
         "| Country | League | Stage | Teams | INSERT | BACKFILL | "
-        "SKIP | A-L | Merge | Clean | Coll | Elapsed |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "B-CAND | SKIP | A-L | Merge | Clean | Coll | Elapsed |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for b in bundles:
         counts = Counter(c.classification for c in b.classified)
@@ -1657,6 +1814,7 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
             f"| {b.league_info.country} | {b.league_info.league_name} | "
             f"{b.league_info.chosen_stage_name} | {len(b.fl_teams)} | "
             f"{counts.get('INSERT', 0)} | {counts.get('BACKFILL', 0)} | "
+            f"{counts.get('BACKFILL-CANDIDATE', 0)} | "
             f"{counts.get('SKIP', 0)} | {b.alias_link_count} | "
             f"{b.merge_required_count} | {len(b.collision_report.clean)} | "
             f"{len(b.collision_report.colliding)} | {b.elapsed_sec:.1f}s |"
@@ -1734,6 +1892,7 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
             "leagues_failed": len(failed),
             "insert": total_insert,
             "backfill": total_backfill,
+            "backfill_candidate": total_backfill_candidate,
             "skip": total_skip,
             "fragmentation_alias_link": total_alias_link,
             "fragmentation_merge_required": total_merge_required,
@@ -1751,7 +1910,9 @@ def write_index(out_dir: Path, bundles: list[LeagueBundle],
                 "classification": {
                     cls: sum(1 for c in b.classified
                              if c.classification == cls)
-                    for cls in ("INSERT", "BACKFILL", "SKIP")
+                    for cls in (
+                        "INSERT", "BACKFILL", "BACKFILL-CANDIDATE", "SKIP",
+                    )
                 },
                 "fragmentation": {
                     "alias_link": b.alias_link_count,
@@ -1972,7 +2133,9 @@ async def run(args, log) -> int:
 
     # Bulk-load sp.teams ONCE for the sport.
     async with async_session() as session:
-        sp_teams_all, by_normalized = await load_sp_teams_for_sport(
+        (
+            sp_teams_all, by_normalized, by_distinctive_token,
+        ) = await load_sp_teams_for_sport(
             session=session, sport_id=sport_id_int, log=log,
         )
 
@@ -1996,6 +2159,7 @@ async def run(args, log) -> int:
                 session=session,
                 sp_teams_all=sp_teams_all,
                 by_normalized=by_normalized,
+                by_distinctive_token=by_distinctive_token,
                 team_data_cache=team_data_cache,
                 log=log,
             )
