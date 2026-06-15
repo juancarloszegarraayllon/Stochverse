@@ -6,6 +6,79 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Where we are / what's next — phase status header
+
+**Read this first, every session.** Track against the SP Architecture
+v1.4 seven-phase arc (§11), not the 2D.5-A coverage-workstream
+vocabulary. The product (v4 serving, Phase 3+) is the goal. Resolver
+accuracy is a critical INPUT to the product, not a substitute for it.
+
+### Current position
+
+**Phase 2 (Resolution) — IN PROGRESS.** Next boundary: **Phase 3
+(v4 cutover) — NOT STARTED.**
+
+### Seven-phase status
+
+- **Phase 0 — Tactical fixes**: DONE. (`WEB_CONCURRENCY`, structlog
+  JSON, `sp.provider_api_calls`, FL fetch off request path.)
+- **Phase 1 — Foundation**: DONE except §6.5 archival. (Neon
+  provisioned; canonical schema via alembic chain; FL + Kalshi
+  ingestion modules writing to `sp.*`; 30-day backfill scripts. The
+  end-of-phase §6.5 archival job to object storage is still NOT
+  BUILT — see exit gates.)
+- **Phase 2 — Resolution**: IN PROGRESS. Matcher built
+  (`resolver/matcher.py`), Tier 1–4 ported (`resolver/alias_tier/`,
+  `resolver/fuzzy_tier/`, FL + Kalshi modules), `sp.resolution_log`
+  writing, admin UI mounted (`admin/router.py`, `main.py:386`).
+  Missing pieces in the exit gates below.
+- **Phase 3 — Cutover** (`/api/v4` feature-flagged): NOT STARTED.
+  `grep "/api/v4" main.py` returns zero. No flag scaffold; frontend
+  still on legacy endpoints.
+- **Phase 4 — New providers** (Polymarket, OddsAPI): NOT STARTED.
+  Strings appear in protocol enums; `resolver/matcher.py:309`
+  states "Other providers ... not yet wired through."
+- **Phase 5 — Decommission legacy**: NOT STARTED. `main.py` still
+  carries `_SERIES_TOURNAMENT_HINTS` (L1483), `_FL_TEAM_HINTS`
+  (L1493), `sports_feed_v3` paths, synth-event construction.
+- **Phase 6 — Frontend rewrite**: NOT STARTED (placeholder per
+  §11.7; triggers require backend stable on v4 for one quarter).
+
+### Phase 2 EXIT GATES — these block Phase 3
+
+| Gate | Spec | Status |
+|---|---|---|
+| Three-loop runner (§7.7) | Hot via LISTEN/NOTIFY + batch 30s + re-resolution 5–10 min | **NOT BUILT.** Only cron-batch twice/day (`run_resolver_pass.py:149` rejects `--run-mode live`, reserved for "Phase 2E"). Hot loop and 5–10 min re-resolution loop missing. Re-resolution is also the §7.6 accuracy multiplier — it retroactively re-resolves the back-catalog whenever aliases are added. |
+| Daily-diff measurement loop (§11.3) | "Run a daily diff; tune until acceptable" | **BUILT BUT UNWIRED.** `scripts/daily_diff.py` exists; `railway.toml` has no cron entry for it (only the two resolver crons). Manual / irregular runs; measurement gaps since Day-21. |
+| Review queue health (§7.5) | Steady-state <20 pending; alert >100 | **18,303 pending (as of 2026-06-15)** — ~915× the spec's <20 steady-state target, ~183× the >100 alert threshold. Grew from ~16,755 (Day-37) despite coverage work — the exit-gate failure made concrete: nothing drains the queue and the §7.6 re-resolution loop that would re-sweep it isn't built. Throughput gate for Phase 3; also unharvested labeled aliases that would feed re-resolution. |
+| Archival job (§6.5) | Nightly mover to object storage; 30d hot / 1y archive / delete; `resolution_log` retained forever | **NOT BUILT.** No S3/object-storage code, no bucket config, no nightly job. `sp.resolution_log` unbounded (~130K rows — not yet biting, but the architectural assumption is fully un-implemented). |
+
+### What unblocks Phase 3
+
+A `/api/v4/sports/{id}/feed` endpoint to flag traffic onto AND a
+review queue tolerable enough to cut over behind that flag.
+**Neither exists yet.**
+
+### Accuracy note
+
+Coverage breadth is past peak leverage toward the product — basketball
+67.5%, baseball / soccer 70%+ are good enough to ship. Aggregate
+matcher capability is 35.3% (scope-filtered, 15,250 records,
+2026-06-15T21:13Z daily_diff run) — denominator-suppressed by
+near-zero-coverage sports (Tennis ceiling, Golf / long-tail); per-league
+F7 remains the honest per-sport measure (Amendment #20). Highest-
+leverage remaining accuracy work that also serves the critical path is
+the re-resolution loop (compounds across all existing coverage) plus
+queue harvest — not the next league bootstrap.
+
+### Pointer
+
+Full architecture: **SP Architecture v1.4** (Google Drive). This
+header is the standing answer to "where are we / what's next" —
+update it when a gate closes.
+
+---
+
 ## Scope boundaries (durable, cross-session)
 
 **Stochverse Academy** (`academy.stochverse.com`) is a separate
