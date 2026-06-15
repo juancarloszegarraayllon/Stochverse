@@ -50,7 +50,7 @@ accuracy is a critical INPUT to the product, not a substitute for it.
 |---|---|---|
 | Three-loop runner (§7.7) | Hot via LISTEN/NOTIFY + batch 30s + re-resolution 5–10 min | **NOT BUILT.** Only cron-batch twice/day (`run_resolver_pass.py:149` rejects `--run-mode live`, reserved for "Phase 2E"). Hot loop and 5–10 min re-resolution loop missing. Re-resolution is also the §7.6 accuracy multiplier — it retroactively re-resolves the back-catalog whenever aliases are added. |
 | Daily-diff measurement loop (§11.3) | "Run a daily diff; tune until acceptable" | **BUILT BUT UNWIRED.** `scripts/daily_diff.py` exists; `railway.toml` has no cron entry for it (only the two resolver crons). Manual / irregular runs; measurement gaps since Day-21. |
-| Review queue health (§7.5) | Steady-state <20 pending; alert >100 | **____ pending (as of 2026-06-15).** Spec assumes the admin UI triages the queue in steady state; processed count has been near-zero. Throughput gate for Phase 3; also unharvested labeled aliases that would feed re-resolution. |
+| Review queue health (§7.5) | Steady-state <20 pending; alert >100 | **18,303 pending (as of 2026-06-15)** — ~915× the spec's <20 steady-state target, ~183× the >100 alert threshold. Grew from ~16,755 (Day-37) despite coverage work — the exit-gate failure made concrete: nothing drains the queue and the §7.6 re-resolution loop that would re-sweep it isn't built. Throughput gate for Phase 3; also unharvested labeled aliases that would feed re-resolution. |
 | Archival job (§6.5) | Nightly mover to object storage; 30d hot / 1y archive / delete; `resolution_log` retained forever | **NOT BUILT.** No S3/object-storage code, no bucket config, no nightly job. `sp.resolution_log` unbounded (~130K rows — not yet biting, but the architectural assumption is fully un-implemented). |
 
 ### What unblocks Phase 3
@@ -59,12 +59,16 @@ A `/api/v4/sports/{id}/feed` endpoint to flag traffic onto AND a
 review queue tolerable enough to cut over behind that flag.
 **Neither exists yet.**
 
-### Accuracy note (one line)
+### Accuracy note
 
 Coverage breadth is past peak leverage toward the product — basketball
-67.5%, baseball / soccer 70%+ are good enough to ship. Highest-leverage
-remaining accuracy work that also serves the critical path is the
-re-resolution loop (compounds across all existing coverage) plus
+67.5%, baseball / soccer 70%+ are good enough to ship. Aggregate
+matcher capability is 35.3% (scope-filtered, 15,250 records,
+2026-06-15T21:13Z daily_diff run) — denominator-suppressed by
+near-zero-coverage sports (Tennis ceiling, Golf / long-tail); per-league
+F7 remains the honest per-sport measure (Amendment #20). Highest-
+leverage remaining accuracy work that also serves the critical path is
+the re-resolution loop (compounds across all existing coverage) plus
 queue harvest — not the next league bootstrap.
 
 ### Pointer
