@@ -6,6 +6,29 @@ next session. Treat it as the project's running journal.
 
 ---
 
+## Scope boundaries (durable, cross-session)
+
+**Stochverse Academy** (`academy.stochverse.com`) is a separate
+bilingual educational resource being built in its own repository and
+deployed independently (likely Astro on Vercel / Cloudflare Pages).
+It shares no infrastructure with the main product. Two boundaries
+apply in BOTH directions and must persist across sessions:
+
+- **Main product → Academy**: do NOT add blog/content/CMS to the
+  FastAPI app; do NOT create routes/models/templates for educational
+  content; do NOT touch the TypeScript frontend bundle for Academy
+  pages; do NOT add subdomain or reverse-proxy logic for
+  `academy.stochverse.com`.
+- **Academy → Main product**: do NOT copy Stochverse production
+  internals into Academy without explicit operator go-ahead. That
+  includes the `sp.*` schema, resolver logic, the v1.5 amendment
+  methodology pile, and any production data.
+
+If anything Academy-related surfaces in main-product work, flag it
+and leave it for the parallel Academy session.
+
+---
+
 ## Session — 2026-06-12
 
 ### Day-36 afternoon: FL-universe BBL pilot RUN + evaluated (operator-driven, read-only)
