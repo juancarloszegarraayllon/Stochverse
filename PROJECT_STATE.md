@@ -29,6 +29,93 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-06-15
+
+### Day-38: FL-universe engine MERGED (PR #231) + Academy boundary persisted + BBL workstream #10 additive apply (Components 1-3)
+
+Three substantive landings this session: the FL-universe automation engine merged to main, the Stochverse Academy scope boundary persisted as a durable cross-session block, and BBL workstream #10's additive components (manifest + Bamberg flip + ALIAS-LINK phantom-releases) applied to production. The 4 MERGE-REQUIRED FK-cascades (Component 4) were deliberately deferred to a separate session — first MERGE in program history, machinery-survey-first.
+
+### Day-38: FL-universe engine merged — PR #231
+
+`claude/fl-universe-engine` head `8e40658` → main. Title: "FL-universe engine: Components 1-3 + fragmentation + Amendment #26 classifier (additive tooling, no apply path)".
+
+Full diff walked against a 5-point pre-merge checklist, all passed:
+1. **Additive-only** — `git diff --name-status` showed 10 files all `A` (added), 0 modified/deleted.
+2. **No write paths in engine code** — grep confirmed only emitted DDL (phantom-release DELETE written to markdown as operator-run text); the two real writes (INSERT/UPDATE) live in pre-existing untouched files (resolver/fixtures.py, resolver/alias_tier/matcher.py), not in the merge surface.
+3. **`classify_team_pure` two-pass design** — exact-match first, then `_reconcile_distinctive` (Amendment #26); hit → BACKFILL-CANDIDATE not BACKFILL; production caller passes the distinctive index.
+4. **Distinct-entity guard** (`resolver/fragmentation.py`) — `_has_distinct_entity_marker` = OR of reserve-marker (U15-U24/Espoir/Reserve/Junior/trailing II/B) + gender-marker (Women/Femenino/Femminile/Féminin/Damen/Kobiet/trailing W), wired as asymmetry test `if fl_has_marker != sp_has_marker: continue` — blocks senior-vs-reserve / men-vs-women over-match.
+5. **Test count** — 124 tests / 5 files (19+16+5+60+24).
+
+10 files: resolver/collision_audit.py, resolver/fragmentation.py, resolver/text_match.py, scripts/harvest_aliases.py, scripts/fl_universe_batch.py + 5 test files. Amendment #26 was production-validated this session via the BBL Bamberg flip (see below). 9 pre-existing test collection errors in tests/test_phase_2d5_* / test_phase_2f1_* noted as UNRELATED — predate the branch.
+
+### Day-38: Stochverse Academy scope boundary persisted to main
+
+Operator started a parallel Claude Code session for Stochverse Academy (`academy.stochverse.com`) — bilingual educational resource, separate repo, independent deploy (likely Astro on Vercel/Cloudflare Pages), no shared infrastructure. A `## Scope boundaries (durable, cross-session)` block was prepended ABOVE the 2026-06-12 session header in PROJECT_STATE.md (so it survives context compaction), committed via `claude/project-state-academy-boundary` (`474965c`) and merged to main. Captures both directions: (a) Main→Academy: no blog/CMS in FastAPI, no routes/models/templates for educational content, no frontend bundle changes, no subdomain/reverse-proxy logic; (b) Academy→Main: no copying sp.* schema, resolver logic, v1.5 amendment methodology, or production data into Academy without explicit operator go-ahead. Standing rule: flag-and-log Academy-adjacent items, don't act. (Operator handles the clean-shell discipline — Academy session runs with no production env vars so it can't reach Neon by accident; chat Claude can't enforce this.)
+
+### Day-38: BBL workstream #10 — additive apply (Components 1-3 of 4)
+
+BBL is the first FL-universe-engine-driven workstream and the first workstream to carry a MERGE component. It decomposes into FOUR distinct apply components, NOT one atomic operation. Components 1-3 (additive, well-rehearsed shapes) applied this session; Component 4 (the 4 MERGEs) deferred.
+
+**Pre-apply prep:**
+- **Pattern A.2 discovery** against sp.resolution_log (Basketball, 7-day, BBL regex): real BBL forms are bare-city (already in manifest) plus asterisk variants `Bonn *` / `Bayern *`. Two key findings: (a) **3x3 contaminant** — `Bonn 3x3` / `Ub 3x3` etc. are FIBA 3x3, a DIFFERENT SPORT; must NOT be aliased. Verified safe via `distinctive_tokens('bonn 3x3')` → `('bonn','3x3')` (keeps 3x3 as discriminating token; no collision with bare `bonn`). (b) Sponsor/full-name tokens (telekom/ratiopharm/brose/niners/seawolves/towers/academics) did NOT appear in production — FL sends bare-city.
+- **Manifest finalized** → `scripts/bbl_seed.py` (branch `claude/bbl-seed-workstream10`). Engine draft (`seed.py.draft`) had 2 `TODO_OPERATOR_FILL` INSERT canonicals (Amendment #24: FL gives structure not identity). Filled: Bonn → "Telekom Baskets Bonn", Ulm → "Ratiopharm Ulm". Initially added `Bonn *` / `Bayern *` asterisk aliases, then **STRIPPED them** after verifying `normalize_name('Bonn *')` → `'bonn'` (normalizer strips the asterisk entirely → asterisk aliases are no-ops, the bare form already resolves starred provider strings via normalized-key match). Reframes the Italian LBA Day-30 asterisk finding: no explicit asterisk alias needed. Final manifest: 17 teams (2 INSERT + 15 BACKFILL), one bare alias each.
+- **bootstrap_bbl.py generated** — Claude Code mirrored bootstrap_vtb.py (three-branch classifier, PR #200 alias-safety INSERT...WHERE NOT EXISTS, shared _check_pattern_d_endpoint, --dry-run). Claude Code cannot run the production dry-run (sandbox has no DATABASE_URL — Amendment #18 honesty held); operator ran it locally.
+- **Amendment #22 pre-apply audit** — clean (0 collisions). The 7 phantom team_ids passed as excluded_team_ids; all 7 verified fixture_count=0 (ALIAS-LINK safety gate). aliases_audited.md correctly reported all 7 phantom-canonical aliases as "colliding" PRE-release (each phantom owns its own canonical) — a sequencing assertion, not a defect; clean post-Part-1.
+
+**Component 1 — manifest apply** (2026-06-15T20:18Z, bootstrap_bbl.py, 7.1s, 0 errors):
+- 2 INSERT: Telekom Baskets Bonn (`af3f14bc`), Ratiopharm Ulm (`be45bfcc`), both country_code=DEU
+- 15 BACKFILL country_code=DEU onto Phase 2A.5 stubs
+- 17 aliases, skipped_global_conflict=0 (script's within-run check agreed with the SQL audit). existing_teams_loaded 2042 → sp.teams Basketball 2044 post-apply.
+
+**Component 2 — Bamberg candidate→confirmed BACKFILL** (out-of-band, not in manifest):
+- Bamberg classified BACKFILL-CANDIDATE by the engine (Amendment #26 fuzzy-reconciliation: bare "Bamberg" under-matches legacy canonical "Bamberg Baskets"). Flipped to confirmed BACKFILL onto `7370e1f3`: country_code=DEU + `bamberg` alias added. **First production validation of Amendment #26.**
+- Surfaced the first hand-written-INSERT schema fact: `sp.team_aliases` has a NOT-NULL raw `alias` column (text, no default) alongside `alias_normalized`. Initial INSERT failed (23502); corrected with both columns. (Prior 9 workstreams never hit this — they inserted aliases via the bootstrap script, which carries the full column set internally.)
+
+**Component 3 — 7 ALIAS-LINK phantom-releases** (two-part, order-mandatory):
+- Part 1: DELETE 7 zero-fixture dormant phantoms (a13dd3fb Löwen Braunschweig, 3a70071e Fitness First Würzburg, bdb22a1c Bayern München, f9d5b8cc MHP Riesen Ludwigsburg, 0f20ba32 Science City Jena, 65ca6885 EWE Baskets Oldenburg, 060beffc BV Chemnitz 99). All 7 DELETE 1; team_aliases cascaded (Bayern München carried `bayern munchen` under two sources — both cascaded with the one team DELETE). Re-verified zero phantoms remain + phantom aliases cascaded clear.
+- Part 2: 7 canonicals re-homed as aliases on winners (full column set per the Bamberg lesson).
+- **Post-apply Amendment #22 audit: 0 collisions** across the full BBL alias surface (7 re-homed + Bamberg + 17 manifest aliases all team_count=1).
+
+**baseline_shifts annotation** — event_type=`phase_2d5a_bbl_bootstrap`, event_date=2026-06-15. Amendment #19 idempotency pre-flight (0 rows). Surfaced the second hand-written-INSERT schema fact: `sp.baseline_shifts` has a NOT-NULL `affected_population` column (initial INSERT failed 23502; corrected). Notes field flags Component 4 as PENDING.
+
+### Day-38: hand-written-INSERT schema-surprise pattern (two instances)
+
+Both schema surprises this session (team_aliases `alias`, baseline_shifts `affected_population`) share a shape: the prior 9 workstreams wrote these rows THROUGH scripts that carry the full column set internally, while this session wrote several by hand (Bamberg flip, phantom-release alias adds, the annotation). Every direct INSERT needs its schema verified first (information_schema.columns) rather than written from assumption — the Amendment #12/#18 discipline applied at the column-set granularity. Relevant forward: Component 4's dedup cascade also writes by hand. No new amendment; covered by #12/#18.
+
+### Day-38: Component 4 DEFERRED — the 4 MERGE-REQUIRED FK-cascades
+
+Verified from fragmentation.md (read at apply time, not memory): 4 MERGE-REQUIRED pairs, each with BOTH sides carrying live fixtures (Amendment #25 fork):
+| Winner | fixtures | Loser | fixtures |
+|---|---:|---|---:|
+| Vechta | 9 | Rasta Vechta | 8 |
+| Rostock | 5 | Rostock Seawolves | 3 |
+| Hamburg | 2 | Hamburg Towers | 1 |
+| Heidelberg | 3 | MLP Academics Heidelberg | 2 |
+
+14 loser-side fixtures total must be re-pointed (home + away) loser→winner before each loser DELETE. This is the FIRST MERGE in program history and the partly-irreversible operation. Deferred for two reasons: (1) the plan asserts "reuses Tennis-dedup FK-cascade machinery" but that machinery is UNVERIFIED — the Tennis dedup workstream was scoped (Day-22/25, sp.dedup_audit rollback table + two-phase batching) but it is NOT confirmed whether a reusable merge script was ever built or scoped-and-deferred. The correct first step for Component 4 is a code-survey, not live cascade SQL. (2) A clean F7 checkpoint on the additive work (1-3) before introducing the first production merge isolates "did the bootstrap land" from "did the merge land."
+
+### Phase 2D.5-A / FL-universe status
+- Phase 2D.5-A (9 manual basketball bootstraps): COMPLETE, F7-validated. Basketball capability 53.3% → 67.5%.
+- FL-universe engine: BUILT, VALIDATED, MERGED (PR #231).
+- BBL workstream #10: additive Components 1-3 APPLIED + verified; Component 4 (4 MERGEs) DEFERRED.
+- v1.5 amendment pile: 26 items.
+
+### Day-38 PR state
+- PR #229 (retrospective + run-ahead docs), PR #230 (Day-36 pilot-eval): MERGED.
+- PR #231 (FL-universe engine): MERGED.
+- `claude/project-state-academy-boundary` (`474965c`): MERGED.
+- `claude/bbl-seed-workstream10` (`bbl_seed.py` + `bootstrap_bbl.py`): pushed, NO PR yet — holding to bundle with Component 4.
+
+### Pending — next session
+1. **BBL F7 verification** — opens ~2026-06-16 10:00 UTC (~14h post-apply). country_code='DEU', team_id JOIN per Amendment #20. Expected: strict resolutions for the BBL teams now covered (Bonn/Ulm INSERTs, Bamberg + 15 BACKFILLs, 7 re-homed phantom canonicals).
+2. **BBL Component 4 — 4 MERGEs.** Open with the machinery survey: does a tested dedup/merge-cascade script + sp.dedup_audit rollback table exist, or was it scoped-and-deferred? Survey FIRST, then stage cascade SQL. Highest blast radius in the program; first-ever MERGE.
+3. **Open PR** for claude/bbl-seed-workstream10 (bundle with Component 4 per workstream convention).
+4. **Daily-diff cron wiring** — open since Day-21; worth resolving before more engine runs to avoid measurement blackouts.
+5. 9 pre-existing test collection errors (track so not blamed on #231).
+6. Review_queue operator work (16,755 pending) + Tennis surname workstream (21.5% ceiling) — both architectural.
+
+---
+
 ## Session — 2026-06-12
 
 ### Day-36 afternoon: FL-universe BBL pilot RUN + evaluated (operator-driven, read-only)
