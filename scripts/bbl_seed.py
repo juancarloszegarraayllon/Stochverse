@@ -22,16 +22,16 @@ LEAGUE_ALIAS_SOURCE = "bootstrap_league_coverage"
 # Format: (canonical_name, country_code, aliases_tuple, notes)
 LEAGUE_TEAMS_SEED: list[tuple[str, str, tuple[str, ...], str]] = [
     ("Bayern", "DEU",
-     ("Bayern", "Bayern *"),
-     "BACKFILL from FL team_id=6LstMRPo; sp.teams.id=b4318e7f-9ee5-4c0d-9c5d-33280c1920ab; 'Bayern *' asterisk variant from Pattern A.2 discovery"),
+     ("Bayern",),
+     "BACKFILL from FL team_id=6LstMRPo; sp.teams.id=b4318e7f-9ee5-4c0d-9c5d-33280c1920ab"),
 
     ("Alba Berlin", "DEU",
      ("Alba Berlin",),
      "PILOT BACKFILL from FL team_id=ncLyc03K; sp.teams.id=7b206ac6-3ff5-4141-b235-474f6db7686a"),
 
     ("Telekom Baskets Bonn", "DEU",
-     ("Bonn", "Bonn *"),
-     "INSERT from FL team_id=86MXctlE; canonical operator-filled per Amendment #24; 'Bonn *' asterisk variant from Pattern A.2 discovery"),
+     ("Bonn",),
+     "INSERT from FL team_id=86MXctlE; canonical operator-filled per Amendment #24"),
 
     ("Wurzburg", "DEU",
      ("Wurzburg",),
