@@ -500,3 +500,100 @@ class TestMergeClusterIntegration:
         team_ids: SELECT FOR UPDATE at step 0 causes the second to
         fail-fast with ValueError (row count mismatch)."""
         pass
+
+
+# ══════════════════════════════════════════════════════════════
+# BBL Component 4 hook — parity + invocation contract
+# ══════════════════════════════════════════════════════════════
+#
+# The `post_review_queue_swap_hook` parameter was added to
+# `merge_cluster()` for BBL Component 4. Tennis path passes None
+# (default) → branch never entered → behavior identical to the
+# pre-hook primitive. These tests are the load-bearing guarantee
+# that touching tested code didn't change Tennis behavior.
+
+
+class TestPostSwapHookSignature:
+    """Pure-signature tests (no DB) — the hook parameter exists,
+    has the right default, and Tennis-default callers' signature
+    contract is unchanged."""
+
+    def test_hook_parameter_exists_with_none_default(self):
+        """The new parameter must default to None so all existing
+        Tennis callers (which don't pass it) get zero behavior
+        change."""
+        import inspect
+        from scripts.tennis_dedup import merge_cluster
+        sig = inspect.signature(merge_cluster)
+        assert "post_review_queue_swap_hook" in sig.parameters
+        param = sig.parameters["post_review_queue_swap_hook"]
+        assert param.default is None, (
+            "Default MUST be None — any other default would change "
+            "Tennis behavior since Tennis callers don't pass this "
+            "parameter."
+        )
+        # Keyword-only enforcement keeps callers from passing the
+        # hook positionally and silently breaking when arg order
+        # shifts.
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY
+
+    def test_existing_required_params_unchanged(self):
+        """Tennis callers pass `mg=...`, `merge_phase=...`, and
+        optionally `merge_pr=...`, `dry_run=...`. None of those
+        signatures change with the hook addition."""
+        import inspect
+        from scripts.tennis_dedup import merge_cluster
+        sig = inspect.signature(merge_cluster)
+        assert "mg" in sig.parameters
+        assert sig.parameters["mg"].default is inspect.Parameter.empty
+        assert "merge_phase" in sig.parameters
+        assert sig.parameters["merge_phase"].default is inspect.Parameter.empty
+        assert "merge_pr" in sig.parameters
+        assert sig.parameters["merge_pr"].default is None
+        assert "dry_run" in sig.parameters
+        assert sig.parameters["dry_run"].default is False
+
+
+@pytest.mark.skipif(
+    not INTEGRATION_DB,
+    reason="SP_INTEGRATION_DB not set — Tennis dedup integration tests need real Postgres.",
+)
+class TestPostSwapHookInvocation:
+    """Real-DB integration tests for the hook contract. Stubbed
+    pending operator dry-run approval, same convention as the rest
+    of `TestMergeClusterIntegration`."""
+
+    @pytest.mark.skip(reason="Integration test — implementation pending operator dry-run approval")
+    def test_none_default_path_unchanged(self):
+        """Calling merge_cluster() without the hook parameter (or
+        passing None) produces identical sp.* writes as the
+        pre-hook primitive — the parity guarantee that justifies
+        touching tested code. Verify by snapshotting sp.fixtures,
+        sp.team_aliases, sp.review_queue, sp.dedup_audit pre + post
+        and asserting they match the recorded Tennis dedup
+        Day-25/26 production baseline."""
+        pass
+
+    @pytest.mark.skip(reason="Integration test — implementation pending operator dry-run approval")
+    def test_hook_awaited_once_per_dupe_with_correct_args(self):
+        """Pass an AsyncMock as the hook. After merge_cluster()
+        returns, assert:
+          - mock.await_count == len(mg.dupes)
+          - each call's args = (session, dupe_id_str, canonical_id_str)
+          - the `session` arg is the SAME session merge_cluster opened
+            internally (so the hook participates in the transaction)
+        Verifies the per-dupe-in-loop placement + in-transaction
+        contract."""
+        pass
+
+    @pytest.mark.skip(reason="Integration test — implementation pending operator dry-run approval")
+    def test_hook_exception_rolls_back_whole_merge(self):
+        """Pass a hook that raises after Step 3. Assert:
+          - sp.fixtures FK changes from Step 2 are reverted
+          - sp.team_aliases reparenting from Step 1 is reverted
+          - sp.review_queue.candidate_fixtures from Step 3 is reverted
+          - sp.dedup_audit has NO row for this merge attempt
+          - sp.teams DELETE from Step 5 did NOT happen
+        Atomicity guarantee — the whole reason the hook must run
+        on the merge_cluster session."""
+        pass

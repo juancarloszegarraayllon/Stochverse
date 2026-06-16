@@ -52,7 +52,7 @@ import re
 import sys
 import os
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Awaitable, Callable, Iterable
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -566,12 +566,29 @@ async def merge_cluster(
     merge_phase: str,
     merge_pr: str | None = None,
     dry_run: bool = False,
+    post_review_queue_swap_hook: (
+        Callable[[object, str, str], Awaitable[None]] | None
+    ) = None,
 ) -> dict:
     """Merge a validated MergeGroup. Single transaction per F4/Phase 2D.3.1.
 
     Returns a report dict (usable in both dry-run and wet modes).
     In dry_run mode: captures what WOULD happen without writing.
     In wet mode: applies the merge and writes the audit row.
+
+    `post_review_queue_swap_hook` (BBL Component 4 addition; default
+    None for full backwards-compat — Tennis path is unchanged): if
+    provided, awaited once per dupe AFTER Step 3's candidate_fixtures
+    swap and BEFORE the cluster-level Step 4 audit-row INSERT. Called
+    with `(session, dupe_id, canonical_id)` on the SAME `session` so
+    it participates in the per-pair transaction — a hook failure
+    rolls back the whole merge (atomicity preserved per the
+    Phase 2D.3.1 discipline). Used by `scripts/merge_bbl.py` to
+    order-preserve-dedupe `candidate_fixtures` arrays that carried
+    BOTH the winner AND the loser (a BBL fragmentation collision
+    shape Tennis dedup doesn't produce). Pass `None` and the hook
+    branch is never entered → zero behavior change vs the pre-hook
+    primitive.
     """
     canonical_id = mg.canonical.team_id
     dupe_ids = [d.team_id for d in mg.dupes]
@@ -679,6 +696,15 @@ async def merge_cluster(
                     )
                     WHERE candidate_fixtures::text LIKE '%%' || CAST(:dupe_text AS text) || '%%'
                 """), {"dupe_text": dupe_text, "canonical_text": canonical_text})
+
+                # Step 3.5 (BBL Component 4): optional post-swap hook,
+                # runs on the same session so it's in-transaction. A
+                # hook failure rolls back the whole per-pair merge.
+                # Tennis path passes None → branch never entered.
+                if post_review_queue_swap_hook is not None:
+                    await post_review_queue_swap_hook(
+                        session, dupe_id, canonical_id,
+                    )
 
             # Step 4: Audit row
             await session.execute(text("""
