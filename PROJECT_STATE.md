@@ -102,6 +102,69 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-06-16
+
+### Day-39: BBL Component 4 — first MERGE in program history, APPLIED + VERIFIED
+
+BBL workstream #10's four MERGE-required FK-cascades (deferred from Day-38) applied to production and verified. This is the first MERGE the program has ever run — both sides of each pair carried live fixtures (Amendment #25 MERGE fork), partly-irreversible. BBL workstream #10 — the first workstream to carry a MERGE component — is now fully complete (Components 1-3 additive, F7-validated Day-38/39 morning; Component 4 applied Day-39).
+
+### Day-39: BBL Components 1-3 F7 validation (clean)
+
+F7 at ~14h post-apply (2026-06-15T20:18Z → 2026-06-16 ~10:00 UTC). country_code='DEU' team_id JOIN per Amendment #20. Both INSERTs resolving (Telekom Baskets Bonn, Ratiopharm Ulm); Amendment #26 Bamberg flip validated in production (Bamberg Baskets resolving under legacy canonical); BACKFILLs + 7 re-homed phantoms (Wurzburg, Bayern, Syntainics MBC, Frankfurt, Trier, Hamburg) all resolving clean. Confirmed Components 1-3 landed before introducing the irreversible Component 4.
+
+### Day-39: Component 4 machinery survey — tested merge primitive EXISTS (not scoped-and-deferred)
+
+Pre-cascade survey overturned the Day-38 assumption that the Tennis-dedup machinery might be unbuilt. Findings:
+- `scripts/tennis_dedup.py:563` `merge_cluster()` — tested (40→44 unit tests), production-battle-tested (drove the +8.62pp Tennis lift Day-29). Single-transaction-per-merge, 5-step FK cascade (alias reparent → fixtures re-point → review_queue JSONB swap → audit INSERT → loser DELETE). The low-level cascade is sport-agnostic; only the cluster-DETECTION layer is Tennis-specific.
+- `sp.dedup_audit` rollback table EXISTS in production — alembic head confirmed `f1b3d5e7a9c2` via `sp.alembic_version` (note: alembic_version lives in `sp` schema, not public — bare query errors). pre_state JSONB snapshot + `rolled_back_at` column + `--rollback --audit-id` path. MERGE is reversible.
+- Reuse path: construct MergeGroup objects directly from operator-confirmed (winner, loser) tuples, skip Tennis detection, call merge_cluster() per pair.
+
+### Day-39: THREE Tennis-specific assumptions caught in dry-run (zero production impact)
+
+The "reuses Tennis machinery" claim was sound at the cascade level but carried three Tennis-specific assumptions that did NOT transfer to BBL. All three surfaced at safe checkpoints (production inspection + dry-run), none reached a write:
+
+1. **candidate_fixtures winner+loser collision** — 6 review_queue rows carry BOTH winner and loser in the same array (BBL city-stub/full-name pairs the resolver offered as co-candidates; Tennis player-merges don't produce this shape). Naive swap would double the winner_id. Step 3 of merge_cluster() confirmed naive (`tennis_dedup.py:671-681`). Fix: order-preserving dedupe hook (`WITH ORDINALITY + MIN(ord)`; NOT plain DISTINCT — `candidate_fixtures[0]`=anchored side, `[1:]`=trigram-ordered, load-bearing per matcher/admin/template invariant chain).
+2. **merge_cluster owns its own transaction** — no external seam to inject the dedupe in-transaction. Fix (operator-chosen Option 1 over replicate-cascade or accept-atomicity-gap): additive `post_review_queue_swap_hook` kwarg on `merge_cluster()`, called same-session after Step 3 swap before Step 4 audit (audit `pre_state` captures original pre-swap state — rollback authoritative). Tennis callers default None → zero behavior change, pinned by parity tests.
+3. **`load_team_rows` hardcoded `WHERE s.code = 'tennis'`** (`tennis_dedup.py:349`) — returned empty for BBL teams, dry-run aborted "winner not found" though team demonstrably existed. Fix: parameterized `sport_code` kwarg (default `'tennis'`); merge_bbl passes `'basketball'`.
+
+### Day-39: scripts/merge_bbl.py built + 4-gate verification + apply
+
+Wrapper around `merge_cluster()` with the dedupe hook. Branch `claude/bbl-seed-workstream10` (head `20438ac`). 188 tests green (44 tennis_dedup + 24 merge_bbl + engine). CLI defaults to `--dry-run`; `--apply` requires `--merge-pr` for `sp.dedup_audit` provenance; Pattern D enforced.
+
+Four gates all passed before apply:
+- Caveat 1 (rollback table): `sp.dedup_audit` live at head `f1b3d5e7a9c2`.
+- Caveat 2 shape: `candidate_fixtures` team-id-shaped (confirmed via production inspection).
+- Caveat 2 collision: 6 rows winner+loser co-occur → dedupe hook fires.
+- `load_team_rows` scope: fixed to basketball.
+
+Dry-run reconciled exactly with hand-verified production state (fixtures 8/3/1/2, 6 collision rows, correct losers). APPLY at 2026-06-16T21:59Z, 18.0s, all 4 pairs committed:
+
+| Winner | absorbed | loser DELETEd |
+|---|---|---|
+| Vechta (`87d4c8c9`) 9→17 fix | 8 | Rasta Vechta (`74e4e1e2`) |
+| Rostock (`1b81310d`) 5→8 fix | 3 | Rostock Seawolves (`3aa87552`) |
+| Hamburg (`09624eed`) 3→4 fix | 1 | Hamburg Towers (`76f717ca`) |
+| Heidelberg (`36cf720f`) 3→5 fix | 2 | MLP Academics Heidelberg (`29b00c01`) |
+
+Post-apply verification (read-only): 4 `sp.dedup_audit` rows present, `merge_phase='phase_b'`, `merge_pr='claude/bbl-seed-workstream10'`, `rolled_back_at=NULL` (all active). 4 losers gone from `sp.teams`; 4 winners absorbed fixtures exactly (Vechta 17, Rostock 8, Hamburg 4, Heidelberg 5). 14 fixtures re-pointed, 6 review_queue rows deduped, 4 aliases reparented.
+
+### Day-39: methodology note — "reuses tested machinery" is a claim to verify, not assume
+
+The Component 4 cascade DID reuse the tested Tennis primitive — but three Tennis-specific assumptions rode along with it, each of which would have corrupted production data if trusted blind. All three caught in read-only checks / dry-run. The discipline that worked: survey the primitive's actual code, inspect production data against its assumptions, dry-run, reconcile dry-run against hand-verified state, THEN apply. Highest-blast-radius operation in 38 days, zero production missteps. Pattern: a tested primitive transfers its tested CORE but not its caller's domain assumptions — verify every seam against the new domain.
+
+### Day-39 PR state
+
+- `claude/bbl-seed-workstream10` (head `20438ac`): `bbl_seed.py` + `bootstrap_bbl.py` + `merge_bbl.py` + `tennis_dedup.py` additive hook + tests. READY FOR PR — bundles full workstream #10 per convention.
+
+### Pending — next session
+
+1. **BBL Component 4 F7** — opens ~2026-06-17 ~12:00 UTC (~14h post-merge). Confirm merged canonicals (Vechta/Rostock/Hamburg/Heidelberg) resolve cleanly, no fragmentation reintroduced, losers stay gone.
+2. **Open + merge PR** for `claude/bbl-seed-workstream10`.
+3. **THE post-BBL strategic fork** — BBL workstream #10 now fully closed (additive + MERGE). The deliberate decision: keep widening coverage (more leagues) vs. pivot to Phase 2 exit plumbing (re-resolution loop → v4 endpoint → queue drain). Per the phase-status header accuracy note + Day-38 numbers conversation, everything points at the pivot — re-resolution loop is the highest lever AND a Phase 2 exit gate. Make this call fresh, deliberately, not by defaulting to another bootstrap.
+4. Daily-diff cron wiring (open since Day-21); §6.5 archival; review_queue 18,303.
+
+---
+
 ## Session — 2026-06-15
 
 ### Day-38: FL-universe engine MERGED (PR #231) + Academy boundary persisted + BBL workstream #10 additive apply (Components 1-3)
