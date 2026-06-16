@@ -346,7 +346,7 @@ SELECT t.id AS team_id,
        (SELECT count(*) FROM sp.team_aliases a WHERE a.team_id = t.id) AS alias_count
 FROM sp.teams t
 JOIN sp.sports s ON s.id = t.sport_id
-WHERE s.code = 'tennis'
+WHERE s.code = :sport_code
   AND t.id = ANY(:team_ids)
 """
 
@@ -366,10 +366,22 @@ async def extract_collision_pairs(
     return [(str(r.team_a), str(r.team_b), r.shared_records) for r in rows]
 
 
-async def load_team_rows(team_ids: list[str]) -> dict[str, TeamRow]:
+async def load_team_rows(
+    team_ids: list[str],
+    *,
+    sport_code: str = "tennis",
+) -> dict[str, TeamRow]:
     """Load sp.teams rows for a set of team_ids.
 
-    Returns {team_id_str: TeamRow}.
+    `sport_code` defaults to `"tennis"` so every existing Tennis
+    caller behaves identically to the pre-parameter version (zero
+    behavior change — the load-bearing guarantee for touching tested
+    code). Non-Tennis callers (e.g. `scripts/merge_bbl.py`) pass the
+    matching `sp.sports.code` value — `"basketball"` for BBL.
+
+    Returns `{team_id_str: TeamRow}`. team_ids not present in
+    `sp.teams` for the given sport are simply absent from the dict
+    — callers must check for missing keys.
     """
     if not team_ids:
         return {}
@@ -377,7 +389,7 @@ async def load_team_rows(team_ids: list[str]) -> dict[str, TeamRow]:
     async with async_session() as session:
         rows = (await session.execute(
             text(_TEAM_ROWS_SQL),
-            {"team_ids": uuids},
+            {"team_ids": uuids, "sport_code": sport_code},
         )).all()
     return {
         str(r.team_id): TeamRow(

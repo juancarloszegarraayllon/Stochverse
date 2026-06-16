@@ -279,7 +279,13 @@ async def _run_one_pair(
 
     Returns a report dict for printing.
     """
-    team_rows = await load_team_rows([winner_id, loser_id])
+    # sport_code="basketball" overrides load_team_rows' Tennis default.
+    # `_TEAM_ROWS_SQL` joins sp.sports and filters on `s.code` for
+    # belt-and-suspenders sport scoping; without this kwarg the Tennis
+    # default rejects every BBL team_id even though the row exists.
+    team_rows = await load_team_rows(
+        [winner_id, loser_id], sport_code="basketball",
+    )
     if winner_id not in team_rows:
         raise RuntimeError(
             f"BBL pair {label!r}: winner team_id {winner_id} not "

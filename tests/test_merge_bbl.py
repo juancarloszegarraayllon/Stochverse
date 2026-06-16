@@ -263,6 +263,111 @@ class TestBBLMergePairsTable:
 # ══════════════════════════════════════════════════════════════
 
 
+class TestLoadTeamRowsBasketballScope:
+    """Regression test for the Day-N+1 dry-run abort: `load_team_rows`
+    in scripts/tennis_dedup.py carried a hardcoded `WHERE s.code =
+    'tennis'` filter. BBL teams have sport_code='basketball', so
+    `load_team_rows` returned an empty dict and merge_bbl raised
+    `winner team_id ... not found in sp.teams` even though every BBL
+    UUID demonstrably exists in production.
+
+    Fix: `load_team_rows` gained a `sport_code` kwarg (default
+    'tennis' for Tennis-unchanged parity); merge_bbl passes
+    `sport_code='basketball'`. This test mocks the session so we can
+    assert (a) the kwarg is plumbed through end-to-end and (b) all 8
+    BBL team_ids round-trip from the mock query result to TeamRow
+    objects.
+    """
+
+    def test_mocked_load_returns_all_eight_bbl_teams(self):
+        """Patch async_session inside tennis_dedup; have its execute
+        return 8 rows shaped like the real query result; assert
+        load_team_rows(sport_code='basketball') returns a dict keyed
+        by team_id with all 8 entries."""
+        import asyncio
+        import datetime as dt
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+        from unittest.mock import patch, MagicMock, AsyncMock
+
+        import scripts.tennis_dedup as td_mod
+
+        bbl_uuids = []
+        bbl_canonicals = []
+        for _, winner, loser in BBL_MERGE_PAIRS:
+            bbl_uuids.extend([winner, loser])
+            bbl_canonicals.extend([f"winner-{winner[:8]}",
+                                   f"loser-{loser[:8]}"])
+
+        rows = [
+            SimpleNamespace(
+                team_id=uuid_str,
+                canonical_name=canon,
+                created_at=dt.datetime(2026, 5, 1, tzinfo=dt.timezone.utc),
+                alias_count=1,
+            )
+            for uuid_str, canon in zip(bbl_uuids, bbl_canonicals)
+        ]
+
+        captured_params: dict = {}
+
+        class FakeResult:
+            def all(self):
+                return rows
+
+        async def fake_execute(stmt, params):
+            captured_params.update(params)
+            return FakeResult()
+
+        fake_session = SimpleNamespace(execute=fake_execute)
+
+        @asynccontextmanager
+        async def fake_async_session():
+            yield fake_session
+
+        with patch.object(td_mod, "async_session", fake_async_session):
+            result = asyncio.run(
+                td_mod.load_team_rows(
+                    bbl_uuids, sport_code="basketball",
+                )
+            )
+
+        # All 8 BBL team_ids round-trip into TeamRow objects.
+        assert len(result) == 8
+        for uuid_str in bbl_uuids:
+            assert uuid_str in result, (
+                f"BBL team_id {uuid_str} should round-trip but is "
+                "missing from load_team_rows result"
+            )
+            tr = result[uuid_str]
+            assert tr.team_id == uuid_str
+            assert tr.canonical_name.startswith(("winner-", "loser-"))
+
+        # And the sport_code kwarg was actually plumbed into the
+        # query parameters — catches regression if a future edit
+        # drops the kwarg from the bind dict.
+        assert captured_params.get("sport_code") == "basketball", (
+            "sport_code='basketball' must reach the SQL bind params "
+            f"— got {captured_params!r}"
+        )
+
+    def test_merge_bbl_passes_basketball_to_load_team_rows(self):
+        """Static-shape guard: the source line in merge_bbl.py that
+        calls load_team_rows MUST pass sport_code='basketball'.
+        Belt-and-suspenders — a future edit that drops the kwarg
+        would reintroduce the Day-N+1 bug, and this test catches it
+        without needing a real DB."""
+        import inspect
+        from scripts import merge_bbl
+        source = inspect.getsource(merge_bbl)
+        assert 'sport_code="basketball"' in source or \
+               "sport_code='basketball'" in source, (
+            "merge_bbl.py must call load_team_rows with "
+            "sport_code='basketball'. The Tennis default would "
+            "reject every BBL team_id at the s.code filter."
+        )
+
+
 class TestCLI:
     """The CLI must default to dry-run and refuse --apply without
     --merge-pr (sp.dedup_audit provenance gate)."""

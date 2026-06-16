@@ -537,6 +537,34 @@ class TestPostSwapHookSignature:
         # shifts.
         assert param.kind == inspect.Parameter.KEYWORD_ONLY
 
+    def test_load_team_rows_default_sport_code_is_tennis(self):
+        """Parity guarantee for the sport_code parameter added when
+        BBL Component 4 surfaced the hardcoded `s.code = 'tennis'`
+        filter in `_TEAM_ROWS_SQL`. Default MUST be `"tennis"` so
+        every existing Tennis caller (extract_collision_pairs,
+        build_phase_a_population, rollback_merge) gets identical
+        behavior without passing the new kwarg."""
+        import inspect
+        from scripts.tennis_dedup import load_team_rows
+        sig = inspect.signature(load_team_rows)
+        assert "sport_code" in sig.parameters
+        param = sig.parameters["sport_code"]
+        assert param.default == "tennis", (
+            "Default MUST be 'tennis' — any other default changes "
+            "Tennis behavior since existing callers don't pass this "
+            "kwarg."
+        )
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY
+
+    def test_team_rows_sql_uses_bind_param_for_sport_code(self):
+        """The SQL was previously `WHERE s.code = 'tennis'` (literal).
+        Confirm it's now `:sport_code` (bind) so the parameter
+        actually flows through. Catches regression on the literal."""
+        from scripts.tennis_dedup import _TEAM_ROWS_SQL
+        assert ":sport_code" in _TEAM_ROWS_SQL
+        # And the old literal is gone — would silently shadow the bind.
+        assert "'tennis'" not in _TEAM_ROWS_SQL
+
     def test_existing_required_params_unchanged(self):
         """Tennis callers pass `mg=...`, `merge_phase=...`, and
         optionally `merge_pr=...`, `dry_run=...`. None of those
