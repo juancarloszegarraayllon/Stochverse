@@ -71,6 +71,12 @@ leverage remaining accuracy work that also serves the critical path is
 the re-resolution loop (compounds across all existing coverage) plus
 queue harvest — not the next league bootstrap.
 
+**Active workstream (Day-40, decided):** the §7.6 / §7.7
+re-resolution loop. Coverage is **resequenced behind it, not
+abandoned** — the loop is a multiplier that retroactively lifts all
+existing AND future coverage, so it is worth more BEFORE the next
+league than after. Coverage resumes once the loop ships.
+
 ### Pointer
 
 Full architecture: **SP Architecture v1.4** (Google Drive). This
@@ -99,6 +105,46 @@ apply in BOTH directions and must persist across sessions:
 
 If anything Academy-related surfaces in main-product work, flag it
 and leave it for the parallel Academy session.
+
+---
+
+## Session — 2026-06-17
+
+### Day-40: BBL Component 4 F7-validated — first MERGE confirmed in production behavior
+
+F7 at ~14h post-merge (2026-06-16T21:59Z → 2026-06-17 ~12:00 UTC). country_code='DEU' team_id JOIN per Amendment #20.
+
+**Positive check — merged winners resolving cleanly**: Hamburg vs Wurzburg, Rostock vs Ludwigsburg both appearing under the winner canonicals. Lift visible on the absorbed fixtures.
+
+**Critical negative check — PASSES**: zero loser canonicals (Rasta Vechta, Rostock Seawolves, Hamburg Towers, MLP Academics Heidelberg) appear in production resolutions. No fragmentation reintroduced. Covers ALL 4 pairs, regardless of per-pair volume.
+
+Vechta / Heidelberg windows had no resolutions yet — early-window + BBL season-tail artifact (same low-but-valid pattern as the off-season F7s Day-35/36 EuroLeague + ABA workstreams). Low volume on the positive side is NOT a defect; the negative check is the dispositive guarantee that the MERGE preserved canonical integrity.
+
+**BBL workstream #10 closed end to end** — first FL-universe-engine-driven workstream + first MERGE in program history, now confirmed in production BEHAVIOR (not just sp.dedup_audit row counts).
+
+### Day-40: POST-BBL FORK DECIDED — pivot to Phase 2 exit plumbing
+
+The strategic fork carried since Day-38 is **resolved**: the next active workstream is the **§7.6 / §7.7 re-resolution loop**, not another league bootstrap. Three-point reasoning, recorded here so it is not re-litigated next session:
+
+1. **Coverage breadth is past peak leverage toward the product.** Basketball 67.5%, baseball / soccer 70%+ — good enough to ship. Aggregate matcher capability 35.3% is denominator-suppressed by near-zero-coverage long-tail sports, not by the headline team-path sports (Amendment #20). The next league moves the wrong needle.
+2. **The re-resolution loop is the highest remaining lever AND a Phase 2 exit gate.** Per the phase-status header — §7.7 three-loop runner is one of the four gates blocking Phase 3. It also retroactively compounds across all 39 days of prior coverage work (every previously-no_match record that NOW has an alias gets re-swept). The 18,303-row review queue is a labeled-alias backlog the loop unlocks. One workstream, two gates progressed.
+3. **The finish line is the product.** Resolver accuracy is a critical INPUT to the product, not a substitute for it. The header's standing rule — track against v1.4 §11, not coverage vocabulary. Phase 3 cutover needs `/api/v4` + tolerable queue + measurement; the loop moves us toward all three.
+
+### Day-40: coverage is RESEQUENCED, not abandoned
+
+Recording this explicitly: **the league-bootstrap workstreams are not closed.** Coverage is sequenced *behind* the re-resolution loop because the loop is a multiplier — built first, it retroactively re-resolves all existing coverage AND multiplies the value of every future bootstrap (a new league lands once; its alias deltas keep re-sweeping previously-stuck records on every subsequent loop tick). Coverage resumes once the loop ships; each future league is then worth more than it would have been today. This is sequencing for leverage, not abandonment.
+
+### Day-40 PR state
+
+- BBL workstream #10: closed (PR #236 merged Day-39, F7 validated Day-40).
+- This entry: PROJECT_STATE Day-40 journal — operator-reviewed.
+
+### Pending — next session
+
+1. **Re-resolution loop — scope build** from the Day-40 machinery survey (separately reported; covers what exists vs. what §7.6 / §7.7 specifies). Survey informs build scope.
+2. **Carried Phase 2 exit gates**: §11.3 daily-diff cron wiring (open since Day-21), §6.5 archival, §7.5 review queue health (18,303 pending).
+3. **Phase 3 cutover scaffolding** — `/api/v4` is not started; flag scaffold not present. Stays gated behind the loop + queue gates per the header.
+4. Coverage resumes after the loop. Carried candidates from prior pending lists stay parked, not closed.
 
 ---
 
