@@ -72,3 +72,74 @@ name = "resolver-cron-kalshi"
 cronSchedule = "15 2 * * *"
 startCommand = "python scripts/run_resolver_pass.py --provider kalshi --run-mode cron"
 restartPolicyType = "NEVER"
+
+# ──────────────────────────────────────────────────────────────────
+# Phase 2E re-resolution loop — services FLAGGED OFF below
+# ──────────────────────────────────────────────────────────────────
+#
+# All three service entries below are COMMENTED OUT pending operator
+# dry-run review (PR for `scripts/run_reresolution_pass.py`). Until
+# the operator un-comments these blocks AND manually creates the
+# matching services in the Railway dashboard, nothing schedules.
+#
+# Per docs/reresolution/scope-2026-06-17.md F3 — DECIDED Day-42:
+#   - resolver-reresolution-fl     : every 5 min, "*/5 * * * *"
+#   - resolver-reresolution-kalshi : every 5 min offset 2 min,
+#                                    "2-59/5 * * * *"
+#   - daily-diff                   : nightly at 03:00 UTC,
+#                                    45 min after the daily cron pair
+#
+# After dry-run review the operator removes the leading "# " from
+# each line below, commits, and creates the three services in the
+# Railway dashboard per the standard provisioning runbook
+# (DEPLOYMENT.md → "One-time Railway setup").
+#
+# The 2-min FL/Kalshi offset preserves the Day-21 swap discipline:
+# FL re-resolution writes complete before Kalshi's pass starts, so
+# any newly-resolved fixtures are visible for cross-provider
+# corroboration. F3a (no quiet window) is built into the cadence —
+# the candidate-selection query naturally excludes records the daily
+# cron just resolved.
+#
+# The daily-diff cron is folded into THIS workstream per F5 —
+# closes the Day-21 measurement-debt that PR #234's phase-status
+# header tracks. Writes to sp.daily_diff_reports per F5a.
+#
+# Halt-criteria warnings emit to stdout AND the structured log per
+# F6; exit code stays 0 on warnings (same as the daily cron pattern)
+# so transient warnings don't surface as deploy failures.
+
+# [[services]]
+# name = "resolver-reresolution-fl"
+#
+# [services.deploy]
+# # Every 5 min. F3-DECIDED cadence. ~16,588 addressable population
+# # ceiling per Day-41 sizing; targeted Tier-1+2 candidate selection
+# # holds per-pass cost proportional to actual change (NOT the gross
+# # no_match population).
+# cronSchedule = "*/5 * * * *"
+# startCommand = "python scripts/run_reresolution_pass.py --provider fl --apply"
+# restartPolicyType = "NEVER"
+
+# [[services]]
+# name = "resolver-reresolution-kalshi"
+#
+# [services.deploy]
+# # Every 5 min offset 2 min (cron expression: minutes 2, 7, 12, …).
+# # The 2-min offset after FL preserves cross-provider corroboration
+# # freshness — Kalshi's pass sees FL's just-re-resolved fixtures.
+# cronSchedule = "2-59/5 * * * *"
+# startCommand = "python scripts/run_reresolution_pass.py --provider kalshi --apply"
+# restartPolicyType = "NEVER"
+
+# [[services]]
+# name = "daily-diff"
+#
+# [services.deploy]
+# # Nightly at 03:00 UTC — 45 min after the daily cron pair completes.
+# # F5-DECIDED. Closes the Day-21 measurement-debt; writes to
+# # sp.daily_diff_reports for trajectory continuity. The loop is
+# # unmeasurable without this; folded into the same workstream.
+# cronSchedule = "0 3 * * *"
+# startCommand = "python scripts/daily_diff.py"
+# restartPolicyType = "NEVER"
