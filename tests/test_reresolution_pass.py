@@ -513,6 +513,58 @@ class TestStaticInvariants:
         import scripts.run_reresolution_pass as mod
         assert "Phase 2E" in (mod.__doc__ or "")
 
+    def test_migration_uses_repo_concurrently_pattern_not_autocommit_block(self):
+        """First CONCURRENTLY migration in the chain (a2c4f6d8e1b3).
+        It MUST use the COMMIT + execution_options(AUTOCOMMIT) pattern,
+        NOT op.get_context().autocommit_block() — which fails the
+        `self._transaction is not None` assertion in this repo's
+        async-asyncpg env.py config (Phase 1A async-alembic gotcha
+        class; production confirmed Day-42).
+
+        Guards against a future maintainer "tidying up" the
+        migration with the standard alembic recipe and silently
+        breaking deploys. If autocommit_block() is ever supported
+        in this env.py config, this test can be reconsidered."""
+        repo_root = os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))
+        )
+        mig_path = os.path.join(
+            repo_root, "migrations", "versions",
+            "20260619_1200_a2c4f6d8e1b3_phase_2e_reresolution_indexes.py",
+        )
+        with open(mig_path, encoding="utf-8") as f:
+            blob = f.read()
+        # Must NOT use the failing escape hatch. Strip the
+        # docstring before checking — the docstring explains why
+        # autocommit_block is avoided, which is a legitimate
+        # mention. We're guarding against actual code calls.
+        import re
+        # Drop the module docstring (first triple-quoted string).
+        code_only = re.sub(
+            r'^"""[\s\S]*?"""', "", blob, count=1,
+        )
+        assert "autocommit_block(" not in code_only, (
+            "autocommit_block() fails in this repo's env.py "
+            "config — see migration docstring. Use COMMIT + "
+            "execution_options(isolation_level='AUTOCOMMIT')."
+        )
+        # Must use the working pattern:
+        assert "COMMIT" in blob, (
+            "Migration must commit alembic's per-migration "
+            "transaction explicitly before running CONCURRENTLY DDL."
+        )
+        assert 'isolation_level="AUTOCOMMIT"' in blob, (
+            "Migration must switch to AUTOCOMMIT isolation so the "
+            "next statement does not implicit-BEGIN a new transaction."
+        )
+        # Must still be CONCURRENTLY (not falling back to a locking
+        # CREATE INDEX):
+        assert "CREATE INDEX CONCURRENTLY" in blob, (
+            "sp.resolution_log is 130k+ rows and a production "
+            "hot-write table — plain CREATE INDEX would lock it. "
+            "The fix MUST keep CONCURRENTLY."
+        )
+
     def test_railway_toml_crons_are_commented_off(self):
         """Belt-and-suspenders: the three Phase 2E cron service
         entries MUST be commented in railway.toml — they go live
