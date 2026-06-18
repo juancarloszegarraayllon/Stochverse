@@ -108,6 +108,95 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-06-19
+
+### Day-41/42: Re-resolution loop — sizing + scope-doc closed + build + production indexes landed
+
+First active work on the §7.6 / §7.7 three-loop runner (Phase 2 exit gate, decided Day-40 post-BBL fork). Survey-first → scope-second → build-third discipline held (same as Component 4). All 8 framing-question decisions closed on production evidence, loop built + tested (236 green), two indexes online in production. Crons NOT enabled — operator runs dry-run review before un-commenting `railway.toml`.
+
+### Day-41: Sizing pass — production decomposition of the no_match backlog
+
+Read-only production query at 2026-06-18 against `sp.resolution_log` (latest decision per `(provider, provider_record_id)`). The decomposition converted three scope-doc framing defaults into evidence-driven decisions.
+
+Total unresolved no_match records: **35,831**. Three structurally-distinct populations:
+
+| Population | Records | Loop-addressable? |
+|---|---:|---|
+| Loop-addressable (5 fail_reason categories — alias-add could flip): fuzzy_no_team_resemblance (non-prop) 10,856 + fuzzy_collision_no_anchor 3,179 + alias_no_team_resemblance 1,040 + below_review_threshold 886 + alias_resolution_incomplete 627 | **~16,588 (46%)** | YES |
+| Prop contamination (`asymmetric_excluded='kalshi_prop_market'`, e.g. "Colorado: First Inning Run") | 4,200 (12%) | NO — not a team |
+| Upstream failures (failed before team-matching): structural_normalize_failed 8,521 (Golf single-player) + sport_not_classified 3,941 (Esports/contaminants) + deferred_to_2d 2,528 (non-terminal artifact) + kickoff_confidence_below_threshold 53 | ~15,043 (42%) | NO — no team was a candidate |
+
+**Latent prop-attachment forward-pointer** (logged so it isn't lost): the 4,200 `kalshi_prop_market` records relate to **real games** — "Shakhtar: First Half Winner" → a real Shakhtar fixture. The `home_canonical` side of the prop already identifies the fixture's home team. They're excluded from this loop because alias-resolution can't move them — but a future Phase 3+ **prop-attachment feature** (attach each prop to the fixture its real side already identifies) is a legitimate scope item. Recorded in the scope doc §1 Day-41 subsection.
+
+### Day-41: All 8 scope-doc decisions DECIDED on production evidence (#238 updated)
+
+- **F1 — DECIDED.** Four-condition candidate-selection rule: (1) `fail_reason` allowlist of 5 categories, (2) `asymmetric_excluded IS NULL`, (3) `fixture_id IS NULL`, (4) last decision was no_match AND a relevant alias-add OR fixture-state change since. Working set bounded at ~16,588 records max. The allowlist + prop-exclusion at the top of the filter chain prune the candidate set BEFORE the JSONB containment scan — structurally cheaper AND more correct than relying on alias-match to incidentally fail on the ~19,243 non-addressable records.
+- **F1a — DECIDED: LOOSE.** Any new alias on any of the prior decision's candidate teams qualifies. The "loose × 288 passes/day sweeps the world" worry defused by F1's pre-filter bounding the working set. Upgrade path to strict is well-defined if measured cost surprises.
+- **F2 — DECIDED: two indexes, one migration.** Partial expression btree on `(reason_detail->>'fail_reason') WHERE reason_code='no_match'` for the structural pre-filter (evidence-driven by the 54% selectivity finding) + GIN with `jsonb_path_ops` for Tier-2 containment. Both `CREATE INDEX CONCURRENTLY`. F2a — accept post-migration measurement (rollback is non-blocking `DROP INDEX CONCURRENTLY`).
+- **F3 — DECIDED: confirmed as specced.** 5-min cadence; `resolver-reresolution-fl` at `*/5 * * * *`; `resolver-reresolution-kalshi` offset 2 min; `daily-diff` at `0 3 * * *` (45 min after the daily cron pair, closes Day-21 measurement-debt per F5). F3a — no quiet window.
+- **F4 — DECIDED: no change.** Existing `ON CONFLICT (provider, provider_record_id) DO UPDATE WHERE status='pending'` clause at `run_resolver_pass.py:640` covers the re-resolution write path. F4a — same `sp.resolver_runs` view, filter by `run_mode` when desired.
+- **F5 — DECIDED: daily-diff cron writes to `sp.daily_diff_reports`** (closes the Day-21 debt; the Day-33/34 measurement gaps in trajectory). F5a — write on every cron pass.
+- **F6 — DECIDED: mirrors `run_resolver_pass.py` halt criteria.** Halt warnings on candidate_set_size > 5× trailing-7d mean / latency > 5s / GIN scan ratio < 80%. Exit 0 on warnings, exit non-zero only on hard failures. Hard limit 50k candidates → exit 4. F6a — `sp.resolver_runs` rows retained forever.
+- **F7 — SHARPENED.** Three-part validation measures against the ~16,588 addressable denominator, NOT the gross 35,831 — measuring against the wrong denominator would understate the loop's effectiveness by ~54% mechanically. Aggregate `matcher_capability_rate` (35.3%) reported alongside but NOT the gate; it's denominator-suppressed by the ~19,243 structurally-non-addressable records.
+- **F8 — DECIDED: deferred-seam set confirmed.** LISTEN/NOTIFY hot loop deferred to Phase 2E.fix (trigger: p95 > 5 min per `DEPLOYMENT.md:1152`); `--candidate-set` CLI mode designed-in; `--sport <id>` arg from day one; review_queue harvest out of scope; Phase 2D fuzzy tuning auto-picked-up via `TIERED_RESOLVER_VERSION` stamp.
+
+### Day-42: Loop BUILT — migration + script + cron entries (flagged off) + tests
+
+Branch `claude/reresolution-loop-scope` head `31dd97f`. 236 tests green (engine + dedup + merge + reresolution; 20 SP_INTEGRATION_DB-gated stubs).
+
+- **`migrations/versions/20260619_1200_a2c4f6d8e1b3_phase_2e_reresolution_indexes.py`** — both indexes `CREATE INDEX CONCURRENTLY`, depends on `f1b3d5e7a9c2` (BBL `dedup_audit` chain). First CONCURRENTLY migration in the chain (see lesson below).
+- **`scripts/run_reresolution_pass.py`** — mirrors `run_resolver_pass.py` shape. Two-tier candidate selection (Tier-1 SQL allowlist + prop-exclusion + fixture_id IS NULL + latest no_match; Tier-2 Python LOOSE F1a alias-add OR fixture-state). `run_mode='live'` on `sp.resolver_runs` writes. `--sport` per-sport restriction (F8 day-one seam). `--candidate-set provider:record_id,…` override (F8 LISTEN/NOTIFY seam). DEFAULT `--dry-run`; explicit `--apply` required + Pattern D pre-flight (Amendment #17). Reuses `TieredMatcher` bootstrap — no resolver-tier changes. F6 halt criteria + structured log per scope doc.
+- **`railway.toml`** — three new cron service entries appended, **all commented out** ("flagged off pending operator dry-run review"). CI-guarded by `tests/test_reresolution_pass.py::TestStaticInvariants::test_railway_toml_crons_are_commented_off` — a maintainer can't accidentally un-comment without the test failing.
+- **`tests/test_reresolution_pass.py`** — 48 pure-function tests + 7 SP_INTEGRATION_DB-gated stubs. Covers allowlist exactness, Tier-1 SQL shape, JSONB walker across all known team_id key shapes, Tier-2 loose semantics, F6 halt branches, F8 seam parsing, CLI safety, static invariants (railway.toml comment guard + the migration pattern guard added Day-42 — see lesson below).
+
+### Day-42: Production indexes landed (via psql, not alembic)
+
+Both indexes built online + stamped:
+
+- `ix_resolution_log_fail_reason_no_match` — partial btree on `(reason_detail->>'fail_reason') WHERE reason_code='no_match'`. Tier-1 pre-filter index.
+- `ix_resolution_log_reason_detail_gin` — GIN on `reason_detail` with `jsonb_path_ops`. Tier-2 containment index.
+- `sp.alembic_version` stamped to **`a2c4f6d8e1b3`** post-build.
+
+Online build, zero production downtime. `sp.resolution_log` (130k+ rows, hot-write table) carried writes throughout.
+
+### Day-42: MIGRATION LESSON — first CONCURRENTLY migration in the chain, async env.py incompatibilities
+
+Pinning this so the next CONCURRENTLY migration doesn't repeat the detour:
+
+**The async env.py path through alembic is incompatible with both standard `CREATE INDEX CONCURRENTLY` escape hatches.** This repo's `migrations/env.py` runs the asyncpg engine via `connectable.connect()` + `transaction_per_migration=True` + `AsyncConnection.run_sync` sync-bridge. Two failure modes observed Day-42 in sequence:
+
+1. **`op.get_context().autocommit_block()` fails on entry**: `AssertionError (assert self._transaction is not None, alembic/runtime/migration.py:329)`. alembic's per-migration `self._transaction` tracker doesn't reliably reflect the underlying DB transaction state through the sync-bridge — same class as the Phase 1A async-alembic commit gotcha that env.py's lifecycle comments (lines 102-112, 122-131) were written to address. Clean failure before any write; `sp.alembic_version` stayed at `f1b3d5e7a9c2`.
+2. **`op.execute("COMMIT")` + `execution_options(isolation_level="AUTOCOMMIT")` fallback also fails**: `InvalidRequestError: transaction already initialized`. SQLAlchemy 2.0's `execution_options(isolation_level=…)` won't switch isolation on a connection whose transaction state is still considered open through the sync-bridge — even after a raw `COMMIT` SQL has gone through the wire.
+
+**Resolution (used Day-42, established for future CONCURRENTLY migrations)**: skip the alembic-upgrade path entirely for CONCURRENTLY DDL. Build the indexes directly via psql / Neon console, then `alembic stamp <rev>` to record the revision without running `upgrade()`.
+
+The migration's docstring carries the operator-runbook fallback verbatim:
+
+```bash
+psql "$DATABASE_URL" -c "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_resolution_log_fail_reason_no_match ON sp.resolution_log ((reason_detail->>'fail_reason')) WHERE reason_code = 'no_match';"
+psql "$DATABASE_URL" -c "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_resolution_log_reason_detail_gin ON sp.resolution_log USING gin (reason_detail jsonb_path_ops);"
+alembic stamp a2c4f6d8e1b3
+```
+
+**What made this a 20-min detour, not a block**: the migration was shipped with both the failed-pattern attempt AND the operator-runbook fallback in its docstring, AND a CI guard test (`TestStaticInvariants::test_migration_uses_repo_concurrently_pattern_not_autocommit_block`) that pins the migration's pattern shape. When the alembic path failed, the runbook was on disk in the migration file itself; operator copied + ran + stamped in one pass. The CI guard prevents a future maintainer from "cleaning up" by reintroducing `autocommit_block()` or dropping `CONCURRENTLY`.
+
+**Forward-pointer for the next CONCURRENTLY migration**: don't bother trying `alembic upgrade head` for the DDL itself. Go straight to the psql + stamp path. The migration file is then a stamping target + documentation source, not an execution path. Same pattern as production-truth-test discipline (Amendment #18) — the alembic path is a hypothesis; the psql path is the verified mechanism.
+
+### Day-41/42 PR state
+
+- **PR #238 (`claude/reresolution-loop-scope`)** — UPDATED (head `31dd97f`): scope doc with all 8 framing questions DECIDED + loop build + migration + tests + railway.toml crons-flagged-off. Open + unmerged. Operator runs dry-run review before any merge.
+- This entry: PROJECT_STATE Day-41/42 journal — operator-reviewed.
+
+### Pending — next session
+
+1. **Dry-run per provider** — `DATABASE_URL=<neon> python scripts/run_reresolution_pass.py --provider fl` (then `--provider kalshi`). Reads the new indexes, writes nothing. Sanity-check `candidate_set_size` against the ~16,588 ceiling per provider. Reconciles the indexes-are-being-used assumption (EXPLAIN ANALYZE in the SP_INTEGRATION_DB tests is the integration-side check).
+2. **If shape's right**: enable crons. Un-comment the three `railway.toml` blocks, create the three services in the Railway dashboard. First `--apply` goes via the cron itself; `sp.resolver_runs` rows with `run_mode='live'` appear within 5 min.
+3. **F7 Part B owing**: operator's pre-ship lift estimate for the addressable-set flip rate over Day-N+1 → Day-N+7. This is the measuring stick before the loop's effectiveness can be evaluated. Recorded as "outstanding operator owings" in the scope doc §8.
+4. **Carried Phase 2 exit gates** (still open after the loop ships): §11.3 daily-diff cron starts flowing the moment the loop's `railway.toml` block is uncommented (F5 folded-in piece); §6.5 archival; §7.5 review queue (18,303 → measure post-loop).
+5. **Carried earlier**: 9 pre-existing test_phase_2d5_* / test_phase_2f1_* collection errors (track so not blamed on Phase 2E work).
+
+---
+
 ## Session — 2026-06-17
 
 ### Day-40: BBL Component 4 F7-validated — first MERGE confirmed in production behavior
