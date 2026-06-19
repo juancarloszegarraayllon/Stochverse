@@ -9,8 +9,10 @@ record.
 Per docs/reresolution/scope-2026-06-17.md (all 8 framing questions
 DECIDED):
 
-  Tier 1 (cheap structural filter — supports the partial expression
-  index from migration a2c4f6d8e1b3):
+  Tier 1 (LATERAL-driven; supports
+  ix_resolution_log_provider_record_decided_at from migration
+  b3d5e7f9a2c4 — drives from the unresolved provider table, looks up
+  the latest decision per row via an Index Scan + LIMIT 1):
     - provider_table.fixture_id IS NULL
     - latest sp.resolution_log row has reason_code = 'no_match'
     - reason_detail->>'fail_reason' IN allowlist of 5 categories
@@ -135,47 +137,66 @@ def _evaluate_halt_criteria(
 # ──────────────────────────────────────────────────────────────────
 # Candidate-selection — pure SQL Tier 1 + Python Tier 2
 # ──────────────────────────────────────────────────────────────────
+#
+# Tier-1 SQL uses a LATERAL JOIN driven from the unresolved provider
+# table (fixture_id IS NULL), with a per-row lookup of the latest
+# resolution_log entry. This shape was chosen Day-43 after the
+# original DISTINCT-ON-then-JOIN structure measured 6.3s warm — the
+# planner picked Parallel Seq Scan + Sort over Index Scan because
+# DISTINCT ON had to pull reason_detail JSONB across (effectively)
+# the whole resolution_log table, making a seq scan cheaper than
+# index-scan-plus-heap-fetch (per-row).
+#
+# The LATERAL inversion:
+#   - drives from the unresolved provider rows (bounded by the
+#     partial index ix_fl_events_unresolved /
+#     ix_kalshi_markets_unresolved — small set: ~10-50k rows per
+#     provider)
+#   - for each, ix_resolution_log_provider_record_decided_at
+#     (provider, provider_record_id, decided_at DESC) returns the
+#     latest decision in one Index Scan + LIMIT 1 (no sort)
+#   - outer WHERE filters on reason_code, fail_reason allowlist,
+#     asymmetric_excluded
+#
+# Semantically equivalent to the prior CTE+DISTINCT ON shape: only
+# records that have been considered before (resolution_log carries a
+# decision for them) AND whose LATEST decision is a loop-eligible
+# no_match end up in the candidate set.
 
 TIER1_SQL_FL = """
-WITH latest AS (
-    SELECT DISTINCT ON (rl.provider, rl.provider_record_id)
-        rl.provider,
-        rl.provider_record_id,
-        rl.reason_code,
-        rl.reason_detail,
-        rl.decided_at
+SELECT fle.fl_event_id AS provider_record_id,
+       latest.reason_detail,
+       latest.decided_at
+FROM sp.fl_events fle
+JOIN LATERAL (
+    SELECT rl.reason_code, rl.reason_detail, rl.decided_at
     FROM sp.resolution_log rl
     WHERE rl.provider = 'fl'
-    ORDER BY rl.provider, rl.provider_record_id, rl.decided_at DESC
-)
-SELECT latest.provider_record_id, latest.reason_detail, latest.decided_at
-FROM latest
-JOIN sp.fl_events fle
-  ON fle.fl_event_id = latest.provider_record_id
- AND fle.fixture_id IS NULL
-WHERE latest.reason_code = 'no_match'
+      AND rl.provider_record_id = fle.fl_event_id
+    ORDER BY rl.decided_at DESC
+    LIMIT 1
+) latest ON TRUE
+WHERE fle.fixture_id IS NULL
+  AND latest.reason_code = 'no_match'
   AND (latest.reason_detail->>'fail_reason') = ANY(:allowlist)
   AND (latest.reason_detail->>'asymmetric_excluded') IS NULL
 """
 
 TIER1_SQL_KALSHI = """
-WITH latest AS (
-    SELECT DISTINCT ON (rl.provider, rl.provider_record_id)
-        rl.provider,
-        rl.provider_record_id,
-        rl.reason_code,
-        rl.reason_detail,
-        rl.decided_at
+SELECT km.ticker AS provider_record_id,
+       latest.reason_detail,
+       latest.decided_at
+FROM sp.kalshi_markets km
+JOIN LATERAL (
+    SELECT rl.reason_code, rl.reason_detail, rl.decided_at
     FROM sp.resolution_log rl
     WHERE rl.provider = 'kalshi'
-    ORDER BY rl.provider, rl.provider_record_id, rl.decided_at DESC
-)
-SELECT latest.provider_record_id, latest.reason_detail, latest.decided_at
-FROM latest
-JOIN sp.kalshi_markets km
-  ON km.ticker = latest.provider_record_id
- AND km.fixture_id IS NULL
-WHERE latest.reason_code = 'no_match'
+      AND rl.provider_record_id = km.ticker
+    ORDER BY rl.decided_at DESC
+    LIMIT 1
+) latest ON TRUE
+WHERE km.fixture_id IS NULL
+  AND latest.reason_code = 'no_match'
   AND (latest.reason_detail->>'fail_reason') = ANY(:allowlist)
   AND (latest.reason_detail->>'asymmetric_excluded') IS NULL
 """

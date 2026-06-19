@@ -84,8 +84,22 @@ class TestLoopEligibleAllowlist:
 
 class TestTier1SQLShape:
     """Static-source guards on the Tier-1 SQL. Pure-text assertions —
-    no DB connection required. Catches accidental dropping of the
-    structural filters that the partial expression index relies on."""
+    no DB connection required.
+
+    Day-43 perf finding rewrote the Tier-1 SQL from
+    CTE+DISTINCT-ON+JOIN to LATERAL-driven-from-the-provider-table.
+    The DISTINCT ON shape pulled the full reason_detail JSONB across
+    (effectively) the whole resolution_log table, so the planner
+    correctly chose Parallel Seq Scan + Sort over Index Scan —
+    `ix_resolution_log_provider_record_decided_at` couldn't win the
+    DISTINCT ON shape no matter what stats said. The LATERAL inversion
+    drives from the small unresolved provider set
+    (~10-50k rows via the `ix_*_unresolved` partial indexes) and does
+    a per-row Index Scan + LIMIT 1 on the latest-decision index.
+
+    These tests pin the shape so a future maintainer doesn't
+    re-introduce DISTINCT ON.
+    """
 
     def test_fl_sql_carries_allowlist_filter(self):
         assert "fail_reason" in TIER1_SQL_FL
@@ -98,26 +112,58 @@ class TestTier1SQLShape:
     def test_fl_sql_carries_fixture_id_null(self):
         assert "fixture_id IS NULL" in TIER1_SQL_FL
 
-    def test_fl_sql_uses_distinct_on_for_latest_decision(self):
-        assert "DISTINCT ON" in TIER1_SQL_FL
+    def test_fl_sql_uses_lateral_for_latest_decision(self):
+        """Day-43 rewrite: LATERAL JOIN replaces CTE+DISTINCT ON.
+        The LATERAL's ORDER BY decided_at DESC LIMIT 1 lets
+        ix_resolution_log_provider_record_decided_at serve the
+        latest-decision lookup directly — no full scan, no sort."""
+        assert "JOIN LATERAL" in TIER1_SQL_FL
         assert "ORDER BY" in TIER1_SQL_FL and "DESC" in TIER1_SQL_FL
+        assert "LIMIT 1" in TIER1_SQL_FL
+
+    def test_fl_sql_does_not_use_distinct_on(self):
+        """Day-43 regression guard. DISTINCT ON forced the planner to
+        Parallel Seq Scan + Sort (5.3s + 0.9s warm); the LATERAL
+        rewrite avoids that. A future maintainer "tidying up" by
+        replacing LATERAL with the CTE shape would silently
+        regress perf."""
+        assert "DISTINCT ON" not in TIER1_SQL_FL
 
     def test_fl_sql_restricts_to_no_match(self):
         assert "reason_code = 'no_match'" in TIER1_SQL_FL
 
     def test_kalshi_sql_carries_same_filters(self):
+        """Same shape on the Kalshi side — JOIN LATERAL from
+        sp.kalshi_markets, keyed on `ticker`."""
         for needle in (
             "fail_reason", ":allowlist", "asymmetric_excluded",
-            "fixture_id IS NULL", "DISTINCT ON",
-            "reason_code = 'no_match'",
+            "fixture_id IS NULL", "JOIN LATERAL",
+            "reason_code = 'no_match'", "LIMIT 1",
         ):
             assert needle in TIER1_SQL_KALSHI
 
-    def test_fl_sql_joins_sp_fl_events(self):
-        assert "sp.fl_events" in TIER1_SQL_FL
+    def test_kalshi_sql_does_not_use_distinct_on(self):
+        assert "DISTINCT ON" not in TIER1_SQL_KALSHI
 
-    def test_kalshi_sql_joins_sp_kalshi_markets(self):
-        assert "sp.kalshi_markets" in TIER1_SQL_KALSHI
+    def test_fl_sql_drives_from_sp_fl_events(self):
+        """LATERAL driver = unresolved provider rows. The partial
+        index ix_fl_events_unresolved on (fixture_id) WHERE
+        fixture_id IS NULL serves the outer driver scan."""
+        assert "FROM sp.fl_events" in TIER1_SQL_FL
+
+    def test_kalshi_sql_drives_from_sp_kalshi_markets(self):
+        """LATERAL driver = unresolved Kalshi tickers."""
+        assert "FROM sp.kalshi_markets" in TIER1_SQL_KALSHI
+
+    def test_fl_lateral_keys_on_fl_event_id(self):
+        """sp.fl_events PK is `fl_event_id` (TEXT), not `ticker`.
+        Catches a copy-paste regression from the Kalshi shape."""
+        assert "rl.provider_record_id = fle.fl_event_id" in TIER1_SQL_FL
+
+    def test_kalshi_lateral_keys_on_ticker(self):
+        """sp.kalshi_markets PK is `ticker` (TEXT), not `fl_event_id`.
+        Catches a copy-paste regression from the FL shape."""
+        assert "rl.provider_record_id = km.ticker" in TIER1_SQL_KALSHI
 
 
 # ──────────────────────────────────────────────────────────────────
