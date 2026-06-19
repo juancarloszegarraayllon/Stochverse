@@ -138,65 +138,93 @@ def _evaluate_halt_criteria(
 # Candidate-selection — pure SQL Tier 1 + Python Tier 2
 # ──────────────────────────────────────────────────────────────────
 #
-# Tier-1 SQL uses a LATERAL JOIN driven from the unresolved provider
-# table (fixture_id IS NULL), with a per-row lookup of the latest
-# resolution_log entry. This shape was chosen Day-43 after the
-# original DISTINCT-ON-then-JOIN structure measured 6.3s warm — the
-# planner picked Parallel Seq Scan + Sort over Index Scan because
-# DISTINCT ON had to pull reason_detail JSONB across (effectively)
-# the whole resolution_log table, making a seq scan cheaper than
-# index-scan-plus-heap-fetch (per-row).
+# Tier-1 SQL drives from the MATERIALIZED set of unresolved provider
+# rows, then per-row LATERALs the latest resolution_log decision.
+# Three perf iterations got us here:
 #
-# The LATERAL inversion:
-#   - drives from the unresolved provider rows (bounded by the
-#     partial index ix_fl_events_unresolved /
-#     ix_kalshi_markets_unresolved — small set: ~10-50k rows per
-#     provider)
-#   - for each, ix_resolution_log_provider_record_decided_at
-#     (provider, provider_record_id, decided_at DESC) returns the
-#     latest decision in one Index Scan + LIMIT 1 (no sort)
-#   - outer WHERE filters on reason_code, fail_reason allowlist,
-#     asymmetric_excluded
+#   Day-43 attempt 1 — CTE+DISTINCT-ON+JOIN. 6.3s warm. Planner
+#     chose Parallel Seq Scan + Sort over the whole resolution_log:
+#     reason_detail JSONB pulled across (effectively) the entire
+#     table made heap-fetch-per-row cheaper than index-scan-plus-
+#     heap-fetch.
 #
-# Semantically equivalent to the prior CTE+DISTINCT ON shape: only
-# records that have been considered before (resolution_log carries a
-# decision for them) AND whose LATEST decision is a loop-eligible
-# no_match end up in the candidate set.
+#   Day-43 attempt 2 — FROM fl_events JOIN LATERAL ... WHERE
+#     fixture_id IS NULL. 2.7s warm. The LATERAL inner was correct
+#     (1.1s Index Scan on ix_resolution_log_provider_record_decided_at
+#     + LIMIT 1), but the OUTER applied fixture_id IS NULL as a
+#     filter on a Seq Scan of fl_events (1.5s), so the LATERAL ran
+#     once per fl_events row, not just unresolved ones.
+#
+#   Day-43 attempt 3 (current) — WITH unresolved AS MATERIALIZED
+#     (SELECT … WHERE fixture_id IS NULL). MATERIALIZED is the
+#     non-negotiable bit: PG 12+ inlines single-reference CTEs by
+#     default, which would put us back at attempt 2's seq-scan
+#     choice. MATERIALIZED forces the planner to compute the CTE
+#     separately, which means scanning sp.fl_events through
+#     ix_fl_events_unresolved (the partial index `WHERE fixture_id
+#     IS NULL` already in the initial schema), then iterating that
+#     small materialized set into the LATERAL.
+#
+# Index utilization (post-attempt-3):
+#   - Outer driver: ix_fl_events_unresolved /
+#     ix_kalshi_markets_unresolved (partial; pre-existing, from
+#     20260507_1504_8f404e0dc89a initial schema).
+#   - Inner LATERAL: ix_resolution_log_provider_record_decided_at
+#     (b3d5e7f9a2c4) — Index Scan + LIMIT 1 per outer row, no sort.
+#
+# Forward-pointer (if attempt 3 still measures > 5s F6 ceiling):
+# bound the candidate set with a time window (e.g., only consider
+# records whose latest decision is within the last N days, or only
+# unresolved provider rows last_seen_at since some watermark). The
+# unresolved-provider set has no upper-bound semantics in the schema
+# — old records that never got resolved accrete indefinitely. If
+# the set is genuinely tens-of-thousands large, even N indexed
+# LATERAL lookups may exceed the ceiling. Defer this fix until
+# attempt 3 measures, per the survey-first → scope-second →
+# build-third → measure-fourth discipline.
 
 TIER1_SQL_FL = """
-SELECT fle.fl_event_id AS provider_record_id,
+WITH unresolved_fl_events AS MATERIALIZED (
+    SELECT fl_event_id
+    FROM sp.fl_events
+    WHERE fixture_id IS NULL
+)
+SELECT u.fl_event_id AS provider_record_id,
        latest.reason_detail,
        latest.decided_at
-FROM sp.fl_events fle
+FROM unresolved_fl_events u
 JOIN LATERAL (
     SELECT rl.reason_code, rl.reason_detail, rl.decided_at
     FROM sp.resolution_log rl
     WHERE rl.provider = 'fl'
-      AND rl.provider_record_id = fle.fl_event_id
+      AND rl.provider_record_id = u.fl_event_id
     ORDER BY rl.decided_at DESC
     LIMIT 1
 ) latest ON TRUE
-WHERE fle.fixture_id IS NULL
-  AND latest.reason_code = 'no_match'
+WHERE latest.reason_code = 'no_match'
   AND (latest.reason_detail->>'fail_reason') = ANY(:allowlist)
   AND (latest.reason_detail->>'asymmetric_excluded') IS NULL
 """
 
 TIER1_SQL_KALSHI = """
-SELECT km.ticker AS provider_record_id,
+WITH unresolved_kalshi_markets AS MATERIALIZED (
+    SELECT ticker
+    FROM sp.kalshi_markets
+    WHERE fixture_id IS NULL
+)
+SELECT u.ticker AS provider_record_id,
        latest.reason_detail,
        latest.decided_at
-FROM sp.kalshi_markets km
+FROM unresolved_kalshi_markets u
 JOIN LATERAL (
     SELECT rl.reason_code, rl.reason_detail, rl.decided_at
     FROM sp.resolution_log rl
     WHERE rl.provider = 'kalshi'
-      AND rl.provider_record_id = km.ticker
+      AND rl.provider_record_id = u.ticker
     ORDER BY rl.decided_at DESC
     LIMIT 1
 ) latest ON TRUE
-WHERE km.fixture_id IS NULL
-  AND latest.reason_code = 'no_match'
+WHERE latest.reason_code = 'no_match'
   AND (latest.reason_detail->>'fail_reason') = ANY(:allowlist)
   AND (latest.reason_detail->>'asymmetric_excluded') IS NULL
 """

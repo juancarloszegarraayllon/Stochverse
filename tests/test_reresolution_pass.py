@@ -86,19 +86,26 @@ class TestTier1SQLShape:
     """Static-source guards on the Tier-1 SQL. Pure-text assertions —
     no DB connection required.
 
-    Day-43 perf finding rewrote the Tier-1 SQL from
-    CTE+DISTINCT-ON+JOIN to LATERAL-driven-from-the-provider-table.
-    The DISTINCT ON shape pulled the full reason_detail JSONB across
-    (effectively) the whole resolution_log table, so the planner
-    correctly chose Parallel Seq Scan + Sort over Index Scan —
-    `ix_resolution_log_provider_record_decided_at` couldn't win the
-    DISTINCT ON shape no matter what stats said. The LATERAL inversion
-    drives from the small unresolved provider set
-    (~10-50k rows via the `ix_*_unresolved` partial indexes) and does
-    a per-row Index Scan + LIMIT 1 on the latest-decision index.
+    Day-43 walked through three perf iterations to land on the
+    current shape (MATERIALIZED CTE + LATERAL):
 
-    These tests pin the shape so a future maintainer doesn't
-    re-introduce DISTINCT ON.
+      Attempt 1: CTE + DISTINCT ON + JOIN. 6.3s warm. Planner chose
+        Parallel Seq Scan + Sort on the whole resolution_log because
+        reason_detail JSONB had to be pulled per-row.
+      Attempt 2: FROM provider_table JOIN LATERAL ... WHERE
+        fixture_id IS NULL. 2.7s warm. Outer applied fixture_id
+        IS NULL as a Seq Scan filter on fl_events, so the LATERAL
+        ran per-row across ALL fl_events.
+      Attempt 3 (current): WITH unresolved AS MATERIALIZED
+        (SELECT ... WHERE fixture_id IS NULL). MATERIALIZED is
+        non-negotiable: PG 12+ inlines single-reference CTEs by
+        default, which would put us back at attempt 2's seq-scan
+        choice. MATERIALIZED forces the planner to compute the CTE
+        separately, exercising the pre-existing partial index
+        ix_*_unresolved before any LATERAL work.
+
+    These tests pin all three properties of the current shape so a
+    future maintainer doesn't silently regress to attempt 1 or 2.
     """
 
     def test_fl_sql_carries_allowlist_filter(self):
@@ -109,12 +116,49 @@ class TestTier1SQLShape:
         assert "asymmetric_excluded" in TIER1_SQL_FL
         assert "IS NULL" in TIER1_SQL_FL
 
-    def test_fl_sql_carries_fixture_id_null(self):
-        assert "fixture_id IS NULL" in TIER1_SQL_FL
+    def test_fl_sql_filters_fixture_id_null_inside_materialized_cte(self):
+        """Day-43 attempt-3 fix: fixture_id IS NULL MUST appear in
+        the MATERIALIZED CTE block, not as an outer WHERE clause —
+        otherwise the planner applies it as a Seq Scan filter and
+        ix_fl_events_unresolved is ignored.
+
+        Catches the attempt-2 regression: a maintainer "simplifying"
+        by moving the predicate into the outer WHERE would silently
+        cost ~1.5s per pass."""
+        # Find the MATERIALIZED CTE's body and assert fixture_id IS
+        # NULL appears inside it.
+        import re
+        cte_match = re.search(
+            r"WITH\s+\w+\s+AS\s+MATERIALIZED\s*\((.*?)\)",
+            TIER1_SQL_FL, flags=re.DOTALL | re.IGNORECASE,
+        )
+        assert cte_match is not None, (
+            "TIER1_SQL_FL must use a MATERIALIZED CTE for the "
+            "unresolved-driver set — see attempt-3 rationale."
+        )
+        cte_body = cte_match.group(1)
+        assert "fixture_id IS NULL" in cte_body, (
+            "fixture_id IS NULL must be filtered INSIDE the "
+            "MATERIALIZED CTE so the partial index "
+            "ix_fl_events_unresolved drives the outer scan. "
+            "Moving it to the outer WHERE silently regresses to "
+            "Day-43 attempt 2's Seq Scan."
+        )
+
+    def test_fl_sql_uses_materialized_cte_for_unresolved_driver(self):
+        """MATERIALIZED is non-negotiable — without it, PG 12+
+        inlines the CTE and we lose the partial-index drive.
+        Attempt-3 regression guard."""
+        assert "AS MATERIALIZED" in TIER1_SQL_FL.upper().replace(
+            "AS  MATERIALIZED", "AS MATERIALIZED"
+        ) or "AS MATERIALIZED" in TIER1_SQL_FL, (
+            "TIER1_SQL_FL must use `WITH ... AS MATERIALIZED (...)`"
+            " — without MATERIALIZED, PG 12+ inlines single-"
+            "reference CTEs and the partial-index drive is lost."
+        )
 
     def test_fl_sql_uses_lateral_for_latest_decision(self):
-        """Day-43 rewrite: LATERAL JOIN replaces CTE+DISTINCT ON.
-        The LATERAL's ORDER BY decided_at DESC LIMIT 1 lets
+        """The LATERAL's ORDER BY decided_at DESC LIMIT 1 lets
         ix_resolution_log_provider_record_decided_at serve the
         latest-decision lookup directly — no full scan, no sort."""
         assert "JOIN LATERAL" in TIER1_SQL_FL
@@ -122,48 +166,61 @@ class TestTier1SQLShape:
         assert "LIMIT 1" in TIER1_SQL_FL
 
     def test_fl_sql_does_not_use_distinct_on(self):
-        """Day-43 regression guard. DISTINCT ON forced the planner to
-        Parallel Seq Scan + Sort (5.3s + 0.9s warm); the LATERAL
-        rewrite avoids that. A future maintainer "tidying up" by
-        replacing LATERAL with the CTE shape would silently
-        regress perf."""
+        """Attempt-1 regression guard."""
         assert "DISTINCT ON" not in TIER1_SQL_FL
 
     def test_fl_sql_restricts_to_no_match(self):
         assert "reason_code = 'no_match'" in TIER1_SQL_FL
 
     def test_kalshi_sql_carries_same_filters(self):
-        """Same shape on the Kalshi side — JOIN LATERAL from
-        sp.kalshi_markets, keyed on `ticker`."""
+        """Same shape on the Kalshi side."""
         for needle in (
             "fail_reason", ":allowlist", "asymmetric_excluded",
             "fixture_id IS NULL", "JOIN LATERAL",
             "reason_code = 'no_match'", "LIMIT 1",
+            "AS MATERIALIZED",
         ):
-            assert needle in TIER1_SQL_KALSHI
+            assert needle in TIER1_SQL_KALSHI, (
+                f"{needle!r} missing from TIER1_SQL_KALSHI"
+            )
 
     def test_kalshi_sql_does_not_use_distinct_on(self):
         assert "DISTINCT ON" not in TIER1_SQL_KALSHI
 
+    def test_kalshi_sql_filters_fixture_id_null_inside_materialized_cte(self):
+        """Same attempt-2 regression guard as FL: fixture_id IS NULL
+        MUST live inside the MATERIALIZED CTE so the partial index
+        ix_kalshi_markets_unresolved drives the outer scan."""
+        import re
+        cte_match = re.search(
+            r"WITH\s+\w+\s+AS\s+MATERIALIZED\s*\((.*?)\)",
+            TIER1_SQL_KALSHI, flags=re.DOTALL | re.IGNORECASE,
+        )
+        assert cte_match is not None
+        cte_body = cte_match.group(1)
+        assert "fixture_id IS NULL" in cte_body
+
     def test_fl_sql_drives_from_sp_fl_events(self):
-        """LATERAL driver = unresolved provider rows. The partial
-        index ix_fl_events_unresolved on (fixture_id) WHERE
-        fixture_id IS NULL serves the outer driver scan."""
+        """Outer driver = MATERIALIZED unresolved set of fl_events.
+        The partial index ix_fl_events_unresolved on (fixture_id)
+        WHERE fixture_id IS NULL serves the CTE's scan."""
         assert "FROM sp.fl_events" in TIER1_SQL_FL
 
     def test_kalshi_sql_drives_from_sp_kalshi_markets(self):
-        """LATERAL driver = unresolved Kalshi tickers."""
+        """Outer driver = MATERIALIZED unresolved set of kalshi_markets."""
         assert "FROM sp.kalshi_markets" in TIER1_SQL_KALSHI
 
     def test_fl_lateral_keys_on_fl_event_id(self):
-        """sp.fl_events PK is `fl_event_id` (TEXT), not `ticker`.
+        """sp.fl_events PK is `fl_event_id` (TEXT), not `ticker`. The
+        LATERAL must key on the CTE's projected `fl_event_id` column.
         Catches a copy-paste regression from the Kalshi shape."""
-        assert "rl.provider_record_id = fle.fl_event_id" in TIER1_SQL_FL
+        assert "rl.provider_record_id = u.fl_event_id" in TIER1_SQL_FL
 
     def test_kalshi_lateral_keys_on_ticker(self):
         """sp.kalshi_markets PK is `ticker` (TEXT), not `fl_event_id`.
+        The LATERAL must key on the CTE's projected `ticker` column.
         Catches a copy-paste regression from the FL shape."""
-        assert "rl.provider_record_id = km.ticker" in TIER1_SQL_KALSHI
+        assert "rl.provider_record_id = u.ticker" in TIER1_SQL_KALSHI
 
 
 # ──────────────────────────────────────────────────────────────────
