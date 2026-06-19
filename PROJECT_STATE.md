@@ -108,6 +108,108 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-06-20
+
+### Day-43: Re-resolution loop — selection logic validated; candidate-query perf in 3-attempt fix arc
+
+FL dry-run validated the selection LOGIC. The candidate-selection QUERY was too slow on three successive iterations; fix attempt 3 (MATERIALIZED CTE driver) shipped this session, pending operator re-measure. PR #238 stays unmerged. Crons stay off. Survey-first → scope-second → build-third → **measure-fourth** discipline held — three attempts measured against production, none assumed-correct.
+
+### Day-43: Selection logic validated on first FL dry-run
+
+Operator ran `python scripts/run_reresolution_pass.py --provider fl` against production. Result:
+
+- Tier-1 returned ~10,160 records (vs the ~16,588 addressable ceiling from Day-41 sizing — sensible reduction by the `decided_at`-since-alias-add freshness filter at Tier-2 input).
+- Tier-2 LOOSE alias-add OR fixture-state filter narrowed to **0-1 survivors** per pass.
+- `candidate_set_size` well under the Day-41 ceiling — the loop selects the RIGHT records.
+
+The Day-41 F1 four-condition rule + F1a LOOSE semantics are **production-validated**. The arithmetic of the loop's value proposition holds: per pass, a small targeted candidate set; the matcher is run on tens, not thousands; the alias-add signal correctly throttles.
+
+### Day-43: Candidate-query perf — three-attempt fix arc
+
+The selection logic is right; the query latency is the problem. Each attempt was measured against production via EXPLAIN ANALYZE warm cache; each surfaced the next bottleneck.
+
+**Attempt 1 — add `ix_resolution_log_provider_record_decided_at`** (migration `b3d5e7f9a2c4`, console+stamp).
+
+Hypothesis: the existing `ix_resolution_log_provider_record` covered the first two columns of `DISTINCT ON (provider, provider_record_id) ORDER BY decided_at DESC`, but `decided_at` was not in the index, forcing heap fetches + Incremental Sort. Adding a covering index `(provider, provider_record_id, decided_at DESC)` should let the planner read latest-decision in index order.
+
+Outcome: **insufficient.** After `ANALYZE sp.resolution_log` the planner STILL chose Parallel Seq Scan + Sort on the whole `sp.resolution_log` (~5.3s scan + 0.9s sort). Index was ignored.
+
+Root cause: the CTE+DISTINCT-ON shape pulled `reason_detail` JSONB across (essentially) every row. The planner correctly reasoned that heap-fetch-per-row was unavoidable, and a seq scan was cheaper than index-scan-plus-heap-fetch. **Not a stats problem; the query structure couldn't be saved by an index.** The new index stayed (it's needed for the next attempt) but was unused.
+
+Migration path detail: `alembic upgrade` failed the same way as `a2c4f6d8e1b3` — both alembic CONCURRENTLY escape hatches incompatible with this repo's async env.py. Used the **second application of the console+stamp pattern** from the Day-42 lesson; built online via Neon console, `alembic stamp b3d5e7f9a2c4`. The docstring carried the verbatim runbook (`psql ...; alembic stamp ...; ANALYZE; EXPLAIN ANALYZE; re-run dry-run`) so the operator copied + ran in one pass. The CI guard test from Day-42 was generalized from a single-file check to a **glob-based scan of every `CREATE INDEX CONCURRENTLY` migration in the chain** — both Phase 2E migrations now pinned by the same test, asserting (1) no `autocommit_block()` call, (2) `COMMIT + execution_options(AUTOCOMMIT)` pattern, (3) CONCURRENTLY preserved, (4) `alembic stamp` runbook present in docstring.
+
+**Attempt 2 — LATERAL Tier-1 rewrite** (commit `901f707`, branch `claude/reresolution-loop-scope`).
+
+Hypothesis: the DISTINCT ON shape forced a full-table scan because Postgres had to materialize latest-decision-per-record across all `sp.resolution_log`. The cure is to drive from the (much smaller) unresolved provider table and per-row LATERAL the latest decision — that lets `ix_resolution_log_provider_record_decided_at` serve the LATERAL's `ORDER BY decided_at DESC LIMIT 1` directly (Index Scan + LIMIT 1 per outer row, no sort).
+
+Outcome: **partial — 2.7s warm, still over the 5s F6 halt ceiling.** EXPLAIN ANALYZE attribution:
+- Nested Loop (good — intended shape).
+- Inner LATERAL: Index Scan using `ix_resolution_log_provider_record_decided_at`, LIMIT 1 — 1,104ms. **Working as designed.**
+- Outer driver: **Seq Scan on `sp.fl_events`** — 1,519ms. **New bottleneck.**
+
+Root cause: the planner was applying `fixture_id IS NULL` as a post-join filter on a Seq Scan of `sp.fl_events`, not as the access path. So the LATERAL ran once per FL event (resolved or not), not just the unresolved set. `ix_fl_events_unresolved` — the partial index `WHERE fixture_id IS NULL` from the initial schema — was ignored.
+
+**Attempt 3 — MATERIALIZED CTE driver** (commit `ed2a44d`).
+
+Hypothesis: wrapping the unresolved set in a CTE makes the planner compute it separately before any LATERAL work. **`MATERIALIZED` is non-negotiable** — PG 12+ inlines single-reference CTEs by default, which would put us back at attempt 2's seq-scan choice. The `MATERIALIZED` keyword forces a separate computation step; Postgres MUST scan `sp.fl_events` to build the temp result first, and `ix_fl_events_unresolved` (partial, `WHERE fixture_id IS NULL`) is the only access path for that scan.
+
+Same shape on the Kalshi side with `unresolved_kalshi_markets` + `ix_kalshi_markets_unresolved`.
+
+Outcome: **awaiting operator re-measure.** Expected plan:
+- CTE Scan on `unresolved_*` driven by Index Scan using `ix_*_unresolved` (partial). No Seq Scan on the provider table.
+- Per outer row: Index Scan using `ix_resolution_log_provider_record_decided_at` + LIMIT 1. No sort.
+- Outer WHERE filters on `reason_code`, fail_reason allowlist, asymmetric_excluded per LATERAL output row.
+
+### Day-43: Reusable lesson — expensive latest-decision queries on hot accreting tables
+
+The arc surfaces a methodology pattern for any future "latest decision per (key1, key2) on a large accreting log table" query. Pin this so the next session doesn't re-derive:
+
+1. **The covering index alone is necessary but not sufficient.** Adding `(key1, key2, ts DESC)` to a table that already has `(key1, key2)` is required for any index-order traversal, but won't help a query that pulls wide payload columns (JSONB) across most of the population — the planner will pick seq scan anyway.
+2. **Restructure the query to minimize the outer-scan population.** Drive from the smallest filtered set; LATERAL the latest-decision lookup per row. The covering index then serves the LATERAL's `ORDER BY ts DESC LIMIT 1` directly. This is the move from "scan-most-of-table-and-dedup" to "scan-small-driver-and-point-look-up".
+3. **Force the planner's hand on the outer driver.** Even with LATERAL, the planner may not use a partial index for the outer scan when the predicate is in the top-level WHERE. **`WITH unresolved AS MATERIALIZED (SELECT ... WHERE <partial-index-predicate>)`** is the explicit, non-rewriteable form. `MATERIALIZED` is mandatory under PG 12+.
+4. **(Possible step 4, deferred) Bound the driver set with a time window.** If the unresolved-population set is itself tens-of-thousands large, N indexed LATERAL lookups may still exceed the latency ceiling. Two natural watermarks: `decided_at > NOW() - INTERVAL '<N> days'` on the LATERAL's resolution_log scan, OR `last_seen_at > NOW() - INTERVAL '<N> days'` on the CTE's provider scan. Don't build until evidence — survey-first → scope-second → build-third → **measure-fourth**.
+
+### Day-43: Three attempt regression guards landed in CI
+
+The three attempts now have static-source pin tests in `tests/test_reresolution_pass.py::TestTier1SQLShape`:
+
+- `test_*_does_not_use_distinct_on` — attempt-1 guard. DISTINCT ON's planner-forced seq scan stays gone.
+- `test_*_filters_fixture_id_null_inside_materialized_cte` — attempt-2 guard. Regex-checks the predicate lives **inside the CTE body**, not in the outer WHERE. A maintainer "simplifying" by hoisting it silently regresses to attempt 2's seq-scan.
+- `test_fl_sql_uses_materialized_cte_for_unresolved_driver` — attempt-3 guard. `AS MATERIALIZED` is mandatory.
+- `test_*_lateral_keys_on_*` — copy-paste guards. FL LATERAL keys on `u.fl_event_id`; Kalshi LATERAL keys on `u.ticker`. The provider tables differ at the PK column.
+
+Plus the CI guard generalization from Day-42: every `CREATE INDEX CONCURRENTLY` migration in the chain is pinned by the same test (no `autocommit_block`, has COMMIT + AUTOCOMMIT pattern, CONCURRENTLY preserved, `alembic stamp` runbook present).
+
+**242 tests green** (engine + dedup + merge + reresolution + the 4 new shape guards across attempts 1-3).
+
+### Day-43: PR state
+
+- **#238 (`claude/reresolution-loop-scope`)** — head `ed2a44d`. Scope doc with all 8 framing questions DECIDED + loop build + two migrations (`a2c4f6d8e1b3`, `b3d5e7f9a2c4`) + Option B → MATERIALIZED CTE attempts + tests + railway.toml crons-flagged-off. **Open + unmerged.** Stays unmerged until operator re-measure confirms attempt 3's warm latency drop.
+- This entry: PROJECT_STATE Day-43 journal.
+
+### Day-43: Pending — next session opens with three reads
+
+All quick, all read-only:
+
+1. **Row counts** — `SELECT count(*) FROM sp.fl_events WHERE fixture_id IS NULL;` + same for `sp.kalshi_markets`. This determines whether candidate-bounding (step 4 of the methodology pattern) is needed. The unresolved-provider set has no upper-bound semantics in the schema — old records that never resolved accrete indefinitely.
+2. **EXPLAIN ANALYZE the attempt-3 FL query** on warm cache — confirm CTE Scan via `ix_fl_events_unresolved`, NO Seq Scan on `sp.fl_events`. Inner LATERAL via `ix_resolution_log_provider_record_decided_at` (unchanged from attempt 2).
+3. **FL dry-run** — measure candidate-select latency vs the 5s F6 ceiling.
+
+Branching from those reads:
+
+- **IF latency clears**: loop validated end-to-end. Proceed to Kalshi dry-run, then F7 Part B pre-ship lift estimate, then un-comment `railway.toml` blocks + create the three Railway services. Crons go live.
+- **IF row counts are 50k+ AND latency borderline**: make the candidate-bounding design decision. Two designs already sketched (time-window on the LATERAL's `decided_at` vs `last_seen_at` watermark on the CTE's provider scan); pick one based on which population shape better matches the unresolved-set decay curve, then build attempt 4.
+
+### Day-43 carried-forward gates
+
+- **F7 Part B owing**: operator's pre-ship lift estimate. Still the measuring stick before crons go live.
+- **Daily-diff cron wiring**: still folded into the same railway.toml workstream; un-comments when the loop crons un-comment.
+- **§6.5 archival**: separate Phase 2 exit gate; orthogonal.
+- **§7.5 review queue**: 18,303 at last measurement (Day-38); re-measure post-loop expected.
+- **9 pre-existing test collection errors** in `test_phase_2d5_*` / `test_phase_2f1_*`: track so not blamed on Phase 2E work.
+
+---
+
 ## Session — 2026-06-19
 
 ### Day-41/42: Re-resolution loop — sizing + scope-doc closed + build + production indexes landed
