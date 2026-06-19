@@ -514,56 +514,114 @@ class TestStaticInvariants:
         assert "Phase 2E" in (mod.__doc__ or "")
 
     def test_migration_uses_repo_concurrently_pattern_not_autocommit_block(self):
-        """First CONCURRENTLY migration in the chain (a2c4f6d8e1b3).
-        It MUST use the COMMIT + execution_options(AUTOCOMMIT) pattern,
-        NOT op.get_context().autocommit_block() — which fails the
-        `self._transaction is not None` assertion in this repo's
-        async-asyncpg env.py config (Phase 1A async-alembic gotcha
-        class; production confirmed Day-42).
+        """Every CONCURRENTLY migration in the chain MUST use the
+        COMMIT + execution_options(AUTOCOMMIT) pattern documented in
+        `a2c4f6d8e1b3` (the first CONCURRENTLY migration) and reused
+        by every subsequent one.
 
-        Guards against a future maintainer "tidying up" the
-        migration with the standard alembic recipe and silently
-        breaking deploys. If autocommit_block() is ever supported
-        in this env.py config, this test can be reconsidered."""
+        Day-42 production confirmed the failure modes:
+          1. `op.get_context().autocommit_block()` fails the
+             `assert self._transaction is not None` (alembic
+             migration.py:329) — async-asyncpg env.py with
+             transaction_per_migration + run_sync sync-bridge.
+          2. `op.execute("COMMIT")` + `execution_options(
+             isolation_level="AUTOCOMMIT")` ALSO fails:
+             `InvalidRequestError: transaction already initialized`.
+
+        The repo pattern (established by `a2c4f6d8e1b3`, extended by
+        every subsequent CONCURRENTLY migration) is: skip the
+        alembic-upgrade path entirely for CONCURRENTLY DDL — go via
+        Neon console + `alembic stamp <rev>`. The migration's
+        `upgrade()` body still carries the DDL for documentation +
+        replay against a fresh database (e.g., disaster recovery)
+        and uses the COMMIT + execution_options pattern there
+        (rather than autocommit_block) so the replay path is at
+        least closer to working.
+
+        This test glob-scans every migration that uses
+        `CREATE INDEX CONCURRENTLY` and pins all three properties:
+          - No `autocommit_block(` call in the code (docstring
+            mentions are allowed — they explain why we avoid it).
+          - COMMIT + AUTOCOMMIT isolation pattern present.
+          - CONCURRENTLY preserved (no fallback to plain
+            CREATE INDEX, which would lock the 130k+ row hot-write
+            sp.resolution_log table).
+          - Console + stamp runbook documented in the migration
+            (a future maintainer needs the runbook on disk; an
+            empty docstring would be a regression).
+
+        Guards against a future maintainer "tidying up" any
+        CONCURRENTLY migration with the standard alembic recipe and
+        silently breaking deploys."""
+        import glob
+        import re
+
         repo_root = os.path.dirname(
             os.path.dirname(os.path.abspath(__file__))
         )
-        mig_path = os.path.join(
-            repo_root, "migrations", "versions",
-            "20260619_1200_a2c4f6d8e1b3_phase_2e_reresolution_indexes.py",
+        mig_dir = os.path.join(repo_root, "migrations", "versions")
+        # Find every migration file. Filter to the ones that contain
+        # `CREATE INDEX CONCURRENTLY` — those are the ones that need
+        # the repo pattern.
+        concurrent_migrations: list[str] = []
+        for path in sorted(glob.glob(os.path.join(mig_dir, "*.py"))):
+            with open(path, encoding="utf-8") as f:
+                blob = f.read()
+            if "CREATE INDEX CONCURRENTLY" in blob:
+                concurrent_migrations.append(path)
+
+        # The repo pattern was established by a2c4f6d8e1b3. If this
+        # list is empty, something deleted the migration chain —
+        # fail loudly so the test isn't silently a no-op.
+        assert len(concurrent_migrations) >= 1, (
+            "Expected at least one CONCURRENTLY migration in the "
+            "chain (the pattern was established by "
+            "a2c4f6d8e1b3 Day-42). None found — did someone delete "
+            "the migration?"
         )
-        with open(mig_path, encoding="utf-8") as f:
-            blob = f.read()
-        # Must NOT use the failing escape hatch. Strip the
-        # docstring before checking — the docstring explains why
-        # autocommit_block is avoided, which is a legitimate
-        # mention. We're guarding against actual code calls.
-        import re
-        # Drop the module docstring (first triple-quoted string).
-        code_only = re.sub(
-            r'^"""[\s\S]*?"""', "", blob, count=1,
-        )
-        assert "autocommit_block(" not in code_only, (
-            "autocommit_block() fails in this repo's env.py "
-            "config — see migration docstring. Use COMMIT + "
-            "execution_options(isolation_level='AUTOCOMMIT')."
-        )
-        # Must use the working pattern:
-        assert "COMMIT" in blob, (
-            "Migration must commit alembic's per-migration "
-            "transaction explicitly before running CONCURRENTLY DDL."
-        )
-        assert 'isolation_level="AUTOCOMMIT"' in blob, (
-            "Migration must switch to AUTOCOMMIT isolation so the "
-            "next statement does not implicit-BEGIN a new transaction."
-        )
-        # Must still be CONCURRENTLY (not falling back to a locking
-        # CREATE INDEX):
-        assert "CREATE INDEX CONCURRENTLY" in blob, (
-            "sp.resolution_log is 130k+ rows and a production "
-            "hot-write table — plain CREATE INDEX would lock it. "
-            "The fix MUST keep CONCURRENTLY."
-        )
+
+        for path in concurrent_migrations:
+            with open(path, encoding="utf-8") as f:
+                blob = f.read()
+            # Strip the module docstring (first triple-quoted
+            # string). The docstring explains why we avoid
+            # autocommit_block — those mentions are legitimate.
+            # We're guarding against actual code calls.
+            code_only = re.sub(
+                r'^"""[\s\S]*?"""', "", blob, count=1,
+            )
+            base = os.path.basename(path)
+            assert "autocommit_block(" not in code_only, (
+                f"{base}: autocommit_block() fails in this repo's "
+                "env.py config — see a2c4f6d8e1b3 docstring for the "
+                "full explanation. Use COMMIT + "
+                "execution_options(isolation_level='AUTOCOMMIT') in "
+                "the upgrade() body, and document the console + "
+                "stamp landing path in the docstring."
+            )
+            assert 'isolation_level="AUTOCOMMIT"' in blob, (
+                f"{base}: must switch to AUTOCOMMIT isolation so "
+                "the next statement does not implicit-BEGIN a new "
+                "transaction. Mirror a2c4f6d8e1b3's "
+                "_switch_to_autocommit() helper."
+            )
+            assert "CREATE INDEX CONCURRENTLY" in blob, (
+                f"{base}: claimed to be a CONCURRENTLY migration "
+                "but doesn't actually carry CREATE INDEX "
+                "CONCURRENTLY. sp.resolution_log is 130k+ rows and "
+                "a production hot-write table — plain CREATE INDEX "
+                "would lock it."
+            )
+            # The console + stamp runbook must be documented in the
+            # docstring so a future operator (or a fresh-session
+            # Claude) can find it without rediscovering it.
+            assert "alembic stamp" in blob, (
+                f"{base}: missing the `alembic stamp` runbook in "
+                "its docstring. The Day-42 lesson is that the "
+                "production landing path is console + stamp, NOT "
+                "alembic upgrade. Future operators need that "
+                "runbook on disk."
+            )
 
     def test_railway_toml_crons_are_commented_off(self):
         """Belt-and-suspenders: the three Phase 2E cron service
