@@ -71,11 +71,20 @@ leverage remaining accuracy work that also serves the critical path is
 the re-resolution loop (compounds across all existing coverage) plus
 queue harvest — not the next league bootstrap.
 
-**Active workstream (Day-40, decided):** the §7.6 / §7.7
-re-resolution loop. Coverage is **resequenced behind it, not
-abandoned** — the loop is a multiplier that retroactively lifts all
-existing AND future coverage, so it is worth more BEFORE the next
-league than after. Coverage resumes once the loop ships.
+**Active workstream (Day-44, perf-validated end-to-end):** the
+§7.6 / §7.7 re-resolution loop is **BUILT + foundation-deployed +
+perf-validated**. Three indexes live in production
+(`ix_resolution_log_fail_reason_no_match`,
+`ix_resolution_log_reason_detail_gin`,
+`ix_resolution_log_provider_record_decided_at`) plus the two
+composite partial `ix_*_unresolved_last_seen` indexes from
+attempt 4. Both providers' dry-runs measure 2.88s on warm cache —
+comfortably under the 5s F6 ceiling. **Crons stay off** pending
+F7 Part B (operator's pre-ship lift estimate; the measuring stick)
++ #238 merge. Coverage stays resequenced behind the loop: the
+loop is a multiplier that retroactively lifts all existing AND
+future coverage, worth more BEFORE the next league than after.
+Coverage resumes once the loop is live.
 
 ### Pointer
 
@@ -105,6 +114,128 @@ apply in BOTH directions and must persist across sessions:
 
 If anything Academy-related surfaces in main-product work, flag it
 and leave it for the parallel Academy session.
+
+---
+
+## Session — 2026-06-22
+
+### Day-44: Re-resolution loop — PERF-VALIDATED END-TO-END (attempt 4)
+
+Attempt 3 surfaced the driver-set ceiling; attempt 4 bounded the candidate set by `last_seen_at` watermark; production re-measured 2.88s on both providers' dry-runs, comfortably under the 5s F6 halt ceiling. Loop is BUILT + foundation-deployed + perf-validated. Crons stay off pending F7 Part B and #238 merge.
+
+### Day-44: The three reads opened the session
+
+Read 1 — row counts. Surfaced the problem:
+- `sp.fl_events` WHERE `fixture_id IS NULL`: **33,882**
+- `sp.kalshi_markets` WHERE `fixture_id IS NULL`: **48,277**
+
+Both large. The unresolved-provider set has no upper-bound semantics in the schema — old records that never resolved accrete indefinitely.
+
+Read 2 — EXPLAIN ANALYZE attempt-3 (MATERIALIZED CTE) on warm cache:
+- CTE Scan via `ix_fl_events_unresolved`: **540ms** ✓ (the partial index drives the CTE; attempt 2's seq scan stays gone)
+- Inner LATERAL via `ix_resolution_log_provider_record_decided_at`: **13,654ms** ✗
+- Total: **15.5s** — query-shape optimization EXHAUSTED.
+
+The LATERAL is O(N_unresolved). N=33,882 × per-row Index Scan + LIMIT 1 = a multi-second budget no further query tweak fixes. The inner index is doing its job; the driver set is the bottleneck.
+
+Read 3 was deferred — moving straight to candidate-bounding (the step-4 fork already designed in the Day-43 journal).
+
+### Day-44: Candidate-bounding decision — last_seen_at watermark, 3-day window
+
+**Choice between the two designs sketched in Day-43**:
+- (a) Time-window on the LATERAL's `decided_at` — bounds by recency-of-prior-decision.
+- (b) `last_seen_at` watermark on the CTE — bounds by **product relevance**.
+
+**Decided: option (b).** Rationale captured for the journal: option (a) drops records whose latest decision was old but might still be product-relevant (the provider is still sending the record). Option (b) drops records the provider stopped sending — past/dead fixtures, zero product value. The blind spot is exactly the right blind spot.
+
+**Window-size sized against production counts** (with attempt-3 implications):
+- FL unresolved 33,882 → 7d 6,646.
+- Kalshi unresolved 48,277 → 7d 11,299 → **3d 7,487**.
+
+Kalshi is the binding constraint (larger unresolved set). 3d projects ~3s warm vs the 5s ceiling — comfortable margin. **2d and 3d are identical on Kalshi (both 7,487)**, so 3d costs nothing in latency over 2d but gives +24h correctness margin for alias-add events.
+
+`RERESOLUTION_LASTSEEN_WINDOW_DAYS = 3` chosen as a tunable named module-level constant (single source of truth, baked into both TIER1 SQL strings via f-string at module load).
+
+### Day-44: Correctness verification — `last_seen_at` write-path
+
+Operator-flagged concern: if `last_seen_at` can go stale for a still-relevant record, the watermark would wrongly drop it. **Verified safe.**
+
+`ingestion/base.py:207` sets `update_cols["last_seen_at"] = text("NOW()")` unconditionally on every UPSERT. Comment at line 139: *"last_seen_at always bumps."* Both FL (`ingestion/fl.py`) and Kalshi (`ingestion/kalshi.py`) route through `upsert_provider_records_batch`. **The watermark is reliable** — `last_seen_at` reflects the most recent provider poll regardless of whether the row's `raw_payload` changed.
+
+### Day-44: Attempt 4 BUILT — script change + third CONCURRENTLY migration
+
+Branch `claude/reresolution-loop-scope` head `441cd31`.
+
+**Script change** (`scripts/run_reresolution_pass.py`):
+- New named constant `RERESOLUTION_LASTSEEN_WINDOW_DAYS = 3`.
+- Both `TIER1_SQL_FL` and `TIER1_SQL_KALSHI` rewritten as f-strings to bake the constant into the watermark predicate inside the MATERIALIZED CTE:
+  ```sql
+  WITH unresolved_fl_events AS MATERIALIZED (
+      SELECT fl_event_id FROM sp.fl_events
+      WHERE fixture_id IS NULL
+        AND last_seen_at > NOW() - INTERVAL '3 days'
+  )
+  ```
+- Module docstring updated with the semantic-narrowing note: **the loop now re-resolves only the last_seen-within-N-days slice, NOT the full back-catalog. The narrowing IS the design, not a known-incomplete shortcut.** Blind spot = past/dead fixtures with zero product value; F7/F8 value case was always about lifting current coverage, not historical resurrection. No periodic full sweep needed.
+
+**New migration `c5e7f9a3b1d4`** (third Phase 2E CONCURRENTLY migration; third application of the console+stamp pattern):
+- `ix_fl_events_unresolved_last_seen ON sp.fl_events (last_seen_at) WHERE fixture_id IS NULL`
+- `ix_kalshi_markets_unresolved_last_seen ON sp.kalshi_markets (last_seen_at) WHERE fixture_id IS NULL`
+
+Composite partial indexes that **exactly match the windowed CTE filter** — range scan over `last_seen_at` for unresolved-only rows, no heap fetch needed for `fixture_id`. The two alternative paths (existing `ix_*_unresolved` + heap-fetch each row for `last_seen_at`, OR existing `ix_*_last_seen` + heap-fetch each row for `fixture_id`) both lose; this composite is the deterministic fix.
+
+The original `ix_*_unresolved` from initial schema stays in place — still used by `scripts/run_resolver_pass.py`'s daily cron filter on `fixture_id IS NULL`. Not exclusive to this loop.
+
+**Tests** (+6, all DB-free): `TestTier1SQLShape::test_*_watermark_predicate_inside_materialized_cte` (positional check — CTE body contains nested parens `NOW()`, so regex couldn't span; switched to "predicate must appear before `JOIN LATERAL`"); `TestWindowConstant` (constant exists, value=3, baked into both SQL strings, positive int). 248 tests green.
+
+### Day-44: Re-measure — PERF VALIDATED END-TO-END
+
+EXPLAIN ANALYZE (warm) on attempt-4 FL query:
+- CTE Scan via **`ix_fl_events_unresolved_last_seen`** (new) — **19ms**
+- Inner LATERAL via `ix_resolution_log_provider_record_decided_at` — 2,100ms (over the bounded ~6.6k FL 3d-window driver set)
+- **Total: 2.2s warm**
+
+Dry-runs:
+- **FL dry-run: 2.88s** — under the 5s F6 ceiling, **NO halt-criteria warning** (first clean run).
+- **Kalshi dry-run: 2.88s** — same shape, same clean exit.
+- `candidate_set_size = 0` on both this pass — correctly selective; no recent alias-adds to act on this 5-min window. (Selection logic was already validated Day-43 at 10,160 → 1; this pass just had no alias-add fresh enough to fire.)
+
+End-to-end: loop selects the RIGHT records (Day-43) and selects them FAST enough (Day-44). The methodology pattern from Day-43 — **covering index alone is necessary but not sufficient (step 1) → LATERAL restructure (step 2) → MATERIALIZED CTE (step 3) → bound the driver set (step 4)** — is now complete and validated end-to-end.
+
+### Day-44: Bookkeeping — alembic linear-history gap (pre-merge cleanup)
+
+Surfaced during the production index inventory: `sp.alembic_version` stamped `c5e7f9a3b1d4` (Day-44), having jumped from `a2c4f6d8e1b3` (Day-42) **SKIPPING** `b3d5e7f9a2c4` (Day-43). The Day-43 `provider_record_decided_at` index was built via console but its `alembic stamp b3d5e7f9a2c4` apparently never ran.
+
+**All three indexes physically EXIST in production** (verified via `pg_indexes` lookup). The query side is fully fine — `ix_resolution_log_provider_record_decided_at`, the two `ix_*_unresolved_last_seen` indexes, and the two Day-42 indexes all serve their queries. **Only the alembic linear history has a gap** — it never recorded `b3d5e7f9a2c4` as applied.
+
+Mitigations in place:
+- The migration's `IF NOT EXISTS` makes even a future fresh-DB upgrade safe (no duplicate-index error).
+- The migration's docstring already says `upgrade()` body is "NOT INVOKED IN PRODUCTION — documentation + replay-against-fresh-DB only."
+
+Flagged for the **pre-#238-merge cleanup** (next session). The fix is either `alembic stamp b3d5e7f9a2c4` retroactively (then re-verify head is `c5e7f9a3b1d4`) or annotate the upgrade() bodies of all three Phase 2E migrations as no-ops so any future main-based `alembic upgrade head` doesn't replay the env.py incompatibilities. Survey first before deciding which.
+
+### Day-44: Phase-status header refreshed (this PR also)
+
+The active-workstream line in the phase-status header updated from the Day-40 "decided to pivot to the loop" framing to the Day-44 "loop is BUILT + foundation-deployed + perf-validated" reality. Crons-off / F7-Part-B-pending / #238-merge-pending all explicit. Coverage-resequenced-behind-the-loop framing preserved (the loop is a multiplier; coverage worth more after it ships).
+
+### Day-44: PR state
+
+- **#238 (`claude/reresolution-loop-scope`)** — head `441cd31`. Scope doc + loop build + three migrations + four perf attempts (3 query-shape + 1 driver-bounding) + tests + railway.toml crons-flagged-off. **Open + unmerged.** Stays unmerged until F7 Part B lands AND the alembic linear-history gap is cleaned up.
+- This entry: PROJECT_STATE Day-44 journal.
+
+### Day-44: Path to live (next session — 5 steps)
+
+1. **F7 Part B** — operator's pre-ship lift estimate (how many of ~16,588 expected to flip in the first Day-N+1 → Day-N+7 window). The measuring stick; required before crons.
+2. **Pre-#238-merge cleanup**: settle the env-hostile `upgrade()` path. All three Phase 2E index migrations stamped via console; annotate / no-op the `upgrade()` bodies so a future main-based `alembic upgrade head` from a clean checkout doesn't replay the three failures. Same pass also resolves the skipped-`b3d5e7f9a2c4` linear-history gap.
+3. **Enable crons** — un-comment the three `railway.toml` blocks; create the three Railway services (`resolver-reresolution-fl`, `resolver-reresolution-kalshi`, `daily-diff`). The LIVE step.
+4. **Merge #238** — once 1+2+3 land.
+5. **F8-validate over Day-N+1 → Day-N+7**: daily-diff trajectory (the just-wired cron starts flowing automatically) + targeted before/after on a known recent-alias-add population (the F7 Part A check from the scope doc).
+
+### Day-44 carried-forward gates
+
+- §6.5 archival (still separate Phase 2 exit gate; orthogonal)
+- §7.5 review queue (18,303 at Day-38; re-measure post-loop expected)
+- 9 pre-existing `test_phase_2d5_*` / `test_phase_2f1_*` collection errors (track so not blamed on Phase 2E)
 
 ---
 
