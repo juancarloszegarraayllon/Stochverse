@@ -9,14 +9,26 @@ record.
 Per docs/reresolution/scope-2026-06-17.md (all 8 framing questions
 DECIDED):
 
-  Tier 1 (LATERAL-driven; supports
+  Tier 1 (LATERAL-driven, last_seen_at-bounded; supports
   ix_resolution_log_provider_record_decided_at from migration
-  b3d5e7f9a2c4 — drives from the unresolved provider table, looks up
-  the latest decision per row via an Index Scan + LIMIT 1):
+  b3d5e7f9a2c4 AND ix_*_unresolved_last_seen from migration
+  c5e7f9a3b1d4):
     - provider_table.fixture_id IS NULL
+    - provider_table.last_seen_at > NOW() - INTERVAL '3 days'
+      (RERESOLUTION_LASTSEEN_WINDOW_DAYS — tunable; Day-44 sizing
+      established 3d as the binding-constraint window for Kalshi)
     - latest sp.resolution_log row has reason_code = 'no_match'
     - reason_detail->>'fail_reason' IN allowlist of 5 categories
     - reason_detail->>'asymmetric_excluded' IS NULL
+
+  Semantic narrowing (Day-44 attempt 4 — deliberate design property):
+  the loop re-resolves only records the provider has sent within
+  the last N days, NOT the full back-catalog. Blind spot = records
+  the provider stopped sending more than N days ago (past/dead
+  fixtures). These have zero product value even if a new alias
+  would now match — the loop's value case is current coverage,
+  not historical resurrection. No periodic full sweep needed; the
+  narrowing IS the design.
 
   Tier 2 (containment, only on Tier-1 survivors — supports the GIN
   index for the alias-add signal):
@@ -90,6 +102,45 @@ LOOP_ELIGIBLE_FAIL_REASONS: tuple[str, ...] = (
 
 
 # ──────────────────────────────────────────────────────────────────
+# Day-44 attempt-4 — last_seen_at watermark on the unresolved driver.
+# ──────────────────────────────────────────────────────────────────
+#
+# The driver-set bound. Sized against production: Kalshi unresolved
+# 48,277 total / 11,299 within 7d / 7,487 within 3d. 3d cuts the
+# binding constraint (Kalshi) to ~3s warm vs the 5s F6 ceiling. 2d
+# and 3d are identical on Kalshi (7,487), so 3d costs nothing in
+# latency over 2d but gives more correctness margin (alias-add
+# events within the last 72h get caught regardless of which
+# provider polled when).
+#
+# Semantic narrowing — deliberate design property, NOT a regression:
+#
+#   The loop now re-resolves only the last_seen-within-N-days slice
+#   of unresolved records, NOT the full back-catalog. Blind spot =
+#   records the provider stopped sending more than N days ago
+#   (past/dead fixtures that closed unresolved). Those have zero
+#   product value even if a new alias would now match — the F7/F8
+#   value case was always about lifting CURRENT coverage, not
+#   resurrecting historical no_matches. The narrowing is correct
+#   for the workstream's purpose.
+#
+#   No periodic full sweep is needed. The narrowing is the design,
+#   not a known-incomplete shortcut.
+#
+# Watermark write-path verified: ingestion/base.py:207 sets
+# `update_cols["last_seen_at"] = text("NOW()")` unconditionally on
+# every UPSERT for both providers (FL via ingestion/fl.py, Kalshi
+# via ingestion/kalshi.py — both route through
+# upsert_provider_records_batch). last_seen_at IS reliable; the
+# watermark won't wrongly drop still-relevant records.
+#
+# Tunable — the named constant is the single source of truth.
+# Changing the value here propagates to both TIER1 SQL strings
+# (constructed at module load via f-string).
+RERESOLUTION_LASTSEEN_WINDOW_DAYS: int = 3
+
+
+# ──────────────────────────────────────────────────────────────────
 # F6 halt criteria (DECIDED Day-42 — mirrors run_resolver_pass.py
 # pattern, thresholds tuned to the loop's 5-min cadence).
 # ──────────────────────────────────────────────────────────────────
@@ -139,8 +190,8 @@ def _evaluate_halt_criteria(
 # ──────────────────────────────────────────────────────────────────
 #
 # Tier-1 SQL drives from the MATERIALIZED set of unresolved provider
-# rows, then per-row LATERALs the latest resolution_log decision.
-# Three perf iterations got us here:
+# rows BOUNDED BY a last_seen_at watermark, then per-row LATERALs the
+# latest resolution_log decision. Four perf iterations got us here:
 #
 #   Day-43 attempt 1 — CTE+DISTINCT-ON+JOIN. 6.3s warm. Planner
 #     chose Parallel Seq Scan + Sort over the whole resolution_log:
@@ -149,45 +200,51 @@ def _evaluate_halt_criteria(
 #     heap-fetch.
 #
 #   Day-43 attempt 2 — FROM fl_events JOIN LATERAL ... WHERE
-#     fixture_id IS NULL. 2.7s warm. The LATERAL inner was correct
-#     (1.1s Index Scan on ix_resolution_log_provider_record_decided_at
-#     + LIMIT 1), but the OUTER applied fixture_id IS NULL as a
-#     filter on a Seq Scan of fl_events (1.5s), so the LATERAL ran
-#     once per fl_events row, not just unresolved ones.
+#     fixture_id IS NULL. 2.7s warm. Inner LATERAL was correct
+#     (1.1s Index Scan + LIMIT 1) but the OUTER seq-scanned
+#     fl_events (1.5s); fixture_id IS NULL was applied as a post-
+#     join filter, not as the access path.
 #
-#   Day-43 attempt 3 (current) — WITH unresolved AS MATERIALIZED
-#     (SELECT … WHERE fixture_id IS NULL). MATERIALIZED is the
-#     non-negotiable bit: PG 12+ inlines single-reference CTEs by
-#     default, which would put us back at attempt 2's seq-scan
-#     choice. MATERIALIZED forces the planner to compute the CTE
-#     separately, which means scanning sp.fl_events through
-#     ix_fl_events_unresolved (the partial index `WHERE fixture_id
-#     IS NULL` already in the initial schema), then iterating that
-#     small materialized set into the LATERAL.
+#   Day-43 attempt 3 — WITH unresolved AS MATERIALIZED (SELECT …
+#     WHERE fixture_id IS NULL). Killed the seq scan (540ms) but
+#     surfaced the next bottleneck: 33,882 unresolved FL rows ×
+#     ~0.4ms LATERAL = 13.6s warm. The driver set IS the bottleneck;
+#     no further query-shape tweak fixes O(N_unresolved).
 #
-# Index utilization (post-attempt-3):
-#   - Outer driver: ix_fl_events_unresolved /
-#     ix_kalshi_markets_unresolved (partial; pre-existing, from
-#     20260507_1504_8f404e0dc89a initial schema).
+#   Day-44 attempt 4 (current) — bound the MATERIALIZED CTE by
+#     last_seen_at > NOW() - INTERVAL 'N days'. Cuts the binding
+#     constraint (Kalshi: 48,277 → 7,487 at 3d) to comfortably under
+#     the 5s F6 ceiling. Window-size operator-tunable via the
+#     RERESOLUTION_LASTSEEN_WINDOW_DAYS constant above.
+#
+# Index utilization (post-attempt-4):
+#   - Outer driver: ix_fl_events_unresolved_last_seen /
+#     ix_kalshi_markets_unresolved_last_seen — composite partial
+#     indexes ON (last_seen_at) WHERE fixture_id IS NULL.
+#     Built by migration c5e7f9a3b1d4 (Day-44, console+stamp).
+#     Returns the unresolved+recent set directly, no heap fetch.
 #   - Inner LATERAL: ix_resolution_log_provider_record_decided_at
-#     (b3d5e7f9a2c4) — Index Scan + LIMIT 1 per outer row, no sort.
+#     (b3d5e7f9a2c4) — unchanged from attempt 3.
 #
-# Forward-pointer (if attempt 3 still measures > 5s F6 ceiling):
-# bound the candidate set with a time window (e.g., only consider
-# records whose latest decision is within the last N days, or only
-# unresolved provider rows last_seen_at since some watermark). The
-# unresolved-provider set has no upper-bound semantics in the schema
-# — old records that never got resolved accrete indefinitely. If
-# the set is genuinely tens-of-thousands large, even N indexed
-# LATERAL lookups may exceed the ceiling. Defer this fix until
-# attempt 3 measures, per the survey-first → scope-second →
-# build-third → measure-fourth discipline.
+# The original ix_*_unresolved (partial WHERE fixture_id IS NULL,
+# initial schema) becomes redundant for THIS query under attempt 4,
+# but stays in place — it's still used by other paths (e.g.,
+# scripts/run_resolver_pass.py's `fixture_id IS NULL` filter on the
+# daily cron). Don't drop it; it's not exclusive to this loop.
 
-TIER1_SQL_FL = """
+# SQL strings constructed at module load via f-string so the
+# RERESOLUTION_LASTSEEN_WINDOW_DAYS constant flows in deterministically.
+# The constant is module-level Python — no user input, so f-string
+# interpolation is safe. INTERVAL literal is the correct shape here;
+# bound parameters can't carry interval-style values cleanly across
+# asyncpg.
+
+TIER1_SQL_FL = f"""
 WITH unresolved_fl_events AS MATERIALIZED (
     SELECT fl_event_id
     FROM sp.fl_events
     WHERE fixture_id IS NULL
+      AND last_seen_at > NOW() - INTERVAL '{RERESOLUTION_LASTSEEN_WINDOW_DAYS} days'
 )
 SELECT u.fl_event_id AS provider_record_id,
        latest.reason_detail,
@@ -206,11 +263,12 @@ WHERE latest.reason_code = 'no_match'
   AND (latest.reason_detail->>'asymmetric_excluded') IS NULL
 """
 
-TIER1_SQL_KALSHI = """
+TIER1_SQL_KALSHI = f"""
 WITH unresolved_kalshi_markets AS MATERIALIZED (
     SELECT ticker
     FROM sp.kalshi_markets
     WHERE fixture_id IS NULL
+      AND last_seen_at > NOW() - INTERVAL '{RERESOLUTION_LASTSEEN_WINDOW_DAYS} days'
 )
 SELECT u.ticker AS provider_record_id,
        latest.reason_detail,

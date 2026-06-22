@@ -27,6 +27,7 @@ from scripts.run_reresolution_pass import (
     CANDIDATE_SET_MULTIPLIER_CEILING,
     HARD_LIMIT_CANDIDATE_SET,
     LOOP_ELIGIBLE_FAIL_REASONS,
+    RERESOLUTION_LASTSEEN_WINDOW_DAYS,
     TIER1_SQL_FL,
     TIER1_SQL_KALSHI,
     _evaluate_halt_criteria,
@@ -221,6 +222,94 @@ class TestTier1SQLShape:
         The LATERAL must key on the CTE's projected `ticker` column.
         Catches a copy-paste regression from the FL shape."""
         assert "rl.provider_record_id = u.ticker" in TIER1_SQL_KALSHI
+
+    def test_fl_watermark_predicate_inside_materialized_cte(self):
+        """Attempt-4 guard (Day-44). The last_seen_at watermark MUST
+        live inside the MATERIALIZED CTE body, BEFORE the LATERAL —
+        putting it in the outer WHERE silently regresses to
+        attempt-3's O(N_unresolved) cost on the inner LATERAL
+        (33,882 → 13.6s warm).
+
+        The composite partial index
+        ix_fl_events_unresolved_last_seen ON (last_seen_at) WHERE
+        fixture_id IS NULL (migration c5e7f9a3b1d4) serves the CTE
+        scan only if the watermark is in the CTE body.
+
+        Position check (rather than CTE-body regex) because the CTE
+        body contains nested parens (NOW()) that a non-greedy regex
+        can't span. The LATERAL is the unambiguous boundary between
+        CTE body and outer query."""
+        lateral_idx = TIER1_SQL_FL.find("JOIN LATERAL")
+        assert lateral_idx > 0, "JOIN LATERAL must be present"
+
+        cte_body = TIER1_SQL_FL[:lateral_idx]
+        assert "last_seen_at" in cte_body, (
+            "Day-44 attempt-4 regression guard: the last_seen_at "
+            "watermark predicate MUST live inside the MATERIALIZED "
+            "CTE body (i.e. before the LATERAL). Hoisting it to "
+            "the outer WHERE silently regresses to attempt-3's "
+            "O(N_unresolved) cost."
+        )
+        assert "INTERVAL" in cte_body, (
+            "Watermark must use INTERVAL (e.g. NOW() - INTERVAL "
+            "'3 days'). Catches a maintainer dropping the "
+            "time-bound by accident."
+        )
+
+    def test_kalshi_watermark_predicate_inside_materialized_cte(self):
+        """Same attempt-4 guard for the Kalshi side. Kalshi is the
+        binding-constraint provider (48,277 unresolved → 7,487 at
+        3d) so this regression matters more here than FL."""
+        lateral_idx = TIER1_SQL_KALSHI.find("JOIN LATERAL")
+        assert lateral_idx > 0
+        cte_body = TIER1_SQL_KALSHI[:lateral_idx]
+        assert "last_seen_at" in cte_body
+        assert "INTERVAL" in cte_body
+
+
+class TestWindowConstant:
+    """Day-44 attempt 4 — the watermark window is a named module-
+    level constant, NOT a magic literal scattered through SQL strings.
+    Tunable via single source of truth."""
+
+    def test_constant_exists_with_documented_value(self):
+        """RERESOLUTION_LASTSEEN_WINDOW_DAYS = 3 was the Day-44
+        operator decision against production counts (Kalshi 7,487
+        at 3d → ~3s warm vs 5s F6 ceiling; 2d and 3d identical on
+        Kalshi so 3d costs nothing in latency over 2d but gives
+        +24h correctness margin)."""
+        assert isinstance(RERESOLUTION_LASTSEEN_WINDOW_DAYS, int)
+        assert RERESOLUTION_LASTSEEN_WINDOW_DAYS == 3, (
+            "Day-44 production-evidence-decided value is 3 days. "
+            "Change requires a sized re-measurement per the "
+            "attempt-4 perf-arc methodology — don't tweak without "
+            "EXPLAIN ANALYZE evidence."
+        )
+
+    def test_constant_baked_into_fl_sql(self):
+        """The constant is interpolated into TIER1_SQL_FL at module
+        load via f-string. Verify the literal flows through, so a
+        future maintainer can't silently drift the constant from the
+        SQL by editing one but not the other."""
+        expected = (
+            f"INTERVAL '{RERESOLUTION_LASTSEEN_WINDOW_DAYS} days'"
+        )
+        assert expected in TIER1_SQL_FL, (
+            f"Expected {expected!r} in TIER1_SQL_FL — the constant "
+            "RERESOLUTION_LASTSEEN_WINDOW_DAYS must be the single "
+            "source of truth, baked into the SQL via f-string."
+        )
+
+    def test_constant_baked_into_kalshi_sql(self):
+        expected = (
+            f"INTERVAL '{RERESOLUTION_LASTSEEN_WINDOW_DAYS} days'"
+        )
+        assert expected in TIER1_SQL_KALSHI
+
+    def test_constant_is_positive_integer(self):
+        """Defensive: a non-positive value would either drop all
+        records (≤0) or be parsed differently by Postgres."""
+        assert RERESOLUTION_LASTSEEN_WINDOW_DAYS > 0
 
 
 # ──────────────────────────────────────────────────────────────────
