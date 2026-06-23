@@ -71,20 +71,21 @@ leverage remaining accuracy work that also serves the critical path is
 the re-resolution loop (compounds across all existing coverage) plus
 queue harvest — not the next league bootstrap.
 
-**Active workstream (Day-44, perf-validated end-to-end):** the
-§7.6 / §7.7 re-resolution loop is **BUILT + foundation-deployed +
-perf-validated**. Three indexes live in production
-(`ix_resolution_log_fail_reason_no_match`,
-`ix_resolution_log_reason_detail_gin`,
-`ix_resolution_log_provider_record_decided_at`) plus the two
-composite partial `ix_*_unresolved_last_seen` indexes from
-attempt 4. Both providers' dry-runs measure 2.88s on warm cache —
-comfortably under the 5s F6 ceiling. **Crons stay off** pending
-F7 Part B (operator's pre-ship lift estimate; the measuring stick)
-+ #238 merge. Coverage stays resequenced behind the loop: the
-loop is a multiplier that retroactively lifts all existing AND
-future coverage, worth more BEFORE the next league than after.
-Coverage resumes once the loop is live.
+**Active workstream (Day-44 continued — LIVE IN PRODUCTION):** the
+§7.6 / §7.7 re-resolution loop is **LIVE**. Three Phase 2E Railway
+services created in the dashboard Day-44 (`resolver-reresolution-fl`,
+`resolver-reresolution-kalshi`, `daily-diff`); both reresolution
+services validated on first live pass (`run_mode='live'`,
+crashes=0, halt_warnings=[], `candidate_set_size=0` correctly
+selective per F7 Part B's alias-velocity-evidence settlement).
+**First Phase 2 exit gate moved built → live.** F8 validation
+pending — staged targeted before/after on a known
+alias-flip-eligible record (passive flips ~0 by design until
+coverage resumes; the loop is a multiplier with nothing to
+multiply this week). Five crons total now (2 daily resolvers +
+3 new Phase 2E). Coverage stays resequenced behind the loop:
+worth more compounding through the now-live machinery than
+ahead of it.
 
 ### Pointer
 
@@ -114,6 +115,103 @@ apply in BOTH directions and must persist across sessions:
 
 If anything Academy-related surfaces in main-product work, flag it
 and leave it for the parallel Academy session.
+
+---
+
+## Session — 2026-06-23
+
+### Day-44 continued: Re-resolution loop LIVE IN PRODUCTION — first Phase 2 exit gate moved built → live
+
+The loop went live this session, staged FL-first per the operator's path-to-live brief. #238 merged. Three Phase 2E Railway services created in the dashboard. Both reresolution services validated on first live pass — `run_mode='live'`, zero crashes, no halt-criteria warnings, `candidate_set_size=0` matching F7 Part B's design prediction. Five crons total now (2 pre-existing daily resolvers + 3 new Phase 2E). The first §7.7 three-loop runner gate is no longer "built" — it's "live".
+
+### Day-44 continued: #238 merged to main
+
+`claude/reresolution-loop-scope` head `04ae152` → main. The PR bundled everything from Day-40's scope decision through Day-44's enable-step:
+- Scope doc with all 8 framing questions DECIDED on production evidence (#229 / #240 chain documented the build)
+- Loop build (`scripts/run_reresolution_pass.py`)
+- Three CONCURRENTLY migrations: `a2c4f6d8e1b3` (fail_reason partial + reason_detail GIN), `b3d5e7f9a2c4` (provider_record_decided_at), `c5e7f9a3b1d4` (composite partial `ix_*_unresolved_last_seen` for the Day-44 watermark)
+- Four perf-iteration attempts (DISTINCT-ON → LATERAL → MATERIALIZED CTE → last_seen_at watermark) — each measured against production, each surfacing the next bottleneck
+- Tier-1 SQL: MATERIALIZED CTE with the 3-day `last_seen_at` watermark; LATERAL inner LIMIT 1 against the new covering index
+- Tier-2 Python LOOSE F1a alias-add OR fixture-state filter
+- Pre-merge cleanup: no-op `upgrade()`/`downgrade()` bodies + glob-based CI guard pinning the no-op + docstring-runbook pattern (Day-44 a8cf26a)
+- Enable-step: railway.toml uncommented, CI guard inverted to "live-blocks-present" guard (Day-44 04ae152)
+- 248 tests green
+- `sp.alembic_version` stamped `c5e7f9a3b1d4` (all three indexes physically present in production; linear-history chain intact)
+
+### Day-44 continued: Three Phase 2E services created in Railway dashboard (services don't auto-create)
+
+Per `DEPLOYMENT.md` "One-time Railway setup (services don't auto-create)" runbook — `railway.toml` declares the schedule + startCommand, but the operator creates each service explicitly. Staged rollout:
+
+| Service | Schedule | Start command |
+|---|---|---|
+| `resolver-reresolution-fl` | `*/5 * * * *` | `python scripts/run_reresolution_pass.py --provider fl --apply` |
+| `resolver-reresolution-kalshi` | `2-59/5 * * * *` (FL+2min stagger) | `python scripts/run_reresolution_pass.py --provider kalshi --apply` |
+| `daily-diff` | `0 3 * * *` (nightly) | `python scripts/daily_diff.py` |
+
+### Day-44 continued: First live passes validated
+
+**FL** — `run_id 88da8238`:
+- `run_mode='live'`, `crashes=0`, `halt_warnings=[]`
+- `latency_candidate_select_ms=2579` (~2.6s) — under the 5s F6 ceiling
+- `candidate_set_size=0` (correctly selective; no recent alias-adds to act on)
+- `finished_at` populated; transaction committed cleanly
+
+**Kalshi** — `run_id a3ed664a`:
+- `run_mode='live'`, `crashes=0`, `halt_warnings=[]`
+- `latency_candidate_select_ms=931` (~0.93s) — **even faster than FL**, despite the larger total unresolved population. The 3-day `last_seen_at` watermark bounds the driver set just as designed; Kalshi's higher write velocity means its unresolved-recent set is denser than FL's
+- `candidate_set_size=0`
+
+**`daily-diff`** — service created Day-44 but the nightly 03:00 UTC schedule hadn't fired by session close. Manual trigger run scanning. Confirm tomorrow that a fresh row landed in `sp.daily_diff_reports` for 2026-06-23 or 2026-06-24 — the latest existing row was 2026-06-15, so this closes the Day-21 measurement-debt explicitly (the carried-since-Day-21 gate is now wired and presumed-running, awaiting visible evidence).
+
+### Day-44 continued: Env-var catch (Railway services don't inherit env)
+
+**Worth recording for the operator runbook**: new Railway services don't inherit env vars from sibling services or the project. First Phase 2E service got a default `dev:dev@localhost:5432/sports_dev` `DATABASE_URL` — caught before the first run via dashboard review. Replaced with the production Neon URL (`ep-fragrant-frog-ak3esp11/neondb`) copied from `resolver-cron-fl`'s env. Each of the three new services got the full set:
+
+- `DATABASE_URL` (production Neon)
+- `EXPECTED_PRODUCTION_DB_HOST`
+- `EXPECTED_PRODUCTION_DB_NAME`
+- `STOCHVERSE_LOG_FORMAT`
+- `FLASHLIVE_API_KEY` (the FL reresolution path; daily-diff queries FL too)
+
+**Pattern D pre-flight (Amendment #17) is what would have caught a real env-misfire** if the localhost URL had stuck — the pre-flight does a `current_database()` lookup and refuses to write if it doesn't match `EXPECTED_PRODUCTION_DB_NAME`. Pattern D passing on both first live passes confirms correct production-DB targeting. The catch came earlier (dashboard review) and Pattern D is the belt-and-suspenders second line.
+
+### Day-44 continued: F7 Part B SETTLED on alias-velocity evidence
+
+The pre-ship lift estimate that the scope doc §7 marked as "owed" is now **settled by direct observation, not estimate**:
+
+- The backlog-helping alias sources (`bootstrap_league_coverage`, `operator_review`) are at **0 alias adds / 7 days**. Coverage work has been paused since the Day-40 strategic pivot. There's nothing fresh in the 3-day `last_seen_at` window for the loop to act on this week.
+- The loop's value is a **multiplier**: it lifts records that NEW aliases would now help. With zero new aliases, multiplier × zero = zero flips — **by design, not by failure**.
+- The `candidate_set_size=0` on both first live passes is the **direct confirmation** of this prediction. The selection logic is correct (Day-43 validated at 10,160 → 1 when there WAS a recent alias); the activity floor is zero by structural design.
+
+The dispositive F8 validation is **targeted before/after**: stage a known addressable no_match record + add the alias that should fix it + watch the next 5-min pass flip it. This proves end-to-end correctness on a real flip without waiting for coverage to resume. Scoped for next session.
+
+### Day-44 continued: Five crons running
+
+| Cron | Cadence | Start | Status |
+|---|---|---|---|
+| `resolver-cron-fl` | `0 2 * * *` daily | `run_resolver_pass.py --provider fl --run-mode cron` | Pre-existing |
+| `resolver-cron-kalshi` | `15 2 * * *` daily | `run_resolver_pass.py --provider kalshi --run-mode cron` | Pre-existing |
+| `resolver-reresolution-fl` | `*/5 * * * *` | `run_reresolution_pass.py --provider fl --apply` | LIVE (validated) |
+| `resolver-reresolution-kalshi` | `2-59/5 * * * *` | `run_reresolution_pass.py --provider kalshi --apply` | LIVE (validated) |
+| `daily-diff` | `0 3 * * *` nightly | `daily_diff.py` | LIVE (first fire pending) |
+
+### Day-44 continued: Phase-status header refreshed
+
+Active-workstream line updated to "LIVE IN PRODUCTION" framing: the §7.6 / §7.7 re-resolution loop is no longer "built / perf-validated, crons-off"; it's "live, validated on first pass, F8 pending." First Phase 2 exit gate moved built → live. The previous Day-44 framing ("Crons stay off pending F7 Part B + #238 merge") is now stale — both gates cleared this session.
+
+### Day-44 continued: PR state
+
+- **#238 (`claude/reresolution-loop-scope`)** — **MERGED** to main. End of arc that started Day-40.
+- This entry: PROJECT_STATE Day-44-continued journal + header refresh.
+
+### Pending — next session
+
+1. **Confirm daily-diff wrote a fresh row.** SELECT MIN/MAX `report_date` from `sp.daily_diff_reports`; a `2026-06-23` or `2026-06-24` row closes the Day-21 measurement-debt explicitly. If absent, check Railway logs for the 03:00 UTC nightly run + env vars on that service (it's the third service created post-env-var-catch, so should be clean, but verify).
+2. **F8 VALIDATION — the dispositive test.** Stage a targeted before/after on a known addressable no_match record: identify a record with `reason_code='no_match'` whose `reason_detail` candidate teams include some `team_id` with no current alias; add the alias; watch the next 5-min loop pass flip the record to `reason_code IN ('strict', 'alias', 'fuzzy')` or `review_queue`. Proves the loop works end-to-end on a real flip. Passive flips are ~0 by design (F7 Part B settlement); a staged flip is the only honest end-to-end proof until coverage resumes.
+3. **Remaining Phase 2 exit gates** (before Phase 3 `/api/v4` opens):
+   - **Review-queue drain** — passive consequence of the loop running. Was 18,303 at Day-38; measure post-loop after F8 validates.
+   - **§6.5 archival** — the last unbuilt Phase 2 exit gate. Object-storage move + retention policy for `sp.resolution_log` and the raw JSONB payload tables. Orthogonal to the loop; can scope-doc + build in parallel with F8.
+4. **Carried-forward**: 9 pre-existing `test_phase_2d5_*` / `test_phase_2f1_*` collection errors (track so not blamed on Phase 2E).
 
 ---
 
