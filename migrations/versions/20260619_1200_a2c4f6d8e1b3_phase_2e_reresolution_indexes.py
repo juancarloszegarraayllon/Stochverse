@@ -89,9 +89,22 @@ Revises: f1b3d5e7a9c2
 Create Date: 2026-06-19
 Updated: 2026-06-20 — autocommit_block() workaround per Day-42
                      bug report (production upgrade failure).
+Updated: 2026-06-22 — Day-44 cleanup: upgrade()/downgrade() bodies
+                     are now REPLAY-SAFE NO-OPS. Day-44 confirmed
+                     that the COMMIT + execution_options fallback
+                     ALSO fails in this env.py (InvalidRequestError:
+                     transaction already initialized). With BOTH
+                     alembic escape hatches broken, the canonical
+                     landing path is the console + stamp runbook
+                     in this docstring; the code body intentionally
+                     does NOTHING so `alembic upgrade head` from a
+                     fresh checkout records the revision in
+                     sp.alembic_version cleanly without attempting
+                     the failing DDL. See CI guard
+                     test_migration_uses_repo_concurrently_pattern_not_autocommit_block
+                     for the enforced contract.
 """
-from alembic import op
-from sqlalchemy import text
+from alembic import op  # noqa: F401  (kept import for replay context)
 
 
 revision = "a2c4f6d8e1b3"
@@ -102,54 +115,41 @@ depends_on = None
 SCHEMA = "sp"
 
 
-def _switch_to_autocommit():
-    """Close alembic's per-migration transaction and return a
-    connection bound in AUTOCOMMIT isolation. The repo pattern for
-    CONCURRENTLY DDL — see module docstring for the why."""
-    # Step 1: commit alembic's per-migration transaction.
-    op.execute("COMMIT")
-    # Step 2: switch isolation level so subsequent statements don't
-    # implicit-BEGIN a new transaction. CREATE INDEX CONCURRENTLY
-    # would otherwise fail with "cannot run inside a transaction
-    # block."
-    return op.get_bind().execution_options(isolation_level="AUTOCOMMIT")
-
-
 def upgrade() -> None:
-    conn = _switch_to_autocommit()
+    """REPLAY-SAFE NO-OP. The canonical landing path is the console
+    + stamp runbook in the module docstring above. This body
+    intentionally does NOTHING because:
 
-    # Tier 1: partial expression btree for the structural
-    # pre-filter. The WHERE clause restricts the index to no_match
-    # rows so the footprint is bounded by the unresolved-population
-    # size rather than the full sp.resolution_log accretion.
-    conn.execute(text(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-        "ix_resolution_log_fail_reason_no_match "
-        f"ON {SCHEMA}.resolution_log "
-        "((reason_detail->>'fail_reason')) "
-        "WHERE reason_code = 'no_match'"
-    ))
+      1. This repo's async env.py is incompatible with BOTH alembic
+         CONCURRENTLY escape hatches (Day-42 + Day-44 lessons):
+           a. op.get_context().autocommit_block() fails the
+              `self._transaction is not None` assertion.
+           b. op.execute("COMMIT") + execution_options(
+              isolation_level="AUTOCOMMIT") raises
+              InvalidRequestError: transaction already initialized.
+         A fresh-DB `alembic upgrade head` would therefore fail on
+         the DDL itself before reaching any index-creation work.
 
-    # Tier 2: GIN with jsonb_path_ops for containment queries.
-    # Smaller and faster than the default jsonb_ops operator class;
-    # supports only @> (containment) which is exactly what the
-    # alias-add signal needs ("does this reason_detail mention this
-    # team_id?").
-    conn.execute(text(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-        "ix_resolution_log_reason_detail_gin "
-        f"ON {SCHEMA}.resolution_log "
-        "USING gin (reason_detail jsonb_path_ops)"
-    ))
+      2. Production is already at this revision via the docstring
+         runbook (sp.alembic_version stamped post-Day-44). On a
+         production replay the indexes already exist and any DDL
+         attempt would be a no-op at the SQL level (CREATE INDEX
+         CONCURRENTLY IF NOT EXISTS) but would still fail at the
+         env.py transaction-state level before the SQL ran.
+
+      3. For a TRUE fresh-DB rebuild (disaster recovery), the
+         operator follows the docstring runbook to build the
+         indexes via Neon console / psql, then `alembic stamp
+         a2c4f6d8e1b3` records the revision.
+
+    Calling this no-op is safe on any DB (production replay, fresh
+    DB, stale DB) — it never errors. `alembic upgrade head` from
+    any starting state moves cleanly to the head revision.
+    """
+    pass
 
 
 def downgrade() -> None:
-    conn = _switch_to_autocommit()
-    conn.execute(text(
-        "DROP INDEX CONCURRENTLY IF EXISTS "
-        f"{SCHEMA}.ix_resolution_log_reason_detail_gin"
-    ))
-    conn.execute(text(
-        "DROP INDEX CONCURRENTLY IF EXISTS "
-        f"{SCHEMA}.ix_resolution_log_fail_reason_no_match"
-    ))
+    """REPLAY-SAFE NO-OP. Same reasoning as upgrade(). See module
+    docstring for the canonical DROP INDEX CONCURRENTLY runbook."""
+    pass

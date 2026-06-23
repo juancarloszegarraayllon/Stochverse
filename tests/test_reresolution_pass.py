@@ -706,45 +706,54 @@ class TestStaticInvariants:
         assert "Phase 2E" in (mod.__doc__ or "")
 
     def test_migration_uses_repo_concurrently_pattern_not_autocommit_block(self):
-        """Every CONCURRENTLY migration in the chain MUST use the
-        COMMIT + execution_options(AUTOCOMMIT) pattern documented in
-        `a2c4f6d8e1b3` (the first CONCURRENTLY migration) and reused
-        by every subsequent one.
+        """Every CONCURRENTLY migration in the chain MUST follow the
+        Day-44 cleanup pattern: console + stamp is the canonical
+        landing path; the upgrade()/downgrade() code bodies are
+        REPLAY-SAFE NO-OPS; the DDL lives in the module docstring as
+        the operator runbook.
 
-        Day-42 production confirmed the failure modes:
-          1. `op.get_context().autocommit_block()` fails the
-             `assert self._transaction is not None` (alembic
-             migration.py:329) — async-asyncpg env.py with
-             transaction_per_migration + run_sync sync-bridge.
-          2. `op.execute("COMMIT")` + `execution_options(
-             isolation_level="AUTOCOMMIT")` ALSO fails:
-             `InvalidRequestError: transaction already initialized`.
+        Two failure modes confirmed in production:
+          1. Day-42 — op.get_context().autocommit_block() fails the
+             `self._transaction is not None` assertion
+             (alembic/runtime/migration.py:329) — async-asyncpg
+             env.py with transaction_per_migration + run_sync
+             sync-bridge.
+          2. Day-44 — op.execute("COMMIT") + execution_options(
+             isolation_level="AUTOCOMMIT") ALSO fails:
+             InvalidRequestError: transaction already initialized.
 
-        The repo pattern (established by `a2c4f6d8e1b3`, extended by
-        every subsequent CONCURRENTLY migration) is: skip the
-        alembic-upgrade path entirely for CONCURRENTLY DDL — go via
-        Neon console + `alembic stamp <rev>`. The migration's
-        `upgrade()` body still carries the DDL for documentation +
-        replay against a fresh database (e.g., disaster recovery)
-        and uses the COMMIT + execution_options pattern there
-        (rather than autocommit_block) so the replay path is at
-        least closer to working.
+        With BOTH alembic CONCURRENTLY escape hatches broken, the
+        only safe upgrade()/downgrade() body is a NO-OP. A fresh-DB
+        `alembic upgrade head` then cleanly records the revision in
+        sp.alembic_version without attempting the failing DDL.
+        Production indexes are built via the docstring runbook
+        (psql + `alembic stamp <rev>`).
 
-        This test glob-scans every migration that uses
-        `CREATE INDEX CONCURRENTLY` and pins all three properties:
-          - No `autocommit_block(` call in the code (docstring
-            mentions are allowed — they explain why we avoid it).
-          - COMMIT + AUTOCOMMIT isolation pattern present.
-          - CONCURRENTLY preserved (no fallback to plain
-            CREATE INDEX, which would lock the 130k+ row hot-write
-            sp.resolution_log table).
-          - Console + stamp runbook documented in the migration
-            (a future maintainer needs the runbook on disk; an
-            empty docstring would be a regression).
+        This test glob-scans every migration whose blob contains
+        `CREATE INDEX CONCURRENTLY` (typically in the module
+        docstring) and enforces four properties:
 
-        Guards against a future maintainer "tidying up" any
-        CONCURRENTLY migration with the standard alembic recipe and
-        silently breaking deploys."""
+          A. autocommit_block( is NOT called in code
+             (Day-42 reintroduction guard).
+          B. CREATE INDEX CONCURRENTLY is NOT in the code body
+             (Day-44 cleanup guard — DDL lives only in the
+             docstring as the operator runbook; any code-side
+             execution would fail in this env.py).
+          C. CREATE INDEX CONCURRENTLY IS present somewhere
+             (the runbook itself must not have been deleted).
+          D. `alembic stamp` runbook is documented somewhere
+             (future operator / fresh-session Claude need it
+             on disk).
+
+        Guards against a future maintainer:
+          - "Tidying up" by reintroducing autocommit_block() (A).
+          - "Finishing the migration" by moving the CONCURRENTLY
+            DDL into the upgrade() body (B).
+          - Dropping CONCURRENTLY semantics by replacing with plain
+            CREATE INDEX (would lock the 130k+ row hot-write
+            sp.resolution_log) (C).
+          - Deleting the docstring runbook (D).
+        """
         import glob
         import re
 
@@ -752,9 +761,6 @@ class TestStaticInvariants:
             os.path.dirname(os.path.abspath(__file__))
         )
         mig_dir = os.path.join(repo_root, "migrations", "versions")
-        # Find every migration file. Filter to the ones that contain
-        # `CREATE INDEX CONCURRENTLY` — those are the ones that need
-        # the repo pattern.
         concurrent_migrations: list[str] = []
         for path in sorted(glob.glob(os.path.join(mig_dir, "*.py"))):
             with open(path, encoding="utf-8") as f:
@@ -762,9 +768,6 @@ class TestStaticInvariants:
             if "CREATE INDEX CONCURRENTLY" in blob:
                 concurrent_migrations.append(path)
 
-        # The repo pattern was established by a2c4f6d8e1b3. If this
-        # list is empty, something deleted the migration chain —
-        # fail loudly so the test isn't silently a no-op.
         assert len(concurrent_migrations) >= 1, (
             "Expected at least one CONCURRENTLY migration in the "
             "chain (the pattern was established by "
@@ -775,44 +778,58 @@ class TestStaticInvariants:
         for path in concurrent_migrations:
             with open(path, encoding="utf-8") as f:
                 blob = f.read()
-            # Strip the module docstring (first triple-quoted
-            # string). The docstring explains why we avoid
-            # autocommit_block — those mentions are legitimate.
-            # We're guarding against actual code calls.
+            # Strip ALL triple-quoted strings (module docstring +
+            # every function/class docstring). Docstrings are where
+            # the operator runbook + design rationale live — their
+            # mentions of autocommit_block / CREATE INDEX CONCURRENTLY
+            # are documentation, not execution. The non-docstring
+            # remainder is what we guard against.
             code_only = re.sub(
-                r'^"""[\s\S]*?"""', "", blob, count=1,
+                r'"""[\s\S]*?"""', "", blob,
             )
             base = os.path.basename(path)
+
+            # A. Day-42 guard.
             assert "autocommit_block(" not in code_only, (
                 f"{base}: autocommit_block() fails in this repo's "
-                "env.py config — see a2c4f6d8e1b3 docstring for the "
-                "full explanation. Use COMMIT + "
-                "execution_options(isolation_level='AUTOCOMMIT') in "
-                "the upgrade() body, and document the console + "
-                "stamp landing path in the docstring."
+                "env.py config (Day-42 lesson). See a2c4f6d8e1b3 "
+                "docstring for the full explanation. The Day-44 "
+                "cleanup pattern keeps upgrade()/downgrade() as "
+                "NO-OPS and runs the runbook from the docstring."
             )
-            assert 'isolation_level="AUTOCOMMIT"' in blob, (
-                f"{base}: must switch to AUTOCOMMIT isolation so "
-                "the next statement does not implicit-BEGIN a new "
-                "transaction. Mirror a2c4f6d8e1b3's "
-                "_switch_to_autocommit() helper."
+
+            # B. Day-44 cleanup guard — CONCURRENTLY DDL must live
+            # ONLY in the module docstring, not in the code body.
+            assert "CREATE INDEX CONCURRENTLY" not in code_only, (
+                f"{base}: CREATE INDEX CONCURRENTLY appears in the "
+                "code body, but the Day-44 cleanup requires it to "
+                "live ONLY in the module docstring (as the operator "
+                "runbook). BOTH alembic CONCURRENTLY escape "
+                "hatches fail in this repo's env.py — any "
+                "code-side execution would crash a future "
+                "`alembic upgrade head`. Move the DDL to the "
+                "docstring runbook and make upgrade()/downgrade() "
+                "REPLAY-SAFE NO-OPS. See a2c4f6d8e1b3 for the "
+                "established shape."
             )
+
+            # C. CONCURRENTLY semantics preserved (in the runbook).
             assert "CREATE INDEX CONCURRENTLY" in blob, (
                 f"{base}: claimed to be a CONCURRENTLY migration "
                 "but doesn't actually carry CREATE INDEX "
-                "CONCURRENTLY. sp.resolution_log is 130k+ rows and "
-                "a production hot-write table — plain CREATE INDEX "
-                "would lock it."
+                "CONCURRENTLY anywhere. sp.resolution_log is 130k+ "
+                "rows and a production hot-write table — plain "
+                "CREATE INDEX would lock it. Restore the runbook "
+                "with CONCURRENTLY semantics in the module "
+                "docstring."
             )
-            # The console + stamp runbook must be documented in the
-            # docstring so a future operator (or a fresh-session
-            # Claude) can find it without rediscovering it.
+
+            # D. Runbook documented.
             assert "alembic stamp" in blob, (
                 f"{base}: missing the `alembic stamp` runbook in "
-                "its docstring. The Day-42 lesson is that the "
-                "production landing path is console + stamp, NOT "
-                "alembic upgrade. Future operators need that "
-                "runbook on disk."
+                "its docstring. The production landing path is "
+                "console + stamp, NOT alembic upgrade. Future "
+                "operators need that runbook on disk."
             )
 
     def test_railway_toml_crons_are_commented_off(self):

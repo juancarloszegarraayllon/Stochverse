@@ -108,9 +108,16 @@ console path.
 Revision ID: b3d5e7f9a2c4
 Revises: a2c4f6d8e1b3
 Create Date: 2026-06-20
+Updated: 2026-06-22 — Day-44 cleanup: upgrade()/downgrade() bodies
+                     are now REPLAY-SAFE NO-OPS. See a2c4f6d8e1b3
+                     for the full rationale (BOTH alembic
+                     CONCURRENTLY escape hatches fail in this env.py;
+                     console + stamp is canonical; the body is no-op
+                     so any future alembic upgrade head records the
+                     revision cleanly without attempting the failing
+                     DDL).
 """
-from alembic import op
-from sqlalchemy import text
+from alembic import op  # noqa: F401  (kept import for replay context)
 
 
 revision = "b3d5e7f9a2c4"
@@ -121,32 +128,15 @@ depends_on = None
 SCHEMA = "sp"
 
 
-def _switch_to_autocommit():
-    """Repo pattern for CONCURRENTLY DDL — see a2c4f6d8e1b3
-    docstring for the why. This function is here for documentation
-    + future replay; the production landing path is console + stamp
-    per the migration docstring."""
-    op.execute("COMMIT")
-    return op.get_bind().execution_options(isolation_level="AUTOCOMMIT")
-
-
 def upgrade() -> None:
-    """NOT INVOKED IN PRODUCTION — see migration docstring for the
-    console + stamp runbook. Body carries the DDL for replay against
-    a fresh database (e.g., disaster recovery)."""
-    conn = _switch_to_autocommit()
-    conn.execute(text(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-        "ix_resolution_log_provider_record_decided_at "
-        f"ON {SCHEMA}.resolution_log "
-        "(provider, provider_record_id, decided_at DESC)"
-    ))
+    """REPLAY-SAFE NO-OP. See module docstring for the canonical
+    console + stamp runbook and a2c4f6d8e1b3 docstring for the full
+    explanation of why both alembic CONCURRENTLY escape hatches
+    fail in this repo's env.py."""
+    pass
 
 
 def downgrade() -> None:
-    """NOT INVOKED IN PRODUCTION — same pattern as upgrade()."""
-    conn = _switch_to_autocommit()
-    conn.execute(text(
-        "DROP INDEX CONCURRENTLY IF EXISTS "
-        f"{SCHEMA}.ix_resolution_log_provider_record_decided_at"
-    ))
+    """REPLAY-SAFE NO-OP. See module docstring for the canonical
+    DROP INDEX CONCURRENTLY runbook."""
+    pass

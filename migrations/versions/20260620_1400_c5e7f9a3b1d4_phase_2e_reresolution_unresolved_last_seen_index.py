@@ -110,9 +110,16 @@ console + stamp path.
 Revision ID: c5e7f9a3b1d4
 Revises: b3d5e7f9a2c4
 Create Date: 2026-06-20
+Updated: 2026-06-22 — Day-44 cleanup: upgrade()/downgrade() bodies
+                     are now REPLAY-SAFE NO-OPS. See a2c4f6d8e1b3
+                     for the full rationale (BOTH alembic
+                     CONCURRENTLY escape hatches fail in this env.py;
+                     console + stamp is canonical; the body is no-op
+                     so any future alembic upgrade head records the
+                     revision cleanly without attempting the failing
+                     DDL).
 """
-from alembic import op
-from sqlalchemy import text
+from alembic import op  # noqa: F401  (kept import for replay context)
 
 
 revision = "c5e7f9a3b1d4"
@@ -123,41 +130,15 @@ depends_on = None
 SCHEMA = "sp"
 
 
-def _switch_to_autocommit():
-    """Repo pattern for CONCURRENTLY DDL — see a2c4f6d8e1b3
-    docstring for the full why. Production landing path is console
-    + stamp per this migration's docstring; this body is here for
-    documentation + replay against a fresh database."""
-    op.execute("COMMIT")
-    return op.get_bind().execution_options(isolation_level="AUTOCOMMIT")
-
-
 def upgrade() -> None:
-    """NOT INVOKED IN PRODUCTION — see migration docstring for the
-    console + stamp runbook. Body carries the DDL for replay against
-    a fresh database."""
-    conn = _switch_to_autocommit()
-    conn.execute(text(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-        "ix_fl_events_unresolved_last_seen "
-        f"ON {SCHEMA}.fl_events (last_seen_at) "
-        "WHERE fixture_id IS NULL"
-    ))
-    conn.execute(text(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-        "ix_kalshi_markets_unresolved_last_seen "
-        f"ON {SCHEMA}.kalshi_markets (last_seen_at) "
-        "WHERE fixture_id IS NULL"
-    ))
+    """REPLAY-SAFE NO-OP. See module docstring for the canonical
+    console + stamp runbook and a2c4f6d8e1b3 docstring for the full
+    explanation of why both alembic CONCURRENTLY escape hatches
+    fail in this repo's env.py."""
+    pass
 
 
 def downgrade() -> None:
-    conn = _switch_to_autocommit()
-    conn.execute(text(
-        "DROP INDEX CONCURRENTLY IF EXISTS "
-        f"{SCHEMA}.ix_kalshi_markets_unresolved_last_seen"
-    ))
-    conn.execute(text(
-        "DROP INDEX CONCURRENTLY IF EXISTS "
-        f"{SCHEMA}.ix_fl_events_unresolved_last_seen"
-    ))
+    """REPLAY-SAFE NO-OP. See module docstring for the canonical
+    DROP INDEX CONCURRENTLY runbook."""
+    pass
