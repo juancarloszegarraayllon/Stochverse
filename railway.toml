@@ -109,37 +109,37 @@ restartPolicyType = "NEVER"
 # F6; exit code stays 0 on warnings (same as the daily cron pattern)
 # so transient warnings don't surface as deploy failures.
 
-# [[services]]
-# name = "resolver-reresolution-fl"
-#
-# [services.deploy]
-# # Every 5 min. F3-DECIDED cadence. ~16,588 addressable population
-# # ceiling per Day-41 sizing; targeted Tier-1+2 candidate selection
-# # holds per-pass cost proportional to actual change (NOT the gross
-# # no_match population).
-# cronSchedule = "*/5 * * * *"
-# startCommand = "python scripts/run_reresolution_pass.py --provider fl --apply"
-# restartPolicyType = "NEVER"
+[[services]]
+name = "resolver-reresolution-fl"
 
-# [[services]]
-# name = "resolver-reresolution-kalshi"
-#
-# [services.deploy]
-# # Every 5 min offset 2 min (cron expression: minutes 2, 7, 12, …).
-# # The 2-min offset after FL preserves cross-provider corroboration
-# # freshness — Kalshi's pass sees FL's just-re-resolved fixtures.
-# cronSchedule = "2-59/5 * * * *"
-# startCommand = "python scripts/run_reresolution_pass.py --provider kalshi --apply"
-# restartPolicyType = "NEVER"
+[services.deploy]
+# Every 5 min. F3-DECIDED cadence. ~16,588 addressable population
+# ceiling per Day-41 sizing; targeted Tier-1+2 candidate selection
+# holds per-pass cost proportional to actual change (NOT the gross
+# no_match population).
+cronSchedule = "*/5 * * * *"
+startCommand = "python scripts/run_reresolution_pass.py --provider fl --apply"
+restartPolicyType = "NEVER"
 
-# [[services]]
-# name = "daily-diff"
-#
-# [services.deploy]
-# # Nightly at 03:00 UTC — 45 min after the daily cron pair completes.
-# # F5-DECIDED. Closes the Day-21 measurement-debt; writes to
-# # sp.daily_diff_reports for trajectory continuity. The loop is
-# # unmeasurable without this; folded into the same workstream.
-# cronSchedule = "0 3 * * *"
-# startCommand = "python scripts/daily_diff.py"
-# restartPolicyType = "NEVER"
+[[services]]
+name = "resolver-reresolution-kalshi"
+
+[services.deploy]
+# Every 5 min offset 2 min (cron expression: minutes 2, 7, 12, …).
+# The 2-min offset after FL preserves cross-provider corroboration
+# freshness — Kalshi's pass sees FL's just-re-resolved fixtures.
+cronSchedule = "2-59/5 * * * *"
+startCommand = "python scripts/run_reresolution_pass.py --provider kalshi --apply"
+restartPolicyType = "NEVER"
+
+[[services]]
+name = "daily-diff"
+
+[services.deploy]
+# Nightly at 03:00 UTC — 45 min after the daily cron pair completes.
+# F5-DECIDED. Closes the Day-21 measurement-debt; writes to
+# sp.daily_diff_reports for trajectory continuity. The loop is
+# unmeasurable without this; folded into the same workstream.
+cronSchedule = "0 3 * * *"
+startCommand = "python scripts/daily_diff.py"
+restartPolicyType = "NEVER"

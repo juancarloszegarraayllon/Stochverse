@@ -832,34 +832,63 @@ class TestStaticInvariants:
                 "operators need that runbook on disk."
             )
 
-    def test_railway_toml_crons_are_commented_off(self):
-        """Belt-and-suspenders: the three Phase 2E cron service
-        entries MUST be commented in railway.toml — they go live
-        only after operator dry-run review removes the leading
-        '# '."""
+    def test_railway_toml_phase_2e_crons_are_uncommented_live(self):
+        """Day-45 enable-crons inversion: the three Phase 2E cron
+        service blocks (`resolver-reresolution-fl`,
+        `resolver-reresolution-kalshi`, `daily-diff`) MUST be present
+        as LIVE [[services]] entries in railway.toml.
+
+        History: this test previously asserted the OPPOSITE — that
+        the blocks were commented out — as a belt-and-suspenders
+        guard against accidentally enabling the loop before its
+        perf was validated. With perf validated end-to-end Day-44
+        (EXPLAIN 2.2s + both dry-runs 2.88s under the 5s F6 ceiling),
+        F7 Part B settled (passive week-1 near-zero expected by
+        design; targeted before/after as dispositive validation),
+        and the pre-merge cleanup landed Day-44 (a8cf26a), the
+        crons are deliberately enabled Day-45 for live writes.
+
+        The inverted guard catches accidental RE-disabling — if a
+        future maintainer comments any of these blocks back out
+        without coordinated PROJECT_STATE notes, this test fails.
+
+        Note: Railway schedules NOTHING from this file alone. The
+        operator creates the three services manually in the Railway
+        dashboard (FL first per the staged rollout), at which point
+        Railway picks up cronSchedule + startCommand from this file
+        on each deploy. See DEPLOYMENT.md → "One-time Railway setup
+        (services don't auto-create)" for the provisioning runbook.
+        """
         repo_root = os.path.dirname(
             os.path.dirname(os.path.abspath(__file__))
         )
         toml_path = os.path.join(repo_root, "railway.toml")
         with open(toml_path, encoding="utf-8") as f:
             text_blob = f.read()
-        # Each service entry header is `name = "<service>"`. The
-        # Phase 2E services must all be commented (line starts with
-        # `# name`).
         for svc in (
             "resolver-reresolution-fl",
             "resolver-reresolution-kalshi",
             "daily-diff",
         ):
-            assert f'# name = "{svc}"' in text_blob, (
-                f"Phase 2E service {svc!r} must be COMMENTED in "
-                "railway.toml — flagged off pending operator dry-run "
-                "review"
+            # The [[services]] header is paired with a
+            # name = "<service>" on the next line. Assert both
+            # appear as a live (uncommented) block.
+            assert f'[[services]]\nname = "{svc}"' in text_blob, (
+                f"Phase 2E service {svc!r} must be UNCOMMENTED in "
+                "railway.toml — the crons were enabled Day-45 "
+                "after the loop was perf-validated end-to-end. "
+                "If you're deliberately disabling, update the "
+                "PROJECT_STATE journal AND invert this test back "
+                "to its previous commented-state assertion."
             )
-            # And the corresponding [[services]] block header should
-            # also be commented (or absent).
-            assert f'[[services]]\nname = "{svc}"' not in text_blob, (
-                f"Phase 2E service {svc!r} has UNCOMMENTED "
-                "[[services]] header — must be commented until "
-                "operator un-flags"
+            # And the previously-commented form must NOT be present.
+            # Catches the regression shape exactly — somebody
+            # putting the `# name = "..."` line back.
+            assert f'# name = "{svc}"' not in text_blob, (
+                f"Phase 2E service {svc!r} has a commented "
+                "`# name = ...` line in railway.toml — this looks "
+                "like a partial re-disable. Either it's fully live "
+                "or fully commented; mixing the two is ambiguous "
+                "and Railway will pick up the live block while the "
+                "commented one confuses readers."
             )
