@@ -118,6 +118,96 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-07-08
+
+### Day-46: Loop healthy overnight; F8 Attempt 1 surfaced the canonical_name-shadowing failure mode; record restored clean
+
+Loop remains LIVE and healthy. F8 Attempt 1 did not complete the dispositive flip, but produced a structural finding that sharpens the selection criterion for Attempt 2 — the alias tier and fuzzy tier build `CandidateIndex` from `sp.teams.canonical_name`, not from `sp.team_aliases` (Day-21 architectural finding re-surfaced). Deleting a single alias only breaks the strict tier; if the team's canonical_name matches the FL provider string, the alias tier re-matches it by name and the record never produces the no_match decision the loop's Tier-1 filter requires. New §2c "canonical-name-shadow-prevention" check added to the F8 procedure. Attempt 1 record restored byte-for-byte from snapshot; only residue is two append-only `sp.resolution_log` rows (expected accretion, harmless).
+
+### Day-46: Loop health (unchanged, clean)
+
+- **FL 144 / Kalshi 144 live runs** in the trailing 12h. Latest fires ~21:35 / ~21:37 UTC.
+- `total_crashes = 0` both providers.
+- daily-diff writing on schedule: fresh rows at 2026-06-24 03:05 (nightly cron) plus manual triggers. Measurement gap (previously stuck at 2026-06-15) stays closed.
+
+All five crons continue to run cleanly at their real cadences.
+
+### Day-46: F8 Attempt 1 — record MRQznWTj (Warwick Senators vs Geraldton Buccaneers, FL, Basketball)
+
+**Selection** (§1 discovery query):
+- `fl_event_id = MRQznWTj`, sport = Basketball.
+- `break_side = away` (Geraldton Buccaneers, team_id `f3cca7c9-...`), `alias_count = 1`.
+- Alias `id 767d508b-...`, `alias/alias_normalized = 'Geraldton Buccaneers' / 'geraldton buccaneers'`, `source = legacy_bootstrap`, `confidence = 0.95`.
+
+**§2b verification passed on the pre-break decision**: `reason_code = 'strict'`, `away_team_id` present in `reason_detail`. Snapshot captured.
+
+**Break executed cleanly** (§4): `DELETE` 1 alias row, `UPDATE` 1 `fl_events` row to `fixture_id = NULL`. Pattern D confirmed `neondb`.
+
+**Runner limitation surfaced**: `run_resolver_pass.py --limit 50` did NOT reach the target record. 43,878 unresolved FL records; runner has no record-targeting flag (only `--provider`, `--run-mode`, `--limit`). Raised progressively; `--limit 5000` finally produced the fresh decision for `MRQznWTj`.
+
+### Day-46: The finding — canonical_name shadowing (why F8 could not complete on this record)
+
+The forced fresh decision (§5) wrote **two** rows at `2026-07-08 22:09:51`, same pass:
+
+| id | tier | reason_code | reason_detail |
+|---|---|---|---|
+| 7272498 | `strict@2a.6` | `no_match` | `fail_reason = alias_resolution_incomplete`, `away_resolved = false`, `home_resolved = true`. **No team_id anywhere in reason_detail.** |
+| 7272499 | `alias@2c.0` | `review_queue` | `away_team_id = f3cca7c9` **RESOLVED via canonical-name match**. `home_collision = true`, `colliding_home_team_ids = [92b83146, 5948f38d]`. |
+
+**Root cause**: `CandidateIndex` (used by the alias tier and fuzzy tier) is built from `sp.teams.canonical_name`, not from `sp.team_aliases`. Geraldton's canonical name (`"Geraldton Buccaneers"`) exactly matched the FL provider string, so the alias tier immediately re-matched it by name (`away_ratio 1.0`, `away_collision false`) — the alias row was never on the resolution path for that side; it was just belt-and-suspenders that duplicated the canonical.
+
+Two independent disqualifiers meant the loop could NOT catch this record post-break:
+
+1. **Latest decision was `review_queue`, not `no_match`** → the loop's Tier-1 filter (`reason_code = 'no_match'`) excludes it entirely.
+2. **The `no_match` row's `reason_detail` had NO team_id** → even if the latest had been no_match, Tier-2 LOOSE containment had nothing to match the re-added alias's `team_id` against.
+
+**This was a Day-21 lesson we failed to apply at selection time.** The scope doc's F1a design correctly anticipated Tier-2 containment needs team_ids in `reason_detail`; the F8 procedure's §2b checked that on the pre-break decision but not that the post-break decision would continue to carry them. §2c closes the gap by requiring FL-provider-string ≠ canonical_name (post-normalization) BEFORE the break — that ensures the strict-tier no_match will be the latest decision AND that it will carry the team_ids the alias tier previously landed on.
+
+### Day-46: Sharpened selection criterion — §2c added to F8 procedure
+
+**The rule**: the break-side team's `canonical_name` must NOT match the FL provider string after normalization. The alias must be the ONLY path to the team across ALL tiers — strict tier AND the canonical-name `CandidateIndex`.
+
+**Concretely, prefer records where**:
+- FL sends a shorter form ("Bonn") while canonical is fuller ("Telekom Baskets Bonn").
+- FL sends an abbreviation while canonical is spelled out.
+- Canonical carries sponsor / suffix tokens the FL string doesn't.
+- Any material token differences after normalization.
+
+The check is a SQL query comparing `fl_events.raw_payload->>'HOME_NAME'` / `'AWAY_NAME'` against `sp.teams.canonical_name` with `lower + unaccent + whitespace-collapse` normalization. `SHADOW_RISK = FALSE` required. Details in `docs/reresolution/f8-procedure.md` §2c (added this session).
+
+### Day-46: Side finding — Warwick Senators (92b83146) latent collision with 5948f38d
+
+Surfaced only during the failed forced-decision pass: `colliding_home_team_ids = [92b83146, 5948f38d]`. Warwick's aliasing normally resolves without collision because the strict tier lands it first; when the strict tier stopped resolving `MRQznWTj` (because the away side was broken), the alias tier's home-side candidate lookup surfaced the collision. **Masked in normal operation.**
+
+Not blocking F8; noted as the kind of thing a **review-queue drain workstream** (one of the remaining Phase 2 exit gates) would systematically expose. Logged for the eventual queue-drain scope conversation.
+
+### Day-46: Clean restore
+
+**Alias re-inserted** with all original values including original `created_at (2026-05-08T15:33:27.981378+00)` — an emergency restore, not a live F8 §7 (which requires `created_at = NOW()` for the Tier-2 freshness predicate to fire). `fixture_id` restored to `b35f850a-2964-4564-8c31-dc2ab919ecee`.
+
+**Post-restore verification** matches snapshot byte-for-byte: `alias_count = 1`, `alias_row_present = 1`, `fixture_id` correct. Only residue: two append-only `sp.resolution_log` rows from the forced pass (expected accretion, harmless — next daily cron pass re-resolves strict for this record just as before).
+
+### Day-46: F8 procedure doc created — `docs/reresolution/f8-procedure.md`
+
+Prior sessions carried the procedure in chat only. This session codifies it as a doc that survives resets, incorporating Day-45's operator-side review notes and Day-46's §2c criterion. Delivered as a separate PR (branch `claude/f8-procedure-doc`). Section labels are stable so the operator's session references stay working (§1 discovery, §2a/§2b/§2c gates, §3 snapshot, §4–§8 the writes, §9 verify).
+
+### Day-46: PR state
+
+- **PROJECT_STATE Day-46 journal**: this entry, single-file PR (`claude/project-state-2026-07-08-day46`).
+- **F8 procedure doc**: separate PR (`claude/f8-procedure-doc`) — new file `docs/reresolution/f8-procedure.md`.
+- **Phase-status header active-workstream line unchanged**: loop still LIVE, F8 pending. Attempt 1 was a false start on a well-understood failure mode, not a regression.
+
+### Pending — next session
+
+1. **F8 Attempt 2 — rerun with a properly-selected target**. Same 8-step sequence with the §2c gate added. Selection preference: national-team friendly / off-season exhibition where FL sends an abbreviation and canonical is spelled out. Dispositive moment unchanged: live FL cron pass with `candidate_set_size ≥ 1`, record flips to strict/alias, `fixture_id` repopulates.
+2. **Runner record-targeting flag** — if F8 continues to run into the `--limit` reach issue, add `--record-id <provider_record_id>` to `scripts/run_resolver_pass.py` as a small quality-of-life improvement for future forced-decision cases. Deferred until F8 Attempt 2 shows whether the progressive `--limit` bump is livable.
+3. **After F8 passes**: remaining Phase 2 exit gates before Phase 3 (`/api/v4`) opens:
+   - **Review-queue drain** — passive consequence of the loop running as coverage resumes. Was 18,303 at Day-38; measure post-F8. Warwick's Day-46 latent-collision finding is the kind of thing a systematic drain would expose.
+   - **§6.5 archival** — the last unbuilt Phase 2 exit gate. Orthogonal to F8; can scope-doc + build in parallel with Attempt 2.
+4. **Carried-forward**: 9 pre-existing `test_phase_2d5_*` / `test_phase_2f1_*` collection errors (track so not blamed on Phase 2E).
+
+---
+
 ## Session — 2026-06-23
 
 ### Day-44 continued: Re-resolution loop LIVE IN PRODUCTION — first Phase 2 exit gate moved built → live
