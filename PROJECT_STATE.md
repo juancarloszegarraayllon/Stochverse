@@ -187,6 +187,34 @@ Not blocking F8; noted as the kind of thing a **review-queue drain workstream** 
 
 **Post-restore verification** matches snapshot byte-for-byte: `alias_count = 1`, `alias_row_present = 1`, `fixture_id` correct. Only residue: two append-only `sp.resolution_log` rows from the forced pass (expected accretion, harmless — next daily cron pass re-resolves strict for this record just as before).
 
+### Day-46 addendum: Forced-decision pass cost + halt-warning context (journaled for gate #3 traceability)
+
+The `run_resolver_pass.py --provider fl --run-mode standalone --limit 5000` run that reached MRQznWTj (§5 forced-decision step; needed because the runner has no record-targeting flag and `--limit 50` didn't reach the target) completed at `22:39:57Z`. Journaling the cost here so a future reader checking gate #3 (§7.5 review queue health) doesn't find the ~2,200-row jump mysterious.
+
+- **Runtime**: 3,200.6s (**53 minutes**), 5,000 records scanned.
+- **Production writes** — all legitimate resolver decisions on genuinely-unresolved backlog records; the same decisions the 02:00 daily cron would eventually have made:
+  - 74 strict `auto_applies` (74 records got `fixture_id` set)
+  - 2,202 `review_queue` writes (1,216 alias-tier + 986 fuzzy-tier)
+  - 2,724 `no_match` rows
+  - Thousands of `sp.resolution_log` accretion rows
+  - One `sp.resolver_runs` row (`run_id 664313d4-48f4-4b7d-a129-7742888c4448`)
+
+**Gate #3 (§7.5 review queue health) impact**: review queue grew by ~2,202 as a side effect. Was ~18,303 (Day-38 measurement); now ~20,500 estimated. **Not a regression** — the daily cron would have written the same rows over the next N passes; this run just batched them into 53 minutes. Log the number so gate-#3 tracking on daily-diff post-loop-live doesn't misattribute the jump to loop mis-behavior.
+
+**Halt warning fired — expected, NOT a regression**: `halt_criteria_exceeded: coverage=1.5% (74/5000) below the 60% floor`. The floor (design doc §2) is calibrated for the DAILY CRON scanning fresh records, most of which resolve. This pass deliberately scanned 5,000 records from the UNRESOLVED BACKLOG — records that have already failed repeatedly. **1.5% coverage on that population is the expected shape, not a defect.** Exit 0 as designed. Note this so a future reader of `sp.resolver_runs.extra->>'halt_warnings'` for `run_id 664313d4` doesn't misread it as resolver degradation.
+
+**Interesting datum — 74 of 5,000 backlog records DID resolve** (1.5%). Small but real evidence that the backlog is not fully static — records that previously failed CAN flip if aliases have since been added. Consistent with the alias_tier ~45/7d + fuzzy_tier ~9/7d write-back rates from the F7 Part B velocity query. Also a sanity check: **re-resolution DOES flip records when aliases land** — but for records that predated the alias-add without the alias-add signal being captured in `reason_detail`, only the daily cron's naïve retry catches them, not the loop's Tier-2 targeted path. Tier-2's specificity is by design (targeted work); the daily cron is the fallback for whatever Tier-2 doesn't see.
+
+### Day-46 addendum: F8 procedure amendment — cost-of-forced-decision (options a/b/c)
+
+Added to `docs/reresolution/f8-procedure.md` between §2c and §3, so the operator reads it BEFORE running §5 in Attempt 2:
+
+- **Option (a)** — `run_reresolution_pass.py --candidate-set fl:{RECORD_ID} --apply` — the LISTEN/NOTIFY seam repurposed. Bypasses Tier-1+Tier-2 selection, drives the matcher against one record at zero scan cost. Requires verification against the code (`_hydrate_candidate_override` call site) that `--apply` actually persists a fresh `resolution_log` row. Doc carries the verification callout.
+- **Option (b)** — `run_resolver_pass.py --limit N` with a target chosen at §1 selection to sort within the first ~50 rows. Day-45 observation: runner orders by `last_seen_at DESC`, so pick a very recently-seen record.
+- **Option (c)** — wait for the 02:00 UTC daily cron. Slowest but zero-effort.
+
+Attempt-1 baseline (53 min / 2,202 queue writes / halt warning) recorded in the doc verbatim so future readers see the cost that should NOT be repeated. Pushed as an addendum commit on PR #243.
+
 ### Day-46: F8 procedure doc created — `docs/reresolution/f8-procedure.md`
 
 Prior sessions carried the procedure in chat only. This session codifies it as a doc that survives resets, incorporating Day-45's operator-side review notes and Day-46's §2c criterion. Delivered as a separate PR (branch `claude/f8-procedure-doc`). Section labels are stable so the operator's session references stay working (§1 discovery, §2a/§2b/§2c gates, §3 snapshot, §4–§8 the writes, §9 verify).
