@@ -226,6 +226,94 @@ wrappers can be dropped for a rougher check (ASCII-only equality)
 and diacritics compared by eye against the raw strings; the
 strict "must differ" gate holds either way.
 
+## Cost of the forced-decision step (Day-46 amendment)
+
+Read this BEFORE running §5. Reaching MRQznWTj through the daily
+runner during Attempt 1 cost **53 minutes and 2,202 unintended
+`review_queue` writes** because `run_resolver_pass.py` has no
+record-targeting flag and MRQznWTj didn't sort within `--limit 50`
+(43,878 unresolved FL records; `ORDER BY last_seen_at DESC` put it
+far down the queue).
+
+Options in preference order — pick the first that works for
+`{FL_EVENT_ID}`:
+
+### Option (a) — reresolution loop's `--candidate-set` override (preferred)
+
+The loop's `--candidate-set fl:{RECORD_ID}` flag exists exactly for
+targeted invocations (originally designed as the LISTEN/NOTIFY seam
+per F8 scope-doc; equally useful here). It bypasses the
+Tier-1+Tier-2 selection filter and drives the matcher against a
+single record at zero scan cost:
+
+```powershell
+python scripts/run_reresolution_pass.py --provider fl `
+  --candidate-set fl:{FL_EVENT_ID} --apply
+```
+
+**Verify against the code before relying on this**: check
+`scripts/run_reresolution_pass.py` around the
+`_hydrate_candidate_override` call site + the matcher-invocation
+path. Confirm that with `--apply`:
+- The override hydrates the record (fetches its latest
+  `resolution_log` row, `fixture_id IS NULL` check passes since §4
+  just cleared it).
+- The matcher runs and writes a fresh `sp.resolution_log` row via
+  the same code path as the daily runner (`TieredMatcher`).
+- The write happens even though the record isn't in the natural
+  Tier-1 filter set (that's the whole point of the override).
+
+If confirmed: total cost = seconds, one record touched, one
+`resolution_log` row written, zero unintended `review_queue`
+writes.
+
+If NOT confirmed (e.g. `--candidate-set` re-runs matcher-decision
+detection without persisting): fall through to option (b).
+
+### Option (b) — pick a target that sorts early in the daily runner
+
+If option (a) can't force the decision, fall back to
+`run_resolver_pass.py --limit N`, but arrange for `{FL_EVENT_ID}`
+during §1 selection so it sorts within a small `--limit`:
+
+1. Read the daily runner's unresolved-query `ORDER BY` in
+   `scripts/run_resolver_pass.py` (around the SELECT that builds
+   the FL unresolved candidate set — Day-45 observation: it
+   ordered by `last_seen_at DESC`).
+2. Pick a target whose sort-key value puts it in the first ~50
+   rows. For `ORDER BY last_seen_at DESC`, prefer a very
+   recently-seen record.
+
+Small `--limit` = short pass = few unintended `review_queue`
+writes. If ORDER BY has changed since Day-45, re-read the SQL
+before picking the target.
+
+### Option (c) — wait for the 02:00 UTC daily cron
+
+Slowest but zero-effort. After §4 breaks the record, the next
+daily FL cron pass naturally includes `{FL_EVENT_ID}` in its
+`fixture_id IS NULL` scan and writes the fresh no_match decision.
+Cost: 0 resolver invocations. Latency: up to ~24 hours.
+
+Only use this if options (a) and (b) both fail — F8 sessions
+usually can't afford the wait.
+
+### Attempt-1 baseline (do not repeat)
+
+`run_resolver_pass.py --provider fl --run-mode standalone --limit 5000`:
+- **3,200s (53 min) runtime**, 5,000 backlog records scanned.
+- **Production writes**: 74 strict `auto_applies`, 2,202
+  `review_queue` writes, 2,724 `no_match` rows, thousands of
+  `resolution_log` accretion rows, one `sp.resolver_runs` row.
+- **Halt warning fired**: `coverage=1.5% (74/5000) below the 60%
+  floor` — expected on backlog population (the 60% floor is
+  calibrated for FRESH records via the daily cron; 1.5% is the
+  expected shape for records that have already failed repeatedly).
+  Exit 0 as designed.
+- **Gate #3 impact**: review queue grew ~18,303 → ~20,500 as a
+  side effect. Legitimate resolver decisions the daily cron
+  would eventually have written; the scope was unintended.
+
 ## §3 — Snapshot before any write
 
 PowerShell-style, output to a JSON scratch file so §8 comparison is
