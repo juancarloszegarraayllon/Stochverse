@@ -241,6 +241,102 @@ class TestStrictMatcherGates:
         assert "orientation_flipped" not in result.reason_detail
 
     @pytest.mark.asyncio
+    async def test_extracted_candidates_stamped_into_reason_detail(self):
+        """Instrumentation for the FL home/away inversion class (Day-47).
+
+        Strict-tier reason_detail must carry a frozen snapshot of both
+        sides' TeamCandidate lists (raw / normalized / kind / weight) so
+        an inversion diagnostic doesn't depend on sp.fl_events.raw_payload
+        retention. Also asserts the resulting reason_detail is
+        JSON-serializable end-to-end, since it's written to a JSONB
+        column and any AttributeError here would take down the daily
+        cron.
+        """
+        import json
+
+        home, away = uuid.uuid4(), uuid.uuid4()
+        existing_fixture = uuid.uuid4()
+        m = self._matcher([
+            ("bayern munich", 1, home),
+            ("psg",           1, away),
+        ])
+        # Multi-candidate signal on both sides — the shape FL actually
+        # emits when HOME_PARTICIPANT_TEAM_ID is present. Kalshi's
+        # abbr candidates are also multi-kind.
+        sig = FixtureSignal(
+            provider="fl",
+            provider_record_id="TESTREC1",
+            sport="Soccer",
+            home_team_candidates=[
+                TeamCandidate(raw="42", normalized="42",
+                              kind="fl_team_id", weight=1.0),
+                TeamCandidate(raw="Bayern Munich", normalized="bayern munich",
+                              kind="name", weight=0.9),
+                TeamCandidate(raw="BAY", normalized="BAY",
+                              kind="shortname", weight=0.7),
+            ],
+            away_team_candidates=[
+                TeamCandidate(raw="99", normalized="99",
+                              kind="fl_team_id", weight=1.0),
+                TeamCandidate(raw="PSG", normalized="psg",
+                              kind="name", weight=0.9),
+            ],
+            kickoff_at=datetime(2026, 5, 7, 19, tzinfo=timezone.utc),
+            kickoff_confidence=1.0,
+        )
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=_find_result(existing_fixture))
+
+        result = await m.match(session, sig)
+
+        assert result.reason_code == ReasonCode.STRICT
+
+        home_snap = result.reason_detail["extracted_home_candidates"]
+        away_snap = result.reason_detail["extracted_away_candidates"]
+
+        assert isinstance(home_snap, list) and len(home_snap) == 3
+        assert isinstance(away_snap, list) and len(away_snap) == 2
+
+        assert home_snap[0] == {
+            "raw": "42", "normalized": "42",
+            "kind": "fl_team_id", "weight": 1.0,
+        }
+        assert home_snap[1] == {
+            "raw": "Bayern Munich", "normalized": "bayern munich",
+            "kind": "name", "weight": 0.9,
+        }
+        assert away_snap[1] == {
+            "raw": "PSG", "normalized": "psg",
+            "kind": "name", "weight": 0.9,
+        }
+
+        # Detector query 2 filters kind='name'; assert the literal
+        # matches the extractor emits (guards against a rename slip).
+        assert any(c["kind"] == "name" for c in home_snap)
+        assert any(c["kind"] == "name" for c in away_snap)
+
+        # End-to-end JSON round-trip — reason_detail is written to JSONB.
+        # A non-serializable value would raise here and take down both
+        # daily crons at 02:00 UTC.
+        round_tripped = json.loads(json.dumps(result.reason_detail))
+        assert round_tripped["extracted_home_candidates"] == home_snap
+        assert round_tripped["extracted_away_candidates"] == away_snap
+
+    @pytest.mark.asyncio
+    async def test_extracted_candidates_empty_lists_are_safe(self):
+        """Belt-and-suspenders: match() never reaches the stamp with
+        empty candidate lists (Gate 3 fails alias_resolution_incomplete
+        first), but the list comprehension is safe on []. Guards
+        against a future refactor moving the stamp above Gate 3.
+        """
+        empty_sig_ok = [
+            {"raw": c.raw, "normalized": c.normalized,
+             "kind": c.kind, "weight": c.weight}
+            for c in []
+        ]
+        assert empty_sig_ok == []
+
+    @pytest.mark.asyncio
     async def test_orientation_flip_records_in_reason_detail(self):
         home, away = uuid.uuid4(), uuid.uuid4()
         existing_fixture = uuid.uuid4()

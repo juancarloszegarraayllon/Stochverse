@@ -376,6 +376,46 @@ class TestExtractTeamIds:
         rd = {"colliding_home_team_ids": ["aaa", 42, None, "bbb"]}
         assert _extract_team_ids_from_reason_detail(rd) == {"aaa", "bbb"}
 
+    def test_extracted_candidates_snapshot_is_walker_safe(self):
+        """Regression guard for the Day-47 instrumentation stamp.
+
+        strict-tier reason_detail carries `extracted_home_candidates` /
+        `extracted_away_candidates` — arrays of {raw, normalized, kind,
+        weight} dicts. The walker matches KEY names containing
+        'team_id' and adds VALUES; none of the new keys match, and the
+        raw value under kind='fl_team_id' (which literally IS an
+        fl_team_id string, e.g. "42") sits under the `raw` key, not
+        under `*_team_id`. The walker must not admit it into the
+        containment set, or Tier-2 would match on FL provider ids
+        instead of sp.teams UUIDs and produce nonsense candidates.
+        """
+        rd = {
+            "provider": "fl",
+            "extracted_home_candidates": [
+                {"raw": "42", "normalized": "42", "kind": "fl_team_id", "weight": 1.0},
+                {"raw": "Bayern Munich", "normalized": "bayern munich",
+                 "kind": "name", "weight": 0.9},
+                {"raw": "BAY", "normalized": "BAY", "kind": "shortname", "weight": 0.7},
+            ],
+            "extracted_away_candidates": [
+                {"raw": "99", "normalized": "99", "kind": "fl_team_id", "weight": 1.0},
+                {"raw": "PSG", "normalized": "psg", "kind": "name", "weight": 0.9},
+            ],
+        }
+        assert _extract_team_ids_from_reason_detail(rd) == set()
+
+        # And when the stamp co-exists with real team_id keys (the
+        # normal strict-tier reason_detail shape after :179-180), only
+        # the real team_ids come through.
+        rd_with_ids = {
+            **rd,
+            "home_team_id": "aa-bb",
+            "away_team_id": "cc-dd",
+        }
+        assert _extract_team_ids_from_reason_detail(rd_with_ids) == {
+            "aa-bb", "cc-dd",
+        }
+
 
 # ──────────────────────────────────────────────────────────────────
 # _filter_tier2 — LOOSE F1a semantics

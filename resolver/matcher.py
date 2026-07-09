@@ -179,6 +179,33 @@ class StrictMatcher:
         reason_detail["home_team_id"] = str(home_id)
         reason_detail["away_team_id"] = str(away_id)
 
+        # Freeze the extractor's view of both sides into reason_detail so
+        # a downstream inversion diagnostic doesn't depend on raw_payload
+        # retention. sp.fl_events.raw_payload is overwritten on hash
+        # change (ingestion/base.py :208-211) and there is no payload
+        # history table, so post-hoc probing of "did the extractor see a
+        # crossed HOME_NAME/AWAY_NAME at decision time?" is otherwise
+        # unfalsifiable. Detector query in
+        # docs/reresolution/homeaway-inversion.md.
+        reason_detail["extracted_home_candidates"] = [
+            {
+                "raw":        c.raw,
+                "normalized": c.normalized,
+                "kind":       c.kind,
+                "weight":     c.weight,
+            }
+            for c in signal.home_team_candidates
+        ]
+        reason_detail["extracted_away_candidates"] = [
+            {
+                "raw":        c.raw,
+                "normalized": c.normalized,
+                "kind":       c.kind,
+                "weight":     c.weight,
+            }
+            for c in signal.away_team_candidates
+        ]
+
         # ── Gate 4: competition gate (per-provider policy) ─────
         competition_id_filter, gate_failure = self._competition_gate(
             signal=signal,
