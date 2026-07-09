@@ -144,12 +144,12 @@ Applied the corrected criterion (`sim < 0.30`) to the §1 discovery CTE. Surface
 - `YVRjxyEk` — FL `"Queretaro"` → canonical `"Conspiradores de Querétaro"`, sim `0.23`.
 - `M9rZw8VQ` — FL `"CSA"` → canonical `"Steaua București"`, sim `0`.
 
-### Day-47: Option (a) confirmed viable — F8's forced decision is now cheap
+### Day-47: Option (a) verdict — VIABILITY RETRACTED IN THE ADDENDUM
 
 Read-only trace of `scripts/run_reresolution_pass.py`:
 
-- `--candidate-set fl:{ID} --apply` branches at `:579` on `candidate_set_override is not None` and calls `_hydrate_candidate_override` (`:766-829`) INSTEAD of the Tier-1/Tier-2 `_select_candidates` path. Hydrate only requires `provider match + fixture_id IS NULL`.
-- `_run_matcher_over_candidates` (`:832-967`) bootstraps the same `TieredMatcher`, calls `matcher.match(signal)` at `:935`, executes `pg_insert_resolution_log(...)` at `:939-950`, commits at `:966`. Real persisted `sp.resolution_log` row.
+- `--candidate-set fl:{ID} --apply` branches at `:579` on `candidate_set_override is not None` and calls `_hydrate_candidate_override` (`:766-829`) INSTEAD of the Tier-1/Tier-2 `_select_candidates` path. Hydrate only requires `provider match + fixture_id IS NULL`. **This half stands.**
+- `_run_matcher_over_candidates` (`:832-967`) bootstraps the same `TieredMatcher`, calls `matcher.match(signal)` at `:935`, executes `pg_insert_resolution_log(...)` at `:939-950`, commits at `:966`. This morning's trace claimed the persisted `sp.resolution_log` row is produced by this shape. **See the Day-47 addendum below — that reading missed a `TypeError` on `:935`. Option (a) is NOT viable against the code as it stands on `main`; the runner PR fixes the shape before option (a) becomes viable.**
 - Cost: ~5 s, `candidate_set_size = 1`, zero unintended `review_queue` writes. Versus Attempt 1's `--limit 5000` cost — 53 min, 2,202 unintended queue rows.
 - **Caveat**: `_run_matcher_over_candidates:909` filters `AND fle.sport_id IS NOT NULL`. A record whose `sport_id` is NULL is silently dropped without a log row. Carry that predicate into the §1 discovery CTE (or into the target-selection filter) or the "cheap forced decision" is a no-op on the wrong target.
 
@@ -229,17 +229,91 @@ Phase 3's `/api/v4/sports/{id}/feed` will serve fixtures with `home_team_id` / `
 
 - **Instrumentation PR**: `claude/explore-repo-pFQ9r` — `resolver/matcher.py` + `docs/reresolution/homeaway-inversion.md`. Additive JSONB; no migration; universal to all providers (not FL-specific).
 - **Day-47 journal PR**: this entry, single-file PR (`claude/project-state-2026-07-09-day47`).
-- **F8 Attempt 2 status**: aborted at §2. To be re-attempted after the inversion class is understood — or deferred entirely if the instrumentation-driven trace shows the loop's forced-decision mechanism is already validated implicitly by the inversion investigation's read-only trace of the same `_hydrate_candidate_override` / `_run_matcher_over_candidates` path.
+- **F8 Attempt 2 status**: aborted at §2. To be re-attempted after the inversion class is understood. (Superseded: this section originally said F8's dispositive value "drops materially if the trace confirms the path works as spec." The addendum below retracts that. The trace missed the runner's `TypeError`, and F8's end-to-end value is HIGHER than this line claimed — it would have caught the runner bug on its first attempt. Re-scope F8 after the runner PR lands and Gate #1 is verified.)
 - **`f8-procedure.md` §2c amendment (deferred, separate PR)**: switch inequality to `similarity(provider_string, canonical) < 0.30`. Carry `AND fle.sport_id IS NOT NULL` into the §1 discovery CTE per the `:909` caveat, so a NULL-sport_id target doesn't silently no-op the forced pass. Scoped as a follow-up doc-only PR, not bundled into either PR above.
 - **Phase-status header active-workstream line unchanged**: loop still LIVE. F8 not surfaced as the active workstream — the inversion investigation is.
 
+### Day-47 addendum: Both re-resolution loops have been no-ops since Day-44 go-live (Gate #1 was never closed)
+
+Surfaced after #246 merged, while looking at `sp.resolver_runs` for the first post-instrumentation cron pass. The clean rows we've been sampling at ~22:00 daily were structurally hiding a 48h steady-state failure. Static trace of `scripts/run_reresolution_pass.py._run_matcher_over_candidates` (`:832-967`) shows that neither provider's loop can process a real candidate — the Kalshi side crashes visibly, the FL side no-ops silently. **Gate #1 was never closed.** Day-44's validation confirmed the process starts, connects, and exits 0 — nothing more.
+
+**The numbers** — `sp.resolver_runs`, `run_mode = 'live'`, trailing 48h:
+
+- Kalshi: `total_crashes = 217`. Every crashing pass has `crashes == records_scanned` (4/4, 5/5, 4/4, 4/4, 4/4). `review_queue_writes = 0` on all crashing passes. Nothing persists; pass exits 0.
+- FL: `total_crashes = 0`. **This is a false negative, not a healthy loop.** Every FL candidate is silently skipped before it reaches the matcher, so the crash counter never increments (see "The FL asymmetry" below).
+
+**Timing** — all Kalshi crashes fall in 02:02–02:22 UTC. That's the ~20-minute window after the daily crons (FL 02:00, Kalshi 02:15) mutate fixture state, which is the only window Tier-2's fixture-state predicate finds candidates. Rest of the day both loops select `candidate_set_size = 0`, `records_scanned = 0`, `crashes = 0` — indistinguishable from a healthy loop. Every health check we ran passed because we always sampled ~22:00 passes.
+
+**The candidates** — all Kalshi crashes are on `KXMLBMENTION-*` tickers (Kalshi "mention" prop markets, not games). Their prior `no_match` decisions carry `fail_reason = alias_no_team_resemblance` / `fuzzy_no_team_resemblance`, both on Tier-1's allowlist. For a real game an alias-add could flip them; for a mention-prop nothing ever will — no game, no teams. Same ~4-5 records re-selected and re-crashed every night, permanently. But this is a secondary contributor, not the crash cause.
+
+**The crash cause** — three stacked defects on one line of `_run_matcher_over_candidates` at `:935`:
+
+```python
+result = matcher.match(signal)                     # :935
+rc = result.reason_code.value if hasattr(...)      # :936
+```
+
+`TieredMatcher.match` is `async def match(self, session, signal)` returning `list[MatchResult]` (`resolver/matcher.py:478`). The call at `:935` (i) omits `session`, (ii) omits `await`, and (iii) treats the result as a single `MatchResult`. The first defect fires first: missing required positional argument. Async functions raise `TypeError` at call time before returning a coroutine, so the exception is `TypeError: match() missing 1 required positional argument: 'signal'`. Caught by the `except Exception` at `:957`, counted as a crash, swallowed.
+
+**The FL asymmetry — why crashes=0 lies.** The FL branch of the extract call at `:927-932` wraps the payload:
+
+```python
+signal = extractor.extract_signal(
+    row.raw_payload
+    if provider == "kalshi"
+    else {"raw_payload": row.raw_payload, "sport_name": row.sport_name},   # ← FL: wrapped
+)
+```
+
+FL's `extract_signal(raw_record, *, tournament_context=None, sport="")` (`resolver/fl.py:60-66`) does `event_id = (raw_record.get("EVENT_ID") or "").strip()`. The wrapping dict has keys `"raw_payload"` and `"sport_name"` — no `EVENT_ID` — so `event_id = ""` and **every FL record returns None**, skipped by `if signal is None: continue` at `:933-934`. FL side never reaches `matcher.match(signal)`, never crashes, never processes. Kalshi's `extract_signal(row.raw_payload)` is correctly unwrapped and DOES produce a signal, so the runner's `:935` bug fires visibly. The daily runner's correct FL shape is at `scripts/run_resolver_pass.py:366-370`: `extract_signal(row.raw_payload, sport=row.sport_name)`. Same drift as `:935`.
+
+**`crashes = 0` on FL is NOT evidence the FL loop works.** `crashes == records_scanned` on Kalshi and `records_scanned == 0` on FL (with silent-skip when non-zero) are two shapes of the same underlying failure: the runner cannot execute the match path for either provider.
+
+**F6 halt criteria fired correctly on every Kalshi crash pass** — `"candidate_set_size=4 exceeds 5× trailing 7-day mean (0.3) — investigate upstream change before next pass"`. Nobody read it. The alarm we built as gate #6 has been screaming into `sp.resolver_runs.extra->>'halt_warnings'` for 48h with no subscriber.
+
+**Not corrupting anything.** `review_queue_writes = 0` across all crashing passes, no fixtures touched, exceptions swallowed cleanly per-record. Data-integrity clean. But: **the loop has never processed a live record on either provider.**
+
+### Day-47 addendum: Gate #1 was never closed — semantic correction
+
+The prior addendum draft called this a "reopen" of Gate #1. That framing is wrong. Day-44's first-live-pass validation observed `candidate_set_size = 0` and marked the gate live; that observable is indistinguishable between (a) the loop is correctly selective on an empty Tier-1/Tier-2 result and (b) the runner cannot process anything so its zero-record output looks identical to (a). We never separated (a) from (b) at go-live. Gate #1 has been "PROCESS STARTS + EXITS 0", not "runner works end-to-end". Phase-status header corrected: gate #1 moves from "live" back to **NOT MET — Day-44 validated only that the process starts and exits 0; runner shape prevents processing on either provider**. Move back to "LIVE" only after a live pass with `candidate_set_size > 0` produces `crashes = 0` on BOTH providers.
+
+### Day-47 addendum: F7 Part B methodology note
+
+F7 Part B settled "passive flips ~0 by design" on alias-velocity evidence. That settlement is consistent with (a) a working loop multiplying zero aliases AND (b) a loop that does nothing. Same observable in the current alias-velocity regime. The settlement wasn't wrong — the reasoning about alias velocity being the multiplier is sound — but it wasn't dispositive on the loop being wired correctly either. Any inference from "the loop hasn't flipped anything" needs the auxiliary premise "and the runner CAN flip things when candidates exist", which Day-44 never established. Worth remembering as a class of conclusion — behavioral inference from a null observable requires the mechanism to be independently verified.
+
+### Day-47 addendum: The option-(a) trace was itself wrong
+
+This morning's option-(a) verdict (§ earlier in Day-47) read `:935` as `result = matcher.match(signal)` "produces the fresh `MatchResult`" and pronounced the forced-decision path viable. It is a `TypeError`. A static trace confirmed a code path that cannot execute — the callee's signature was never checked against the call. Same class of finding as the six hypotheses we killed earlier today, and it's the strongest argument yet that F8's end-to-end value is HIGHER than #246's PR-state line claimed. F8 would have caught this on its first attempt: an actual `run_reresolution_pass --candidate-set fl:{ID} --apply` invocation would have crashed and written zero `resolution_log` rows, and the operator would have known the loop was broken at go-live rather than 48 hours in. Retraction of the "drops materially" language corrected inline in the Day-47 "PR state" section above.
+
+### Day-47 addendum: Methodology cluster (the alarm-nobody-read pattern)
+
+Three related failures compounded:
+
+1. **We built the alarm and never read it.** F6 halt criteria fired on every Kalshi crash pass, correctly. `halt_warnings` is a JSONB column on `sp.resolver_runs.extra` and the runner writes it. No dashboard, no email, no query in any sampling procedure. An alarm nobody watches is not an alarm.
+2. **Health checks sampled the latest pass, never summed the window.** `SELECT ... FROM sp.resolver_runs ORDER BY started_at DESC LIMIT 1` returns 22:00's clean row 96% of the time because 96% of daily runs have no candidates. `SUM(total_crashes) OVER (last 48h)` was the honest measure and nobody ran it.
+3. **Static traces pronounced code paths viable without exercising them.** F8's whole point is exercising the loop end-to-end on a real record. Skipping F8 in favor of a read-only viability trace lets the trace's own bugs propagate. This is the same shape as (1) — an inspection substitute for a run.
+
+Three variants of the same failure mode. Gate #3 (review-queue health) has the shape too — `depth < 20` is a spot check that survives if we ignore the incoming rate. Gate #4 (archival) doesn't have this failure mode because it's binary. Worth generalizing before Phase 3.
+
+### Day-47 addendum: Next action — runner PR
+
+The exception traceback in Railway will confirm the `TypeError`; the fix scope is clear from the static trace and does not wait on the log line. Scope:
+
+- **Runner correctness (`_run_matcher_over_candidates` at `scripts/run_reresolution_pass.py:832-967`)** — match the daily runner's proven shape at `scripts/run_resolver_pass.py:413` and `:366-370`. Replace `:935` with `tier_results = await matcher.match(session, signal)`, iterate the returned `list[MatchResult]`, and write one `sp.resolution_log` row per tier consulted. Replace the FL branch of the extract call (`:927-932`) with `extractor.extract_signal(row.raw_payload, sport=row.sport_name)` — unwrap the payload, pass sport as kwarg. Both defects are code-drift from Phase 2D.3 that the daily runner already got right.
+- **`KXMLBMENTION-*` exclusion** — add `KXMLBMENTION` to `_OUTRIGHT_SERIES_PREFIXES` in `kalshi_identity.py:101-166` (same treatment as `KXMLBTB` / `KXMLBHR` / `KXMLBHRR`). Regression test in `tests/test_kalshi_identity.py::TestOutrightSeriesPrefixes`. This is an add-on; the runner fix is dispositive on the crash, but the exclusion prevents the daily cron from burning cycles on structurally-unmatchable records forever.
+- **Matcher raise-safety audit — DEFERRED** to a separate PR after the loop is verified. Not needed for this incident; the raise is in the runner, not the matcher. Worth doing as an invariant hardening but only after the loop actually runs.
+
+**Verification bar for the runner PR**: a live pass with `candidate_set_size > 0` producing `crashes = 0` on **BOTH** providers. Until then Gate #1 stays open. `records_scanned > 0 + crashes = 0` on Kalshi (the only provider that currently reaches the matcher) is necessary but not sufficient — the FL wrapping bug means FL needs its own `candidate_set_size > 0` pass with a real signal reaching the matcher too.
+
 ### Pending — next session
 
-1. **Read the first live inversion row** — the instrumentation lands on `main`; the next FL cron pass (02:00 UTC) exercises the new keys on the day's unresolved records. Any new inversion arrives with `extracted_home_candidates` / `extracted_away_candidates` populated. Run the candidate-snapshot query in `docs/reresolution/homeaway-inversion.md` when the first row appears (`~1–7` days). Verdict determines the fix path.
-2. **`f8-procedure.md` §2c amendment PR** — `sim < 0.30` clause + sport_id predicate. Small, doc-only.
-3. **F8 Attempt 3 (deferred)** — if the inversion trace confirms the loop's forced-decision path works as spec, F8's dispositive value drops materially. Reassess necessity after the inversion verdict.
-4. **Remaining Phase 2 exit gates before Phase 3** — review-queue drain (passive under the loop), §6.5 archival (unbuilt). Unchanged from Day-46 pending.
-5. **Carried-forward**: 9 pre-existing `test_phase_2d5_*` / `test_phase_2f1_*` collection errors; not exercised this session.
+1. **Runner PR** — scope above. Match daily-runner shape at `run_resolver_pass.py:413` and `:366-370`; add `KXMLBMENTION` to `_OUTRIGHT_SERIES_PREFIXES` with regression test. Hold matcher raise-safety audit for a separate PR.
+2. **Live-pass verification** — post-merge, wait for the 02:02–02:22 UTC window with `candidate_set_size > 0` on both providers, confirm `crashes = 0`. This closes Gate #1 for real.
+3. **Pull the Railway logs** for `resolver-reresolution-kalshi` at 02:02–02:22 UTC 2026-07-09 to file the traceback alongside the runner PR — belt and suspenders on the static trace's `TypeError` prediction.
+4. **Sum-over-window health checks + `halt_warnings` subscriber** — replace "sample latest pass" with `SUM(total_crashes) OVER (last N)`; surface `halt_warnings` somewhere with a human eye on it. Scope-doc, then a small PR wiring it into the daily-diff report or a lightweight monitor cron.
+5. **Read the first live inversion row** — unchanged from earlier pending. Instrumentation from #245 landed on `main`; the next FL cron pass (02:00 UTC) exercises the new keys on the day's unresolved records. Verdict within `~1–7` days once the runner fix lets the loop actually process.
+6. **`f8-procedure.md` §2c amendment PR** — `sim < 0.30` clause + `AND fle.sport_id IS NOT NULL` predicate. Small, doc-only. Unchanged.
+7. **F8 Attempt 3 — value RAISED, not reduced.** F8 is the class of dispositive test that catches runner-shape bugs like this one. Re-scope after the runner PR lands. F8 as an end-to-end exercise of `_hydrate_candidate_override` → `_run_matcher_over_candidates` on a single controlled record is now understood to be the exact tool needed to verify Gate #1 hasn't drifted again.
 
 ---
 
