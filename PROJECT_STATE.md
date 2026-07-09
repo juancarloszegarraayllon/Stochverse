@@ -233,13 +233,62 @@ Phase 3's `/api/v4/sports/{id}/feed` will serve fixtures with `home_team_id` / `
 - **`f8-procedure.md` §2c amendment (deferred, separate PR)**: switch inequality to `similarity(provider_string, canonical) < 0.30`. Carry `AND fle.sport_id IS NOT NULL` into the §1 discovery CTE per the `:909` caveat, so a NULL-sport_id target doesn't silently no-op the forced pass. Scoped as a follow-up doc-only PR, not bundled into either PR above.
 - **Phase-status header active-workstream line unchanged**: loop still LIVE. F8 not surfaced as the active workstream — the inversion investigation is.
 
+### Day-47 addendum: Kalshi re-resolution loop crashing on 100% of selected candidates (gate #1 reopens)
+
+Surfaced after #246 merged, while looking at `sp.resolver_runs` for the first post-instrumentation cron pass. The clean rows we've been sampling at ~22:00 daily were structurally hiding a 48h steady-state failure.
+
+**The numbers** — `sp.resolver_runs`, `run_mode = 'live'`, trailing 48h:
+
+- Kalshi: `total_crashes = 217`.
+- FL: `total_crashes = 0`.
+- **Shape** — every crashing pass has `crashes == records_scanned` (4/4, 5/5, 4/4, 4/4, 4/4). `review_queue_writes = 0` on all crashing passes. Nothing persists; the pass exits 0 and looks healthy from a distance.
+
+**Timing** — all crashes fall in 02:02–02:22 UTC. That's the ~20-minute window after the daily crons (FL 02:00, Kalshi 02:15) mutate fixture state, which is the only window Tier-2's fixture-state predicate finds candidates. Rest of the day the Kalshi loop selects `candidate_set_size = 0`, `records_scanned = 0`, `crashes = 0`, and looks identical to a clean run. Every health check we ran passed because we always sampled ~22:00 passes.
+
+**The candidates** — all `KXMLBMENTION-*` tickers (Kalshi "mention" prop markets, not games). Their prior `no_match` decisions carry `fail_reason` of `alias_no_team_resemblance` or `fuzzy_no_team_resemblance`, both on Tier-1's loop-addressable allowlist. For a real game an alias-add could flip them; for a mention-prop nothing ever will — no game, no teams. The same ~4-5 records are re-selected and re-crashed every night, permanently.
+
+**F6 halt criteria fired correctly on every pass**: `"candidate_set_size=4 exceeds 5× trailing 7-day mean (0.3) — investigate upstream change before next pass"`. **Nobody read it.** The alarm we built as gate #6 has been screaming into `sp.resolver_runs.extra->>'halt_warnings'` for 48h and nobody was subscribed to it.
+
+**Not corrupting anything.** `review_queue_writes = 0`, no fixtures touched, exception counted per-record and swallowed cleanly. This is a false-negative loop, not a data-integrity incident. But it does mean the Kalshi loop **has never successfully processed a record** on live rows.
+
+### Day-47 addendum: Gate #1 (three-loop runner) REOPENS
+
+The Day-44 validation was insufficient. First-live-pass rows had `candidate_set_size = 0` — which proved the runner runs, not that the matcher path works. The Kalshi loop's first non-zero-candidate pass is also its first crash pass, and its 217th crash pass is 48 hours later. Gate #1 was ticked before it should have been.
+
+Phase-status header updated: gate #1 moves back from "live" to "PARTIALLY LIVE — FL live, Kalshi loop crashing on 100% of selected candidates". The FL side is genuinely working (`total_crashes = 0` across the same 48h). This is a Kalshi-specific fault, likely a per-record signal shape the matcher can't parse.
+
+### Day-47 addendum: Methodology note (the alarm-nobody-read pattern)
+
+Two related failures compounded:
+
+1. **We built the alarm and never read it.** F6 halt criteria fired on every crash pass, correctly. `halt_warnings` is a JSONB column on `sp.resolver_runs.extra` and the runner writes it. No dashboard, no email, no query in any of our sampling procedures. An alarm nobody watches is not an alarm.
+2. **Health checks sampled the latest pass, never summed the window.** `SELECT ... FROM sp.resolver_runs ORDER BY started_at DESC LIMIT 1` returns 22:00's clean row 96% of the time simply because 96% of daily runs have no candidates. `SUM(total_crashes) OVER (last 48h)` was the honest measure and nobody ran it.
+
+These are the same failure mode. Gate #3 (review-queue health) has the same shape — `depth < 20` is a spot check that survives if we ignore the incoming rate. Gate #4 (archival) doesn't have this failure mode because it's binary. Worth generalizing before Phase 3.
+
+### Day-47 addendum: Next action — Railway logs, then decide fix path
+
+The exception traceback is not in `sp.resolver_runs`; it's in Railway stdout for `resolver-reresolution-kalshi` around 02:02–02:22 UTC 2026-07-09. Pull that first.
+
+**Suspect**: the Day-19 `MatchResult` validation family — Kalshi-only, per-record crash-and-swallow, silently retried every pass. Tennis's `candidate_fixtures[0] is None` sat in the same shape for weeks before we noticed. If the traceback is another Pydantic v2 constructor rejecting a nullable field the matcher expected to be non-null, we already know the fix pattern.
+
+**Fix-path options** (call decisively once the traceback lands):
+
+- **Tier-1 exclusion for `KXMLBMENTION-*`** — mention-props should never enter the loop; they're structurally unmatchable. Cleanest, most surgical, and generalizes to future prop-only tickers.
+- **Matcher guard** — the matcher should return `no_match` on a signal it can't parse, not raise. Independent of Tier-1's filter this is the correct invariant; a signal is a signal, and the matcher's contract is "return `MatchResult`, never raise." If both are done, the Tier-1 exclusion is the fast path and the matcher guard is the safety net.
+- **Both, in that order.** The exclusion stops the retry-loop cost tonight; the guard makes the runner robust to whatever the next surprise-shape looks like.
+
+Not tonight. Read-only investigation kicked off separately (three sub-questions on how `KXMLBMENTION-*` survives Tier-1's `asymmetric_excluded IS NULL` filter, where the matcher raises, and whether the fix is exclusion / guard / both). No PR from that yet.
+
 ### Pending — next session
 
-1. **Read the first live inversion row** — the instrumentation lands on `main`; the next FL cron pass (02:00 UTC) exercises the new keys on the day's unresolved records. Any new inversion arrives with `extracted_home_candidates` / `extracted_away_candidates` populated. Run the candidate-snapshot query in `docs/reresolution/homeaway-inversion.md` when the first row appears (`~1–7` days). Verdict determines the fix path.
-2. **`f8-procedure.md` §2c amendment PR** — `sim < 0.30` clause + sport_id predicate. Small, doc-only.
-3. **F8 Attempt 3 (deferred)** — if the inversion trace confirms the loop's forced-decision path works as spec, F8's dispositive value drops materially. Reassess necessity after the inversion verdict.
-4. **Remaining Phase 2 exit gates before Phase 3** — review-queue drain (passive under the loop), §6.5 archival (unbuilt). Unchanged from Day-46 pending.
-5. **Carried-forward**: 9 pre-existing `test_phase_2d5_*` / `test_phase_2f1_*` collection errors; not exercised this session.
+1. **Pull the Railway logs** for `resolver-reresolution-kalshi` at 02:02–02:22 UTC 2026-07-09 and land the traceback. First real diagnostic step.
+2. **Kalshi-loop fix PR** — scope decided after the traceback: Tier-1 exclusion for `KXMLBMENTION-*` (surgical), matcher guard against unparseable signals (correctness), or both.
+3. **Sum-over-window health checks** — replace the "sample latest pass" pattern with `SUM(total_crashes) OVER (last N)` in whatever we use for daily loop verification. Also surface `halt_warnings` — nobody has read a single one.
+4. **Gate #1 status in phase-status header** — moved to "PARTIALLY LIVE" this addendum. Move back to "LIVE" only after the Kalshi loop successfully processes a record on a live pass without crashing.
+5. **Read the first live inversion row** — unchanged from the earlier pending item. Instrumentation from #245 landed on `main`; the next FL cron pass (02:00 UTC) exercises the new keys on the day's unresolved records. Verdict on the FL home/away inversion class within `~1–7` days.
+6. **`f8-procedure.md` §2c amendment PR** — `sim < 0.30` clause + `AND fle.sport_id IS NOT NULL` predicate. Small, doc-only. Unchanged from earlier pending.
+7. **F8 Attempt 3 (still deferred)** — value drops further given gate #1 needs re-validation on the Kalshi side; F8 doesn't move that.
 
 ---
 
