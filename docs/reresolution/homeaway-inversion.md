@@ -320,14 +320,45 @@ the fix is determined by which side of the FALSE/TRUE it lands on.
 The stamp adds one JSONB list per side per strict-tier decision. FL
 typically emits 2–3 candidates per side (participant_id when present,
 name, shortname); Kalshi typically 1–2. Six candidate dicts per
-decision at ~50 bytes each ≈ 300 bytes added per row. `sp.resolution_log`
-is not GIN-indexed on `reason_detail` today (indexes at
-`sp_models.py:402-406` are on `run_id`, `(provider, provider_record_id)`,
-`fixture_id`, `decided_at`), so the growth cost is table-only.
-`resolution_log` retention is architecturally forever per §7.6, so the
-growth compounds — negligible in absolute terms (300 bytes × few million
-rows/year) but worth revisiting if a future PR proposes GIN-indexing
-`reason_detail`.
+decision at ~50 bytes each ≈ 300 bytes added per row.
+
+`sp.resolution_log.reason_detail` **is GIN-indexed** —
+`ix_resolution_log_reason_detail_gin` using `jsonb_path_ops`, created
+by migration `a2c4f6d8e1b3` (Day-42, Phase 2E) as the Tier-2
+containment index for the re-resolution loop. The index is invisible
+in the source: all three Phase 2E migrations had their upgrade() /
+downgrade() bodies no-op'd to `pass` on Day-44 for fresh-DB replay
+safety, so the index exists only as a psql runbook in the migration
+docstring and in production `pg_indexes`. `jsonb_path_ops` indexes
+every path in the document, so the six candidate dicts inflate the
+GIN index, not just the table heap. Still fine at ~300 bytes and
+current volumes; `resolution_log` retention is architecturally forever
+per §7.6, so both the heap and the GIN entries compound over time.
+Negligible today (300 bytes × few million rows/year on both sides);
+worth revisiting if `reason_detail` sees materially wider fields
+added or if the loop starts to feel the GIN's write amplification.
+
+## Tier-2 walker safety
+
+The re-resolution loop's Tier-2 containment filter walks
+`reason_detail` JSONB via
+`_extract_team_ids_from_reason_detail` in
+`scripts/run_reresolution_pass.py:291-326`. The walker recurses
+generically over dicts and lists, but its acceptance rule is
+key-shape-based: a value is admitted to the team-id set **only if
+its parent key's lowercase form contains the substring `"team_id"`**
+(`:312`). Values under non-matching keys are recursed into
+structurally; scalar leaves under non-matching keys are ignored.
+
+Neither new key (`extracted_home_candidates`,
+`extracted_away_candidates`) contains `"team_id"` in its name; the
+inner dict keys (`raw`, `normalized`, `kind`, `weight`) don't
+either. The walker will iterate the arrays and the inner dicts, land
+on scalar leaves, and add nothing to the team-id set. In particular,
+a `raw = "<fl_team_id>"` value on an `fl_team_id`-kind candidate is
+safe: the walker matches KEY names, not VALUES, and `raw` doesn't
+match. If a future key is added whose name contains `"team_id"`,
+this analysis needs re-doing — worth flagging in that PR's review.
 
 ## Cross-references
 
