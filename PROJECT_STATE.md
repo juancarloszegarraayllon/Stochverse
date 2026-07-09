@@ -118,6 +118,131 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-07-09
+
+### Day-47: F8 Attempt 2 aborted at §2; FL home/away inversion discovered and sized
+
+Loop remains LIVE and healthy — FL 144 / Kalshi 144 runs, latest ~22:05 / ~22:02 UTC, `total_crashes = 0`. `main` synced to `40caff4`. F8 Attempt 2 did not touch production; it aborted cleanly at §2 (record selection) on two successive candidates after the read-only §2c check surfaced disqualifiers. In the process, the similarity-filtered discovery pattern that replaces the raw-inequality §2c uncovered a distinct FL defect class — 95 fixtures with `home_team_id` / `away_team_id` inverted relative to FL's `HOME_NAME` / `AWAY_NAME`, running at a steady ~0.2% of the FL `created_new_fixture` path since week of 2026-05-04. Six hypotheses eliminated on read-only trace; the surviving hypothesis (FL emits crossed names on some rare event shape) is retroactively unfalsifiable. Instrumentation PR opened to make the next occurrence dispositive; no backfill of the 95 attempted. Displaces F8 as this session's action item — the inversion blocks Phase 3 by sequencing (`/api/v4/sports/{id}/feed` will serve fixtures with home/away).
+
+### Day-47: Loop health (unchanged, clean)
+
+- **FL 144 / Kalshi 144 live runs** in the trailing 12h. Latest fires ~22:05 / ~22:02 UTC.
+- `total_crashes = 0` both providers.
+- `main` at `40caff4` (post-#243 / #244 merge).
+
+All five crons continue clean.
+
+### Day-47: F8 Attempt 2 — aborted at §2, zero production writes
+
+Two targets selected in turn, both rejected on read-only checks before any break:
+
+- **Monterrey** (`KQdgXlWh`, canonical `"Sultanes de Monterrey"`): passes raw §2c inequality but `similarity('monterrey', 'sultanes de monterrey') = 0.4545`, above the ~0.30 fuzzy anchor. The fuzzy tier would have rescued the record into `review_queue` — Attempt 1's failure through a different door.
+- **Finding — §2c is incomplete.** The current criterion (FL provider string ≠ canonical_name after normalization) accepts diacritic and punctuation differences (`Bolivar` / `Bolívar`, `St.Louis` / `St. Louis`) that the normalizer erases to the same key. It also accepts semantic near-misses that the fuzzy tier will rescue. §2c must require `similarity(provider_string, canonical) < 0.30` — a semantic token-set difference, not mere inequality.
+
+Applied the corrected criterion (`sim < 0.30`) to the §1 discovery CTE. Surfaced clean candidates immediately:
+
+- `YVRjxyEk` — FL `"Queretaro"` → canonical `"Conspiradores de Querétaro"`, sim `0.23`.
+- `M9rZw8VQ` — FL `"CSA"` → canonical `"Steaua București"`, sim `0`.
+
+### Day-47: Option (a) confirmed viable — F8's forced decision is now cheap
+
+Read-only trace of `scripts/run_reresolution_pass.py`:
+
+- `--candidate-set fl:{ID} --apply` branches at `:579` on `candidate_set_override is not None` and calls `_hydrate_candidate_override` (`:766-829`) INSTEAD of the Tier-1/Tier-2 `_select_candidates` path. Hydrate only requires `provider match + fixture_id IS NULL`.
+- `_run_matcher_over_candidates` (`:832-967`) bootstraps the same `TieredMatcher`, calls `matcher.match(signal)` at `:935`, executes `pg_insert_resolution_log(...)` at `:939-950`, commits at `:966`. Real persisted `sp.resolution_log` row.
+- Cost: ~5 s, `candidate_set_size = 1`, zero unintended `review_queue` writes. Versus Attempt 1's `--limit 5000` cost — 53 min, 2,202 unintended queue rows.
+- **Caveat**: `_run_matcher_over_candidates:909` filters `AND fle.sport_id IS NOT NULL`. A record whose `sport_id` is NULL is silently dropped without a log row. Carry that predicate into the §1 discovery CTE (or into the target-selection filter) or the "cheap forced decision" is a no-op on the wrong target.
+
+### Day-47: The new finding — FL home/away inversion (displaces F8)
+
+Surfaced from the corrected §2c similarity discovery: fixtures whose `home_team_id` holds the team FL calls away, and vice versa. Exact-match test both directions; no fuzzy judgment involved.
+
+**Sizing** (all-time, no `last_seen_at` filter):
+
+- **95 inverted fixtures total.** First appearance week of 2026-05-04 — the week of the `initial_sp_schema` migration (`8f404e0dc89a`, 2026-05-07).
+- **Rate is stable at ~0.2%** of the FL `created_new_fixture` denominator. Weekly pct: `0.19 / 0.34 / 0.49 / 0.06 / 0.11 / 0.04 / 0.09 / 0.14 / 0.39 / 0.16`. No trend. Poisson noise around a constant rate.
+- **Not a bootstrap artifact; not self-correcting.** The 7-day window in the initial probe was our sampling frame, not the bug's lifespan.
+- **Raw-count decay (50 → 1/week) is denominator drop.** FL creations fell from 15,422 → 632/week as the fixture table filled behind live coverage. Rate held.
+- **Propagation is real, downstream of the original defect.** 20 of the first 50 lack `created_new_fixture = true` — they linked to an already-inverted fixture via strict-tier `find_fixture`.
+- **Signature** on 100% of the 95: `first_decision_provider = 'fl'`, `created_new_fixture = true`, `kalshi_markets_on_fixture = 0`, `fl_transitional_path = 'created_null_comp_fixture'`, `fl_transitional_sport_only = true`, all created 02:03–02:10 UTC (daily FL cron window). Spans Soccer and Basketball.
+
+### Day-47: Six hypotheses eliminated on read-only trace
+
+1. **Kalshi-origin inheritance** — `first_decision_provider = 'fl'` on all, zero Kalshi markets on the fixture. Not Kalshi's doing.
+2. **Swap-probe propagation** — no `orientation_flipped = true` on any of the 95. The probe (`resolver/matcher.py:207-223`) is a read-only `find_fixture` lookup and does not carry swapped orientation into `ensure_fixture`.
+3. **Writer / `ensure_fixture` transposition** — `reason_detail.home_team_id` and `sp.fixtures.home_team_id` come from the same local (`matcher.py :154-155` → `:179-180` and `:228-234`); they cannot disagree, and both contradict FL.
+4. **Extraction branching** — `FLResolverModule.extract_signal` (`fl.py:88-97`) is straight-line kwargs. No payload-shape, sport, or competition branch.
+5. **Ingestion transform** — `ingestion/fl.py:243` stores `raw = event_raw` verbatim; `ingestion/base.py:191` copies `raw_payload` verbatim.
+6. **Participant-id precedence** — `_team_candidates` weights `fl_team_id 1.0 > name 0.9 > shortname 0.7`, and `AliasResolver.resolve()` (`resolver/aliases.py:86-120`) short-circuits on first unambiguous hit — so a crossed `HOME_PARTICIPANT_TEAM_ID` WOULD shadow a correct `HOME_NAME`. But `HOME_PARTICIPANT_TEAM_ID` / `AWAY_PARTICIPANT_TEAM_ID` are NULL on all 11 sampled — the weight-1.0 candidate never exists, resolve() falls through to name at 0.9. Shortnames also corroborate names (CLI/LIS, RIV/RAC, BAT/VAL). Mechanism cannot fire.
+
+### Day-47: Surviving hypothesis — retroactively unfalsifiable
+
+FL emits crossed `HOME_NAME` / `AWAY_NAME` on some rare event shape, at a steady ~0.2%. Nothing on-disk lets us reconstruct the payload as it was at decision time for the 95:
+
+- `sp.fl_events.payload_hash` is overwritten unconditionally on every UPSERT (`ingestion/base.py:212`) — current-value only, no history.
+- No payload-history audit table exists for `sp.fl_events`; migrations don't create one; `sp.resolution_log` audits decisions, not payloads.
+- Strict-tier `reason_detail` (the tier the 95 went through) stamps ids only — no names, no normalized inputs. The alias tier (`alias_tier/matcher.py:208-223`) and fuzzy tier (`fuzzy_tier/matcher.py:434-437`) DO capture `*_provider_normalized` and `*_canonical`, but the 95 have strict-tier signatures (`home_team_id`/`away_team_id` set from `matcher.py:179-180`), not alias/fuzzy signatures.
+- `payload_changed_after_decision` was TRUE on 11/11 sampled, but the non-inverted control on the same path is 2381 TRUE / 684 FALSE (78% baseline). `P(11/11 | null) ≈ 0.06` — not dispositive.
+
+Retroactively unfalsifiable on existing data. Instrument forward.
+
+### Day-47: Instrumentation PR — freeze extractor's candidates into strict-tier reason_detail
+
+`resolver/matcher.py` after `:180`, additive JSONB, no migration:
+
+```python
+reason_detail["extracted_home_candidates"] = [
+    {"raw": c.raw, "normalized": c.normalized, "kind": c.kind, "weight": c.weight}
+    for c in signal.home_team_candidates
+]
+reason_detail["extracted_away_candidates"] = [
+    {"raw": c.raw, "normalized": c.normalized, "kind": c.kind, "weight": c.weight}
+    for c in signal.away_team_candidates
+]
+```
+
+Effect: every future strict-tier decision — including new FL `created_new_fixture` rows — carries a frozen snapshot of the payload as the extractor saw it, independent of any later `raw_payload` overwrite. Detector queries live in `docs/reresolution/homeaway-inversion.md` (same PR): weekly-rate monitor + candidate-snapshot comparison. The comparison is dispositive on the next live inversion:
+
+- If `kind='name'` at decision time resolves to the AWAY canonical, FL sent us a crossed payload → source-side guard needed at the extractor.
+- If it resolves correctly, the inversion originated downstream of extraction → the trace has a gap.
+
+Expected verdict within days of merge: `~1–7` qualifying FL creations per week, so a live occurrence should surface within one or two weekly runs. **Do NOT backfill the 95** — cause unknown, any rewrite is a guess at which side is correct, and rewriting destroys the evidence the detector needs.
+
+`payload_hash_at_decision` and a history table were considered and skipped; noted as options if a second occurrence class appears.
+
+### Day-47: Filed, not chased (different failure mode — mis-resolution, not inversion)
+
+- **`ANGpZ5Z7`** — FL `"Abo"` (Åbo, Finnish) → canonical `"All Boys"` (Argentine), similarity `0.083`. Opponent `"Ilves 2"` is Finnish. Probable mis-resolution to the Argentine team; the alias / fuzzy tier landed the wrong Latinized short form.
+- **`M9rZw8VQ`** — FL `"CSA"` → canonical `"Steaua București"`, similarity `0`. Possibly legitimate (`CSA Steaua București` is the same club historically); noted as ambiguous.
+
+Neither is home/away inversion. Filed separately so the inversion class stays clean.
+
+### Day-47: Methodology note
+
+§2c's read-only checks rejected two F8 targets before any write. Attempt 1's 53-minute / 2,202-queue-row mistake was not repeated. The entire day's investigation — six hypotheses eliminated, bug sized from a 7-day sample to full history, instrumentation PR authored — cost **zero production writes**. Discovery under a similarity-filter (`sim < 0.30`) was the entry point; the corrected §2c both prevents the F8 misfire and exposes the inversion class that displaced F8 as the action item.
+
+### Day-47: What blocks Phase 3
+
+Phase 3's `/api/v4/sports/{id}/feed` will serve fixtures with `home_team_id` / `away_team_id`. Nothing consumes those columns yet, so the inversion is not a live regression — but the endpoint would be. Not an emergency; must be understood before the endpoint exists. Sequencing constraint on Phase 3, not a blocker on the loop.
+
+### Day-47: PR state
+
+- **Instrumentation PR**: `claude/explore-repo-pFQ9r` — `resolver/matcher.py` + `docs/reresolution/homeaway-inversion.md`. Additive JSONB; no migration; universal to all providers (not FL-specific).
+- **Day-47 journal PR**: this entry, single-file PR (`claude/project-state-2026-07-09-day47`).
+- **F8 Attempt 2 status**: aborted at §2. To be re-attempted after the inversion class is understood — or deferred entirely if the instrumentation-driven trace shows the loop's forced-decision mechanism is already validated implicitly by the inversion investigation's read-only trace of the same `_hydrate_candidate_override` / `_run_matcher_over_candidates` path.
+- **`f8-procedure.md` §2c amendment (deferred, separate PR)**: switch inequality to `similarity(provider_string, canonical) < 0.30`. Carry `AND fle.sport_id IS NOT NULL` into the §1 discovery CTE per the `:909` caveat, so a NULL-sport_id target doesn't silently no-op the forced pass. Scoped as a follow-up doc-only PR, not bundled into either PR above.
+- **Phase-status header active-workstream line unchanged**: loop still LIVE. F8 not surfaced as the active workstream — the inversion investigation is.
+
+### Pending — next session
+
+1. **Read the first live inversion row** — the instrumentation lands on `main`; the next FL cron pass (02:00 UTC) exercises the new keys on the day's unresolved records. Any new inversion arrives with `extracted_home_candidates` / `extracted_away_candidates` populated. Run the candidate-snapshot query in `docs/reresolution/homeaway-inversion.md` when the first row appears (`~1–7` days). Verdict determines the fix path.
+2. **`f8-procedure.md` §2c amendment PR** — `sim < 0.30` clause + sport_id predicate. Small, doc-only.
+3. **F8 Attempt 3 (deferred)** — if the inversion trace confirms the loop's forced-decision path works as spec, F8's dispositive value drops materially. Reassess necessity after the inversion verdict.
+4. **Remaining Phase 2 exit gates before Phase 3** — review-queue drain (passive under the loop), §6.5 archival (unbuilt). Unchanged from Day-46 pending.
+5. **Carried-forward**: 9 pre-existing `test_phase_2d5_*` / `test_phase_2f1_*` collection errors; not exercised this session.
+
+---
+
 ## Session — 2026-07-08
 
 ### Day-46: Loop healthy overnight; F8 Attempt 1 surfaced the canonical_name-shadowing failure mode; record restored clean
