@@ -148,6 +148,16 @@ _OUTRIGHT_SERIES_PREFIXES = (
     "KXMLBTB",            # MLB total bases per player per game
     "KXMLBHR",            # MLB home runs per player per game
     "KXMLBHRR",           # MLB home runs+runs per player per game
+    # Player-mention prop markets ("will player X be mentioned in
+    # the broadcast?") — structurally unmatchable to any per-fixture
+    # game. Added Day-47 after the re-resolution loop's Kalshi crash
+    # trace surfaced KXMLBMENTION-* records at ~28/7d being re-
+    # selected and crashed every night. Excluding them at extraction
+    # ALSO stops the daily cron from burning cycles matching them.
+    # See PROJECT_STATE.md Day-47 addendum + baseline shift
+    # annotation (~28 records/7d moves from denominator to
+    # prop_market_filtered_out).
+    "KXMLBMENTION",       # MLB player-mention props (Day-47)
     "KXNBASTL",           # NBA steals per player per game
     # Misc / cross-sport novelty
     "KXEUROVISIONISRAELBAN", "KXPIZZASCORE",

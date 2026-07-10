@@ -368,6 +368,22 @@ class TestOutrightSeriesPrefixes:
             "KXJOINCLUB-26OCT02RODRYGO", "KXJOINCLUB", "Soccer",
         )
         assert i.kind != "per_fixture"
+
+    def test_mlb_mention_prop_is_outright(self):
+        """KXMLBMENTION-<player>-<date> — Kalshi player-mention prop
+        markets ("will player X be mentioned in the broadcast?").
+        Structurally unmatchable to any per-fixture game; must be
+        classified as outright at extraction so neither the daily
+        cron nor the re-resolution loop burns cycles matching them.
+
+        Regression guard for the Day-47 re-resolution loop crash
+        trace. See PROJECT_STATE.md Day-47 addendum.
+        """
+        i = parse_ticker(
+            "KXMLBMENTION-26JUL10JUDGE", "KXMLBMENTION", "Baseball",
+        )
+        assert i.kind == "outright"
+        assert i.kind != "per_fixture"
         assert i.kind != "per_leg"
 
     # ── Phase 2C.1 — player-prop prefixes ──────────────────────

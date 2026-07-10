@@ -873,31 +873,30 @@ class TestStaticInvariants:
             )
 
     def test_railway_toml_phase_2e_crons_are_uncommented_live(self):
-        """Day-45 enable-crons inversion: the three Phase 2E cron
-        service blocks (`resolver-reresolution-fl`,
-        `resolver-reresolution-kalshi`, `daily-diff`) MUST be present
-        as LIVE [[services]] entries in railway.toml.
+        """Day-47 PAUSE inversion (temporary — commit 2 of the
+        runner-fix PR restores this).
 
-        History: this test previously asserted the OPPOSITE — that
-        the blocks were commented out — as a belt-and-suspenders
-        guard against accidentally enabling the loop before its
-        perf was validated. With perf validated end-to-end Day-44
-        (EXPLAIN 2.2s + both dry-runs 2.88s under the 5s F6 ceiling),
-        F7 Part B settled (passive week-1 near-zero expected by
-        design; targeted before/after as dispositive validation),
-        and the pre-merge cleanup landed Day-44 (a8cf26a), the
-        crons are deliberately enabled Day-45 for live writes.
+        History:
+          - Day-45: enable-crons form (assert uncommented + LIVE).
+          - Day-47: paused pending runner PR dry-run verification.
+            Both loops confirmed no-op since Day-44 (Kalshi crashes
+            at run_reresolution_pass.py:935; FL silently skips via
+            the wrapping-dict bug at :927-932). Crons commented out
+            in this commit so a fixed runner can't unintentionally
+            go live before an operator reads a dry-run against the
+            3-day watermark. See PROJECT_STATE.md Day-47 addendum
+            for the full sequencing.
 
-        The inverted guard catches accidental RE-disabling — if a
-        future maintainer comments any of these blocks back out
-        without coordinated PROJECT_STATE notes, this test fails.
+        This form asserts:
+          - `resolver-reresolution-fl` — MUST be COMMENTED OUT.
+          - `resolver-reresolution-kalshi` — MUST be COMMENTED OUT.
+          - `daily-diff` — MUST STAY UNCOMMENTED (measurement, not
+            loop; orthogonal to the runner PR).
 
-        Note: Railway schedules NOTHING from this file alone. The
-        operator creates the three services manually in the Railway
-        dashboard (FL first per the staged rollout), at which point
-        Railway picks up cronSchedule + startCommand from this file
-        on each deploy. See DEPLOYMENT.md → "One-time Railway setup
-        (services don't auto-create)" for the provisioning runbook.
+        Commit 2 of the runner PR re-uncomments the two loops AND
+        flips this test back to the Day-45 form. Do NOT skip the
+        flip — the test is the guard that prevents an accidental
+        re-disable OR an accidental un-pause.
         """
         repo_root = os.path.dirname(
             os.path.dirname(os.path.abspath(__file__))
@@ -905,30 +904,38 @@ class TestStaticInvariants:
         toml_path = os.path.join(repo_root, "railway.toml")
         with open(toml_path, encoding="utf-8") as f:
             text_blob = f.read()
+
+        # The two reresolution loops must be paused (commented).
         for svc in (
             "resolver-reresolution-fl",
             "resolver-reresolution-kalshi",
-            "daily-diff",
         ):
-            # The [[services]] header is paired with a
-            # name = "<service>" on the next line. Assert both
-            # appear as a live (uncommented) block.
-            assert f'[[services]]\nname = "{svc}"' in text_blob, (
-                f"Phase 2E service {svc!r} must be UNCOMMENTED in "
-                "railway.toml — the crons were enabled Day-45 "
-                "after the loop was perf-validated end-to-end. "
-                "If you're deliberately disabling, update the "
-                "PROJECT_STATE journal AND invert this test back "
-                "to its previous commented-state assertion."
+            assert f'# name = "{svc}"' in text_blob, (
+                f"Phase 2E service {svc!r} must be COMMENTED in "
+                "railway.toml pending the runner-fix PR dry-run "
+                "verification (Day-47). If you're un-pausing, "
+                "update PROJECT_STATE AND flip this test back to "
+                "the Day-45 uncommented-live assertion."
             )
-            # And the previously-commented form must NOT be present.
-            # Catches the regression shape exactly — somebody
-            # putting the `# name = "..."` line back.
-            assert f'# name = "{svc}"' not in text_blob, (
-                f"Phase 2E service {svc!r} has a commented "
-                "`# name = ...` line in railway.toml — this looks "
-                "like a partial re-disable. Either it's fully live "
-                "or fully commented; mixing the two is ambiguous "
-                "and Railway will pick up the live block while the "
-                "commented one confuses readers."
+            assert f'[[services]]\nname = "{svc}"' not in text_blob, (
+                f"Phase 2E service {svc!r} still has a LIVE "
+                "[[services]] block in railway.toml — pause is "
+                "incomplete. Either fully commented or fully live; "
+                "the paused form comments EVERY line of the block "
+                "including the [[services]] header."
             )
+
+        # daily-diff is unaffected by the Day-47 pause — measurement,
+        # not the loop. Same live-form assertion as Day-45.
+        assert '[[services]]\nname = "daily-diff"' in text_blob, (
+            "Phase 2E service 'daily-diff' must remain UNCOMMENTED "
+            "in railway.toml — the Day-47 pause covers only the "
+            "two reresolution loops. daily-diff closes the Day-21 "
+            "measurement debt and is orthogonal."
+        )
+        assert '# name = "daily-diff"' not in text_blob, (
+            "Phase 2E service 'daily-diff' has a commented "
+            "`# name = ...` line in railway.toml — this looks "
+            "like an accidental re-pause. daily-diff stays live "
+            "under the Day-47 pause."
+        )

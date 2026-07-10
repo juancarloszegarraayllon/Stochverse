@@ -109,28 +109,67 @@ restartPolicyType = "NEVER"
 # F6; exit code stays 0 on warnings (same as the daily cron pattern)
 # so transient warnings don't surface as deploy failures.
 
-[[services]]
-name = "resolver-reresolution-fl"
+# ──────────────────────────────────────────────────────────────────
+# Day-47 PAUSE — reresolution crons commented out pending runner PR
+# dry-run verification
+# ──────────────────────────────────────────────────────────────────
+#
+# Both `resolver-reresolution-*` blocks are commented out below
+# pending the runner fix in this PR going through pre-un-pause
+# verification. Rationale:
+#
+#   - Day-47 static trace + Railway traceback confirmed both loops
+#     have been no-ops since Day-44 go-live. Kalshi crashes at :935
+#     with `TypeError: TieredMatcher.match() missing 1 required
+#     positional argument: 'signal'`. FL silently skips every record
+#     because the extract call wraps the payload — `signal is None`
+#     via the missing EVENT_ID key, `continue` swallows.
+#
+#   - Fixing the runner means both providers will process live
+#     records for the first time under `--apply`. Attempt 1's
+#     `--limit 5000` daily-runner pass wrote 2,202 unintended
+#     sp.review_queue rows in 53 minutes; this PR's runner writes
+#     sp.resolution_log only (no provider UPDATE, no review_queue
+#     INSERTs), but the ORDER OF MAGNITUDE of accretion needs to be
+#     measured on a dry-run against the 3-day watermark before
+#     `--apply` fires against production for real.
+#
+#   - Sequence: (a) commit 1 pauses the two loops here AND flips the
+#     CI guard in tests/test_reresolution_pass.py to allow the
+#     commented-state. (b) Operator runs the dry-run vehicles listed
+#     in the PR body and reads the numbers. (c) Commit 2 un-pauses
+#     both blocks below AND flips the CI guard back.
+#
+#   - `daily-diff` is NOT paused. It's measurement, not the loop —
+#     its writes to sp.daily_diff_reports are read-only against the
+#     loop and closing the Day-21 measurement debt is orthogonal.
+#
+# See PROJECT_STATE.md Day-47 addendum for the full sequencing +
+# verification bar (candidate_set_size > 0 producing crashes = 0 on
+# BOTH providers before Gate #1 closes).
 
-[services.deploy]
-# Every 5 min. F3-DECIDED cadence. ~16,588 addressable population
-# ceiling per Day-41 sizing; targeted Tier-1+2 candidate selection
-# holds per-pass cost proportional to actual change (NOT the gross
-# no_match population).
-cronSchedule = "*/5 * * * *"
-startCommand = "python scripts/run_reresolution_pass.py --provider fl --apply"
-restartPolicyType = "NEVER"
+# [[services]]
+# name = "resolver-reresolution-fl"
+#
+# [services.deploy]
+# # Every 5 min. F3-DECIDED cadence. ~16,588 addressable population
+# # ceiling per Day-41 sizing; targeted Tier-1+2 candidate selection
+# # holds per-pass cost proportional to actual change (NOT the gross
+# # no_match population).
+# cronSchedule = "*/5 * * * *"
+# startCommand = "python scripts/run_reresolution_pass.py --provider fl --apply"
+# restartPolicyType = "NEVER"
 
-[[services]]
-name = "resolver-reresolution-kalshi"
-
-[services.deploy]
-# Every 5 min offset 2 min (cron expression: minutes 2, 7, 12, …).
-# The 2-min offset after FL preserves cross-provider corroboration
-# freshness — Kalshi's pass sees FL's just-re-resolved fixtures.
-cronSchedule = "2-59/5 * * * *"
-startCommand = "python scripts/run_reresolution_pass.py --provider kalshi --apply"
-restartPolicyType = "NEVER"
+# [[services]]
+# name = "resolver-reresolution-kalshi"
+#
+# [services.deploy]
+# # Every 5 min offset 2 min (cron expression: minutes 2, 7, 12, …).
+# # The 2-min offset after FL preserves cross-provider corroboration
+# # freshness — Kalshi's pass sees FL's just-re-resolved fixtures.
+# cronSchedule = "2-59/5 * * * *"
+# startCommand = "python scripts/run_reresolution_pass.py --provider kalshi --apply"
+# restartPolicyType = "NEVER"
 
 [[services]]
 name = "daily-diff"
