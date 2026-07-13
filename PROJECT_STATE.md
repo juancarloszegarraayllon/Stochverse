@@ -240,6 +240,22 @@ Phase 3's `/api/v4/sports/{id}/feed` will serve fixtures with `home_team_id` / `
 3. **F8 Attempt 3 (deferred)** — if the inversion trace confirms the loop's forced-decision path works as spec, F8's dispositive value drops materially. Reassess necessity after the inversion verdict.
 4. **Remaining Phase 2 exit gates before Phase 3** — review-queue drain (passive under the loop), §6.5 archival (unbuilt). Unchanged from Day-46 pending.
 5. **Carried-forward**: 9 pre-existing `test_phase_2d5_*` / `test_phase_2f1_*` collection errors; not exercised this session.
+6. **Gate #1 first-live-pass write-back verification (added Day-48 addendum context)** — after the reresolution crons un-pause (commit 2 of #248), the first natural `--apply` pass that auto-applies at least one record must have the provider table's `fixture_id` populated on that record. F8 Attempt 3 (YVRjxyEk, LMB baseball) surfaced a possible write-back gap: `sp.resolution_log` got an alias-tier `alias@2c.0` row with `reason_detail.fixture_id = a65a9677` AND `sp.resolver_runs` got a run row, but `sp.fl_events.fixture_id` read back NULL before manual restore. Whole-population check (`sp.fl_events` with `fixture_id IS NULL` AND a prior strict/alias/fuzzy `resolution_log` decision) returned zero rows — mostly de-risks the gap as systemic, but the zero is also consistent with "no live loop pass has run since the crons paused, so there'd be no post-fix resolved records to find either way." First-live-pass query is the disambiguator, not a discovery:
+   ```sql
+   SELECT
+     rl.provider_record_id,
+     rl.reason_code,
+     rl.decided_at,
+     fle.fixture_id AS fl_events_fixture_id
+   FROM sp.resolution_log rl
+   JOIN sp.fl_events fle ON fle.fl_event_id = rl.provider_record_id
+   WHERE rl.reason_code IN ('strict','alias','fuzzy')
+     AND rl.run_id = '<first-live-run_id>'
+   ORDER BY rl.decided_at DESC
+   LIMIT 20;
+   ```
+   Expected: `fl_events_fixture_id IS NOT NULL` on every row. If NULL anywhere, the reresolution runner has a write-back gap analogous to the daily runner's `UPDATE sp.fl_events SET fixture_id = :fx` path (`run_resolver_pass.py:447-454`) — decision recorded, provider state not updated, record re-selected every pass. NOT a code change yet — evidence gathering only; if the gap fires, scope the runner PR for the write-back UPDATE + team_aliases INSERT + review_queue INSERT paths as a separate PR.
+7. **`f8-procedure.md` §2c(d) landed (Day-48 addendum context)** — YVRjxyEk also surfaced that §2c(a) shadow-prevention + §2c(b) 0.30-similarity + §2c(c) alias-index-only path together do NOT catch canonical-name shadowing via distinctive-token subset. The alias tier's `token_set_contribution` scorer rescues `Queretaro → Conspiradores de Querétaro` regardless of §2c(a)/(b)/(c). §2c(d) added in a separate PR requires the break-side provider string's `distinctive_tokens()` to NOT be a subset of the canonical's, AND to NOT be a subset of any same-sport canonical's. Check runs in Python via `resolver.text_match.distinctive_tokens` and `resolver._normalize.normalize_name` — SQL approximation would drift from the scorer and pass exactly the targets the scorer then rescues. Poisons the "short city name → long club name" target class (most of LMB); F8 Attempt 4 selection must use §2c(d) alongside the existing gates.
 
 ---
 

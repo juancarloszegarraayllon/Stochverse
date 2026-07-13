@@ -123,6 +123,96 @@ side's team_id), `{ALIAS_ID}`, `{ALIAS_FORM}`, `{ALIAS_NORMALIZED}`,
 `AWAY_NAME` FL sends for the break side — used by §2c). These are
 the placeholders for the rest of the procedure.
 
+### §1 supplemental — distinctive-token screening (added Day-48)
+
+The SQL query above returns candidates that pass §1's structural
+filters (single-alias dependency, recent FL activity). Before
+running §2c, screen each candidate through the matcher's own
+tokenizer to filter out targets where the alias tier will rescue
+the record via distinctive-token containment — see §2c(d) below
+for the failure mode this catches.
+
+Run in Python at the repo root — this uses the matcher's real
+`resolver.text_match.distinctive_tokens` and
+`resolver._normalize.normalize_name` functions so the screening
+matches the alias tier's actual scoring, not a SQL approximation:
+
+```python
+from resolver._normalize import normalize_name
+from resolver.text_match import distinctive_tokens
+
+def is_token_subset_of_canonical(
+    provider_string: str,
+    canonical_name: str,
+) -> bool:
+    """True iff the provider string's distinctive tokens are a
+    subset of the canonical's. If True, the alias tier's
+    token_set scorer will resolve the provider string to the
+    canonical via distinctive-token containment even when no
+    alias row exists — target is a §2c(d) failure and must be
+    rejected."""
+    provider_tokens = set(distinctive_tokens(
+        normalize_name(provider_string)
+    ))
+    canonical_tokens = set(distinctive_tokens(
+        normalize_name(canonical_name)
+    ))
+    # An empty provider token set trivially "subsets" anything —
+    # treat as a screen failure (nothing distinctive to break on).
+    if not provider_tokens:
+        return True
+    return provider_tokens.issubset(canonical_tokens)
+
+# Screen each candidate row from §1's SQL result:
+for row in candidates_from_sql:
+    if is_token_subset_of_canonical(
+        provider_string=row["fl_break_side_name"],
+        canonical_name=row["break_side_canonical"],
+    ):
+        continue  # Reject — will fail §2c(d).
+    # Row is a §2c(d) survivor; proceed to §2a/§2b/§2c(a).
+```
+
+**Why Python, not SQL**: a faithful SQL predicate would need to
+replicate `normalize_name` (NFD + combining-mark strip + lowercase
++ Unicode-punctuation stripping + whitespace collapse) AND the
+`GENERIC_SPORT_TOKENS` stopword strip inside `distinctive_tokens`.
+The NFD accent-strip has no Postgres equivalent without the
+`unaccent` extension (not installed in this deployment; only
+`pg_trgm` is present), and even with `unaccent` the Python-flavored
+`re.UNICODE \w` boundary handling drifts from Postgres regex
+semantics on non-ASCII input. A SQL predicate that DISAGREES with
+the matcher's tokenizer would pass exactly the targets the matcher
+then rescues — worse than an explicit "check this in Python" step
+because it gives false confidence. Ship the Python check, don't
+approximate.
+
+Also screen against every same-sport canonical, not just the
+break-side canonical — the alias tier's `CandidateIndex` (Day-21
+architectural finding: built from `sp.teams.canonical_name`, not
+`sp.team_aliases`) resolves against ALL canonicals in the sport,
+so a distinctive-token subset of ANY same-sport canonical
+poisons the target:
+
+```python
+# Same-sport canonicals — pull from sp.teams for the break-side's sport.
+same_sport_canonicals = [row["canonical_name"] for row in db.execute(
+    "SELECT canonical_name FROM sp.teams WHERE sport_id = :sid",
+    {"sid": break_side_sport_id},
+).all()]
+
+for c in same_sport_canonicals:
+    if is_token_subset_of_canonical(
+        provider_string=fl_break_side_name,
+        canonical_name=c,
+    ):
+        # Poisoned by canonical `c`. Reject the target.
+        break
+```
+
+This second sweep is what catches "Sale" → "Sale Sharks" style
+subsets against unrelated same-sport canonicals in the roster.
+
 ### §2a — Single-alias dependency confirmation
 
 ```sql
@@ -225,6 +315,114 @@ shapes for what to look for:
 wrappers can be dropped for a rougher check (ASCII-only equality)
 and diacritics compared by eye against the raw strings; the
 strict "must differ" gate holds either way.
+
+Note on numbering: this shadow-prevention check is §2c(a) in the
+expanded structure. §2c(b) (whole-string similarity < 0.30) is
+tracked as the pending Day-47 amendment PR. §2c(c) is reserved.
+§2c(d) is below (added Day-48).
+
+### §2c(d) — Distinctive-token subset check (added Day-48)
+
+**Why this exists**: F8 Attempt 3 (YVRjxyEk, LMB baseball,
+`Queretaro` → `Conspiradores de Querétaro`) passed all three
+existing §2c gates — provider ≠ canonical, whole-string trigram
+similarity 0.233 < 0.30, and the break-side alias verified as the
+only ALIAS-index path — and got the strict tier to no_match
+exactly as designed. But the record STILL auto-applied via the
+alias tier at `alias@2c.0`, `home_ratio 1.0`, with
+`reason_detail.alias_score_breakdown.token_set_contribution = 0.3`.
+
+The alias tier matched `Queretaro` to `Conspiradores de Querétaro`
+by **distinctive-token containment** — `querétaro` is a token
+inside the canonical, and the alias tier's `token_set` scorer
+resolves against the canonical_name-sourced `CandidateIndex`
+(Day-21 architectural finding). Whole-string trigram similarity —
+which §2c(b)'s 0.30 clause guards on — is IRRELEVANT to this
+path; the alias tier never consults it.
+
+This is canonical-name shadowing (§2c(a)'s Day-46 failure mode) in
+a **token-subset mask**. Whole-string equality doesn't fire, but
+the resolver still lands on the canonical because the provider
+string is a distinctive-token subset of it.
+
+**The check**: the break-side provider string's distinctive
+tokens must NOT be a subset of the canonical's distinctive tokens,
+AND must not be a subset of any same-sport canonical's distinctive
+tokens either.
+
+Run in Python at the repo root using the matcher's own tokenizer
+(see §1 supplemental above for the helper functions — do NOT
+approximate this check in SQL, the tokenization drift will pass
+targets the alias tier then rescues):
+
+```python
+from resolver._normalize import normalize_name
+from resolver.text_match import distinctive_tokens
+
+# Break-side canonical check (must be False for the target to pass):
+break_side_tokens = set(distinctive_tokens(
+    normalize_name(FL_BREAK_SIDE_NAME)
+))
+canonical_tokens = set(distinctive_tokens(
+    normalize_name(BREAK_SIDE_CANONICAL)
+))
+poisoned_by_canonical = break_side_tokens.issubset(canonical_tokens)
+
+# Same-sport canonicals check (must be empty for the target to pass):
+poisoned_by_others = []
+for c in same_sport_canonicals:  # from sp.teams WHERE sport_id = ...
+    c_tokens = set(distinctive_tokens(normalize_name(c)))
+    if break_side_tokens and break_side_tokens.issubset(c_tokens):
+        poisoned_by_others.append(c)
+
+# Gate:
+SHADOW_RISK_2C_D = poisoned_by_canonical or bool(poisoned_by_others)
+```
+
+**Expected**: `SHADOW_RISK_2C_D = False`. The provider string's
+distinctive tokens must NOT be a subset of the break-side
+canonical's, and must NOT be a subset of any same-sport
+canonical's.
+
+**If `SHADOW_RISK_2C_D = True`**: pick a different record. The
+alias tier will resolve this target via `token_set_contribution`
+regardless of whether the alias row exists. The whole "short city
+name → full club name" target class is poisoned by this failure
+mode — most of LMB and much of the ready-to-hand F8 target space.
+Look instead for shapes where the provider string shares NO
+distinctive token with the canonical:
+
+- Provider name and canonical are structurally different words
+  (e.g., a heritage moniker on one side, a modern sponsor name
+  on the other).
+- Provider sends an ABBREVIATION whose expansion doesn't appear
+  in the canonical.
+- Canonical is a compound where none of its distinctive tokens
+  is the provider string alone.
+
+**Concrete disqualifying examples** (all from LMB / similar
+short-name → long-name rosters):
+
+- `Queretaro` → `Conspiradores de Querétaro` — `queretaro` is a
+  distinctive token of the canonical after normalization. `False`
+  under §2c(a) (unequal), but `True` under §2c(d). Attempt 3's
+  target.
+- `Monterrey` → `Sultanes de Monterrey` — same shape as above.
+- `Sale` → `Sale Sharks` (rugby, hypothetical) — same shape.
+
+**Empirical validation from Attempt 3**: with the target already
+broken (queretaro alias deleted, fl_event fixture_id nulled),
+the fresh pass wrote two `resolution_log` rows in one pass:
+
+1. strict tier: `no_match`, `fail_reason=alias_resolution_incomplete`,
+   `home_resolved=false`, `away_resolved=true` — the break landed
+   correctly.
+2. alias tier: `alias@2c.0`, `home_team_id` populated, `home_ratio
+   1.0`, `token_set_contribution=0.3`, auto-applied.
+
+The strict tier's `no_match` was correct; the alias tier's rescue
+was the failure. §2c(d) is the gate that would have rejected the
+target at selection time and sent Attempt 3 to a different record.
 
 ## Cost of the forced-decision step (Day-46 amendment)
 
