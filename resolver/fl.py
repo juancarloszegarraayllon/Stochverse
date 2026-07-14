@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ._normalize import normalize_name
+from .alias_tier.normalize import INDIVIDUAL_SPORT_CODES
 from .types import FixtureSignal, TeamCandidate
 
 
@@ -44,6 +45,41 @@ from .types import FixtureSignal, TeamCandidate
 # Logged with every decision so replay can reconstruct what the
 # extractor saw at decision time.
 RESOLVER_VERSION = "fl@2a.0"
+
+
+def _is_doubles_pair_signal(sport: str, raw_record: dict[str, Any]) -> bool:
+    """True when the FL payload describes a doubles pair (or MMA
+    tag-team / Darts pair) rather than a single-fixture head-to-head.
+
+    Predicate: sport is in `INDIVIDUAL_SPORT_CODES` (case-insensitive
+    match on the display name FL runners pass — 'Tennis' / 'MMA' /
+    'Darts', plus the preventive set 'Boxing' / 'Golf' / 'Snooker')
+    AND HOME_NAME or AWAY_NAME contains a '/'.
+
+    Structurally-unmatchable: sp.teams has no doubles-pair entity;
+    the matcher would walk ~40 single-player canonicals, correctly
+    fail, and route to review_queue every nightly cron. Same
+    treatment as Kalshi's KXMLBMENTION exclusion via
+    `_OUTRIGHT_SERIES_PREFIXES` — reject at extraction so the
+    matcher never sees it and the daily cron doesn't burn cycles.
+
+    Validated FL population (Day-48): 6,448 pending review_queue
+    rows split Tennis 6,213 / MMA 187 / Darts 48, all
+    `reason_detail.is_personal = true`. Soccer 22 + Basketball 4
+    slash-names are is_personal=false lookalikes (SJK Akatemia/2,
+    PPJ/Ruoholahti) — the sport gate correctly excludes them.
+
+    Preventive coverage on Boxing/Golf/Snooker: zero observed rows
+    today, but structurally-same shape if FL emits a tag-team boxing
+    match, pairs match play in golf, or a doubles snooker frame.
+    Firing preventively costs nothing (no false-positive population)
+    and avoids a follow-up PR on discovery.
+    """
+    if sport.lower() not in INDIVIDUAL_SPORT_CODES:
+        return False
+    home = raw_record.get("HOME_NAME") or ""
+    away = raw_record.get("AWAY_NAME") or ""
+    return "/" in home or "/" in away
 
 
 class FLResolverModule:
@@ -83,6 +119,14 @@ class FLResolverModule:
         """
         event_id = (raw_record.get("EVENT_ID") or "").strip()
         if not event_id:
+            return None
+
+        # Doubles-pair / tag-team / pairs guard (Day-48). sp.teams
+        # has no doubles-pair entity; reject at extraction so neither
+        # the daily cron nor the reresolution loop burns cycles
+        # matching what will always fail. Same shape as Kalshi's
+        # KXMLBMENTION exclusion. See _is_doubles_pair_signal above.
+        if _is_doubles_pair_signal(sport, raw_record):
             return None
 
         home_candidates = self._team_candidates(

@@ -222,6 +222,189 @@ class TestFLExtractSignal:
         assert sig.kickoff_confidence == 0.0
 
 
+class TestFLDoublesPairGuard:
+    """Day-48 doubles-pair extractor exclusion.
+
+    sp.teams has no doubles-pair entity. FL emits ~500/day of these
+    (Tennis dominant, MMA + Darts long-tail). Pre-guard they walked
+    the matcher, correctly failed, and accreted into review_queue —
+    6,448 pending FL rows validated Day-48 all match the shape
+    'is_personal=true AND / in HOME_NAME or AWAY_NAME'.
+
+    Predicate on the fl.py side is sport-membership + slash-presence.
+    Same treatment class as _OUTRIGHT_SERIES_PREFIXES for Kalshi
+    KXMLBMENTION.
+    """
+
+    def setup_method(self):
+        self.m = FLResolverModule()
+
+    # ── True positives — must fire ─────────────────────────
+
+    def test_tennis_doubles_home_slash(self):
+        """Tennis doubles — slash in HOME_NAME. Validated concrete
+        string from Day-48 FL pending sample."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "Abanda F./Frissora E.",
+            "AWAY_NAME": "Kudermetova V./Rakhimova K.",
+        }, sport="Tennis")
+        assert sig is None
+
+    def test_tennis_doubles_away_slash(self):
+        """Tennis doubles — slash in AWAY_NAME only."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "Sinner J.",
+            "AWAY_NAME": "van Loben Sels E./Zamora N.",
+        }, sport="Tennis")
+        assert sig is None
+
+    def test_tennis_doubles_both_slash(self):
+        """Both sides carry slashes — doubles pair vs doubles pair."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "Dobreva M./Mircheva N.",
+            "AWAY_NAME": "Bogdan A./Cristian J.",
+        }, sport="Tennis")
+        assert sig is None
+
+    def test_mma_tag_team_slash(self):
+        """MMA tag-team shape — Day-48 population 187 rows."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "Fighter A./Fighter B.",
+            "AWAY_NAME": "Fighter C.",
+        }, sport="MMA")
+        assert sig is None
+
+    def test_darts_pair_slash(self):
+        """Darts pair — Day-48 population 48 rows."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "Player X./Player Y.",
+            "AWAY_NAME": "Player Z./Player W.",
+        }, sport="Darts")
+        assert sig is None
+
+    def test_boxing_preventive_slash(self):
+        """Boxing tag-team — zero observed today, preventive shape."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "Fury/Joshua",
+            "AWAY_NAME": "Wilder/Ortiz",
+        }, sport="Boxing")
+        assert sig is None
+
+    def test_golf_preventive_slash(self):
+        """Golf pairs match play — zero observed today, preventive."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "McIlroy/Lowry",
+            "AWAY_NAME": "Scheffler/Cantlay",
+        }, sport="Golf")
+        assert sig is None
+
+    def test_snooker_preventive_slash(self):
+        """Snooker doubles frame — zero observed today, preventive."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "O'Sullivan/Selby",
+            "AWAY_NAME": "Trump/Robertson",
+        }, sport="Snooker")
+        assert sig is None
+
+    # ── False positives — must NOT fire ────────────────────
+
+    def test_soccer_slash_lookalike_not_excluded(self):
+        """Day-48 validated: FL Soccer sends slash-shape names for
+        academy / reserve sides — 'SJK Akatemia/2', 'PPJ/Ruoholahti'.
+        These ARE fixtures (real teams, is_personal=false) and must
+        NOT be excluded. Sport gate rules them out even though the
+        shape matches."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "SJK Akatemia/2",
+            "AWAY_NAME": "PPJ/Ruoholahti",
+        }, sport="Soccer")
+        assert sig is not None
+        assert sig.provider_record_id == "x"
+
+    def test_basketball_slash_lookalike_not_excluded(self):
+        """Basketball slash-name lookalike — Day-48 population 4
+        rows, is_personal=false. Sport gate excludes."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "Team A/2",
+            "AWAY_NAME": "Team B",
+        }, sport="Basketball")
+        assert sig is not None
+
+    def test_tennis_singles_no_slash_not_excluded(self):
+        """Tennis singles — personal sport but no slash. Extraction
+        must proceed normally."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "Kecmanovic M.",
+            "AWAY_NAME": "Sinner J.",
+        }, sport="Tennis")
+        assert sig is not None
+        assert len(sig.home_team_candidates) >= 1
+
+    def test_mma_singles_no_slash_not_excluded(self):
+        """MMA singles fighter — no slash. Extraction proceeds."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "Fighter A.",
+            "AWAY_NAME": "Fighter B.",
+        }, sport="MMA")
+        assert sig is not None
+
+    def test_empty_sport_slash_not_excluded(self):
+        """Empty sport (unclassified) with slash-shape names — the
+        guard must not fire because we can't confirm is_personal.
+        The record proceeds to the matcher which will hit
+        sport_not_classified and route to no_match normally.
+        Rejecting here would over-fire on unclassified records that
+        happen to carry '/' for unrelated reasons."""
+        sig = self.m.extract_signal({
+            "EVENT_ID":  "x",
+            "HOME_NAME": "A/B",
+            "AWAY_NAME": "C/D",
+        }, sport="")
+        assert sig is not None
+
+    # ── Helper-level assertions (call the pure function directly) ──
+
+    def test_helper_case_insensitive_sport(self):
+        """`sport` reaches extract_signal as the display-cased name
+        from `sp.sports.s.name` ('Tennis'), while INDIVIDUAL_SPORT_CODES
+        is lowercase codes. Guard lowercases before checking; both
+        casings must fire identically."""
+        from resolver.fl import _is_doubles_pair_signal
+        payload = {"HOME_NAME": "A/B", "AWAY_NAME": "C"}
+        assert _is_doubles_pair_signal("Tennis", payload) is True
+        assert _is_doubles_pair_signal("tennis", payload) is True
+        assert _is_doubles_pair_signal("TENNIS", payload) is True
+
+    def test_helper_missing_names_safe(self):
+        """Guard must not raise on missing HOME_NAME / AWAY_NAME —
+        `raw_record.get(...) or ""` handles None and missing keys."""
+        from resolver.fl import _is_doubles_pair_signal
+        assert _is_doubles_pair_signal("Tennis", {}) is False
+        assert _is_doubles_pair_signal(
+            "Tennis", {"HOME_NAME": None, "AWAY_NAME": None},
+        ) is False
+
+    def test_helper_covers_validated_target_set(self):
+        """Guard sport allowlist must be a superset of the validated
+        target set {Tennis, MMA, Darts}. Change-detector: if a future
+        edit narrows INDIVIDUAL_SPORT_CODES, this fails first."""
+        from resolver.alias_tier.normalize import INDIVIDUAL_SPORT_CODES
+        for sport in ("tennis", "mma", "darts"):
+            assert sport in INDIVIDUAL_SPORT_CODES
+
+
 # ── Kalshi extraction ───────────────────────────────────────────
 
 class TestKalshiExtractSignal:
