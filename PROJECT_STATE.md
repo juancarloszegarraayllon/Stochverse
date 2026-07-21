@@ -118,6 +118,87 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-07-16 → 2026-07-21
+
+### Days 49–52: Gate #3 re-specified from a mis-diagnosis into three real workstreams; doubles exclusion (3a) and LMB dedup (3d) shipped and verified; three-pattern methodology bank; 05-08 bootstrap re-regression audit closed
+
+One continuous arc across four sessions. Gate #1 (three-loop runner) stayed open the whole span — needs PR #248 and a natural 02:00–02:22 UTC window no session landed in. Everything below is Gate #3, the more consequential thread.
+
+### Days 49–52: Gate #3 was mis-specified
+
+Exit bar read "review_queue < 20 pending." Decomposing 31,278 pending rows surfaced the mis-diagnosis: the queue is not a work list — three unrelated engineering problems in one table, and reviewing at any speed can't close it (~500/night arrive from daily crons). Worse, the queue is a narrow filtered slice: ~38,000 distinct FL records fail nightly (~46k distinct over 7d, a stable wall not churn) and only a few hundred reach the queue. The `<20` bar pointed at ~0.8% of the real unresolved population. Re-specified:
+
+- **3a extractor exclusion** — structurally unmatchable shapes (doubles pairs, mention props).
+- **3b coverage feed** — canonical doesn't exist. The real Phase-3 distance; unscoped.
+- **3c matcher tightening** — token-subset collisions. Deferred pending 3a + 3d landing.
+- **3d data reconciliation** — duplicate canonicals from unreconciled bootstraps.
+
+### Day-49 → Day-52: Gate #3a — doubles exclusion (shipped, verified)
+
+~6,448 FL pending rows are doubles/pairs (Tennis 6,213 / MMA 187 / Darts 48), `is_personal=true` AND `'/'` in a team name. No doubles entity exists in `sp.teams`. Fixed at extraction in `resolver/fl._is_doubles_pair_signal` (PR #250), mirroring KXMLBMENTION's `_OUTRIGHT_SERIES_PREFIXES` treatment. Existing rows dispositioned via `UPDATE sp.review_queue SET status='rejected', reviewed_by='system:doubles_exclusion'` (not deleted — audit trail). Kalshi's 121 tennis slash-titles remain deferred pending a 20-row-sample validation; PR #250 explicitly excluded them for the tie-break-negative-result reason (below). Verified 07-16: post-guard cron scanned 46,601 FL records, zero doubles filed. Key catch: guard predicate (`INDIVIDUAL_SPORT_CODES`, code-lowercase) and disposition predicate (`reason_detail->>'sport'`, display-cased) are the same set in two vocabularies — validated against the population before shipping.
+
+### Day-49: The ~6,500-silently-wrong-fixture mistake avoided
+
+A proposed exact-normalized-name tie-break auto-resolve was sized at 9,997 clean by a CIRCULAR query (compared candidates against `reason_detail->>'home_canonical'` = the matcher's own choice). Against FL's raw payload on a 20-row sample it scored ~35% → **~6,500 silently-wrong fixtures, the 97-inversion mode**. Silently-wrong, not unwind-able-wrong; the cost of the mistake is not the count of rows but the untraceability of a confident bulk action wrong at scale. Sample cost 5 min. Rule banked: never validate auto-resolve against the matcher's own output.
+
+### Day-49 → Day-52: Gate #3d — LMB duplicate-canonical dedup (shipped, verified)
+
+**Root cause with a timestamp**: 2026-05-08 `scripts/bootstrap_sp_teams.py` created bare city names (`country_code = NULL`, `source = 'legacy_bootstrap'`); 2026-05-28 `bootstrap_league_coverage` (`scripts/bootstrap_lmb.py:156-163`) created full club names (`country_code = 'MEX'`). Nothing reconciled them. Between the dates bare rows accumulated ~325 fixtures; after, two canonicals compete per FL city payload, the matcher correctly refuses (`home_collision:true`), class fails nightly. Controlled natural experiment: Querétaro (no bare duplicate) resolves; Campeche (bare duplicate) fails — one variable. 14 pairs, ~370 records/week.
+
+**Direction (b) chosen**: rename bare row to full canonical, re-point full row's aliases via UPDATE, delete empty full row. Deciding argument was `sp.resolution_log` history preservation — the bare row's `team_id` is referenced by every historical decision; direction (a) would orphan it. Two reasons, one decision: (b) ALSO preserves the `legacy_bootstrap` city alias on the renamed row, which turned out to be what makes strict-tier resolution work post-rename (see broken-state-as-baseline below).
+
+Snapshot-first, 14 transactions, PR #251 (docs), operator-run SQL through Day-52. **§5 verified 07-17 02:00 UTC FL cron**: 624 `sp.resolution_log` rows across all 14 merged team_ids, `reason_code = 'strict'` / `strict@2a.6`, zero collisions, zero `review_queue` writes. Class-level: Baseball `review_queue` inflow ~39/night → 3; FL total auto_applies 271 → 727. Held clean 07-18/19/20 (verified 07-21 23:00 UTC: `renamed_intact = 14`, `bare_names_resurrected = 0`, `dup_normalized_baseball = 0`).
+
+### Days 50–51: Two merge traps caught during LMB execution
+
+1. **`uq_team_aliases_alias_normalized_source` is a GLOBAL unique index** — copy-then-delete of aliases (an earlier draft's Step 2) violated it. Corrected to **re-point** (`UPDATE ... SET team_id`), which never touches the constrained columns and preserves original ids + `created_at`. Caught by the first transaction aborting atomically; nothing half-written.
+2. **Three accented canonicals** (`Diablos Rojos del México`, `El Águila de Veracruz`, `Leones de Yucatán`) — normalized forms READ from snapshot's `full_normalized_pre` column, NEVER derived locally. Wrong derivation → `bootstrap_lmb.py:156-163`'s `normalize_name(canonical)` lookup misses the renamed rows → silently recreates three duplicates next run. Load-bearing catch; had we derived, three duplicates back on the next scheduled bootstrap.
+
+### Day-52: §5 predicate caught a wrong premise
+
+Expected `alias@2c.0` per the "Querétaro control" defined Day-49. Got `strict@2a.6` on all 624. Investigating rather than auto-passing: same-window check of Querétaro itself (id `2cb54cf9`, 30 rows) also `strict@2a.6`. The Day-49 alias-tier control was measured DURING the Day-48 F8 Attempt 3 break — the only window Querétaro ever resolved via alias tier (the `queretaro` alias `50862f87` had been deleted for the F8 experiment). Strict was always healthy: the bare row keeps its `legacy_bootstrap` city alias (direction (b) renames not deletes), strict hits it exactly, token-set scorer never runs. `sp.baseline_shifts` row `81b9cc23` `expected_metric_delta` corrected in-place; `notes` appended with Day-52 correction paragraph, original wrong claim preserved as audit trail.
+
+### Days 49–52: Methodology bank — three-pattern family
+
+Frame: **"the observation isn't what you think because you didn't check what state the source was in."** Three named siblings, all instances of the same underlying failure:
+
+1. **Read-don't-derive** — schema-guess failures (5 instances both sides across the arc: `review_queue.reason_code` absent, `sp.teams` no unique constraint where expected, `sp.team_aliases` had one where not expected, circular tie-break, invented `sp.baseline_shifts` columns). Corrective: read migration/snapshot before drafting SQL.
+2. **Null-observable-with-missing-auxiliary-premise** — Gate #1 `crashes=0` (loop no-op), 00:35 UTC doubles-inflow=0 (cron hadn't run), 3-day inversion window empty (no post-stamp inversion existed). Corrective: require a second premise (cron ran, records scanned) before treating a null as informative.
+3. **Broken-state-as-baseline** — Day-49 Querétaro `alias@2c.0` control, measured during the F8 break, generalized as healthy. Corrective: verify the control is in its normal state before generalizing.
+
+**Chronological accretion**: the token-subset-shadow mechanism showed up three times before the family-frame crystalized — first as Kalshi's `KXMLBMENTION` (PR #250's KXMLBMENTION cousin exclusion, `_OUTRIGHT_SERIES_PREFIXES`), then as F8 Attempt 3's Querétaro discovery leading to §2c(d) (PR #249, `docs/reresolution/f8-procedure.md`), then as the Antalyaspor collisions surfaced in the Day-49 Gate #3 decomposition. Each occurrence was independently correct; the third made the pattern legible enough to name.
+
+### Days 51–52: 05-08 bootstrap re-regression audit — closed, converted to a scoped fix
+
+`scripts/bootstrap_sp_teams.py` (2026-05-08, `source = 'legacy_bootstrap'`) checks team existence by `(sport_id, normalize_name(canonical))` at `:222-243`. Legacy `public.entities` STILL holds all 14 bare names verbatim (confirmed Day-52). A re-run finds no `sp.teams` row normalizing to `'campeche'` (renamed away by Day-52 merge) and re-inserts the bare row → all 14 duplicates return silently. Script advertises "zero new inserts on re-run" — true before merge, silently false after.
+
+Risk shape: **latent-manual** (nothing schedules it; docs say one-time), but Gate #3b coverage work is exactly when bootstraps get re-run by hand.
+
+**Fix scoped and shipped as PR #252** (`claude/bootstrap-sp-teams-alias-aware-existence`) — alias-aware existence check on the TEAM insert. `TRUSTED_ALIAS_SOURCES` frozenset (`legacy_bootstrap`, `bootstrap_league_coverage`, `bootstrap_national` — bootstrap-family only; runtime-derived `fuzzy_auto` / `alias_tier` excluded so a stray runtime alias doesn't retroactively suppress a legitimate legacy insert). Pure functions `_build_alias_team_index` (set-valued so ambiguity is detectable) and `_resolve_via_alias`. Ambiguity → skip-and-log with `bootstrap.sp_teams.alias_ambiguous` warning + colliding team_ids. Dry-run canary reports `per_sport_alias_reused` per sport; **canary invariant** = `alias_reused per sport must match the sum across that sport's retained direction-(b) dedup snapshot tables. Counter is the gate, not a fixed constant.` Docstring corrected inline.
+
+Test coverage (5 classes, all Day-53's locked cases): `TestTrustedAliasSources` (Case 3 negative: `fuzzy_auto` / `alias_tier` excluded), `TestBuildAliasTeamIndex` (Cases 4 + 5: ambiguity + accented input), `TestResolveViaAlias` (Case 2: reuse + sport-scoping isolation), `TestAliasAwareClassificationControlFlow` (structural: primary-before-secondary, secondary-only-on-primary-miss, counters flow), `TestDocstringInvariantCorrected` (guards the corrected invariant). 37 passed / 1 integration-skipped in `test_bootstrap_sp_teams.py`; 167 passed / 9 integration-skipped across the broader resolver-adjacent suite.
+
+Dry-run canary against production (blocked pending #252 merge): Baseball `alias_reused = 14` exactly (matches `sp.lmb_dedup_snapshot_2026_07_19` row count — all 14 legacy Baseball canonicals confirmed matching the snapshot bare forms Day-53), every other sport `= 0`, `queued_for_insert` unchanged from pre-Day-52 baseline. Any deviation → investigate before `--apply`. `--apply` stays blocked until this reads green.
+
+### Days 49–52: PR state
+
+- **PR #249** (`claude/f8-procedure-2c-fourth-clause-plus-day47-writeback`) — f8-procedure §2c(d) distinctive-token subset gate + Day-47 pending write-back item. Open.
+- **PR #250** (`claude/fl-doubles-pair-exclusion`) — Gate #3a extractor exclusion. **Merged 07-15**. `resolver/fl.py:60-66` guard + `tests/test_resolver_2a.py` 16 regression tests.
+- **PR #251** (`claude/lmb-duplicate-canonical-dedup`) — Gate #3d LMB dedup procedure doc + snapshot/merge/verify SQL templates + methodology corrections through Day-52. Open (docs-only; operator-run SQL through Day-52).
+- **PR #252** (`claude/bootstrap-sp-teams-alias-aware-existence`) — bootstrap alias-aware existence check + 5 test classes + docstring invariant correction. Just opened (Day-53).
+- **PR #248** (`claude/reresolution-runner-fix`) — Gate #1 runner fix. Open since 07-13; still awaiting natural-window verification.
+
+### Pending — next session
+
+1. **PR #252 dry-run canary** — operator runs `python scripts/bootstrap_sp_teams.py --dry-run` against production; confirms Baseball `alias_reused = 14`, every other sport = 0, `queued_for_insert` unchanged, `alias_ambiguous = 0`. Post-canary-green, `--apply` unblocks for Gate #3b.
+2. **Gate #1 natural-window run** — needs PR #248 and a live 02:00–02:22 UTC window with `candidate_set_size > 0` on both providers producing `crashes = 0`. Verification bar unchanged from Day-47 addendum.
+3. **Gate #3b coverage feed** — real Phase-3 distance, unscoped. The next-largest workstream after 3a/3d land.
+4. **Gate #3c matcher tightening** — token-subset collision handling. Deferred pending 3a + 3d verification post-#252.
+5. **`ix_teams_sport_normalized` → unique** — paired structural-fix question (`docs/dedup/lmb-2026-07-19.md` §13). Requires all direction-(b) dedups complete first (index would refuse to build on current duplicates). After 3d is stable and the bootstrap fix is verified in production.
+6. **Snapshot table retention** — `sp.lmb_dedup_snapshot_2026_07_19` retained per §8 as the canary reference for Baseball. Future direction-(b) dedups extend the canary per sport (sum-across-retained-snapshots, not a fixed constant).
+
+---
+
 ## Session — 2026-07-09
 
 ### Day-47: F8 Attempt 2 aborted at §2; FL home/away inversion discovered and sized
