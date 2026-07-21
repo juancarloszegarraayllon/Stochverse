@@ -210,6 +210,329 @@ class TestBulkIOPattern:
         assert "1000" in self.src
 
 
+# ── Day-53 alias-aware existence check (pure functions + static) ──
+
+class TestTrustedAliasSources:
+    """The alias-aware existence check must consult ONLY bootstrap-
+    family curated aliases. Runtime-derived aliases (fuzzy_auto,
+    alias_tier) can be wrong and must never suppress a legitimate
+    legacy-entity insert. Guard the allowlist against drift."""
+
+    def test_frozenset_defined_and_bootstrap_family(self):
+        from scripts.bootstrap_sp_teams import TRUSTED_ALIAS_SOURCES
+        assert isinstance(TRUSTED_ALIAS_SOURCES, frozenset)
+        # Bootstrap-family sources present.
+        assert "legacy_bootstrap" in TRUSTED_ALIAS_SOURCES
+        assert "bootstrap_league_coverage" in TRUSTED_ALIAS_SOURCES
+        assert "bootstrap_national" in TRUSTED_ALIAS_SOURCES
+
+    def test_runtime_derived_sources_excluded(self):
+        """Case 3 from Day-53 scope: normalized canonical exists as
+        fuzzy_auto alias → NOT reused. Enforced at the SQL WHERE
+        clause via TRUSTED_ALIAS_SOURCES; this test guards the
+        allowlist itself."""
+        from scripts.bootstrap_sp_teams import TRUSTED_ALIAS_SOURCES
+        assert "fuzzy_auto" not in TRUSTED_ALIAS_SOURCES, (
+            "fuzzy_auto is runtime-derived; must NOT be trusted for "
+            "team-existence disambiguation — see docstring."
+        )
+        assert "alias_tier" not in TRUSTED_ALIAS_SOURCES, (
+            "alias_tier is runtime-derived; must NOT be trusted for "
+            "team-existence disambiguation — see docstring."
+        )
+
+    def test_alias_index_sql_filters_by_trusted_sources(self):
+        """The bulk SELECT loading alias_team_index must apply the
+        TRUSTED_ALIAS_SOURCES filter in the WHERE clause. Static-
+        inspection guard so a future edit doesn't quietly drop the
+        filter and start indexing every alias source."""
+        import inspect
+        import scripts.bootstrap_sp_teams
+        src = inspect.getsource(scripts.bootstrap_sp_teams)
+        # The SELECT joining sp.teams to sp.team_aliases must carry
+        # source = ANY(:trusted_sources) OR equivalent.
+        assert "SELECT t.sport_id, a.alias_normalized, a.team_id" in src
+        assert "FROM sp.team_aliases a" in src
+        assert "JOIN sp.teams t ON t.id = a.team_id" in src
+        assert "source = ANY(:trusted_sources)" in src
+        assert 'list(TRUSTED_ALIAS_SOURCES)' in src, (
+            "the SQL parameter binding must pass TRUSTED_ALIAS_SOURCES "
+            "rather than a hardcoded list."
+        )
+
+
+class TestBuildAliasTeamIndex:
+    """Pure-function tests for _build_alias_team_index. Set-valued
+    so ambiguity (same normalized on multiple teams in one sport)
+    is detectable at lookup time."""
+
+    def test_empty_input(self):
+        from scripts.bootstrap_sp_teams import _build_alias_team_index
+        assert _build_alias_team_index([]) == {}
+
+    def test_single_alias_single_team(self):
+        import uuid
+        from scripts.bootstrap_sp_teams import _build_alias_team_index
+        team = uuid.uuid4()
+        idx = _build_alias_team_index([(6, "campeche", team)])
+        assert idx == {(6, "campeche"): {team}}
+
+    def test_multiple_aliases_same_team(self):
+        import uuid
+        from scripts.bootstrap_sp_teams import _build_alias_team_index
+        team = uuid.uuid4()
+        idx = _build_alias_team_index([
+            (6, "campeche", team),
+            (6, "piratas", team),
+            (6, "piratas de campeche", team),
+        ])
+        assert idx[(6, "campeche")] == {team}
+        assert idx[(6, "piratas")] == {team}
+        assert idx[(6, "piratas de campeche")] == {team}
+        assert len(idx) == 3
+
+    def test_same_alias_two_teams_yields_ambiguity_marker(self):
+        """Case 4 from Day-53 scope: the same normalized string is
+        an alias on two teams in one sport. Set-valued index means
+        the ambiguity is detectable rather than silently lost via
+        last-writer-wins."""
+        import uuid
+        from scripts.bootstrap_sp_teams import _build_alias_team_index
+        team_a, team_b = uuid.uuid4(), uuid.uuid4()
+        idx = _build_alias_team_index([
+            (6, "confusingcity", team_a),
+            (6, "confusingcity", team_b),
+        ])
+        assert idx == {(6, "confusingcity"): {team_a, team_b}}
+        assert len(idx[(6, "confusingcity")]) == 2
+
+    def test_sport_scoped_not_flat(self):
+        """The same normalized string on two teams in DIFFERENT
+        sports is NOT ambiguity — sport-scoping means each (sport_id,
+        alias_normalized) key stands alone."""
+        import uuid
+        from scripts.bootstrap_sp_teams import _build_alias_team_index
+        soccer_team, basketball_team = uuid.uuid4(), uuid.uuid4()
+        idx = _build_alias_team_index([
+            (1, "united", soccer_team),
+            (2, "united", basketball_team),
+        ])
+        assert idx == {
+            (1, "united"): {soccer_team},
+            (2, "united"): {basketball_team},
+        }
+        assert len(idx[(1, "united")]) == 1
+        assert len(idx[(2, "united")]) == 1
+
+    def test_diacritics_index_correctness(self):
+        """Case 5 from Day-53 scope: accented legacy canonical whose
+        normalize_name matches an accented team's preserved alias.
+        The index build itself must correctly key on the pre-
+        normalized string (whatever the caller provides); this test
+        exercises the accented-input path end-to-end via
+        normalize_name so the index-lookup pipeline works on the
+        real Diablos Rojos del México / El Águila / Leones data
+        shape without derivation drift."""
+        import uuid
+        from scripts.bootstrap_sp_teams import _build_alias_team_index
+        from resolver._normalize import normalize_name
+        team = uuid.uuid4()
+        # Alias as it lives in sp.team_aliases post-merge (accent-
+        # stripped by the resolver's normalizer).
+        stored_alias = normalize_name("México")  # → 'mexico'
+        idx = _build_alias_team_index([(6, stored_alias, team)])
+        # Legacy canonical carrying the accented form — normalizes
+        # identically to the stored alias, so the lookup key matches.
+        legacy_normalized = normalize_name("México")
+        assert stored_alias == "mexico"
+        assert legacy_normalized == "mexico"
+        assert idx[(6, legacy_normalized)] == {team}
+
+    def test_sqlalchemy_row_shape_supported(self):
+        """The index builder must accept both raw tuples (test
+        fixtures) and objects with attribute access (SQLAlchemy
+        row shape) — the production caller passes the latter."""
+        import uuid
+        from scripts.bootstrap_sp_teams import _build_alias_team_index
+
+        class _Row:
+            def __init__(self, sport_id, alias_normalized, team_id):
+                self.sport_id = sport_id
+                self.alias_normalized = alias_normalized
+                self.team_id = team_id
+
+        team = uuid.uuid4()
+        idx = _build_alias_team_index([_Row(6, "campeche", team)])
+        assert idx == {(6, "campeche"): {team}}
+
+
+class TestResolveViaAlias:
+    """Pure-function tests for _resolve_via_alias — the secondary
+    existence check called on primary-team-lookup miss."""
+
+    def test_hit_single_team_returns_uuid_not_ambiguous(self):
+        """Case 2 from Day-53 scope: normalized canonical exists as
+        trusted alias, exactly one team. Returns (team_id, False);
+        caller reuses it, increments per_sport_alias_reused."""
+        import uuid
+        from scripts.bootstrap_sp_teams import _resolve_via_alias
+        team = uuid.uuid4()
+        idx = {(6, "campeche"): {team}}
+        result_uuid, ambiguous = _resolve_via_alias(6, "campeche", idx)
+        assert result_uuid == team
+        assert ambiguous is False
+
+    def test_miss_returns_none_not_ambiguous(self):
+        """Not found: caller falls through to INSERT-new-team."""
+        from scripts.bootstrap_sp_teams import _resolve_via_alias
+        result_uuid, ambiguous = _resolve_via_alias(6, "not_there", {})
+        assert result_uuid is None
+        assert ambiguous is False
+
+    def test_ambiguity_returns_none_true(self):
+        """Case 4 from Day-53 scope: two teams. Caller must
+        skip-and-log, not pick arbitrarily."""
+        import uuid
+        from scripts.bootstrap_sp_teams import _resolve_via_alias
+        team_a, team_b = uuid.uuid4(), uuid.uuid4()
+        idx = {(6, "confusingcity"): {team_a, team_b}}
+        result_uuid, ambiguous = _resolve_via_alias(6, "confusingcity", idx)
+        assert result_uuid is None
+        assert ambiguous is True
+
+    def test_wrong_sport_id_misses(self):
+        """Sport-scoping: lookup with the wrong sport_id doesn't
+        find the alias even when the normalized matches."""
+        import uuid
+        from scripts.bootstrap_sp_teams import _resolve_via_alias
+        team = uuid.uuid4()
+        idx = {(6, "united"): {team}}
+        # Same normalized, wrong sport_id — miss.
+        result_uuid, ambiguous = _resolve_via_alias(2, "united", idx)
+        assert result_uuid is None
+        assert ambiguous is False
+
+    def test_diacritics_lookup(self):
+        """Case 5 from Day-53 scope continuation: accented legacy
+        canonical resolves via the accent-stripped alias index."""
+        import uuid
+        from scripts.bootstrap_sp_teams import _resolve_via_alias
+        from resolver._normalize import normalize_name
+        team = uuid.uuid4()
+        idx = {(6, normalize_name("México")): {team}}
+        result_uuid, ambiguous = _resolve_via_alias(
+            6, normalize_name("México"), idx,
+        )
+        assert result_uuid == team
+        assert ambiguous is False
+
+
+class TestAliasAwareClassificationControlFlow:
+    """Static-inspection guards for how the secondary alias-aware
+    check fits into the classification loop. The primary check must
+    still run first (Case 1 unchanged behavior), the secondary check
+    runs only on primary miss, and ambiguity skips-and-logs rather
+    than proceeding with an INSERT."""
+
+    def setup_method(self):
+        import inspect
+        import scripts.bootstrap_sp_teams
+        self.src = inspect.getsource(scripts.bootstrap_sp_teams)
+
+    def test_primary_check_runs_before_secondary(self):
+        """team_uuid_by_key.get(key) (primary) must appear before
+        the secondary _resolve_via_alias CALL SITE. Case 1 from
+        Day-53 scope: primary reuse path is unchanged.
+
+        Note: `.find("_resolve_via_alias(")` matches the function
+        DEFINITION first (early in file). We search for the
+        assignment form used at the call site to disambiguate.
+        """
+        primary_idx = self.src.find("team_uuid_by_key.get(key)")
+        secondary_call_idx = self.src.find(
+            "aliased_uuid, ambiguous = _resolve_via_alias("
+        )
+        assert primary_idx > 0
+        assert secondary_call_idx > 0, (
+            "expected the classification loop's call site of "
+            "_resolve_via_alias with the (aliased_uuid, ambiguous) "
+            "tuple unpacking"
+        )
+        assert primary_idx < secondary_call_idx, (
+            "Primary team-existence check must run before the "
+            "secondary alias-aware check at the call site."
+        )
+
+    def test_secondary_check_only_runs_on_primary_miss(self):
+        """The secondary check must be inside the primary-miss
+        branch (after `existing_uuid is not None: ... continue`),
+        not before it. Uses the call-site form to avoid matching
+        the function definition earlier in the file."""
+        primary_hit = self.src.find("if existing_uuid is not None:")
+        continue_after_primary = self.src.find("continue", primary_hit)
+        secondary_call_idx = self.src.find(
+            "aliased_uuid, ambiguous = _resolve_via_alias("
+        )
+        assert primary_hit > 0
+        assert continue_after_primary > primary_hit
+        assert secondary_call_idx > continue_after_primary, (
+            "Secondary alias-aware check must run only on primary "
+            "miss (i.e., after the primary-hit branch's continue)."
+        )
+
+    def test_ambiguity_skips_and_logs(self):
+        """Ambiguity path must log at warning level with the
+        colliding team_ids AND NOT proceed to INSERT."""
+        assert "alias_ambiguous" in self.src
+        assert "bootstrap.sp_teams.alias_ambiguous" in self.src
+        assert "colliding_team_ids" in self.src
+
+    def test_per_sport_counters_defined_and_in_log(self):
+        """Both new counters must exist and appear in the structlog
+        payload alongside existing counters."""
+        assert "per_sport_alias_reused" in self.src
+        assert "per_sport_alias_ambiguous" in self.src
+        assert "alias_reused_per_sport=dict(per_sport_alias_reused)" in self.src
+        assert "alias_ambiguous_per_sport=dict(per_sport_alias_ambiguous)" in self.src
+
+    def test_stdout_summary_surfaces_canary(self):
+        """The --dry-run stdout summary must surface the per-sport
+        alias_reused count and the canary invariant statement, so
+        the operator can eyeball the value against the retained
+        dedup snapshot tables."""
+        assert "Alias-aware existence check (canary)" in self.src
+        assert "Canary invariant" in self.src
+
+
+class TestDocstringInvariantCorrected:
+    """The pre-Day-53 docstring claimed 'Re-running this script
+    after a successful bootstrap produces zero new inserts.' That
+    was silently false after any direction-(b) dedup. The corrected
+    docstring documents the canary invariant instead."""
+
+    def setup_method(self):
+        import scripts.bootstrap_sp_teams
+        self.doc = scripts.bootstrap_sp_teams.__doc__ or ""
+
+    def test_zero_new_inserts_absolute_claim_removed(self):
+        """The false absolute claim must be gone."""
+        # The old phrasing was 'produces zero new inserts.' with a
+        # period ending the sentence — an absolute assertion.
+        assert (
+            "Re-running this script after a successful bootstrap "
+            "produces zero new inserts."
+        ) not in self.doc
+
+    def test_canary_invariant_documented(self):
+        """New invariant explains the alias-aware secondary check
+        and the sum-across-snapshot-tables canary."""
+        assert "canary" in self.doc.lower()
+        assert "TRUSTED_ALIAS_SOURCES" in self.doc
+        assert "direction-(b)" in self.doc
+        # The invariant must state the counter-is-the-gate framing.
+        assert "counter is the gate" in self.doc
+
+
 # ── Integration tests (skipped unless SP_INTEGRATION_DB is set) ──
 
 pytestmark_integration = pytest.mark.skipif(
