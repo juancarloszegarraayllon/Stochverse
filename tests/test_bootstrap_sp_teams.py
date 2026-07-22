@@ -532,6 +532,33 @@ class TestDocstringInvariantCorrected:
         # The invariant must state the counter-is-the-gate framing.
         assert "counter is the gate" in self.doc
 
+    def test_invariant_scope_narrowed_to_dedup_reduplication(self):
+        """Day-53 addition: the docstring must scope the invariant
+        NARROWLY. Canary-green protects against direction-(b)
+        re-duplication, NOT against legacy/sp formatting divergence.
+        Guards against a future edit reverting to the broader "re-run
+        is safe" phrasing.
+        """
+        # The "necessary but not sufficient" framing must be present
+        # to make the scope narrowing legible at read time.
+        assert "NECESSARY but NOT SUFFICIENT" in self.doc, (
+            "The invariant scope narrowing (Day-53 dry-run finding) "
+            "must explicitly state canary-green is necessary but not "
+            "sufficient for --apply safety."
+        )
+        # The specific out-of-scope class must be named — a future
+        # reader lands on the right class name.
+        assert "formatting" in self.doc.lower(), (
+            "The out-of-scope class (legacy/sp formatting divergence) "
+            "must be named, not just gestured at."
+        )
+        # The concrete example must appear so the class is not vague.
+        assert "(Country)" in self.doc or "(Ger)" in self.doc or \
+               "(Mex)" in self.doc, (
+            "A concrete example of the formatting divergence "
+            "(country-suffix pattern) must appear in the docstring."
+        )
+
 
 # ── Integration tests (skipped unless SP_INTEGRATION_DB is set) ──
 

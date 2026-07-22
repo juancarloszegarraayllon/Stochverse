@@ -91,6 +91,46 @@ Re-run safety and the canary invariant (Day-53):
   the log line, either merges those two teams or adjusts the
   legacy canonical before re-running.
 
+  What this fix does NOT protect against (Day-53 dry-run finding):
+
+    Canary-green on alias_reused is NECESSARY but NOT SUFFICIENT
+    for --apply safety. The alias-aware check protects against
+    re-duplication of direction-(b) dedups (the LMB Campeche
+    class). It does NOT protect against a broader class where
+    legacy public.entities and sp.teams diverge in canonical-name
+    FORMATTING — e.g., public.entities carries `(Country)` suffixes
+    ("Sturm Graz (Aut)", "Queretaro (Mex)") that sp.teams doesn't.
+    Those strings normalize to something that isn't the sp.teams
+    normalized_name AND isn't preserved as an alias anywhere, so
+    the primary check misses AND the secondary alias-aware check
+    misses too. They queue as net-new team inserts and, on --apply,
+    seed a new duplicate-canonical class at scale.
+
+    Empirical: the Day-53 dry-run against production reported 8,060
+    net-new team inserts (public.entities has grown since the
+    Phase-2A.5 May bootstrap; nothing backfilled). A random 25-row
+    Soccer sample of substring-collision candidates estimated ~40%
+    are formatting-mismatch duplicates about to be created —
+    dominated by the `(Country)`-suffix pattern. Applying this
+    without resolving that class would seed dozens to thousands of
+    duplicate-canonical pairs across Soccer alone, dwarfing the 14
+    LMB pairs the direction-(b) merge just untangled.
+
+    Consequently: canary-green closes the DEDUP re-duplication risk
+    this fix was scoped for. It does NOT close --apply overall.
+    --apply remains blocked pending a separate scoping item on
+    country-suffix normalization (design question: should
+    normalize_name strip parenthetical country codes? If yes, it
+    changes matching for every provider payload carrying
+    "(Ger)"/"(Mex)" — wide blast radius. If no, the bootstrap needs
+    a suffix-aware guard. Either way it's design, not patch, and
+    it is deliberately out of scope for this PR.).
+
+    Rule for future dedup-adjacent workstreams: distinguish "canary
+    covers the class this fix targeted" from "canary covers all
+    ways --apply can go wrong." Two different assertions; the second
+    requires evidence beyond the counter this fix installs.
+
 Usage:
 
     DATABASE_URL=<prod-Neon-URL> python scripts/bootstrap_sp_teams.py
