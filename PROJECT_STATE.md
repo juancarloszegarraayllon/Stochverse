@@ -118,11 +118,11 @@ and leave it for the parallel Academy session.
 
 ---
 
-## Session — 2026-07-14 → 2026-07-21
+## Session — 2026-07-14 → 2026-07-22
 
-### Days 49–52: Gate #3 re-specified from a mis-diagnosis into three real workstreams; doubles exclusion (3a) and LMB dedup (3d) shipped and verified; three-pattern methodology bank; 05-08 bootstrap re-regression audit closed
+### Days 49–53: Gate #3 re-specified from a mis-diagnosis into three real workstreams; doubles exclusion (3a) and LMB dedup (3d) shipped and verified; three-pattern methodology bank; 05-08 bootstrap re-regression audit closed with an alias-aware fix; Day-53 dry-run surfaced a distinct (Country)-suffix duplicate-in-waiting class that keeps `--apply` blocked
 
-One continuous arc across four sessions. Gate #1 (three-loop runner) stayed open the whole span — needs PR #248 and a natural 02:00–02:22 UTC window no session landed in. Everything below is Gate #3, the more consequential thread.
+One continuous arc across five sessions. Gate #1 (three-loop runner) stayed open the whole span — needs PR #248 and a natural 02:00–02:22 UTC window no session landed in. Everything below is Gate #3, the more consequential thread.
 
 ### Days 49–52: Gate #3 was mis-specified
 
@@ -180,22 +180,63 @@ Test coverage (5 classes, all Day-53's locked cases): `TestTrustedAliasSources` 
 
 Dry-run canary against production (blocked pending #252 merge): Baseball `alias_reused = 14` exactly (matches `sp.lmb_dedup_snapshot_2026_07_19` row count — all 14 legacy Baseball canonicals confirmed matching the snapshot bare forms Day-53), every other sport `= 0`, `queued_for_insert` unchanged from pre-Day-52 baseline. Any deviation → investigate before `--apply`. `--apply` stays blocked until this reads green.
 
-### Days 49–52: PR state
+### Day-53: Dry-run canary GREEN — invariant works AS-DESIGNED; separate finding keeps `--apply` blocked
+
+**Canary result** (production dry-run against #252 branch, fix verified present):
+
+- Baseball `alias_reused = 14` **exactly** — matches `sp.lmb_dedup_snapshot_2026_07_19` row count. Dedup re-duplication risk this PR was scoped for is closed.
+- `alias_ambiguous = 0` on all sports.
+- Non-Baseball reuse counts: **Tennis 76**, Basketball 11, Soccer 2, total 103. Not a failure — the invariant working as generalized. Tennis 76 matches the Day-26 tennis-dedup workstream's ~76 merges; source distribution confirms (Tennis `legacy_bootstrap` 3,843 / `fuzzy_tier` 198 / `operator_review` 3, and NO `bootstrap_league_coverage`). The allowlist earns its place: `fuzzy_tier` (198) and `operator_review` (3) correctly excluded from the reuse index.
+- Snapshot-tables-as-canary-references invariant confirmed generalizable: LMB's Baseball 14 is one instance of a broader sum-across-sports pattern.
+
+**The separate finding** — `--apply` is NOT a no-op; it would insert **8,060 net-new teams**.
+
+Arithmetic accounts for every legacy entity: 24,656 existing + 8,060 queued + 103 alias-reused + 6,909 tennis-doubles-skipped + 1,213 unmapped-sports = 40,941 legacy entities. The 8,060 are legacy entities with NO `sp.teams` row at all — `public.entities` has grown since the Phase-2A.5 May bootstrap and nothing backfilled. The docstring's "zero new inserts on re-run" is false for a **second** reason we hadn't considered, independent of the dedup issue.
+
+**And the 8,060 would seed Gate #3d at scale**. Substring-collision sizing (over-fires but useful as a candidate set): legacy queued-for-insert whose name substring-pairs against an existing same-sport team — Soccer 5,791, Basketball 56, Baseball 20, Cricket 9, Tennis 6, Hockey 5. Random 25-row Soccer sample against the raw legacy strings:
+
+- **~10/25 GENUINE DUPLICATES about to be created** — systematic pattern: `public.entities` carries `(Country)` suffixes that `sp.teams` doesn't. `Wisloka Debica (Pol)` / `Wisloka Debica`. `Usti nad Labem (Cze)` / `Usti nad Labem`. `Sturm Graz (Aut)` / `Sturm Graz`. `Ironi Modiin (Isr)`, `KFUM Oslo (Nor)`, `Ipswich (Aus)`, `Zabbar (Mlt)`, `Phonix Lubeck (Ger)`, `Eisbachtal (Ger)`. And pointedly: `Queretaro (Mex)` would collide with the Querétaro team the Day-52 LMB dedup just untangled.
+- ~4/25 legitimately distinct (`Flamengo RJ U17` vs `Flamengo RJ`; `Belarus U19` vs `Belarus`) — youth teams, inserting them is correct.
+- ~11/25 substring noise (`São Bernardo` / `Nardo`, `Charlotte (Usa)` / `USA`, `Hirnyk-Sport` / `Sport`).
+
+So ~40% of the sample is a real duplicate-in-waiting driven by a **formatting mismatch** between `public.entities` and `sp.teams`, not by edge cases. `--apply` would seed duplicate-canonical pairs across Soccer at a scale dwarfing the 14 LMB pairs the Day-52 merge just untangled.
+
+**Critically**: #252's alias-aware fix does NOT catch these. `'sturm graz (aut)'` isn't an alias on anything — it's a NEW string that merely CONTAINS an existing canonical. Different mechanism from the direction-(b) re-duplication case the fix was scoped for. Fix is correct and mergeable; **canary-green is necessary but not sufficient for `--apply` safety**.
+
+### Day-53: Invariant scope narrowed — necessary but not sufficient
+
+#252's docstring + new regression test amended to reflect the narrowed scope: alias-aware existence check protects against re-duplication of direction-(b) dedups, does NOT protect against legacy/sp formatting divergence. Concrete `(Country)`-suffix example in the docstring so a future reader lands on the right class name. `test_invariant_scope_narrowed_to_dedup_reduplication` guards the "NECESSARY but NOT SUFFICIENT" framing against future edits reverting to broader "re-run is safe" phrasing. 38 passed / 1 integration-skipped in `test_bootstrap_sp_teams.py` (was 37/1). PR #252 amended in commit `c1bd590`.
+
+Rule banked for future dedup-adjacent workstreams (sibling of the read-don't-derive family): **distinguish "canary covers the class this fix targeted" from "canary covers all ways `--apply` can go wrong."** Two different assertions; the second requires evidence beyond the counter the fix installs.
+
+### Day-53: New workstream (unscoped) — country-suffix normalization design question
+
+Is `resolver._normalize.normalize_name` supposed to strip parenthetical country codes (`"Sturm Graz (Aut)"` → `"sturm graz"`)?
+
+- **If yes**: it's a normalizer fix with wide blast radius — changes matching for every provider payload carrying `(Ger)` / `(Mex)` / etc. FL DOES send those (per Day-49 review-queue decomposition: `"Heerenveen (Ned)"`, `"Sparta Prague (Cze)"`). Ripples into strict / alias / fuzzy tier matching, resolver_log audit shape, and every existing `alias_normalized` value already written.
+- **If no**: the bootstrap needs a suffix-aware guard that treats `"Sturm Graz (Aut)"` as either a variant of existing `"Sturm Graz"` or as a distinct entity worth its own row.
+
+Either way it's a **design question, not a patch**. Deliberately out of scope for PR #252. Not scoping tonight; queued as pending workstream #2 below.
+
+Overlap worth noting: the 8,060 net-new legitimate teams (the ones NOT in the ~40% duplicate class) are arguably Gate #3b's coverage answer sitting right there — but only accessible after the country-suffix hazard is resolved. Same numeric population, different framing depending on which class you're solving for.
+
+### Days 49–53: PR state
 
 - **PR #249** (`claude/f8-procedure-2c-fourth-clause-plus-day47-writeback`) — f8-procedure §2c(d) distinctive-token subset gate + Day-47 pending write-back item. Open.
 - **PR #250** (`claude/fl-doubles-pair-exclusion`) — Gate #3a extractor exclusion. **Merged 2026-07-14**. `_is_doubles_pair_signal` guard in `resolver/fl.py` + `tests/test_resolver_2a.py` 16 regression tests.
 - **PR #251** (`claude/lmb-duplicate-canonical-dedup`) — Gate #3d LMB dedup procedure doc + snapshot/merge/verify SQL templates + methodology corrections through Day-52. Open (docs-only; operator-run SQL through Day-52).
-- **PR #252** (`claude/bootstrap-sp-teams-alias-aware-existence`) — bootstrap alias-aware existence check + 5 test classes + docstring invariant correction. Just opened (Day-53).
+- **PR #252** (`claude/bootstrap-sp-teams-alias-aware-existence`) — bootstrap alias-aware existence check + 5 test classes + docstring invariant correction. Day-53 canary verified GREEN (Baseball 14, ambiguous 0). Day-53 amendment (`c1bd590`) narrowed the invariant scope to "necessary but not sufficient" after the same dry-run surfaced 8,060 net-new inserts with ~40% Soccer duplicate-in-waiting via `(Country)`-suffix mismatch. Fix itself unchanged; scope-narrowing only. Green to merge.
 - **PR #248** (`claude/reresolution-runner-fix`) — Gate #1 runner fix. Open since the runner-fix span; still awaiting natural-window verification.
 
 ### Pending — next session
 
-1. **PR #252 dry-run canary** — operator runs `python scripts/bootstrap_sp_teams.py --dry-run` against production; confirms Baseball `alias_reused = 14`, every other sport = 0, `queued_for_insert` unchanged, `alias_ambiguous = 0`. Post-canary-green, `--apply` unblocks for Gate #3b.
-2. **Gate #1 natural-window run** — needs PR #248 and a live 02:00–02:22 UTC window with `candidate_set_size > 0` on both providers producing `crashes = 0`. Verification bar unchanged from Day-47 addendum.
-3. **Gate #3b coverage feed** — real Phase-3 distance, unscoped. The next-largest workstream after 3a/3d land.
-4. **Gate #3c matcher tightening** — token-subset collision handling. Deferred pending 3a + 3d verification post-#252.
-5. **`ix_teams_sport_normalized` → unique** — paired structural-fix question (`docs/dedup/lmb-2026-07-19.md` §13). Requires all direction-(b) dedups complete first (index would refuse to build on current duplicates). After 3d is stable and the bootstrap fix is verified in production.
-6. **Snapshot table retention** — `sp.lmb_dedup_snapshot_2026_07_19` retained per §8 as the canary reference for Baseball. Future direction-(b) dedups extend the canary per sport (sum-across-retained-snapshots, not a fixed constant).
+1. **`--apply` remains BLOCKED post-#252 merge** for a NEW reason (Day-53 finding, distinct from the dedup class #252 addressed): 8,060 net-new team inserts including ~40% `(Country)`-suffix formatting-mismatch duplicates in the Soccer sample. Do NOT read canary-green as `--apply`-safe; the canary covers the dedup re-duplication class only.
+2. **Country-suffix normalization design question** (new, unscoped) — should `resolver._normalize.normalize_name` strip parenthetical country codes? Wide-blast-radius normalizer fix vs suffix-aware bootstrap guard vs some third option. Design question, not patch. Scope in a future session; the 8,060 legitimate net-new teams are gated on this AND overlap with Gate #3b coverage territory.
+3. **Gate #1 natural-window run** — needs PR #248 and a live 02:00–02:22 UTC window with `candidate_set_size > 0` on both providers producing `crashes = 0`. Verification bar unchanged from Day-47 addendum.
+4. **Gate #3b coverage feed** — real Phase-3 distance, unscoped. Overlaps with pending #2 above: the ~5,000+ legitimate net-new teams currently blocked behind the country-suffix question ARE the coverage-feed answer for those sports, once the duplicate-hazard is resolved.
+5. **Gate #3c matcher tightening** — token-subset collision handling. Deferred pending 3a + 3d verification post-#252.
+6. **`ix_teams_sport_normalized` → unique** — paired structural-fix question (`docs/dedup/lmb-2026-07-19.md` §13). Requires all direction-(b) dedups complete first (index would refuse to build on current duplicates). After 3d is stable, the bootstrap fix is verified in production, AND the country-suffix question is resolved (pending #2) — otherwise the unique index would refuse to build on the new duplicates `--apply` would seed.
+7. **Snapshot table retention** — `sp.lmb_dedup_snapshot_2026_07_19` retained per §8 as the canary reference for Baseball. Future direction-(b) dedups extend the canary per sport (sum-across-retained-snapshots, not a fixed constant).
 
 ---
 
