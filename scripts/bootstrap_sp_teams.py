@@ -1,8 +1,10 @@
 """Bootstrap sp.teams + sp.team_aliases from legacy public.entities + public.entity_aliases.
 
 Phase 2A.5 deliverable per SP Architecture v1.4 §5 / Phase 2B design
-doc Question B. One-time migration (idempotent — re-running is a
-no-op for any rows already present).
+doc Question B. Re-runnable — idempotent for the primary case (row
+already exists at (sport_id, normalized_name)) AND for the secondary
+alias-aware case added Day-53 (see "Re-run safety and the canary
+invariant" below).
 
 I/O pattern: bulk loads, in-memory dedup, bulk inserts. NOT per-row
 round-trips. The original implementation issued one SELECT per
@@ -49,8 +51,85 @@ Idempotency guarantees survive the rewrite:
   - sp.team_aliases idempotent via the (alias_normalized, source)
     UNIQUE constraint, with ON CONFLICT DO NOTHING.
 
-Re-running this script after a successful bootstrap produces zero
-new inserts.
+Re-run safety and the canary invariant (Day-53):
+
+  The primary "does this team already exist?" check keys on
+  (sport_id, normalized_name) from sp.teams. That check alone was
+  sufficient BEFORE any direction-(b) dedup ran — see the LMB
+  workstream in docs/dedup/lmb-2026-07-19.md — because pre-dedup
+  every legacy canonical still normalized to a live sp.teams row's
+  normalized_name. Post-dedup, the renamed row's normalized_name is
+  the FULL canonical (e.g. "piratas de campeche"), and the primary
+  check misses on the legacy bare canonical ("campeche"), which
+  would silently re-insert the duplicate the dedup just removed.
+
+  Fix: a secondary alias-aware existence check runs on primary miss.
+  If the normalized legacy canonical exists as a TRUSTED alias
+  (source in TRUSTED_ALIAS_SOURCES — bootstrap-family only, NOT
+  runtime-derived) on some team in the same sport, reuse that
+  team_id instead of inserting. The bare form is what direction-(b)
+  merges preserve as an alias, so this generalizes to every past
+  and future direction-(b) dedup without hardcoding team lists.
+
+  Canary invariant — the DRY-RUN GATE for re-run safety:
+
+    Baseline_alias_reused[sport] == sum across all retained
+    docs/dedup snapshot tables of merges affecting that sport.
+
+  For each sport, the expected alias_reused count is the number of
+  direction-(b) merges recorded in that sport's retained snapshot
+  tables (e.g. sp.lmb_dedup_snapshot_2026_07_19 → Baseball = 14).
+  Bootstrap re-run is safe when every sport's alias_reused counter
+  matches its expected value. The counter is the gate, not a
+  fixed constant. --dry-run reports the counters so the operator
+  confirms the canary reads clean before running --apply.
+
+  Ambiguity (a normalized string is a trusted alias on ≥2 teams
+  in the sport): skip-and-log the legacy entity, do NOT pick
+  arbitrarily. Matches the script's existing conservatism
+  (skipped_tennis_doubles / per_sport_skipped). Operator inspects
+  the log line, either merges those two teams or adjusts the
+  legacy canonical before re-running.
+
+  What this fix does NOT protect against (Day-53 dry-run finding):
+
+    Canary-green on alias_reused is NECESSARY but NOT SUFFICIENT
+    for --apply safety. The alias-aware check protects against
+    re-duplication of direction-(b) dedups (the LMB Campeche
+    class). It does NOT protect against a broader class where
+    legacy public.entities and sp.teams diverge in canonical-name
+    FORMATTING — e.g., public.entities carries `(Country)` suffixes
+    ("Sturm Graz (Aut)", "Queretaro (Mex)") that sp.teams doesn't.
+    Those strings normalize to something that isn't the sp.teams
+    normalized_name AND isn't preserved as an alias anywhere, so
+    the primary check misses AND the secondary alias-aware check
+    misses too. They queue as net-new team inserts and, on --apply,
+    seed a new duplicate-canonical class at scale.
+
+    Empirical: the Day-53 dry-run against production reported 8,060
+    net-new team inserts (public.entities has grown since the
+    Phase-2A.5 May bootstrap; nothing backfilled). A random 25-row
+    Soccer sample of substring-collision candidates estimated ~40%
+    are formatting-mismatch duplicates about to be created —
+    dominated by the `(Country)`-suffix pattern. Applying this
+    without resolving that class would seed dozens to thousands of
+    duplicate-canonical pairs across Soccer alone, dwarfing the 14
+    LMB pairs the direction-(b) merge just untangled.
+
+    Consequently: canary-green closes the DEDUP re-duplication risk
+    this fix was scoped for. It does NOT close --apply overall.
+    --apply remains blocked pending a separate scoping item on
+    country-suffix normalization (design question: should
+    normalize_name strip parenthetical country codes? If yes, it
+    changes matching for every provider payload carrying
+    "(Ger)"/"(Mex)" — wide blast radius. If no, the bootstrap needs
+    a suffix-aware guard. Either way it's design, not patch, and
+    it is deliberately out of scope for this PR.).
+
+    Rule for future dedup-adjacent workstreams: distinguish "canary
+    covers the class this fix targeted" from "canary covers all
+    ways --apply can go wrong." Two different assertions; the second
+    requires evidence beyond the counter this fix installs.
 
 Usage:
 
@@ -102,6 +181,29 @@ LEGACY_SPORT_ALIASES: dict[str, str] = {
 }
 
 
+# Alias sources trusted for the secondary team-existence disambiguation
+# check (see module docstring: "Re-run safety and the canary invariant").
+#
+# Bootstrap-family sources only. Runtime-derived sources — 'fuzzy_auto',
+# 'alias_tier' — are deliberately EXCLUDED. Those aliases are created by
+# the live resolver on production records, are subject to the same mis-
+# resolution failure modes we've been tracking, and MUST NOT
+# retroactively suppress a legitimate legacy-entity insertion just
+# because a stray runtime-derived alias happened to collide.
+#
+# Extension pattern: when a new curated bootstrap tag is added
+# (bootstrap_<league_code>, manual_review, operator_seed, etc.), add
+# it here if and only if that source is genuinely curated. Add a
+# regression test to TestTrustedSourceAllowlist. Do NOT add runtime-
+# derived sources; the whole point of the allowlist is to keep those
+# out.
+TRUSTED_ALIAS_SOURCES: frozenset[str] = frozenset({
+    "legacy_bootstrap",
+    "bootstrap_league_coverage",
+    "bootstrap_national",
+})
+
+
 def _resolve_sport_id(legacy_sport: str | None, sport_id_by_name: dict) -> int | None:
     """Look up sport_id from legacy entity.sport, applying alias map.
 
@@ -112,6 +214,61 @@ def _resolve_sport_id(legacy_sport: str | None, sport_id_by_name: dict) -> int |
         return None
     canonical = LEGACY_SPORT_ALIASES.get(legacy_sport, legacy_sport)
     return sport_id_by_name.get(canonical)
+
+
+def _build_alias_team_index(
+    alias_rows,
+) -> dict[tuple[int, str], set[uuid.UUID]]:
+    """Group trusted-source alias rows by (sport_id, alias_normalized)
+    → set of team_ids.
+
+    Set-valued so the "same normalized string on two teams in one
+    sport" ambiguity is detectable at lookup time (rather than a
+    scalar last-writer-wins that would silently pick one team).
+
+    `alias_rows` is any iterable yielding objects with attributes
+    `.sport_id: int`, `.alias_normalized: str`, `.team_id: uuid.UUID`
+    — matches the row shape from the bulk-load SELECT below.
+    Alternative: iterable of `(sport_id, alias_normalized, team_id)`
+    tuples; test suite exercises both shapes.
+
+    Pure function — same input, same output. Deliberately trivial so
+    the unit tests can be unit tests, not integration tests.
+    """
+    idx: dict[tuple[int, str], set[uuid.UUID]] = {}
+    for row in alias_rows:
+        # Support both attribute access (SQLAlchemy rows) and tuple
+        # unpacking (test fixtures).
+        if hasattr(row, "sport_id"):
+            sport_id, alias_norm, team_id = (
+                row.sport_id, row.alias_normalized, row.team_id,
+            )
+        else:
+            sport_id, alias_norm, team_id = row
+        idx.setdefault((sport_id, alias_norm), set()).add(team_id)
+    return idx
+
+
+def _resolve_via_alias(
+    sport_id: int,
+    normalized: str,
+    alias_team_index: dict[tuple[int, str], set[uuid.UUID]],
+) -> tuple[uuid.UUID | None, bool]:
+    """Look up (sport_id, normalized) in the trusted-alias index.
+
+    Returns (team_id, ambiguous):
+      - (uuid, False)   — exactly one team has this normalized as a
+                          trusted alias. Reuse it.
+      - (None, True)    — two or more teams. Ambiguous; caller
+                          skips-and-logs rather than picking.
+      - (None, False)   — not found. Caller falls through to INSERT.
+    """
+    teams = alias_team_index.get((sport_id, normalized))
+    if not teams:
+        return None, False
+    if len(teams) == 1:
+        return next(iter(teams)), False
+    return None, True
 
 
 async def main(dry_run: bool) -> int:
@@ -170,6 +327,34 @@ async def main(dry_run: bool) -> int:
         log.info("bootstrap.sp_teams.existing_legacy_aliases_loaded",
                  count=len(existing_aliases))
 
+        # Alias-aware team-existence index (Day-53 addition — see module
+        # docstring "Re-run safety and the canary invariant").
+        #
+        # Keyed on (sport_id, alias_normalized) → set of team_ids. Used
+        # as the SECONDARY check in the classification loop below: when
+        # the primary (sport_id, normalized_name) team lookup misses,
+        # this catches the case where the legacy canonical is
+        # preserved as an alias on a team whose canonical was renamed
+        # by a direction-(b) dedup.
+        #
+        # Filtered to TRUSTED_ALIAS_SOURCES (bootstrap-family only,
+        # NOT runtime-derived) — a stray fuzzy_auto alias must never
+        # suppress a legitimate legacy-entity insertion.
+        alias_team_rows = (await session.execute(text(
+            """
+            SELECT t.sport_id, a.alias_normalized, a.team_id
+            FROM sp.team_aliases a
+            JOIN sp.teams t ON t.id = a.team_id
+            WHERE a.source = ANY(:trusted_sources)
+            """
+        ), {"trusted_sources": list(TRUSTED_ALIAS_SOURCES)})).all()
+        alias_team_index = _build_alias_team_index(alias_team_rows)
+        log.info(
+            "bootstrap.sp_teams.alias_team_index_loaded",
+            unique_keys=len(alias_team_index),
+            trusted_sources=sorted(TRUSTED_ALIAS_SOURCES),
+        )
+
         # ── Step 2: read legacy entities (team-typed) ───────────
 
         team_entities = (await session.execute(text(
@@ -188,6 +373,8 @@ async def main(dry_run: bool) -> int:
         teams_to_insert: list[dict] = []
         per_sport_inserts: dict[str, int] = defaultdict(int)
         per_sport_existing: dict[str, int] = defaultdict(int)
+        per_sport_alias_reused: dict[str, int] = defaultdict(int)
+        per_sport_alias_ambiguous: dict[str, int] = defaultdict(int)
         per_sport_skipped: dict[str, int] = defaultdict(int)
         unmapped_sports: dict[str, int] = defaultdict(int)
         skipped_tennis_doubles = 0
@@ -222,9 +409,42 @@ async def main(dry_run: bool) -> int:
             key = (sport_id, normalized)
             existing_uuid = team_uuid_by_key.get(key)
             if existing_uuid is not None:
-                # Already in sp.teams — reuse its uuid for alias FKs.
+                # PRIMARY existence check — team already exists at
+                # (sport_id, normalized_name). Reuse its uuid.
                 legacy_to_sp[ent.id] = existing_uuid
                 per_sport_existing[ent.sport] += 1
+                continue
+
+            # SECONDARY existence check (Day-53) — see module docstring
+            # "Re-run safety and the canary invariant". The legacy
+            # canonical may have been preserved as a trusted alias on
+            # a team whose canonical was renamed by a direction-(b)
+            # dedup (e.g. LMB "Campeche" preserved as alias on the
+            # renamed "Piratas de Campeche" row). If so, reuse that
+            # team_id rather than re-inserting the duplicate.
+            aliased_uuid, ambiguous = _resolve_via_alias(
+                sport_id, normalized, alias_team_index,
+            )
+            if ambiguous:
+                # The normalized string is a trusted alias on 2+ teams
+                # in this sport. Skip-and-log, don't guess.
+                per_sport_alias_ambiguous[ent.sport] += 1
+                log.warning(
+                    "bootstrap.sp_teams.alias_ambiguous",
+                    sport=ent.sport,
+                    sport_id=sport_id,
+                    normalized=normalized,
+                    legacy_canonical=ent.canonical_name,
+                    legacy_entity_id=ent.id,
+                    colliding_team_ids=sorted(
+                        str(tid) for tid in
+                        alias_team_index.get((sport_id, normalized), set())
+                    ),
+                )
+                continue
+            if aliased_uuid is not None:
+                legacy_to_sp[ent.id] = aliased_uuid
+                per_sport_alias_reused[ent.sport] += 1
                 continue
 
             # New team — generate uuid, queue insert, add to in-memory
@@ -245,8 +465,12 @@ async def main(dry_run: bool) -> int:
             "bootstrap.sp_teams.teams_classified",
             queued_for_insert=len(teams_to_insert),
             already_existing=sum(per_sport_existing.values()),
+            alias_reused_total=sum(per_sport_alias_reused.values()),
+            alias_ambiguous_total=sum(per_sport_alias_ambiguous.values()),
             inserted_per_sport=dict(per_sport_inserts),
             existing_per_sport=dict(per_sport_existing),
+            alias_reused_per_sport=dict(per_sport_alias_reused),
+            alias_ambiguous_per_sport=dict(per_sport_alias_ambiguous),
             skipped_per_sport=dict(per_sport_skipped),
             skipped_tennis_doubles=skipped_tennis_doubles,
             unmapped_sports=dict(unmapped_sports),
@@ -391,6 +615,30 @@ async def main(dry_run: bool) -> int:
         print(f"\n  Already present (skipped):")
         print(f"    teams already in sp.teams:       {sum(per_sport_existing.values()):>6}")
         print(f"    aliases already (legacy_bootstrap): {len(existing_aliases) - len(aliases_to_insert):>6}")
+
+        # Alias-aware existence check (Day-53) — the canary. Per-sport
+        # alias_reused counter and per-sport alias_ambiguous counter.
+        # Expected value for each sport = sum across that sport's
+        # retained direction-(b) dedup snapshot tables. Any deviation
+        # from expected → investigate before running --apply.
+        alias_reused_total = sum(per_sport_alias_reused.values())
+        alias_ambiguous_total = sum(per_sport_alias_ambiguous.values())
+        if alias_reused_total or alias_ambiguous_total:
+            print(f"\n  Alias-aware existence check (canary):")
+            print(f"    reused via trusted alias (total):     {alias_reused_total:>6}")
+            print(f"    ambiguous (skipped, see log):         {alias_ambiguous_total:>6}")
+            if per_sport_alias_reused:
+                print(f"    per sport (alias_reused):")
+                for sport, count in sorted(per_sport_alias_reused.items()):
+                    print(f"      {sport!r:28}  {count:>6}")
+            if per_sport_alias_ambiguous:
+                print(f"    per sport (alias_ambiguous):")
+                for sport, count in sorted(per_sport_alias_ambiguous.items()):
+                    print(f"      {sport!r:28}  {count:>6}")
+            print(f"    Trusted sources: {sorted(TRUSTED_ALIAS_SOURCES)}")
+            print(f"    Canary invariant: alias_reused per sport must match "
+                  f"the sum across that sport's retained dedup snapshot tables.")
+
         if skipped_tennis_doubles:
             print(f"\n  Skipped — tennis doubles partnerships:    {skipped_tennis_doubles:>6}")
             print(f"    (canonical_name contains '/'; per-tournament pairings,")
