@@ -44,20 +44,51 @@ accuracy is a critical INPUT to the product, not a substitute for it.
 - **Phase 6 — Frontend rewrite**: NOT STARTED (placeholder per
   §11.7; triggers require backend stable on v4 for one quarter).
 
-### Phase 2 EXIT GATES — these block Phase 3
+### Phase 2 EXIT CONDITIONS — §11.3 checklist, reanchored Day-53
 
-| Gate | Spec | Status |
-|---|---|---|
-| Three-loop runner (§7.7) | Hot via LISTEN/NOTIFY + batch 30s + re-resolution 5–10 min | **NOT BUILT.** Only cron-batch twice/day (`run_resolver_pass.py:149` rejects `--run-mode live`, reserved for "Phase 2E"). Hot loop and 5–10 min re-resolution loop missing. Re-resolution is also the §7.6 accuracy multiplier — it retroactively re-resolves the back-catalog whenever aliases are added. |
-| Daily-diff measurement loop (§11.3) | "Run a daily diff; tune until acceptable" | **BUILT BUT UNWIRED.** `scripts/daily_diff.py` exists; `railway.toml` has no cron entry for it (only the two resolver crons). Manual / irregular runs; measurement gaps since Day-21. |
-| Review queue health (§7.5) | Steady-state <20 pending; alert >100 | **18,303 pending (as of 2026-06-15)** — ~915× the spec's <20 steady-state target, ~183× the >100 alert threshold. Grew from ~16,755 (Day-37) despite coverage work — the exit-gate failure made concrete: nothing drains the queue and the §7.6 re-resolution loop that would re-sweep it isn't built. Throughput gate for Phase 3; also unharvested labeled aliases that would feed re-resolution. |
-| Archival job (§6.5) | Nightly mover to object storage; 30d hot / 1y archive / delete; `resolution_log` retained forever | **NOT BUILT.** No S3/object-storage code, no bucket config, no nightly job. `sp.resolution_log` unbounded (~130K rows — not yet biting, but the architectural assumption is fully un-implemented). |
+**Reanchor rationale**: the prior 4-gate table (three-loop runner / daily-diff / review queue <20 / archival) drifted from the source doc. Reading SP Architecture v1.4 directly against the repo: "review_queue <20" is §7.5's steady-state operational health metric alongside ">100 = notify, do not page" — NOT a phase exit criterion (doc's guidance for our exact situation is "if consistently growing despite review effort, the resolver thresholds are wrong; the fix is upstream" — which is what Gates #3a-c already are). Archival is §11.2's Phase 1 deliverable partially descoped by v1.4 ("existing PRICE_RETENTION_HOURS pruning is acceptable steady-state"). Both had migrated into "Phase 2 exit gates" via working-memory drift, not the doc. Sibling of the read-don't-derive family — see §13's methodology bank in `docs/dedup/lmb-2026-07-19.md`.
 
-### What unblocks Phase 3
+Replaced with §11.3's actual 8-item Phase 2 checklist. Status per Day-53 read-based audit against the repo (not inferred from prior journal state):
 
-A `/api/v4/sports/{id}/feed` endpoint to flag traffic onto AND a
-review queue tolerable enough to cut over behind that flag.
-**Neither exists yet.**
+| # | §11.3 item | Status | Evidence |
+|---|---|---|---|
+| 1 | Central matcher with confidence scoring | **DONE** | `resolver/matcher.py:StrictMatcher` + `TieredMatcher`; `MatchResult.confidence: float` per `resolver/types.py:100` |
+| 2 | Tier 1–4 ported into FL + Kalshi resolver module | **DONE** | Strict (`resolver/matcher.py`), Alias (`resolver/alias_tier/matcher.py`), Fuzzy (`resolver/fuzzy_tier/matcher.py`). §7.3's fourth item (corroboration) reads as a preference rule among candidates ("the corroborated fixture is preferred") — a scoring signal, not a distinct matching strategy. Implemented correctly as `has_cross_provider_corroboration` + `CORROBORATION_SCORE = 0.20` boost into alias/fuzzy score breakdown. "Tier 1-4" is legacy vocabulary from earlier phase notes; the doc's actual four items are three matchers + a preference rule. |
+| 3 | `sp.resolution_log` | **DONE** | Migration `20260507_1504_...initial_sp_schema.py`; ORM at `sp_models.py:381`; every decision written via `pg_insert_resolution_log` |
+| 4 | Three-loop resolver (hot LISTEN/NOTIFY + batch 30s + re-resolution 5–10 min) | **PARTIAL** | Hot loop: zero code matches on `LISTEN`/`NOTIFY`/`pg_notify` primitives across the repo (only docs + one env-var name collision + reresolution runner's `--candidate-set` "seam" comment). No listener, no NOTIFY trigger. Batch loop: selection logic EXISTS in `scripts/run_resolver_pass.py` (the daily runner's broad `fixture_id IS NULL` scan) — cadence is daily, not 30s. Re-resolution loop: `scripts/run_reresolution_pass.py` implemented with narrow Tier-1 selection (`fixture_id IS NULL AND last_seen_at > 3d AND latest.reason_code = 'no_match' AND fail_reason IN allowlist AND asymmetric_excluded IS NULL` per `:242-288`); paused pending PR #248 merge + dry-run verification. **Hot loop scoped as post-Phase-3 optimization** (see decision block below). **Batch cadence is operator-owned** (see decision block below). |
+| 5 | Admin review-queue UI (§7.5 minimum scope) | **DONE** | `admin/router.py`: `review_queue_list`, `review_queue_detail`; templates for list/detail/login/decision-form/decision-result/anchor-failed; auth in `admin/auth.py`; mounted at `/admin/*` per `main.py:385-386` |
+| 6 | Resolver running continuously against stored data | **PARTIAL / decision-dependent** | Daily crons run resolver against stored `sp.fl_events`/`sp.kalshi_markets` at 02:00/02:15 UTC. "Continuously" per §11.3 almost certainly means Item 4's three-loop cadence — on that reading, Item 6 is gated on Item 4's cadence decision (below), not a separate build |
+| 7 | Daily diff until acceptable | **PARTIAL** | `scripts/daily_diff.py` (1,168 lines), scheduled `0 3 * * *` via `daily-diff` service in `railway.toml`. Running. **"Acceptable" undefined in the code** (see decision block below) |
+| 8 | Extract initial test corpus of ~100 cases from accumulated raw payloads (§12.1) | **NOT STARTED — silent violation** | `tests/corpus/` does not exist. `Makefile:95-96`'s `test-corpus: pytest tests/corpus/` target would fail on missing directory. §12.2 mandates replay-against-corpus as the gate for every resolver change; that gate has been silently absent through the entire Phase 2E arc (PRs #245, #250, #251, #252 all shipped resolver-adjacent changes without corpus replay). Corrective queued below |
+
+### Two undecided numbers gating Phase 3 — operator-owned
+
+Both are product-latency / product-quality decisions, not code work. Surfaced explicitly here rather than buried in item status so future sessions don't accrete inherited numbers the way "<20 pending" did (that number arrived from working-memory drift, was treated as a bar for weeks, and turned out to be §7.5's health metric — the second-order failure was the anchoring, not the number itself).
+
+**Decision 1 — Item 7 acceptable-threshold**: `docs/reresolution/scope-2026-06-17.md` and §13.1 both say "do not cut over until diff is acceptable." No one has defined acceptable. Candidate shapes: matcher-capability rate on a scope-filtered denominator, per-sport floors, cross-provider agreement rate, or something else entirely. **Operator decision; no number proposed here.** A number proposed by anyone but the operator risks becoming the inherited bar a future session treats as canonical.
+
+**Decision 2 — Item 4 batch-loop cadence**: the batch-loop SELECTION exists (daily runner's broad `fixture_id IS NULL` scan); the CADENCE is daily. §7.7 spec is 30s; re-resolution is 5–10 min. The genuine question is "what latency from provider-ingest to fixture-link is acceptable" — 30s vs 5 min vs daily is set by product, not architecture. Running the daily-shape scan every 30s is real work (~46k FL records/pass, connection budget, incremental scan design), so this is build-work-gated-on-a-decision, not a cron edit. **Operator decision; no number proposed here.**
+
+### Reclassified out of Phase 2 exit gates
+
+- **Review queue <20 pending** (was Gate #3): §7.5 steady-state operational health metric, alongside `>100 = notify, do not page`. NOT a cutover blocker per the source doc. Ongoing resolver-quality workstreams — Gates #3a (extractor exclusion, PR #250 merged), #3b (coverage feed, unscoped), #3c (matcher tightening, deferred), #3d (data reconciliation, PR #251 + operator-run SQL through Day-52) — are the "upstream fix" §7.5 mandates. Queue depth is a downstream effect of those; treat as ongoing.
+- **§6.5 archival** (was Gate #4): Phase 1 deliverable per §11.2, partially descoped by v1.4 ("existing PRICE_RETENTION_HOURS pruning is acceptable steady-state"). NOT a Phase 2 exit criterion.
+
+### What Phase 3 actually needs from us
+
+Three things:
+
+1. **Decision 1 above** — Item 7's acceptable-threshold. Blocks the "should we cut over" call itself.
+2. **Decision 2 above** — Item 4's batch cadence. Blocks Item 6 completion.
+3. **`/api/v4/sports/{id}/feed` scaffolding** — unchanged from prior framing. `grep "/api/v4" main.py` returns zero. Not started.
+
+### Silent-violation corrective — Item 8 test corpus
+
+§12.1 spec: canary / regression / active-edge-case corpus. §12.2 spec: replay-against-corpus gates every resolver change. Currently absent, and PRs #245 / #250 / #251 / #252 all shipped resolver-adjacent changes without corpus replay. Queued as a Day-54+ scope item: extract ~100 cases spanning strict/alias/fuzzy/no_match/review_queue outcomes across FL and Kalshi from accumulated raw payloads, stand up `tests/corpus/`, wire `Makefile:test-corpus` back to green, add replay-as-gate to a pre-merge checklist for any `resolver/*.py` diff. Unblocking — doesn't depend on Item 4 decisions.
+
+### Methodology bank addition (Day-53) — doc-drift check as first move on strategic re-anchor
+
+This whole audit surfaced that two of four tracked gates weren't in the source doc and one doc-mandated safety net (Item 8) was silently absent. Sibling of the read-don't-derive family named in `docs/dedup/lmb-2026-07-19.md` §13: **when re-anchoring, read the anchor before working from the working-memory summary of it.** Same corrective as the other three family members — read the source (migration / snapshot / doc), don't derive from the local mental model.
 
 ### Accuracy note
 
@@ -71,21 +102,7 @@ leverage remaining accuracy work that also serves the critical path is
 the re-resolution loop (compounds across all existing coverage) plus
 queue harvest — not the next league bootstrap.
 
-**Active workstream (Day-44 continued — LIVE IN PRODUCTION):** the
-§7.6 / §7.7 re-resolution loop is **LIVE**. Three Phase 2E Railway
-services created in the dashboard Day-44 (`resolver-reresolution-fl`,
-`resolver-reresolution-kalshi`, `daily-diff`); both reresolution
-services validated on first live pass (`run_mode='live'`,
-crashes=0, halt_warnings=[], `candidate_set_size=0` correctly
-selective per F7 Part B's alias-velocity-evidence settlement).
-**First Phase 2 exit gate moved built → live.** F8 validation
-pending — staged targeted before/after on a known
-alias-flip-eligible record (passive flips ~0 by design until
-coverage resumes; the loop is a multiplier with nothing to
-multiply this week). Five crons total now (2 daily resolvers +
-3 new Phase 2E). Coverage stays resequenced behind the loop:
-worth more compounding through the now-live machinery than
-ahead of it.
+**Active workstream (Day-53 reanchored):** the previous "re-resolution loop LIVE" framing was correct in Day-44 mechanical terms (services created, first-pass exit-0) but overstated in exit-gate terms — Day-47 addendum found both loops were no-ops since Day-44 go-live (Gate #1 was never actually closed). PR #248 fixes the runner; paused until natural-window verification (`candidate_set_size > 0` producing `crashes = 0` on both providers). The re-resolution loop is Item 4's narrow slice; the batch loop (broad selection at 30s cadence) and hot loop (LISTEN/NOTIFY sub-second) are the other two slices — see the reanchor table above for real status. Coverage stays resequenced behind the loop and the two decision blocks above; ongoing resolver-quality workstreams (Gates #3a-d) continue as ongoing work, not cutover blockers.
 
 ### Pointer
 
