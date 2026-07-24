@@ -628,15 +628,27 @@ async def main(
     no_match = 0
     review_queue_writes = 0
     crashes = 0
+    log_rows_written = 0
 
-    if apply and candidates:
+    # Day-47 change: dry-run also exercises the matcher (with rollback
+    # at commit-time), so the pre-un-pause verification pass produces
+    # real per-record counters and halt-warning math sees real values.
+    # Prior shape (`if apply and candidates:`) meant dry-run only
+    # measured candidate_set_size — insufficient for pre-un-pause
+    # dispositive verification of the runner shape.
+    if candidates:
         try:
             (
-                auto_applies, no_match, review_queue_writes, crashes,
+                auto_applies,
+                no_match,
+                review_queue_writes,
+                crashes,
+                log_rows_written,
             ) = await _run_matcher_over_candidates(
                 provider=provider,
                 candidates=candidates,
                 run_id=run_id,
+                apply=apply,
                 log=log,
             )
         except Exception as exc:  # noqa: BLE001
@@ -723,7 +735,6 @@ async def main(
     )
 
     # ── Stdout summary ──────────────────────────────────────
-    verb = "Would" if not apply else ""
     print(f"\nRe-resolution pass {'dry-run' if not apply else 'apply'} "
           f"complete in {elapsed_sec:.2f}s:")
     print(f"  provider:                  {provider}")
@@ -734,17 +745,27 @@ async def main(
     if trailing_mean is not None:
         print(f"  trailing-7d-mean:          {trailing_mean:>6.1f}")
     print(f"  candidate-select latency:  {latency_candidate_select_ms:>6} ms")
+    # Post Day-47: the matcher runs on both --apply and --dry-run so
+    # these counters are always real (dry-run rolls back the writes at
+    # commit-time; the numbers reflect what the matcher decided, not
+    # what persisted).
+    print(f"  auto_applies:              {auto_applies:>6}")
+    print(f"  no_match:                  {no_match:>6}")
+    print(f"  review_queue_writes:       {review_queue_writes:>6}")
+    print(f"  crashes:                   {crashes:>6}")
+    print(f"  resolution_log rows/pass:  {log_rows_written:>6}")
     if apply:
-        print(f"  auto_applies:              {auto_applies:>6}")
-        print(f"  no_match:                  {no_match:>6}")
-        print(f"  review_queue_writes:       {review_queue_writes:>6}")
-        print(f"  crashes:                   {crashes:>6}")
         print(f"\n  metrics written to sp.resolver_runs "
               f"(run_id={run_id}, run_mode=live)")
+        print(f"  sp.resolution_log rows persisted "
+              f"({log_rows_written} appended).")
     else:
-        print(f"  {verb} run matcher over {candidate_set_size} records.")
-        print(f"\n  Dry-run: no writes to sp.resolution_log, "
-              "sp.review_queue, or sp.resolver_runs.")
+        print(f"\n  Dry-run: sp.resolution_log writes ROLLED BACK; "
+              "no sp.resolver_runs row written.")
+        print(f"  review_queue_writes above is a decision-shape "
+              "counter; this runner does not INSERT to sp.review_queue")
+        print(f"  (writes live on the daily runner). --apply to "
+              "persist the sp.resolution_log rows.")
         print(f"  Operator sanity check — Day-41 addressable ceiling is "
               f"~16,588.")
 
@@ -834,14 +855,34 @@ async def _run_matcher_over_candidates(
     provider: str,
     candidates: list[dict],
     run_id: uuid.UUID,
+    apply: bool,
     log,
-) -> tuple[int, int, int, int]:
-    """Run the TieredMatcher over the candidate set and write fresh
-    sp.resolution_log rows. Reuses the same write pattern as
-    run_resolver_pass.py (ON CONFLICT WHERE status='pending' covers
-    sp.review_queue idempotency per F4).
+) -> tuple[int, int, int, int, int]:
+    """Run the TieredMatcher over the candidate set and (on apply)
+    persist sp.resolution_log rows.
 
-    Returns (auto_applies, no_match, review_queue_writes, crashes).
+    Mirrors the daily runner's shape at scripts/run_resolver_pass.py
+    :413 (`await matcher.match(session, signal)`) and :430 (one
+    resolution_log row per tier consulted, per Phase 2D.3 design
+    D.4 — "I tried and failed" is forensic data).
+
+    apply=True  → session.commit() at the end; sp.resolution_log
+                  rows persist.
+    apply=False → session.rollback() at the end; matcher runs end
+                  to end, per-record counters populate, halt-warning
+                  math sees real values, no persistence. Use for
+                  pre-un-pause dry-run verification.
+
+    Note: this runner writes sp.resolution_log ONLY. Provider-table
+    UPDATE, sp.team_aliases write-back, and sp.review_queue INSERTs
+    live on the daily runner (scripts/run_resolver_pass.py). The
+    review_queue_writes return value is a decision-shape counter
+    (`final tier_result.reason_code == 'review_queue'`), NOT a write
+    count — the reresolution loop's actual review_queue landing
+    happens on the subsequent daily cron.
+
+    Returns (auto_applies, no_match, review_queue_writes, crashes,
+             log_rows_written).
     """
     # Lazy import — keeps module-load light and matches the resolver
     # bootstrap shape.
@@ -858,6 +899,7 @@ async def _run_matcher_over_candidates(
     miss = 0
     rq_writes = 0
     crashes = 0
+    log_rows = 0
 
     async with async_session() as session:
         # ── Bootstrap matcher state (single-shot) ────────────
@@ -924,35 +966,55 @@ async def _run_matcher_over_candidates(
         # ── Walk records and write sp.resolution_log per pass ─
         for row in payload_rows:
             try:
-                signal = extractor.extract_signal(
-                    row.raw_payload
-                    if provider == "kalshi"
-                    else {"raw_payload": row.raw_payload,
-                          "sport_name": row.sport_name},
-                )
+                # FL extractor takes sport as a kwarg on the raw
+                # payload; Kalshi reads _sport off raw_payload itself.
+                # Mirror scripts/run_resolver_pass.py:366-370. The
+                # Day-44 code wrapped the FL payload as
+                # {"raw_payload": ..., "sport_name": ...} which made
+                # extract_signal(raw_record).get("EVENT_ID") return
+                # None on every record, silently no-op'ing the FL
+                # loop since go-live.
+                if provider == "fl":
+                    signal = extractor.extract_signal(
+                        row.raw_payload,
+                        sport=row.sport_name,
+                    )
+                else:
+                    signal = extractor.extract_signal(row.raw_payload)
                 if signal is None:
                     continue
-                result = matcher.match(signal)
-                rc = result.reason_code.value if hasattr(
-                    result.reason_code, "value"
-                ) else str(result.reason_code)
-                await session.execute(
-                    pg_insert_resolution_log(
-                        run_id=run_id,
-                        provider=provider,
-                        provider_record_id=row.pk,
-                        fixture_id=result.fixture_id,
-                        confidence=result.confidence,
-                        reason_code=rc,
-                        reason_detail=result.reason_detail,
-                        resolver_version=result.resolver_version,
+                # Mirror scripts/run_resolver_pass.py:413. The Day-44
+                # code was `result = matcher.match(signal)` — missing
+                # session, missing await, and treated the list return
+                # as a single MatchResult. TypeError at call time,
+                # swallowed by the except below, on every record.
+                tier_results = await matcher.match(session, signal)
+                # Mirror scripts/run_resolver_pass.py:430 — one
+                # sp.resolution_log row per tier consulted (Phase
+                # 2D.3 design D.4: forensic data).
+                for tier_result in tier_results:
+                    rc_str = tier_result.reason_code.value
+                    await session.execute(
+                        pg_insert_resolution_log(
+                            run_id=run_id,
+                            provider=provider,
+                            provider_record_id=row.pk,
+                            fixture_id=tier_result.fixture_id,
+                            confidence=tier_result.confidence,
+                            reason_code=rc_str,
+                            reason_detail=tier_result.reason_detail,
+                            resolver_version=tier_result.resolver_version,
+                        )
                     )
-                )
-                if rc in ("strict", "alias", "fuzzy"):
+                    log_rows += 1
+                # Final tier drives routing counters (mirrors
+                # run_resolver_pass.py:443 `final = tier_results[-1]`).
+                final_rc = tier_results[-1].reason_code.value
+                if final_rc in ("strict", "alias", "fuzzy"):
                     auto += 1
-                elif rc == "review_queue":
+                elif final_rc == "review_queue":
                     rq_writes += 1
-                elif rc == "no_match":
+                elif final_rc == "no_match":
                     miss += 1
             except Exception as exc:  # noqa: BLE001
                 crashes += 1
@@ -963,8 +1025,14 @@ async def _run_matcher_over_candidates(
                     error_class=type(exc).__name__,
                     error_msg=str(exc)[:200],
                 )
-        await session.commit()
-    return auto, miss, rq_writes, crashes
+        if apply:
+            await session.commit()
+        else:
+            # Dry-run: matcher ran end to end and per-record counters
+            # populated, but we discard all sp.resolution_log writes
+            # so pre-un-pause verification doesn't accrete rows.
+            await session.rollback()
+    return auto, miss, rq_writes, crashes, log_rows
 
 
 def pg_insert_resolution_log(
