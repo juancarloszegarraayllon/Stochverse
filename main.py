@@ -5459,6 +5459,9 @@ async def _prewarm_series_stages():
                         pass
                     await asyncio.sleep(1.0)
                 _log.info("prewarm: %d/%d series resolved", resolved, len(unresolved))
+                # Consolidated save: at most one write per iteration,
+                # only if any refresh above changed content.
+                await _maybe_save_tournament_brackets()
         except Exception as e:
             _log.warning("prewarm_series_stages iter failed: %s", e)
         # Re-run hourly. Newly-listed series mid-day still get
@@ -5516,20 +5519,75 @@ async def _refresh_tournament_bracket(stage_id: str, season_id: str = "",
             "season_id":   season_id or "",
             "league_name": league_name or "",
         }
-        # Throttle persistence — bracket changes are rare, no need to
-        # write on every refresh. Save after every Nth refresh.
-        try:
-            from db import save_cache_blob
-            asyncio.create_task(save_cache_blob(
-                "tournament_brackets", dict(_TOURNAMENT_BRACKET_CACHE)
-            ))
-        except Exception:
-            pass
+        # Persistence deferred to caller via _maybe_save_tournament_brackets().
+        # The old inline `asyncio.create_task(save_cache_blob(...))` fired on
+        # every stage refresh, generating ~47k saves/day of ~1.35 MB payload
+        # (~63 GB/day egress). Every refresh bumps `ts` above, which by itself
+        # made the serialized dict differ save-to-save even when the bracket
+        # content was byte-identical, so no content-based gating at the save
+        # layer could have caught the flapping. Callers now hash content-only
+        # after their walk-loop iteration and save at most once, only when
+        # content actually changed.
         return True
     except Exception as e:
         logging.getLogger("stochverse").warning(
             "_refresh_tournament_bracket(%s) failed: %s", stage_id, e
         )
+        return False
+
+
+# Content-only hash of the last successfully persisted bracket cache.
+# `None` at process start; the first walk after startup will compute a
+# hash and, if it differs from what warm-start loaded (rare — usually
+# identical), issue exactly one save. Subsequent walks whose refreshes
+# produce byte-identical content (the common case, since brackets change
+# only on real tournament state transitions) skip persistence entirely.
+_LAST_SAVED_BRACKET_HASH: str | None = None
+
+
+def _bracket_content_hash() -> str:
+    """Stable content-only hash of _TOURNAMENT_BRACKET_CACHE. Excludes
+    `ts` (bumped on every refresh regardless of content) so the hash
+    reflects only what a warm-restart would actually restore differently."""
+    import hashlib as _hashlib
+    import json as _json
+    view = {
+        sid: {
+            "bracket":     entry.get("bracket"),
+            "season_id":   entry.get("season_id") or "",
+            "league_name": entry.get("league_name") or "",
+        }
+        for sid, entry in _TOURNAMENT_BRACKET_CACHE.items()
+        if isinstance(entry, dict)
+    }
+    payload = _json.dumps(view, sort_keys=True, separators=(",", ":"))
+    return _hashlib.sha256(payload.encode()).hexdigest()
+
+
+async def _maybe_save_tournament_brackets() -> bool:
+    """Persist _TOURNAMENT_BRACKET_CACHE to cache_blobs iff its content
+    hash differs from the last successful save. Callers invoke this at
+    the end of a walk-loop iteration to consolidate what were formerly
+    N per-stage saves into 0 or 1 saves per walk.
+
+    Returns True if a save was issued (content changed), False otherwise
+    (no-op — hash unchanged, or DB unavailable)."""
+    global _LAST_SAVED_BRACKET_HASH
+    try:
+        h = _bracket_content_hash()
+    except Exception:
+        return False
+    if h == _LAST_SAVED_BRACKET_HASH:
+        return False
+    try:
+        from db import save_cache_blob
+        ok = await save_cache_blob(
+            "tournament_brackets", dict(_TOURNAMENT_BRACKET_CACHE),
+        )
+        if ok:
+            _LAST_SAVED_BRACKET_HASH = h
+        return ok
+    except Exception:
         return False
 
 
@@ -5557,6 +5615,14 @@ async def _load_tournament_brackets_from_db():
                 "tournament_brackets warm-start: loaded %d entries",
                 len(_TOURNAMENT_BRACKET_CACHE),
             )
+            # Anchor the last-saved-content hash to what warm-start
+            # loaded, so the first walk-loop iteration doesn't rewrite
+            # byte-identical content back to Neon.
+            global _LAST_SAVED_BRACKET_HASH
+            try:
+                _LAST_SAVED_BRACKET_HASH = _bracket_content_hash()
+            except Exception:
+                pass
     except Exception as e:
         _log.warning("tournament_brackets warm-start failed: %s", e)
 
@@ -5626,6 +5692,9 @@ async def _multi_stage_discovery_loop():
                     "multi-stage discovery: warmed %d new brackets",
                     discovered_total,
                 )
+                # Consolidated save: one write per walk if any newly-
+                # discovered stage changed content (typical), zero if not.
+                await _maybe_save_tournament_brackets()
         except Exception as e:
             _log.warning("multi_stage_discovery_loop iter failed: %s", e)
         await asyncio.sleep(30 * 60)
@@ -5703,6 +5772,8 @@ async def _tournament_bracket_warm_loop():
             "bracket warm-loop: initial pass refreshed %d/%d cached-stage brackets",
             ok_count, len(initial_tasks),
         )
+        # Consolidated save for the whole parallel batch.
+        await _maybe_save_tournament_brackets()
 
     # ── Multi-stage discovery — runs OUT of the hot path so it
     #    doesn't starve user requests. Walks each unique league_name
@@ -5741,6 +5812,9 @@ async def _tournament_bracket_warm_loop():
                 # when several stages happen to expire at the same
                 # tick.
                 await asyncio.sleep(0.3)
+            # Consolidated save at end of each 60s pass: one write iff
+            # any refresh above changed content, zero writes otherwise.
+            await _maybe_save_tournament_brackets()
         except Exception as e:
             _log.warning("tournament_bracket_warm_loop iter failed: %s", e)
 
