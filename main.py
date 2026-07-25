@@ -5544,6 +5544,19 @@ async def _refresh_tournament_bracket(stage_id: str, season_id: str = "",
 # only on real tournament state transitions) skip persistence entirely.
 _LAST_SAVED_BRACKET_HASH: str | None = None
 
+# Belt-and-braces throttle floor for _maybe_save_tournament_brackets.
+# The content-only hash still gates the common case, but post-deploy
+# 2026-07-25 saw consecutive "changed" saves 5 bytes apart during live
+# games — some field inside `compact` (score/clock/elapsed?) ticks per
+# walk, defeating the content-hash. Until that field is identified and
+# stripped from the hash input, cap at 1 save per _BRACKET_SAVE_MIN_
+# INTERVAL_S regardless of hash outcome. Warm-restart-only persistence,
+# so bounding save frequency has no user-visible impact; worst case
+# during live churn = 1440 saves/day × 1.77 MB ≈ 2.5 GB/day, vs the
+# ~63 GB/day the unthrottled state produced.
+_BRACKET_SAVE_MIN_INTERVAL_S: float = 60.0
+_LAST_BRACKET_SAVE_MONOTONIC: float = 0.0
+
 
 def _bracket_content_hash() -> str:
     """Stable content-only hash of _TOURNAMENT_BRACKET_CACHE. Excludes
@@ -5571,13 +5584,16 @@ async def _maybe_save_tournament_brackets() -> bool:
     N per-stage saves into 0 or 1 saves per walk.
 
     Returns True if a save was issued (content changed), False otherwise
-    (no-op — hash unchanged, or DB unavailable)."""
-    global _LAST_SAVED_BRACKET_HASH
+    (no-op — hash unchanged, throttled, or DB unavailable)."""
+    global _LAST_SAVED_BRACKET_HASH, _LAST_BRACKET_SAVE_MONOTONIC
     try:
         h = _bracket_content_hash()
     except Exception:
         return False
     if h == _LAST_SAVED_BRACKET_HASH:
+        return False
+    now = time.monotonic()
+    if now - _LAST_BRACKET_SAVE_MONOTONIC < _BRACKET_SAVE_MIN_INTERVAL_S:
         return False
     try:
         from db import save_cache_blob
@@ -5586,6 +5602,7 @@ async def _maybe_save_tournament_brackets() -> bool:
         )
         if ok:
             _LAST_SAVED_BRACKET_HASH = h
+            _LAST_BRACKET_SAVE_MONOTONIC = now
         return ok
     except Exception:
         return False
