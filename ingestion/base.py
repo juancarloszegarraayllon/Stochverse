@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -122,25 +122,41 @@ async def upsert_provider_records_batch(
     table,
     records: list[dict[str, Any]],
 ) -> tuple[int, int, int]:
-    """Multi-row UPSERT with hash-based change detection.
+    """Multi-row UPSERT with hash-based change detection, client-side
+    partitioned to keep unchanged-row raw_payload off the wire.
 
     Each record is shaped: ``{"pk": {col: val}, "fields": {col: val, ...}, "raw": {...}}``.
     Returns ``(inserted_count, updated_count, unchanged_count)``.
 
-    Strategy (architecture §6.3 idempotency, optimized for batches):
+    Strategy (architecture §6.3 idempotency, optimized for batches; wire
+    cost minimized per cost-investigation 2026-07-26 PR #2):
       1. Single SELECT to fetch existing payload_hash for every PK in
          the batch. Round trip #1.
       2. Per-record classification in Python: insert (no existing) /
-         update (hash differs) / unchanged (hash matches). Counter
-         accuracy comes from this comparison, not from RETURNING tricks.
-      3. Single multi-row INSERT ... ON CONFLICT DO UPDATE for the
-         entire batch. Postgres handles per-row conflict resolution.
-         Round trip #2. raw_payload + last_changed_at gated on hash
-         change via SQL CASE clauses; last_seen_at always bumps.
+         update (hash differs) / unchanged (hash matches). Partition
+         the batch into `changed_rows` (need full UPSERT) and
+         `unchanged_pks` (need only a last_seen_at bump).
+      3a. Multi-row INSERT ... ON CONFLICT DO UPDATE for `changed_rows`
+          only — skipped if none. Round trip #2. Because we only send
+          rows whose payload_hash actually differs (or that don't yet
+          exist), the previous CASE-gates on raw_payload / last_changed_at
+          are unreachable and have been removed; every conflict now
+          writes the new raw_payload and bumps last_changed_at = NOW().
+      3b. Lightweight UPDATE table SET last_seen_at = NOW() WHERE pk IN
+          (unchanged_pks) — skipped if none. Round trip #3. Preserves
+          the re-resolution loop's freshness watermark (its candidate
+          scan uses `WHERE last_seen_at > NOW() - INTERVAL '3d'`); a
+          ticker whose content is byte-identical still gets its
+          last_seen_at bumped so it stays in-scope for re-resolution.
+          Sends only the PK list (~few bytes per row) instead of the
+          full raw_payload (~12 KB per row for Kalshi).
 
-    Round-trip count is constant (2) regardless of batch size — the
-    big win vs. per-record UPSERT which is N round trips. For Phase 1B
-    FL passes this drops 150-275s wall time to a few seconds.
+    Round-trip count is 2 or 3 depending on the partition (always ≥2
+    for a non-empty batch, at most 3). The per-row wire cost for the
+    unchanged fraction drops from ~O(raw_payload) to ~O(PK) — for
+    Kalshi's 30s cadence with ~5-7k tickers and typical unchanged
+    fractions (70-90% during normal trading), this cuts the batch
+    wire cost by 70-90% pass-over-pass.
 
     Constraint: assumes a single-column primary key. All current
     provider tables (fl_events.fl_event_id, kalshi_markets.ticker,
@@ -167,11 +183,13 @@ async def upsert_provider_records_batch(
     )
     existing_hashes = {row[0]: row[1] for row in existing_rows.all()}
 
-    # Step 2: classify + build the multi-row VALUES list.
+    # Step 2: classify + partition. `changed_rows` carries full raw_payload
+    # to the UPSERT; `unchanged_pks` gets only a last_seen_at bump.
     inserted_count = 0
     updated_count = 0
     unchanged_count = 0
-    rows: list[dict[str, Any]] = []
+    changed_rows: list[dict[str, Any]] = []
+    unchanged_pks: list[Any] = []
 
     for r in records:
         h = payload_hash(r["raw"])
@@ -180,46 +198,55 @@ async def upsert_provider_records_batch(
 
         if old_hash is None:
             inserted_count += 1
+            changed_rows.append({
+                **r["pk"],
+                **r["fields"],
+                "raw_payload": r["raw"],
+                "payload_hash": h,
+            })
         elif old_hash == h:
             unchanged_count += 1
+            unchanged_pks.append(pk_val)
         else:
             updated_count += 1
+            changed_rows.append({
+                **r["pk"],
+                **r["fields"],
+                "raw_payload": r["raw"],
+                "payload_hash": h,
+            })
 
-        row = {
-            **r["pk"],
-            **r["fields"],
-            "raw_payload": r["raw"],
-            "payload_hash": h,
+    # Step 3a: multi-row UPSERT for changed rows only. CASE-gates from
+    # the previous implementation are removed because every row in this
+    # branch has a genuinely-different (or absent) payload_hash — the
+    # "hash matched" arm is unreachable.
+    if changed_rows:
+        stmt = pg_insert(table.__table__).values(changed_rows)
+        update_cols: dict[str, Any] = {
+            col: stmt.excluded[col]
+            for col in records[0]["fields"].keys()
         }
-        rows.append(row)
+        update_cols["raw_payload"] = stmt.excluded.raw_payload
+        update_cols["payload_hash"] = stmt.excluded.payload_hash
+        update_cols["last_seen_at"] = text("NOW()")
+        update_cols["last_changed_at"] = text("NOW()")
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[pk_col],
+            set_=update_cols,
+        )
+        await session.execute(stmt)
 
-    if not rows:
-        return (0, 0, 0)
-
-    # Step 3: multi-row UPSERT.
-    stmt = pg_insert(table.__table__).values(rows)
-
-    # Build update_cols once (column references resolve via stmt.excluded).
-    update_cols: dict[str, Any] = {
-        col: stmt.excluded[col]
-        for col in records[0]["fields"].keys()
-    }
-    update_cols["last_seen_at"] = text("NOW()")
-    update_cols["raw_payload"] = text(
-        f"CASE WHEN {table.__tablename__}.payload_hash = excluded.payload_hash "
-        f"THEN {table.__tablename__}.raw_payload ELSE excluded.raw_payload END"
-    )
-    update_cols["payload_hash"] = stmt.excluded.payload_hash
-    update_cols["last_changed_at"] = text(
-        f"CASE WHEN {table.__tablename__}.payload_hash = excluded.payload_hash "
-        f"THEN {table.__tablename__}.last_changed_at ELSE NOW() END"
-    )
-
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[pk_col],
-        set_=update_cols,
-    )
-    await session.execute(stmt)
+    # Step 3b: freshness-only UPDATE for unchanged rows. Wire cost is
+    # the PK list, not raw_payload. Preserves the re-resolution
+    # candidate-scan watermark (`last_seen_at > NOW() - INTERVAL 'Nd'`).
+    if unchanged_pks:
+        tbl = table.__table__
+        pk_column = tbl.c[pk_col]
+        await session.execute(
+            update(tbl)
+            .where(pk_column.in_(unchanged_pks))
+            .values(last_seen_at=text("NOW()"))
+        )
 
     return (inserted_count, updated_count, unchanged_count)
 
