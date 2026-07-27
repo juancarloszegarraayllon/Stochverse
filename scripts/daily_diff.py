@@ -1362,7 +1362,23 @@ async def _measure(
     fl_events_by_sport: dict[str, list[dict]] = defaultdict(list)
     for row in fl_rows:
         if row.raw_payload and isinstance(row.raw_payload, dict) and row.sport_name:
-            fl_events_by_sport[row.sport_name].append(dict(row.raw_payload))
+            # Inject `_sport` from the sp.sports JOIN's sport_name.
+            # sp.fl_events.raw_payload does NOT carry SPORT_ID at the
+            # event level — FL's /v1/events/list nests SPORT_ID in the
+            # tournament wrapper, not per-event. `_parse_event` at
+            # flashlive_feed.py:510 falls back to
+            # `SPORT_MAP.get(str(ev.get("SPORT_ID", "")), "")` = `""`
+            # when SPORT_ID is absent → every game gets `sport=""` →
+            # `match_game`'s sport-filter drops every candidate → v1
+            # map is empty. Diagnostic Run 3 (2026-07-28) confirmed
+            # this via scripts/diag_s1.py: stage [10] showed 0/313
+            # games matched Basketball. `_parse_event` prefers
+            # `_sport` when present, so injecting the JOIN-derived
+            # display-case sport here gives every game the right
+            # sport label without changing FL API parsing.
+            enriched = dict(row.raw_payload)
+            enriched["_sport"] = row.sport_name
+            fl_events_by_sport[row.sport_name].append(enriched)
     kalshi_records_by_sport: dict[str, list[dict]] = defaultdict(list)
     for r in kalshi_records_for_diff:
         sport = r.get("_sport")
