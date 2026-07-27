@@ -135,6 +135,128 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-07-25 → 2026-07-27: Cost investigation — Railway egress cut ~89% via measurement-then-fix loop
+
+Three-day arc, orthogonal to Phase 2 work. Railway network egress was 91.5% of the June 15 → July 15 invoice ($471.35 of $515.22, ~9.2 TB for the month, ~256 GB/day). Railway support's flow logs confirmed the dominant destination was the Neon endpoint (44.240.112.28:5432). `pg_stat_user_tables` accounted for only ~34 GB/day of tuple-level writes — a ~7-8× wire-bytes-vs-tuple-bytes amplification that had no obvious explanation from static analysis. Investigation → three fixes shipped in sequence → 24h verification against Railway meter closed at **~$0.031/hr (~$0.75/day)**, down from **~$0.55/hr baseline** — **~89% reduction, ~$180/month recurring saved**.
+
+### Day-54 → Day-56: One methodology point — MEASURE THE WIRE, NOT THE STORAGE
+
+`pg_stat_user_tables` shows tuples written on the DB side. Wire cost is what the CLIENT ships across the network. Server-side hash-gates that keep `raw_payload` byte-identical on-disk still cost the FULL `raw_payload` wire bytes, because the server has to RECEIVE what it hashes. Every fix that landed was a variation on this: move the hash-gate client-side, or eliminate the transmit entirely.
+
+### Day-54 (2026-07-25): Writer inventory + Gate #2 sharpening
+
+**Code survey via Explore agents** identified ~14 writer paths:
+- **Continuous (in-web-process)**: `kalshi_ws._price_flush_loop` (10s), `ingestion.kalshi._markets_loop` (30s), `ingestion.fl` today + week loops (60s + 600s), `_score_flush_loop` (30s scores + entities), `_price_prune_loop` (1h), `get_data()` write-through via `db.sync_events_to_db`.
+- **cache_blobs writers** (all funnel through `db.save_cache_blob`, single-row UPSERT, no hash-gate, no retry — every call rewrites the FULL dict for that key): `flashlive_games` (30s throttle), `tournament_brackets` (**NO throttle** despite comment claiming one at `main.py:5519-5527`), `series_to_stage`, `team_ids`, `team_pair_events` (all 60s throttles).
+- **Cron**: `resolver-cron-fl` (02:00 UTC), `resolver-cron-kalshi` (02:15 UTC), plus dashboard-only (`daily-diff`, `resolver-reresolution-fl` ~5min, `resolver-reresolution-kalshi` ~10min).
+- **Per-request**: `POST /api/snapshot`, admin approve/reject.
+- **Confirmed NOT wired**: `ingestion/kalshi_ws.py` (the 1s-snapshot module) is de-scoped — `ingestion/runner.py:54-66` only launches `fl` and `kalshi`. Zero rows/day from it.
+
+**Gate #2 (§11.3 Item 7) sharpened to TWO BLANKS.** Same session, Day-54 read confirmed `daily_diff.py:1048` hardcodes `legacy_comparison_present=False` — the script runs only the new resolver standalone, produces no v3-vs-v4 agreement metric. §13.1's "do not cut over until diff is acceptable" was unmeasurable in the current state. Two independent gaps: threshold undefined AND comparison dimension absent. Deliverable 1 scope-doc filed as PR #256; Gate #2 documentation update filed as PR #255 (merged).
+
+### Day-54 (2026-07-25): PR #257 log-only instrumentation — measurement, not a fix
+
+Static analysis of `db.save_cache_blob` couldn't answer "how often do rewrites carry byte-identical content?" — that needs live traffic. Shipped a **3-line temporary instrumentation** to `db.save_cache_blob`: pre-write `SELECT md5(data::text)` + `RETURNING md5(data::text)` + one `log.info` line emitting `cache_blob_save key=X change=new|same|changed payload_bytes=N`. Both hashes computed server-side, only 32-char hex crosses the wire per hash (~64 bytes overhead). Tagged `TEMPORARY — cost-investigation 2026-07-25`, single-revert removal.
+
+**This is the load-bearing methodology point**: log-only instrumentation is MEASUREMENT, not a fix — no gating, no behavior change. Ship as its own commit, deploy, observe, revert. Beats extrapolation from static analysis because it catches surprises (see Day-55 flashlive_games 7.6 MB payload, unexpected).
+
+### Day-55 (2026-07-26): PR #258 tournament_brackets content hash-gate + walk-loop consolidation
+
+**Two independent causes**, both required to fix (~63 GB/day, ~25% of the bill):
+
+1. **`_refresh_tournament_bracket` at `main.py:5490-5533` fired `save_cache_blob` inline on every stage refresh** via `asyncio.create_task`. Four walk loops (`_prewarm_series_stages_loop`, `_multi_stage_discovery_loop`, `_tournament_bracket_warm_loop` initial pass, `_tournament_bracket_warm_loop` steady-state) each generated N saves for N-stage walks, writing the FULL cache dict each time. Comment at `:5519-5520` claimed a throttle; code had none. **Doc-drift on implementation** — sibling of the descriptions-are-not-evidence family in the methodology bank.
+
+2. **Every cache entry carried `"ts": time.time()` bumped per refresh regardless of content**. Any content-based hash-gate at the save layer would still see "changed" every time because the serialized dict differed only in the `ts` fields. Post-deploy PR #257 log lines empirically confirmed this: consecutive saves showed `change=changed` while alternating between two payload sizes that differed only in which stage's `ts` had just been bumped.
+
+Fix: strip inline save from `_refresh_tournament_bracket`; add `_bracket_content_hash()` (stable SHA-256 over `{bracket, season_id, league_name}` per `stage_id`, excludes `ts`); add `_maybe_save_tournament_brackets()` that saves iff `content_hash != _LAST_SAVED_BRACKET_HASH`; call it at each of the four walk-loop natural end points; warm-start anchors the initial hash to what was loaded.
+
+### Day-55 (2026-07-25 evening): PR #259 tournament_brackets throttle floor
+
+Post-#258 log data showed the gate WAS working (~99.96% of saves suppressed) but consecutive `changed` saves 5 bytes apart during live games proved a volatile field inside `compact` (score/clock/elapsed candidate) was ticking per-walk. Field hunt would take time; wanted to bound the leak overnight.
+
+**5-line belt-and-braces**: `_BRACKET_SAVE_MIN_INTERVAL_S = 60.0` + `_LAST_BRACKET_SAVE_MONOTONIC` cursor + 2-line check in `_maybe_save_tournament_brackets` skipping when `<60s` since last save regardless of hash. Worst case with the throttle: 1,440 saves/day × 1.77 MB ≈ **2.5 GB/day** (vs unthrottled ~63 GB/day). Warm-restart-only persistence, so 60s deferral zero user-visible impact.
+
+Day-56 log evidence showed 14 saves in 15.8h (~21/day) — the hash gate did 99.96% of the work, the throttle was a barely-invoked backstop. **Field hunt DEMOTED** — 21 saves/day × 1.78 MB = ~37 MB/day, not worth the morning to close.
+
+### Day-56 (2026-07-26): PR #260 kalshi/fl client-side diff + last_seen_at split
+
+**The load-bearing fix.** Kalshi ingestion was the #1 writer at ~198 GB/day (~77% of the bill) — measured via Block 2 CSV row 9: 15,506 calls/day × ~12.4 MB per statement (193,639 bytes SQL text with 1000-row VALUES × ~12 KB per row uncompressed raw_payload). The server-side hash-gate at `ingestion/base.py:208-216` (CASE clauses on raw_payload / last_changed_at) saved storage / WAL but not wire — the client already had `existing_hashes` from Step 1's SELECT and could have pruned client-side.
+
+**Fix**: partition the batch client-side. `changed_rows` (new OR different hash) go into the multi-row UPSERT as before, with CASE-gates removed (unreachable arm). `unchanged_pks` (matching hash) go into a lightweight `UPDATE table SET last_seen_at = NOW() WHERE pk IN (...)` — wire cost drops from ~12 KB/row (raw_payload) to ~10 bytes/row (PK only). Round-trip count moves from fixed-2 to 2-or-3 (skip either sub-statement if empty).
+
+**Correctness dependency identified pre-ship**: re-resolution's `WHERE last_seen_at > NOW() - INTERVAL '3d'` gates candidate scans. If unchanged rows stopped getting last_seen_at bumped, unchanged tickers would silently fall out of re-resolution after 3d — resolver-correctness bug, not a cost fix. The split preserves the semantic: unchanged rows still get last_seen_at bumped via the new UPDATE.
+
+**Documented behavior change**: the old ON CONFLICT UPDATE set `records[0]["fields"].keys()` unconditionally for every conflicting row. For Kalshi: `market_type, series_ticker, abbr_block, parsed_home_abbr, parsed_away_abbr` (parser output). For FL: `sport_id`. New behavior = these columns update only when raw_payload actually changes → **parse-on-change semantics**. When parser logic changes, run the appropriate `scripts/backfill_*.py` (established pattern from Phase 2A.7 `sport_id` backfill).
+
+Day-56 morning verification confirmed: kalshi INSERT full-payload variant frozen (Δ=0), new `UPDATE sp.kalshi_markets SET last_seen_at=NOW() WHERE ticker IN (...)` statement (row 26 in the marginal CSV) firing at expected rate, watermarks alive on both providers (287/day re-resolution SELECTs still returning ~1,293 FL / ~596 Kalshi candidate rows per pass). Kalshi wire cost: ~198 → ~1-2 GB/day (~99.6% reduction on that writer alone).
+
+### Day-56 (2026-07-26): PR #261 flashlive_games 5-min throttle + tb stamp-before-await race
+
+Two small changes, one review.
+
+**Change 1**: `flashlive_feed.py:1575` `_SAVE_INTERVAL_S: 30 → 300`. Flashlive_games was persisting a ~4 MB JSONB payload up to 2,880 times/day (~11 GB/day peak). Zero request-path readers — grep confirmed exactly two references (startup warm-load at `:1556`, save at `:1639`), so relaxing to 5-min freshness is safe. `_last_save_ts = 0.0` at loop entry keeps the first save after startup unconditional.
+
+**Change 2**: `main.py::_maybe_save_tournament_brackets` — throttle stamp moves from AFTER `await save_cache_blob(...)` to BEFORE. Post-#259 logs showed floor violations at 15s and 27s spacing during live-game bursts; root cause was the stamp updating in the success-path only, so a second caller entering during a seconds-long in-flight save saw the stale stamp and passed the interval check. asyncio's single-threaded scheduling means nothing runs between the sync interval check and the sync stamp update below — the race closes cleanly.
+
+Post-deploy 2× startup save (2.2s apart, identical payload_bytes=4101182) revealed that both uvicorn workers run their own `_flashlive_loop` — no advisory lock. Success criterion becomes ≤288/day PER WORKER, ≤576/day total. Filed as task #21 to investigate whether the legacy FL loop wants the same advisory-lock treatment as `ingestion.fl` / `ingestion.kalshi`; likely resolves the 429 storms simultaneously.
+
+### Day-56 (2026-07-27): PR #262 revert of PR #257 instrumentation
+
+24h verification CSV (2026-07-27 15:18 UTC): Railway rate $0.031/hr ≈ 15 GB/day, cache_blobs marginal ~560-640/day, kalshi INSERT full variant frozen at 146,034 (Δ=0 all day), watermarks alive. Instrumentation had served its purpose — reverted the 3-line temporary addition. `cache_blob_save` log lines stop appearing; ~64 bytes/save measurement overhead removed.
+
+### Day-56: Row-26 accounting resolution (for future readers)
+
+Post-#260 marginal CSV showed `UPDATE sp.kalshi_markets ... IN ($1..$1000)` at ~34k/day extrapolated from a 4.3h post-deploy window, but `passes × chunks` code arithmetic predicted ~20k/day. Three candidate reconciliations were on the record; full-day CSV settled it:
+
+1. **✅ WINNER: Partial-chunk normalization + short-window extrapolation.** pg_stat_statements normalizes UPDATE statements by IN-list length. 7,623 tickers per pass ÷ CHUNK_SIZE=1000 = 7 full chunks + 1 partial (~623 rows). The partial is a DIFFERENT normalized statement — the 24h CSV shows it as row 56 (~235-item avg, 2,016 calls). Adding row 14 (1000-item, 20,489 calls) + row 56 gives ~17-18k/day full-day matching `2,540 passes × 7 full + 1 partial = 20k` steady-state code arithmetic. The 34k extrapolation came from a 4.3h window that hadn't settled.
+2. Rejected: post-deploy cadence faster than 34s.
+3. Rejected: UPDATE path chunking differs from INSERT path.
+
+Note left here so future readers don't reopen the puzzle.
+
+### Days 54-56: Methodology bank additions
+
+Two new principles, both applications of the existing "DESCRIPTIONS ARE NOT EVIDENCE" family:
+
+- **Server-side gates don't save wire cost.** A hash-gate at the SERVER side means the CLIENT still ships the payload — the server has to receive what it hashes. Only client-side prune saves wire. The `ingestion.base.upsert_provider_records_batch` CASE-gate was doing storage / WAL work honestly but the ~198 GB/day wire cost sat unaddressed for months because "hash-gated UPSERT" reads like "cheap." Same failure mode as documentation-drift: what the code says it does ≠ what the wire sees.
+- **Log-only instrumentation is measurement, not a fix.** PR #257's 3-line addition (pre/post md5 + INFO log) informed every subsequent PR. Deploy → observe → revert single-commit pattern is worth its weight when static analysis can't answer the load-bearing question. Explicitly framed to operator as "no gating, no behavior change" so approval was straightforward.
+
+### Days 54-56: PR state
+
+- **PR #255** (Gate #2 correction, TWO BLANKS sharpening): merged 07-25
+- **PR #256** (Deliverable 1 scope doc, 427 lines): open, awaiting operator fresh-read review
+- **PR #257** (log-only cache_blob instrumentation): merged 07-25, reverted via #262
+- **PR #258** (tournament_brackets content hash-gate + walk-loop consolidation): merged 07-25
+- **PR #259** (tournament_brackets throttle floor): merged 07-25
+- **PR #260** (kalshi/fl client-side diff + last_seen_at split): merged 07-26
+- **PR #261** (flashlive throttle + tb stamp-before-await race): merged 07-27
+- **PR #262** (revert #257 instrumentation): open 07-27, pending merge
+
+### Days 54-56: Verification numbers on the record
+
+- **Baseline** (pre-fix, 2026-07-25 23:25 UTC): $165.94 cumulative on cycle day ~10.5 → **~$0.55/hr ≈ ~300 GB/day** run rate.
+- **After #258/#259** (2026-07-26 15:30 UTC): ~$0.55/hr essentially unchanged — brackets savings (~60 GB/day) offset by Saturday-live-games kalshi growth (~15-20 GB/day). Netted ~-35 GB/day.
+- **After #260** (2026-07-26 18:10 → 00:25 UTC): $175.23 → $175.62, **~$0.063/hr ≈ ~30 GB/day** — kalshi collapse landed as predicted.
+- **After #261 + 24h** (2026-07-27 ~15:00 UTC): **$0.031/hr ≈ ~15 GB/day** — flashlive throttle added final ~10-15 GB/day cut.
+
+Total: **~256 → ~15 GB/day**, **~$0.55/hr → ~$0.031/hr**, **~89% reduction**.
+
+### Days 54-56: Cleanup queued (not blocking Phase 2)
+
+- **Task #11**: entity_aliases/entities no-op waste — 2.6M no-op INSERTs/day (99.99% no-op rate via ON CONFLICT DO NOTHING). Statement-count problem, not wire cost. Same pattern as #260 could apply to `_seed_entities_and_aliases`.
+- **Task #14**: log handler consolidation — Python logging default StreamHandler writes to stderr → Railway routes as `severity=error`. Also fixes a suspected double-emission on the stochverse warm-start logger line.
+- **Task #21**: FL loop worker topology / advisory lock — flashlive_feed.py has zero advisory-lock refs; both uvicorn workers run their own `_flashlive_loop`, doubling FL rate limit consumption. Likely root cause of 429 storms.
+- **Task #22**: kalshi `last_seen_at` staleness-gate for Neon WAL churn. Post-#260 measurement: the new UPDATE path accrued ~25.6 GB WAL in ~23h (~19M row versions/day). Not a Railway egress cost — Neon storage churn. Fix: only issue the UPDATE for rows whose `last_seen_at` is older than 1h (3-day re-resolution watermark makes hourly granularity ample; cuts churn ~99%).
+
+### Pending — next session
+
+- Merge PR #262, verify `cache_blob_save` log lines stop appearing
+- Return to **PR #256 review** (Deliverable 1 scope doc — awaiting operator fresh-read since 07-25)
+- Task #21 (FL worker topology) — likely resolves 429 storms as side effect
+- Task #22 (kalshi WAL churn) — Neon storage, not egress
+
+---
+
 ## Session — 2026-07-14 → 2026-07-22
 
 ### Days 49–53: Gate #3 re-specified from a mis-diagnosis into three real workstreams; doubles exclusion (3a) and LMB dedup (3d) shipped and verified; three-pattern methodology bank; 05-08 bootstrap re-regression audit closed with an alias-aware fix; Day-53 dry-run surfaced a distinct (Country)-suffix duplicate-in-waiting class that keeps `--apply` blocked
