@@ -5595,6 +5595,22 @@ async def _maybe_save_tournament_brackets() -> bool:
     now = time.monotonic()
     if now - _LAST_BRACKET_SAVE_MONOTONIC < _BRACKET_SAVE_MIN_INTERVAL_S:
         return False
+    # Stamp BEFORE the await so concurrent walk-loop callers serialize
+    # through the throttle instead of racing into save. Post-#259 log
+    # sample showed two saves 15s apart (23:50:41→23:50:56) and two
+    # 27s apart (00:38:57→00:39:24) — root cause was the stamp
+    # updating AFTER `await save_cache_blob(...)`, which let a second
+    # caller enter during the in-flight save, see the stale stamp,
+    # and pass the interval check. asyncio is single-threaded per
+    # loop, so nothing runs between this sync stamp update and the
+    # await below; the race closes cleanly.
+    #
+    # If the save fails, the stamp stays advanced — the next real
+    # save waits an extra 60s. Since content hash didn't update
+    # (save didn't succeed), the next caller after the throttle window
+    # still sees "content changed" and retries. Warm-restart-only
+    # persistence, so a 60s retry delay is invisible to users.
+    _LAST_BRACKET_SAVE_MONOTONIC = now
     try:
         from db import save_cache_blob
         ok = await save_cache_blob(
@@ -5602,7 +5618,6 @@ async def _maybe_save_tournament_brackets() -> bool:
         )
         if ok:
             _LAST_SAVED_BRACKET_HASH = h
-            _LAST_BRACKET_SAVE_MONOTONIC = now
         return ok
     except Exception:
         return False
