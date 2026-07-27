@@ -346,7 +346,7 @@ def _cache_key_normalize(s: str) -> str:
     return " ".join(s.split())  # collapse internal whitespace too
 
 
-def match_game(title: str, sport: str = ""):
+def match_game(title: str, sport: str = "", games: dict | None = None):
     """Find a FlashLive game matching a Kalshi event title.
     Returns a game dict or None.
 
@@ -356,13 +356,21 @@ def match_game(title: str, sport: str = ""):
     "Denmark vs Mexico" (only "mexico" overlapping) and inherit the
     wrong score. Score still picks the best dual-match when more
     than one candidate satisfies both sides.
+
+    Optional `games` parameter (added for Deliverable 1's daily-diff
+    cron — the FL polling loop only runs in the web process, so a
+    standalone cron sees empty module-level GAMES). Default preserves
+    the pre-existing single-argument behavior for every existing
+    caller.
     """
-    if not GAMES or not title:
+    if games is None:
+        games = GAMES
+    if not games or not title:
         return None
     norm_title = _normalize(title)
     best = None
     best_score = 0
-    for key, g in GAMES.items():
+    for key, g in games.items():
         if sport and g.get("sport") != sport:
             continue
         home_phrases = g.get("home_phrases", [])

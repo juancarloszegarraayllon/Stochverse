@@ -1264,92 +1264,39 @@ class TestV4QueryDiscipline:
     required in the general case; the integration variant runs against
     SP_INTEGRATION_DB when set)."""
 
-    def test_v4_query_uses_event_ticker_namespace(self):
-        """The _V4_PAIRINGS_PER_SPORT_SQL query aggregates
-        `public.events.event_ticker`, NOT `sp.kalshi_markets.ticker`.
-        Would have caught the operator-caught BLOCKER on day one."""
-        from scripts.daily_diff import _V4_PAIRINGS_PER_SPORT_SQL
-        sql = _V4_PAIRINGS_PER_SPORT_SQL
-        # array_agg targets event_ticker, not km.ticker.
-        assert "array_agg(DISTINCT pe.event_ticker)" in sql
-        assert "public.markets" in sql
-        assert "public.events" in sql
-        # Must NOT array_agg market-granularity ticker.
-        assert "array_agg(km.ticker)" not in sql
-        assert "array_agg(DISTINCT km.ticker)" not in sql
+    def test_v4_query_uses_event_ticker_namespace_directly(self):
+        """The v4 SQL aggregates `km.ticker` directly — the DB column
+        NAME is "ticker" but its content is the Kalshi EVENT_TICKER
+        (populated at ingestion.kalshi:179). No JOIN through
+        public.markets/events is needed. Post-manual-run correction
+        2026-07-28: the prior version's JOIN chain silently dropped
+        ~95% of km rows via the pm.ticker!=km.ticker mismatch —
+        this test locks in the corrected direct-aggregation."""
+        from scripts.daily_diff import _V4_PAIRINGS_SQL
+        sql = _V4_PAIRINGS_SQL
+        # Direct aggregation of km.ticker (== event_ticker semantically).
+        assert "array_agg(DISTINCT km.ticker)" in sql
+        # Must NOT re-introduce the phantom-namespace JOIN chain.
+        assert "public.markets" not in sql
+        assert "public.events" not in sql
+        assert "pe.event_ticker" not in sql
 
-    def test_v4_query_respects_km_window(self):
-        """The v4 SQL must window-filter BOTH sides of the fle→km join.
-        A one-sided filter would make v4's ticker set reflect all-time
-        km linkage vs the legacy 24h population — same-window violation
-        (§3.1). Guards against a future edit that accidentally drops
-        the km window predicate."""
-        from scripts.daily_diff import _V4_PAIRINGS_PER_SPORT_SQL
-        sql = _V4_PAIRINGS_PER_SPORT_SQL
-        assert "km.last_seen_at  >= :window_start" in sql
-        assert "km.last_seen_at  <  :window_end" in sql
-        assert "fle.last_seen_at >= :window_start" in sql
-        assert "fle.last_seen_at <  :window_end" in sql
-
-    def test_v4_join_unresolved_counter_query_shape(self):
-        """_V4_JOIN_UNRESOLVED_PER_SPORT_SQL selects km rows whose
-        public.markets peer is NULL (WHERE pm.ticker IS NULL). Guards
-        against a future edit that inverts the predicate or drops the
-        LEFT JOIN — either would silently zero the unresolved counter."""
-        from scripts.daily_diff import _V4_JOIN_UNRESOLVED_PER_SPORT_SQL
-        sql = _V4_JOIN_UNRESOLVED_PER_SPORT_SQL
-        assert "LEFT JOIN public.markets pm" in sql
-        assert "pm.ticker IS NULL" in sql
-        # Same window discipline as the pairings query.
-        assert "km.last_seen_at  >= :window_start" in sql
-        assert "km.last_seen_at  <  :window_end" in sql
-        # Returns a COUNT + sample, not the pairings themselves.
-        assert "COUNT(*)" in sql
-        assert "array_agg(km.ticker)" in sql
-
-    def test_v4_join_unresolved_counter_increments_on_unresolvable_row(self):
-        """_query_v4_pairings_for_sport threads an unresolved count and
-        sample back to the caller. Operator's third-loud-number in the
-        post-run checklist depends on this end-to-end. Stubbed session
-        avoids the DB dependency; test focuses on the return-shape wiring."""
-        import asyncio
-        from datetime import datetime, timezone
-        from unittest.mock import AsyncMock, MagicMock
-        from scripts.daily_diff import _query_v4_pairings_for_sport
-
-        # First execute() = pairings query, returns one fixture that
-        # resolved cleanly. Second execute() = unresolved-count query,
-        # returns count=3 with a 3-ticker sample.
-        pairings_row = MagicMock()
-        pairings_row.fl_event_id = "fl_a"
-        pairings_row.event_tickers = ["KXNBAGAME-ONE"]
-        pairings_result = MagicMock()
-        pairings_result.all.return_value = [pairings_row]
-
-        unresolved_row = MagicMock()
-        unresolved_row.unresolved_count = 3
-        unresolved_row.sample_tickers = ["KXORPH-1", "KXORPH-2", "KXORPH-3"]
-        unresolved_result = MagicMock()
-        unresolved_result.first.return_value = unresolved_row
-
-        session = AsyncMock()
-        session.execute = AsyncMock(side_effect=[pairings_result, unresolved_result])
-
-        loop = asyncio.new_event_loop()
-        try:
-            v4_map, unresolved_count, unresolved_sample = loop.run_until_complete(
-                _query_v4_pairings_for_sport(
-                    session, "Basketball",
-                    datetime(2026, 7, 27, tzinfo=timezone.utc),
-                    datetime(2026, 7, 28, tzinfo=timezone.utc),
-                )
-            )
-        finally:
-            loop.close()
-
-        assert v4_map == {"fl_a": {"KXNBAGAME-ONE"}}
-        assert unresolved_count == 3
-        assert unresolved_sample == ["KXORPH-1", "KXORPH-2", "KXORPH-3"]
+    def test_v4_query_scopes_by_pk_sets(self):
+        """The v4 SQL scopes by ANY(:kalshi_pks) + ANY(:fl_pks) — D2's
+        actual loaded PK sets — not by re-evaluating last_seen_at at a
+        different moment. Post-manual-run tightening 2026-07-28:
+        insulates from PR #260's active-row last_seen_at bumps that
+        would exclude still-active fixture-linked rows on any
+        historical cron run. Guards against a future edit that
+        re-introduces a window predicate."""
+        from scripts.daily_diff import _V4_PAIRINGS_SQL
+        sql = _V4_PAIRINGS_SQL
+        assert "fle.fl_event_id = ANY(:fl_pks)" in sql
+        assert "km.ticker      = ANY(:kalshi_pks)" in sql
+        # No window predicate — same-population is by PK-set scope.
+        assert "last_seen_at" not in sql
+        assert "window_start" not in sql
+        assert "window_end" not in sql
 
     def test_fl_event_id_key_format_consistency(self):
         """v1, v2, and v4 all emit fl_event_id keys as str. Cross-
@@ -1365,16 +1312,85 @@ class TestV4QueryDiscipline:
         assert all(isinstance(k, str) for k in v1_map.keys())
         assert all(isinstance(k, str) for k in v2_map.keys())
         # v4: the query function coerces to str via `str(row.fl_event_id)`
-        # (see _query_v4_pairings_for_sport). Assert the code path
-        # exists — either by grepping the source or by exercising
-        # against an in-memory stub. Simpler here: inspect the source.
+        # (see _query_v4_pairings). Assert the code path exists via
+        # source inspection.
         import inspect
-        from scripts.daily_diff import _query_v4_pairings_for_sport
-        src = inspect.getsource(_query_v4_pairings_for_sport)
+        from scripts.daily_diff import _query_v4_pairings
+        src = inspect.getsource(_query_v4_pairings)
         assert "str(row.fl_event_id)" in src, (
             "v4 pairings query must coerce fl_event_id to str to match "
             "v1/v2 key format; drift causes silent disjoint intersection."
         )
+
+
+class TestGamesHydrationForCron:
+    """Symptom 1 fix (2026-07-28): match_game accepts an explicit
+    games dict, and _run_legacy_pairings builds one from fl_events
+    so the standalone daily-diff cron doesn't produce empty v1 maps
+    from an unpopulated module-level GAMES."""
+
+    def test_match_game_accepts_explicit_games_dict(self):
+        """match_game(title, sport, games=explicit_dict) works even
+        when the module-level GAMES is empty. Default (games=None)
+        preserves the pre-existing behavior for every legacy caller."""
+        import flashlive_feed
+        from flashlive_feed import match_game
+        # Force module-level GAMES empty so we know the resolution
+        # comes from the explicit dict.
+        original = flashlive_feed.GAMES.copy()
+        try:
+            flashlive_feed.GAMES.clear()
+            # Construct an explicit game dict with the fields
+            # match_game reads (home_phrases, away_phrases, sport).
+            games = {
+                "key1": {
+                    "sport": "Basketball",
+                    "home_name": "Cleveland Cavaliers",
+                    "away_name": "Toronto Raptors",
+                    "home_phrases": ["cleveland", "cavaliers", "cavs"],
+                    "away_phrases": ["toronto", "raptors"],
+                    "event_id": "fl_test_evt",
+                },
+            }
+            # With module GAMES empty, no-games call returns None.
+            assert match_game("Cleveland Cavaliers vs Toronto Raptors", "Basketball") is None
+            # With explicit games, matches.
+            hit = match_game("Cleveland Cavaliers vs Toronto Raptors",
+                             "Basketball", games=games)
+            assert hit is not None
+            assert hit["event_id"] == "fl_test_evt"
+        finally:
+            flashlive_feed.GAMES.update(original)
+
+    def test_run_legacy_pairings_hydrates_games_from_fl_events(self):
+        """_build_games_from_fl_events converts raw fl_event dicts
+        into the shape match_game expects (via _parse_event). Empty
+        input returns empty dict; well-formed input produces a game
+        entry with home_phrases/away_phrases/sport populated."""
+        from scripts.daily_diff import _build_games_from_fl_events
+        # Empty input → empty dict.
+        assert _build_games_from_fl_events([]) == {}
+
+        # Well-formed FL raw event → one game entry with the fields
+        # match_game reads.
+        fl_event = {
+            "EVENT_ID":       "fl_evt_1",
+            "HOME_NAME":      "Cleveland Cavaliers",
+            "AWAY_NAME":      "Toronto Raptors",
+            "SHORTNAME_HOME": "CLE",
+            "SHORTNAME_AWAY": "TOR",
+            "SPORT_ID":       "2",   # SPORT_MAP entry — Basketball or similar
+            "START_UTIME":    1780000000,
+        }
+        games = _build_games_from_fl_events([fl_event])
+        assert games, "well-formed fl_event should produce at least one game"
+        # Exactly one entry — one fl_event in, one game out.
+        g = next(iter(games.values()))
+        assert g.get("home_name") == "Cleveland Cavaliers"
+        assert g.get("away_name") == "Toronto Raptors"
+        # match_game reads home_phrases/away_phrases; assert populated.
+        assert g.get("home_phrases"), "home_phrases must be populated"
+        assert g.get("away_phrases"), "away_phrases must be populated"
 
 
 class TestSumDiffDictsAggregation:

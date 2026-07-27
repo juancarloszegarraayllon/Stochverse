@@ -835,103 +835,116 @@ _RESOLUTION_LOG_WINDOW_SQL = (
 # `main.py::_build_kalshi_index_for_sport`, v2 identity-parse via
 # `kalshi_join.build_kalshi_index + join_with_fl`).
 #
-# Namespace discipline: v1/v2 emit event_ticker (parent-event
-# granularity). v4 storage is at market granularity in
-# `sp.kalshi_markets.ticker`. The v4 SQL below normalizes to
-# event_ticker via a JOIN through `public.markets` → `public.events`
-# (both are populated by `db.sync_events_to_db` every ~5 min from the
-# Kalshi REST cache). The JOIN was chosen over a `substring(...)`
-# regex on `km.ticker` because Kalshi's ticker convention isn't
-# universally `<event>-<outcome>` (KXMLBMENTION and prop families
-# don't fit that shape) and re-deriving by pattern what exists in
-# `public.markets` as data violates read-don't-derive. See §4.3 of
-# the scope doc.
+# Namespace realization (post-manual-run correction 2026-07-28): the
+# original scope doc §3.1/§4.3 premise about a namespace mismatch was
+# WRONG. `sp.kalshi_markets.ticker` is the DB column name, but its
+# semantic content is the Kalshi EVENT_TICKER — populated at
+# ingestion.kalshi:179 via `record.get("event_ticker")`. So v1/v2
+# legacy maps AND `km.ticker` are already in the same event_ticker
+# namespace. No JOIN through `public.markets` / `public.events` is
+# needed to normalize; we `array_agg(DISTINCT km.ticker)` directly.
+# The prior version's JOIN chain silently dropped ~95% of km rows via
+# the pm.ticker!=km.ticker mismatch, producing the manual-run's
+# near-empty v4 map (5 fl_ids across 9 sports).
 #
-# Same-window discipline: km AND fle both carry a window predicate on
-# `last_seen_at`. A one-sided filter (only fle) would make v4's ticker
-# set reflect all-time linkage while v1/v2 reflect the sampled 24h —
-# same-window violation of the exact class §3.1 warns against.
+# Same-window discipline (post-manual-run tightening): scope the v4
+# query by D2's LOADED PK SETS (`kalshi_pks` + `fl_pks`) rather than
+# re-evaluating a `last_seen_at` predicate at a different moment.
+# Insulates from PR #260's active-row `last_seen_at` bumps that would
+# otherwise exclude still-active fixture-linked rows on any historical
+# cron run (window ended before run). Rock-solid same-population by
+# construction: v4's ticker sets come from EXACTLY the km rows D2's
+# `_KALSHI_WINDOW_SQL` loaded, not a re-evaluated superset/subset.
 
 SAMPLE_N = 30
 
-# Per-sport v4 pairing reconstruction. Filters:
-#   - fle.fixture_id NOT NULL  → v4 has actually resolved this fl_event
-#   - fle.last_seen_at ∈ window → same 24h population Deliverable 2 sees
-#   - km.last_seen_at ∈ window  → same-window on the Kalshi side too
-#   - sp.sports.name = :sport   → per-sport slicing
-# Ticker normalization: `array_agg(DISTINCT pe.event_ticker)` — event-
-# level via the JOIN chain km.ticker → pm.ticker → pm.event_id → pe.id.
-# LEFT JOIN on public.markets so a km row without a public.markets peer
-# still contributes a NULL that the FILTER clause drops (would happen
-# during a brief drift between `sync_events_to_db` cycles; small
-# population). The COMPANION _V4_JOIN_UNRESOLVED_PER_SPORT_SQL below
-# counts drops explicitly so a large drift stays visible in the
-# report meta (would otherwise silently degrade agreements to partial
-# or push agree→legacy_only depending on how the drop distributes).
-_V4_PAIRINGS_PER_SPORT_SQL = (
+# v4 pairing reconstruction — all sports at once, scoped by D2's PKs.
+#   - fle.fixture_id NOT NULL       → v4 has actually resolved this fl_event
+#   - fle.fl_event_id = ANY(:fl_pks) → strict same-population with D2's fl_rows
+#   - km.ticker      = ANY(:kalshi_pks) → strict same-population with D2's kalshi_rows
+# `km.ticker` semantically holds event_ticker (see ingestion.kalshi:179),
+# so array_agg(DISTINCT km.ticker) yields event_ticker sets directly.
+# One query instead of one-per-sport; per-sport partitioning happens
+# in Python via the fl_id → sport_name map built from fl_rows.
+_V4_PAIRINGS_SQL = (
     "SELECT fle.fl_event_id, "
-    "       array_agg(DISTINCT pe.event_ticker) "
-    "         FILTER (WHERE pe.event_ticker IS NOT NULL) "
-    "         AS event_tickers "
+    "       array_agg(DISTINCT km.ticker) AS event_tickers "
     "FROM sp.fl_events fle "
-    "JOIN sp.sports s ON s.id = fle.sport_id "
     "JOIN sp.kalshi_markets km ON km.fixture_id = fle.fixture_id "
-    "LEFT JOIN public.markets pm ON pm.ticker = km.ticker "
-    "LEFT JOIN public.events pe ON pe.id = pm.event_id "
     "WHERE fle.fixture_id IS NOT NULL "
-    "  AND s.name = :sport_name "
-    "  AND fle.last_seen_at >= :window_start "
-    "  AND fle.last_seen_at <  :window_end "
-    "  AND km.last_seen_at  >= :window_start "
-    "  AND km.last_seen_at  <  :window_end "
+    "  AND fle.fl_event_id = ANY(:fl_pks) "
+    "  AND km.ticker      = ANY(:kalshi_pks) "
     "GROUP BY fle.fl_event_id"
 )
 
 
-# Counts in-window fixture-linked km rows whose event_ticker resolves
-# NULL through the join (i.e., no public.markets peer). Ships in
-# `report_json.legacy_diff_meta.v4_join_unresolved_tickers` so the
-# operator sees when the JOIN's third-population dependency
-# (public.markets = get_data()'s filtered serving sync) has drifted.
-# Small population is normal (~seconds of race between sync_events_to_db
-# cycles); a spike would silently misclassify records — agreements
-# degrade to partial/disjoint, some agrees flip to legacy_only.
-_V4_JOIN_UNRESOLVED_PER_SPORT_SQL = (
-    "SELECT COUNT(*) AS unresolved_count, "
-    "       array_agg(km.ticker) FILTER (WHERE km.ticker IS NOT NULL) "
-    "         AS sample_tickers "
-    "FROM sp.fl_events fle "
-    "JOIN sp.sports s ON s.id = fle.sport_id "
-    "JOIN sp.kalshi_markets km ON km.fixture_id = fle.fixture_id "
-    "LEFT JOIN public.markets pm ON pm.ticker = km.ticker "
-    "WHERE fle.fixture_id IS NOT NULL "
-    "  AND s.name = :sport_name "
-    "  AND fle.last_seen_at >= :window_start "
-    "  AND fle.last_seen_at <  :window_end "
-    "  AND km.last_seen_at  >= :window_start "
-    "  AND km.last_seen_at  <  :window_end "
-    "  AND pm.ticker IS NULL"
-)
+def _build_games_from_fl_events(fl_events: list[dict]) -> dict:
+    """Construct the `games` dict `match_game(...)` expects, from the
+    same fl_events D2 loaded. Same-window discipline: v1's title-based
+    pairing pairs against exactly the fl_events D2 sampled, not against
+    the module-level `flashlive_feed.GAMES` (empty in the standalone
+    daily-diff cron because the FL polling loop only runs in the web
+    process — see manual-run Symptom 1 finding).
+
+    Keying mirrors the polling loop's `{sport}:{home_norm}:{away_norm}`
+    format so nothing about match_game's iteration semantics changes.
+    Falls back to `event_id` if the sport/home/away triple can't be
+    constructed (parse failed for that fl_event) — match_game iterates
+    values, so key format only matters for uniqueness.
+    """
+    from flashlive_feed import _parse_event, _normalize
+    games: dict = {}
+    for ev in fl_events:
+        if not isinstance(ev, dict):
+            continue
+        try:
+            g = _parse_event(ev)
+        except Exception:
+            continue
+        if not (g and g.get("home_name") and g.get("away_name")):
+            continue
+        sport = g.get("sport") or ""
+        home_norm = _normalize(g.get("home_name") or "")
+        away_norm = _normalize(g.get("away_name") or "")
+        key = f"{sport}:{home_norm}:{away_norm}"
+        if not (home_norm and away_norm):
+            key = g.get("event_id") or f"unkeyed:{id(g)}"
+        games[key] = g
+    return games
 
 
 def _run_legacy_pairings(
     sport_name: str,
     kalshi_records: list[dict],
     fl_events: list[dict],
+    games: dict | None = None,
 ) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     """Run v1 (title-parse) and v2 (identity-parse) pairings against
     the same 24h population.
 
     Returns (v1_map, v2_map). Both maps carry `{fl_event_id: {event_ticker, ...}}`
-    — the event_ticker namespace, same as `_query_v4_pairings_for_sport`.
+    — the event_ticker namespace, same as `_query_v4_pairings`.
+
+    `games` parameter (added post-manual-run for Symptom 1 fix):
+    passed through to v1's `_build_kalshi_index_for_sport(...games=...)`
+    → `match_game(...games=...)`. In the daily-diff cron, callers build
+    `games` from the same fl_events via `_build_games_from_fl_events`;
+    in tests, callers can pass any pre-built dict. Default `None`
+    preserves the pre-existing behavior of reading module-level
+    `flashlive_feed.GAMES` (which is what legacy request-path callers
+    of `_build_kalshi_index_for_sport` still expect).
     """
     from main import _build_kalshi_index_for_sport
     from kalshi_join import build_kalshi_index, join_with_fl
 
-    # v1: title-parse via _build_kalshi_index_for_sport (needs the §4.1
-    # refactor to accept an explicit records parameter — default of
-    # None still reads from _cache for legacy callers).
-    v1_index = _build_kalshi_index_for_sport(sport_name, records=kalshi_records)
+    # v1: title-parse via _build_kalshi_index_for_sport. Passes the
+    # explicit records list AND games dict so the daily-diff cron
+    # gets deterministic same-window behavior — no dependency on
+    # `_cache` or module-level `GAMES`, both of which are empty in
+    # the standalone cron container.
+    v1_index = _build_kalshi_index_for_sport(
+        sport_name, records=kalshi_records, games=games,
+    )
     v1_map: dict[str, set[str]] = {
         str(fl_id): {r.get("event_ticker") or "" for r in recs}
         for fl_id, recs in v1_index.items()
@@ -944,7 +957,8 @@ def _run_legacy_pairings(
         if not v1_map[k]:
             v1_map.pop(k)
 
-    # v2: identity-parse via kalshi_join.
+    # v2: identity-parse via kalshi_join. Doesn't depend on GAMES —
+    # parses tickers directly, no title matching.
     v2_index = build_kalshi_index(kalshi_records, sport_name)
     v2_pairings, _v2_unpaired = join_with_fl(fl_events, v2_index, sport_name)
     v2_map: dict[str, set[str]] = {}
@@ -960,38 +974,31 @@ def _run_legacy_pairings(
     return v1_map, v2_map
 
 
-async def _query_v4_pairings_for_sport(
+async def _query_v4_pairings(
     session,
-    sport_name: str,
-    window_start: datetime,
-    window_end: datetime,
-) -> tuple[dict[str, set[str]], int, list[str]]:
-    """Reconstruct v4's current pairing state for one sport.
+    kalshi_pks: list[str],
+    fl_pks: list[str],
+) -> dict[str, set[str]]:
+    """Reconstruct v4's pairing state scoped to D2's loaded populations.
 
-    Returns `(v4_map, unresolved_count, unresolved_sample)` where:
-      - `v4_map` is `{fl_event_id: {event_ticker, ...}}` — same
-        namespace and shape as `_run_legacy_pairings` output for direct
-        set-comparability. fl_events with `fixture_id IS NULL` are
-        excluded (v4 hasn't paired them). If v1/v2 paired one of these
-        it becomes `legacy_only` in the diff; if neither did it drops
-        entirely.
-      - `unresolved_count` is the count of in-window fixture-linked
-        `sp.kalshi_markets` rows whose `event_ticker` failed to resolve
-        through the JOIN chain (no `public.markets` peer). These get
-        FILTER-dropped from `v4_map`, which can silently degrade
-        agreements or misclassify records — see companion sample.
-      - `unresolved_sample` is up to SAMPLE_N of the actual dropped
-        km ticker strings so the operator can spot-check whether the
-        drift is real (Kalshi tickers not yet synced to `public.markets`)
-        or a data issue (tickers that never should have been in
-        `sp.kalshi_markets` at all).
+    Returns `{fl_event_id: {event_ticker, ...}}` — same shape and
+    namespace as `_run_legacy_pairings` output. fl_events with
+    `fixture_id IS NULL` are excluded (v4 hasn't paired them); if
+    v1/v2 paired one of these it becomes `legacy_only` in the diff.
+
+    Strict same-population semantics: v4's ticker sets come from the
+    exact km rows D2 loaded, not from a re-evaluated `last_seen_at ∈
+    window` predicate at a slightly-later moment. Insulates from
+    PR #260's active-row `last_seen_at` bumps that would exclude
+    still-active fixture-linked rows on any historical cron run.
     """
+    if not (kalshi_pks and fl_pks):
+        return {}
     result = await session.execute(
-        text(_V4_PAIRINGS_PER_SPORT_SQL),
+        text(_V4_PAIRINGS_SQL),
         {
-            "sport_name":  sport_name,
-            "window_start": window_start,
-            "window_end":   window_end,
+            "kalshi_pks": kalshi_pks,
+            "fl_pks":     fl_pks,
         },
     )
     v4_map: dict[str, set[str]] = {}
@@ -1000,21 +1007,7 @@ async def _query_v4_pairings_for_sport(
         tickers = {t for t in (row.event_tickers or []) if t}
         if tickers:
             v4_map[fl_id] = tickers
-
-    unresolved_result = await session.execute(
-        text(_V4_JOIN_UNRESOLVED_PER_SPORT_SQL),
-        {
-            "sport_name":  sport_name,
-            "window_start": window_start,
-            "window_end":   window_end,
-        },
-    )
-    unresolved_row = unresolved_result.first()
-    if unresolved_row is None:
-        return v4_map, 0, []
-    unresolved_count = int(unresolved_row.unresolved_count or 0)
-    unresolved_sample = list((unresolved_row.sample_tickers or [])[:SAMPLE_N])
-    return v4_map, unresolved_count, unresolved_sample
+    return v4_map
 
 
 def _diff_pairings(
@@ -1376,79 +1369,96 @@ async def _measure(
         if sport:
             kalshi_records_by_sport[sport].append(r)
 
+    # Extract D2's loaded PK sets — used to scope the v4 query to
+    # exactly the same population D2 sampled. Strict same-window by
+    # construction (see _V4_PAIRINGS_SQL header comment).
+    kalshi_pks = [row.pk for row in kalshi_rows]  # sp.kalshi_markets.ticker
+    fl_pks     = [row.pk for row in fl_rows]      # sp.fl_events.fl_event_id
+
+    # Build fl_event_id → sport lookup from fl_rows (has sport_name via
+    # LEFT JOIN sp.sports in _FL_WINDOW_SQL). Used to partition v4's
+    # single all-sports return by sport in Python.
+    fl_id_to_sport: dict[str, str] = {}
+    for row in fl_rows:
+        if row.raw_payload and isinstance(row.raw_payload, dict) and row.sport_name:
+            evt_id = str(row.raw_payload.get("EVENT_ID") or "")
+            if evt_id:
+                fl_id_to_sport[evt_id] = row.sport_name
+
     sports_to_diff = sorted(
         set(kalshi_records_by_sport) & set(fl_events_by_sport)
     )
     per_sport_v1_diffs: list[dict] = []
     per_sport_v2_diffs: list[dict] = []
-    v4_pairings_by_sport: dict[str, dict[str, set[str]]] = {}
     legacy_diff_errors = 0
-    v4_unresolved_total = 0
-    v4_unresolved_sample: list[str] = []
+    all_v4_map: dict[str, set[str]] = {}
 
     async with async_session() as session:
-        for sport in sports_to_diff:
-            try:
-                v4_map, sport_unresolved_count, sport_unresolved_sample = (
-                    await _query_v4_pairings_for_sport(
-                        session, sport, window_start, window_end,
-                    )
-                )
-            except Exception as exc:
-                legacy_diff_errors += 1
-                log.warning(
-                    "daily_diff.v4_pairing_query_failed",
-                    sport=sport,
-                    error_class=type(exc).__name__,
-                    error_msg=str(exc)[:300],
-                )
-                continue
-            v4_pairings_by_sport[sport] = v4_map
-            v4_unresolved_total += sport_unresolved_count
-            if len(v4_unresolved_sample) < SAMPLE_N:
-                # Concatenate + cap so the top-level sample stays
-                # bounded regardless of how many sports contribute.
-                v4_unresolved_sample.extend(
-                    sport_unresolved_sample[:SAMPLE_N - len(v4_unresolved_sample)]
-                )
-            try:
-                v1_map, v2_map = _run_legacy_pairings(
-                    sport,
-                    kalshi_records_by_sport[sport],
-                    fl_events_by_sport[sport],
-                )
-            except Exception as exc:
-                legacy_diff_errors += 1
-                log.warning(
-                    "daily_diff.legacy_pairing_failed",
-                    sport=sport,
-                    error_class=type(exc).__name__,
-                    error_msg=str(exc)[:300],
-                )
-                continue
-            try:
-                v1_diff = _diff_pairings(
-                    v1_map, v4_map, kalshi_extractor,
-                    kalshi_records_by_sport[sport],
-                )
-                v2_diff = _diff_pairings(
-                    v2_map, v4_map, kalshi_extractor,
-                    kalshi_records_by_sport[sport],
-                )
-            except AssertionError:
-                # Invariant violation — raise rather than write corrupt.
-                raise
-            except Exception as exc:
-                legacy_diff_errors += 1
-                log.warning(
-                    "daily_diff.diff_pairings_failed",
-                    sport=sport,
-                    error_class=type(exc).__name__,
-                    error_msg=str(exc)[:300],
-                )
-                continue
-            per_sport_v1_diffs.append(v1_diff)
-            per_sport_v2_diffs.append(v2_diff)
+        try:
+            # ONE all-sports v4 query, PK-scoped. Partition per-sport
+            # in Python via fl_id_to_sport lookup.
+            all_v4_map = await _query_v4_pairings(session, kalshi_pks, fl_pks)
+        except Exception as exc:
+            legacy_diff_errors += 1
+            log.warning(
+                "daily_diff.v4_pairing_query_failed",
+                error_class=type(exc).__name__,
+                error_msg=str(exc)[:300],
+            )
+            all_v4_map = {}
+
+    v4_map_by_sport: dict[str, dict[str, set[str]]] = defaultdict(dict)
+    for fl_id, tickers in all_v4_map.items():
+        sport = fl_id_to_sport.get(fl_id)
+        if sport:
+            v4_map_by_sport[sport][fl_id] = tickers
+
+    for sport in sports_to_diff:
+        # Build FL games dict from THIS sport's fl_events. Symptom 1
+        # fix: the standalone daily-diff cron has an empty module-
+        # level `flashlive_feed.GAMES` (no polling loop), so v1's
+        # match_game would otherwise return None for every title.
+        games_for_sport = _build_games_from_fl_events(fl_events_by_sport[sport])
+        try:
+            v1_map, v2_map = _run_legacy_pairings(
+                sport,
+                kalshi_records_by_sport[sport],
+                fl_events_by_sport[sport],
+                games=games_for_sport,
+            )
+        except Exception as exc:
+            legacy_diff_errors += 1
+            log.warning(
+                "daily_diff.legacy_pairing_failed",
+                sport=sport,
+                error_class=type(exc).__name__,
+                error_msg=str(exc)[:300],
+            )
+            continue
+        v4_map_for_sport = v4_map_by_sport.get(sport, {})
+        try:
+            v1_diff = _diff_pairings(
+                v1_map, v4_map_for_sport, kalshi_extractor,
+                kalshi_records_by_sport[sport],
+            )
+            v2_diff = _diff_pairings(
+                v2_map, v4_map_for_sport, kalshi_extractor,
+                kalshi_records_by_sport[sport],
+            )
+        except AssertionError:
+            # Invariant violation — raise rather than write corrupt.
+            raise
+        except Exception as exc:
+            legacy_diff_errors += 1
+            log.warning(
+                "daily_diff.diff_pairings_failed",
+                sport=sport,
+                error_class=type(exc).__name__,
+                error_msg=str(exc)[:300],
+            )
+            continue
+        per_sport_v1_diffs.append(v1_diff)
+        per_sport_v2_diffs.append(v2_diff)
 
     legacy_present = bool(per_sport_v1_diffs and per_sport_v2_diffs)
     if legacy_present:
@@ -1457,24 +1467,23 @@ async def _measure(
         report_json["legacy_diff_meta"] = {
             "sports_covered":    sports_to_diff,
             "per_sport_errors":  legacy_diff_errors,
-            # Third-loud number in the operator's post-run checklist:
-            # counts km rows whose event_ticker resolved NULL through
-            # the JOIN chain. Non-zero → v4_map underrepresents true
-            # v4 linkage → agreements silently degrade or misclassify.
-            # Small drift (single-digit-per-sport) is normal race
-            # between sync_events_to_db cycles; large spikes need
-            # investigation before Item 7 threshold-setting can trust
-            # the diff numbers.
-            "v4_join_unresolved_tickers": {
-                "count":  v4_unresolved_total,
-                "sample": v4_unresolved_sample,
-            },
+            # Replaces the removed v4_join_unresolved_tickers counter
+            # (was a check on public.markets JOIN drift, no longer
+            # needed since we don't JOIN through public.markets).
+            # Contextualizes total_evaluated: how many fl_events in
+            # D2's loaded fl_rows had fixture_id set AND at least one
+            # in-window fixture-linked km peer. Feeds the S2b backfill
+            # decision — if this number is tiny relative to
+            # len(fl_pks), the fixture-link population is genuinely
+            # narrow and backfill may be warranted before Item 7
+            # threshold-setting can trust the diff.
+            "fixture_linked_in_window_count": len(all_v4_map),
         }
         log.info(
             "daily_diff.legacy_comparison_computed",
             sports_covered=len(sports_to_diff),
             per_sport_errors=legacy_diff_errors,
-            v4_join_unresolved=v4_unresolved_total,
+            fixture_linked_in_window=len(all_v4_map),
             v1_both_pair_different=report_json["legacy_v1_diff"].get(
                 "both_pair_different", 0,
             ),
