@@ -56,7 +56,7 @@ Each of these gets a dedicated section below.
   - `legacy_only` — v3 pairs; v4 doesn't. **Regression risk**; this is the cutover bar.
   - `both_pair_different` — both pair, DISJOINT ticker sets under different fixtures. **Silent wrong-linking**; the dangerous class. Distinct from `agree_partial_coverage` by the disjoint-intersection test.
 - **Extraction-exclusion classification pass** — records v4's extractor deliberately refused (`extract_signal returned None`) are their own bucket (`v4_extraction_excluded`), never folded into `legacy_only`. From day one, not a follow-up.
-- **Namespace-normalization discipline**. v1 and v2 legacy maps emit **event_ticker** (parent-event granularity, e.g. `KXNBAGAME-26MAY04MINSAS`). v4's storage is at **market granularity** (`sp.kalshi_markets.ticker`, e.g. `KXNBAGAME-26MAY04MINSAS-MIN`). Set equality across these two namespaces is impossible on day one — the v4 query MUST normalize to event_ticker before comparison, else every dual-pairing lands in `both_pair_different` regardless of actual agreement. See §4.3.
+- **Namespace realization (post-manual-run correction 2026-07-28)**. v1 and v2 legacy maps emit **event_ticker** (parent-event granularity, e.g. `KXNBAGAME-26MAY04MINSAS`). `sp.kalshi_markets.ticker` — the DB column NAME is "ticker" but its semantic content is ALSO the Kalshi **event_ticker**, populated at `ingestion/kalshi.py:179` via `record.get("event_ticker")`. So v1/v2 legacy maps AND `km.ticker` are already in the same namespace. **No JOIN through `public.markets` / `public.events` is required to normalize.** The initial version of §4.3 (pre-2026-07-28) proposed such a JOIN and dropped ~95% of km rows via `pm.ticker != km.ticker` — corrected in the amended §4.3 below.
 - **Same-window discipline** — refactor `_build_kalshi_index_for_sport` to accept a records-list parameter (~15-line signature change) so v1 pairing runs against the same 24h `sp.kalshi_markets` snapshot Deliverable 2 already pulls. Not `_cache` (which is live, would compare two different populations and call it a diff).
 - **Flip `legacy_comparison_present`** in `_write_report` to `True` once the diff pipeline runs cleanly. That's the schema-signal that Gate #2's diff-shaped requirement is met.
 
@@ -232,35 +232,31 @@ def _run_legacy_pairings(
     return v1_map, v2_map
 ```
 
-### 4.3 Add `_query_v4_pairings(session, window_start, window_end)` to `daily_diff.py`
+### 4.3 Add `_query_v4_pairings(session, kalshi_pks, fl_pks)` to `daily_diff.py` — CORRECTED 2026-07-28
 
-**File**: `scripts/daily_diff.py`. **LOC**: ~50.
+**File**: `scripts/daily_diff.py`. **LOC**: ~35.
 
-Reconstruct v4's current pairing state by joining `sp.fl_events` and `sp.kalshi_markets` on `fixture_id`. Same 24h window Deliverable 2 already uses. **Two disciplines applied that a naive SELECT would violate:**
+Reconstruct v4's current pairing state by joining `sp.fl_events` and `sp.kalshi_markets` on `fixture_id`, scoped to D2's LOADED PK SETS (kalshi_pks + fl_pks). Two disciplines applied:
 
-1. **Namespace normalization to event_ticker.** v1/v2 legacy maps emit `event_ticker` at parent-event granularity (`KXNBAGAME-26MAY04MINSAS`). `sp.kalshi_markets.ticker` is market-granularity (`KXNBAGAME-26MAY04MINSAS-MIN`, `-SAS`, etc.). A raw `array_agg(km.ticker)` would produce ticker sets that CAN NEVER equal the legacy sets — every dual-pairing would land in `both_pair_different` on day one regardless of actual agreement. Extract event_ticker from km.ticker in SQL before aggregation.
+1. **Namespace realized (post-manual-run correction)**: `sp.kalshi_markets.ticker` semantically stores event_ticker (via `ingestion/kalshi.py:179`). Direct `array_agg(DISTINCT km.ticker)` is already event_ticker — no JOIN through `public.markets`/`public.events` needed. The prior version's JOIN chain caused ~95% of km rows to silently drop (`pm.ticker != km.ticker` mismatch) and produced a near-empty v4 map on the initial manual run.
 
-2. **Window filter on km, not just fle.** Without a window predicate on `km.last_seen_at`, the JOIN pulls all-time km rows whose `fixture_id` matches any windowed fle. v4's ticker set would then reflect all-time linkage while v1/v2's reflects only the 24h population — same-window violation of the exact form §3.1 warns against.
+2. **Same-population by PK set, not by predicate re-evaluation**: v4's ticker sets come from EXACTLY the km rows D2's `_KALSHI_WINDOW_SQL` loaded, not from a re-evaluated `last_seen_at ∈ window` predicate at a slightly-later moment. Insulates from PR #260's active-row `last_seen_at` bumps that would otherwise exclude still-active fixture-linked rows on any historical cron run (window ended before run). Strict same-window by construction.
 
 ```sql
 SELECT
   fle.fl_event_id,
-  array_agg(
-    DISTINCT substring(km.ticker from '^(.+)-[^-]+$')
-  ) AS event_tickers
+  array_agg(DISTINCT km.ticker) AS event_tickers
 FROM sp.fl_events fle
 JOIN sp.kalshi_markets km ON km.fixture_id = fle.fixture_id
 WHERE fle.fixture_id IS NOT NULL
-  AND fle.last_seen_at BETWEEN :window_start AND :window_end
-  AND km.last_seen_at  BETWEEN :window_start AND :window_end
+  AND fle.fl_event_id = ANY(:fl_pks)
+  AND km.ticker      = ANY(:kalshi_pks)
 GROUP BY fle.fl_event_id;
 ```
 
-**On the `substring(km.ticker from '^(.+)-[^-]+$')` pattern**: Kalshi's ticker convention is `<EVENT>-<OUTCOME>` with the outcome suffix as the last hyphen-separated segment. The regex captures everything before the last hyphen. Two caveats to verify at implementation time:
-- Some ticker families may not have the outcome suffix (event-level tickers where the whole ticker IS the event_ticker). For those, `substring` returns NULL and `DISTINCT` collapses; add a `COALESCE(substring(...), km.ticker)` fallback if a smoke test surfaces any.
-- If Kalshi introduces a new ticker convention post-implementation, the pattern breaks silently — the diff would suddenly land more records in `both_pair_different`. The bucket-invariant assertion (§4.4) doesn't catch this. Instrument at write time: log a WARN if the extracted event_ticker set has zero overlap with the legacy event_ticker set for a randomly sampled row, so the operator sees the pattern break the day it happens.
+Parameters `kalshi_pks` and `fl_pks` are the actual `sp.kalshi_markets.ticker` and `sp.fl_events.fl_event_id` values D2's kalshi_rows/fl_rows already carry (extracted in Python before this query fires). Postgres `ANY(array)` handles 10k+-item arrays without issue.
 
-Alternative if the substring pattern proves fragile: JOIN through a table that carries both `ticker` and `event_ticker` explicitly (currently `public.events` + `public.markets` in the legacy schema; not yet mirrored into `sp.*`). Preferred long-term but requires the mirror; substring is the pragmatic short-term.
+**All-sports at once, partition in Python**: no `s.name = :sport` filter. One query returns fl_events across every sport in D2's population; per-sport partitioning happens in `_measure` via an `fl_id → sport_name` lookup built from `fl_rows`. Avoids the sp.sports JOIN entirely — which is fortunate because pre-2A.7 rows with `sport_id NULL` would have been dropped by the sport-filtered variant.
 
 Returns `dict[str, set[str]]` (event_ticker sets) — same shape and namespace as v1/v2 maps for direct comparability. FL records with `fixture_id NULL` (not yet resolved by v4) don't appear — those become `legacy_only` if v1/v2 paired them, or drop entirely if neither v3 flavor paired them either.
 
@@ -522,6 +518,7 @@ No schema migration to reverse, no data cleanup. Same reason `sp.daily_diff_repo
 
 ## 8. Followups (not in this PR)
 
+- **D2/D1 window-predicate semantics — cron populations exclude still-active rows**. D2's `_KALSHI_WINDOW_SQL` / `_FL_WINDOW_SQL` load rows via `last_seen_at >= :window_start AND last_seen_at < :window_end`. Deliverable 1's `_query_v4_pairings` inherits this via PK-scope (D1 sees exactly what D2 loaded). Under the 03:00 UTC cron with a 24h historical window, rows still active at run time have `last_seen_at ≈ NOW() > window_end` and are EXCLUDED (PR #260 bumps `last_seen_at` on every ingestion pass regardless of content change). Consequence: **the cron population is dominated by records that concluded / delisted / went stale during the window; still-active records at run time are absent.** Manual runs with a `window_end` at or after "now" capture active records too. Two different populations for the "same" nominal window. Possibly acceptable as a documented choice (concluded-events-only gives more stable measurement), but **must be a decision, not a default**. Options: (a) keep + document explicitly so the first cron report's different character doesn't read as regression, (b) change the anchor to `last_changed_at` (bumps only on content change, more stable), (c) extend the predicate to include "still-active at run time" rows. Decision is a separate workstream — this scope doc does not resolve it. Tracked as task #25.
 - **Sport-level diff breakdowns**. Not required to close Gate #2; natural extension once Deliverable 1 is shipping.
 - **Alerting on `both_pair_different` step-changes**. Once trend data exists, a Nth-percentile step-detector is worth wiring. Not urgent; the manual weekly-read discipline works at current volume.
 - **Automated cutover gating**. When Item 7's threshold is set, `/api/v4` traffic-flag flips can be conditioned on `both_pair_different <= threshold AND legacy_only <= threshold`. Separate scope, needs product decision on gate semantics (soft-warn vs hard-block).

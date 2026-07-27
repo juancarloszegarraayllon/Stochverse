@@ -7912,6 +7912,7 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
 def _build_kalshi_index_for_sport(
     sport_name: str,
     records: list[dict] | None = None,
+    games: dict | None = None,
 ) -> dict:
     """Walk the Kalshi cache, return {fl_event_id: [kalshi_records]}
     for sports events whose title matches an FL game. Multiple
@@ -7940,6 +7941,14 @@ def _build_kalshi_index_for_sport(
     against the exact 24h `sp.kalshi_markets` snapshot Deliverable 2
     already pulls, rather than the live cache which drifts pass-to-
     pass. Default preserves existing behavior for every legacy caller.
+
+    Optional `games` parameter: when supplied, pass through to
+    match_game as its FL game dict rather than defaulting to
+    module-level GAMES. Also added for Deliverable 1 — the daily-
+    diff cron runs standalone (no FL polling loop), so module-level
+    GAMES is empty. Same-window discipline extends to the FL side:
+    caller constructs games from the same 24h fl_events D2 pulled.
+    Default preserves the legacy request-path behavior.
     """
     from flashlive_feed import match_game
     if records is None:
@@ -7954,7 +7963,7 @@ def _build_kalshi_index_for_sport(
         if not title:
             continue
         try:
-            mg = match_game(title, sport_name)
+            mg = match_game(title, sport_name, games=games)
         except Exception:
             mg = None
         if not mg:
