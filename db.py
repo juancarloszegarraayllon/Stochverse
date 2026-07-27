@@ -808,39 +808,15 @@ async def save_cache_blob(key: str, data) -> bool:
         return False
     try:
         from sqlalchemy import text as _text
-        # TEMPORARY — cost-investigation 2026-07-25. Measures how often
-        # cache_blob rewrites carry byte-identical content (no hash-gate
-        # on this path). Compare pre-write md5 to post-write md5, both
-        # computed server-side; only 32-char hex crosses the wire, so
-        # measurement overhead does not skew the pg_stat_statements
-        # window materially. Single-revert removal once collected.
-        pre_sql = _text(
-            "SELECT md5(data::text) FROM cache_blobs WHERE key = :key"
-        )
         sql = _text(
             "INSERT INTO cache_blobs (key, data, updated_at) "
             "VALUES (:key, CAST(:data AS JSONB), NOW()) "
             "ON CONFLICT (key) DO UPDATE SET "
-            "data = EXCLUDED.data, updated_at = NOW() "
-            "RETURNING md5(data::text)"
+            "data = EXCLUDED.data, updated_at = NOW()"
         )
         import json as _json
-        payload_str = _json.dumps(data)
         async with engine.begin() as conn:
-            pre = (await conn.execute(pre_sql, {"key": key})).scalar_one_or_none()
-            post = (await conn.execute(
-                sql, {"key": key, "data": payload_str}
-            )).scalar_one_or_none()
-        if pre is None:
-            change = "new"
-        elif pre == post:
-            change = "same"
-        else:
-            change = "changed"
-        log.info(
-            "cache_blob_save key=%s change=%s payload_bytes=%d",
-            key, change, len(payload_str),
-        )
+            await conn.execute(sql, {"key": key, "data": _json.dumps(data)})
         return True
     except Exception as e:
         log.warning("save_cache_blob(%s) failed: %s", key, e)
