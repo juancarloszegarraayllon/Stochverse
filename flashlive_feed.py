@@ -1572,7 +1572,18 @@ async def run_flashlive_feed():
         log.warning("FlashLive warm-start failed: %s", e)
 
     _last_save_ts = 0.0
-    _SAVE_INTERVAL_S = 30  # save at most every 30s — bound DB write rate
+    # Cost-investigation 2026-07-26 PR #3: bumped from 30s to 300s. The
+    # 30s cadence was persisting a ~4 MB JSONB payload up to 2,880 times/
+    # day (~11 GB/day peak egress); the ONLY reader of this key is the
+    # startup warm-start above at :1555, so nothing on the hot path
+    # needs sub-5-minute freshness. Trade: after a container restart,
+    # warm-hydrated GAMES scores can be up to 5 min stale for the very
+    # first requests — the poll loop below refreshes them on its next
+    # cycle (10s while any game is live, 60s idle), so the stale window
+    # is bounded to the container's cold-start latency. `_last_save_ts =
+    # 0.0` above means the first save after startup always passes
+    # unconditionally; the throttle only caps steady-state.
+    _SAVE_INTERVAL_S = 300
 
     while True:
         try:
