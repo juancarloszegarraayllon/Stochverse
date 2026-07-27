@@ -1392,6 +1392,58 @@ class TestGamesHydrationForCron:
         assert g.get("home_phrases"), "home_phrases must be populated"
         assert g.get("away_phrases"), "away_phrases must be populated"
 
+    def test_build_games_from_fl_events_uses_injected_sport(self):
+        """H1 regression guard (Run 3 diag confirmed 2026-07-28):
+        sp.fl_events.raw_payload does NOT carry SPORT_ID at the event
+        level (FL nests it in the tournament wrapper). `_parse_event`
+        without SPORT_ID falls back to `SPORT_MAP.get("", "")` = `""`,
+        which causes `match_game`'s sport-filter to drop every
+        candidate → v1 map empty. The fix injects `_sport` from
+        `sp.sports.name` (via the sp.sports JOIN we already have on
+        fl_rows) into raw_payload before `_parse_event` sees it —
+        `_parse_event` prefers `_sport` over the SPORT_ID fallback.
+
+        This test simulates the exact production shape: FL raw fields
+        present, SPORT_ID absent, `_sport` injected by `_measure`'s
+        post-JOIN enrichment. Asserts the resulting game dict carries
+        the correct sport AND that match_game finds a hit — the
+        end-to-end failure path Run 3 caught."""
+        from scripts.daily_diff import _build_games_from_fl_events
+        from flashlive_feed import match_game
+
+        fl_event = {
+            "EVENT_ID":       "fl_evt_hyp1",
+            "HOME_NAME":      "Cleveland Cavaliers",
+            "AWAY_NAME":      "Toronto Raptors",
+            "SHORTNAME_HOME": "CLE",
+            "SHORTNAME_AWAY": "TOR",
+            "START_UTIME":    1780000000,
+            # NOTE: no SPORT_ID — matches production FL raw_payload.
+            "_sport":         "Basketball",  # injected in _measure post-JOIN
+        }
+        games = _build_games_from_fl_events([fl_event])
+        assert len(games) == 1
+        g = next(iter(games.values()))
+        assert g.get("sport") == "Basketball", (
+            f"expected sport='Basketball' from injected _sport, got "
+            f"{g.get('sport')!r}. If this fails, _parse_event stopped "
+            f"preferring _sport over the SPORT_ID fallback — check "
+            f"flashlive_feed.py:510."
+        )
+        # match_game finds it — proves the injected sport propagates
+        # end-to-end through the games dict to the sport-filter test.
+        hit = match_game(
+            "Cleveland Cavaliers vs Toronto Raptors",
+            "Basketball",
+            games=games,
+        )
+        assert hit is not None, (
+            "match_game returned None — the injected sport didn't "
+            "propagate through the games dict to match_game's "
+            "`if g.get('sport') != sport: continue` filter."
+        )
+        assert hit.get("event_id") == "fl_evt_hyp1"
+
 
 class TestSumDiffDictsAggregation:
     """§4.6 tests 12-13: summed-across-sports aggregation shape."""
