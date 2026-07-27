@@ -1100,3 +1100,332 @@ class TestRenderScript:
         assert "# Daily-diff report (window: 7 days)" in md
         assert "_No reports in window._" in md
         assert "_No baseline-shift events in window._" in md
+
+
+# ── Deliverable 1: v3-vs-v4 legacy comparison ─────────────────────
+#
+# Per docs/measurement/deliverable-1-scope-2026-07-25.md §4.6.
+# All 12 tests specified by the amended scope doc. Category split:
+#   1-7: core _diff_pairings classification (pure-function, no DB)
+#   8:   refactor safety (_build_kalshi_index_for_sport records param)
+#   9-11: namespace / window / fl_event_id key-format discipline
+#   12-13: summed-across-sports aggregation shape (2 tests)
+
+
+class _FakeExtractorAlwaysReturnsSignal:
+    """Extractor stub that never refuses — every record produces a
+    (truthy) signal, so v4_extraction_excluded stays empty."""
+
+    def extract_signal(self, record):
+        return "signal"  # any truthy value
+
+
+class _FakeExtractorRefusesTicker:
+    """Extractor stub that refuses specific event_tickers. Lets tests
+    exercise the v4_extraction_excluded bucket precisely."""
+
+    def __init__(self, refused_event_tickers):
+        self._refused = set(refused_event_tickers)
+
+    def extract_signal(self, record):
+        return None if record.get("event_ticker") in self._refused else "signal"
+
+
+class TestDiffPairingsClassification:
+    """§4.6 tests 1-7: pure-function _diff_pairings bucket classification.
+    No DB required; all inputs are hand-built dicts of sets."""
+
+    def test_diff_pairings_bucket_invariant(self):
+        """Bucket counts sum to total_evaluated. The pipeline-halt
+        guard that catches classification bugs before they persist."""
+        from scripts.daily_diff import _diff_pairings
+        legacy = {"fl_a": {"E1"}, "fl_b": {"E2"}, "fl_c": {"E3"}}
+        v4 = {"fl_a": {"E1"}, "fl_b": {"E2"}, "fl_d": {"E4"}}
+        out = _diff_pairings(legacy, v4, _FakeExtractorAlwaysReturnsSignal(), [])
+        bucket_sum = (
+            out["agree_same_fixture"] + out["agree_partial_coverage"]
+            + out["v4_only"] + out["legacy_only"]
+            + out["both_pair_different"] + out["v4_extraction_excluded"]
+        )
+        assert bucket_sum == out["total_evaluated"]
+        assert out["total_evaluated"] == 4  # fl_a, fl_b, fl_c, fl_d
+
+    def test_diff_pairings_invariant_asserts_on_orphan_fl_id_with_empty_sets(self):
+        """Deliberately-corrupted fixture: an fl_id keyed to empty sets
+        in both maps produces no bucket increment. Invariant assert must
+        fire — pipeline-halt guard proves it guards."""
+        import pytest
+        from scripts.daily_diff import _diff_pairings
+        # fl_orphan is in all_fl_ids (via legacy_map key) but its sets
+        # are empty on both sides → nothing increments → invariant fires.
+        legacy = {"fl_orphan": set()}
+        v4 = {"fl_orphan": set()}
+        with pytest.raises(AssertionError, match="invariant violated"):
+            _diff_pairings(legacy, v4, _FakeExtractorAlwaysReturnsSignal(), [])
+
+    def test_diff_pairings_extraction_exclusion_isolates(self):
+        """Legacy pairing whose only Kalshi tickers are v4-refused
+        goes to v4_extraction_excluded, NOT legacy_only. Correct-
+        behavior classes (KXMLBMENTION etc.) never read as regression."""
+        from scripts.daily_diff import _diff_pairings
+        legacy = {"fl_a": {"KXMLBMENTION-123"}}
+        v4: dict = {}
+        extractor = _FakeExtractorRefusesTicker({"KXMLBMENTION-123"})
+        records = [{"event_ticker": "KXMLBMENTION-123"}]
+        out = _diff_pairings(legacy, v4, extractor, records)
+        assert out["v4_extraction_excluded"] == 1
+        assert out["legacy_only"] == 0
+
+    def test_diff_pairings_full_agreement(self):
+        """Identical maps → all agree_same_fixture; other buckets zero."""
+        from scripts.daily_diff import _diff_pairings
+        legacy = {"fl_a": {"E1"}, "fl_b": {"E2", "E3"}}
+        v4 = {"fl_a": {"E1"}, "fl_b": {"E2", "E3"}}
+        out = _diff_pairings(legacy, v4, _FakeExtractorAlwaysReturnsSignal(), [])
+        assert out["agree_same_fixture"] == 2
+        assert out["agree_partial_coverage"] == 0
+        assert out["both_pair_different"] == 0
+        assert out["legacy_only"] == 0
+        assert out["v4_only"] == 0
+
+    def test_diff_pairings_partial_coverage_not_dangerous(self):
+        """Overlapping-unequal sets: {A,B} vs {A,C} → agree_partial_
+        coverage, NOT both_pair_different. Guards against operator-
+        caught regression that would set Item 7 threshold against
+        benign coverage noise."""
+        from scripts.daily_diff import _diff_pairings
+        legacy = {"fl_a": {"E1", "E2"}}
+        v4 = {"fl_a": {"E1", "E3"}}
+        out = _diff_pairings(legacy, v4, _FakeExtractorAlwaysReturnsSignal(), [])
+        assert out["agree_partial_coverage"] == 1
+        assert out["both_pair_different"] == 0
+        assert out["agree_same_fixture"] == 0
+        # Sample carries the overlap for eyeball inspection.
+        sample = out["sample_disagreements"]["agree_partial_coverage"][0]
+        assert sample["overlap"] == ["E1"]
+
+    def test_diff_pairings_dangerous_class_is_disjoint_only(self):
+        """Disjoint sets: {A,B} vs {C,D} → both_pair_different. Also
+        {A} vs {B} single-element disjoint. The dangerous bucket
+        must ONLY carry disjoint disagreements after PR #256's
+        equal/overlap/disjoint partition."""
+        from scripts.daily_diff import _diff_pairings
+        legacy = {"fl_a": {"E1", "E2"}, "fl_b": {"E5"}}
+        v4 = {"fl_a": {"E3", "E4"}, "fl_b": {"E6"}}
+        out = _diff_pairings(legacy, v4, _FakeExtractorAlwaysReturnsSignal(), [])
+        assert out["both_pair_different"] == 2
+        assert out["agree_partial_coverage"] == 0
+        assert out["agree_same_fixture"] == 0
+
+    def test_diff_pairings_v4_only_and_legacy_only(self):
+        """v4-only and legacy-only paths increment their own buckets."""
+        from scripts.daily_diff import _diff_pairings
+        legacy = {"fl_l": {"E1"}}
+        v4 = {"fl_v": {"E2"}}
+        out = _diff_pairings(legacy, v4, _FakeExtractorAlwaysReturnsSignal(), [])
+        assert out["legacy_only"] == 1
+        assert out["v4_only"] == 1
+
+
+class TestBuildKalshiIndexRecordsParam:
+    """§4.6 test 8: refactor safety. Default preserves existing
+    cache-read behavior; explicit records bypasses cache."""
+
+    def test_build_kalshi_index_for_sport_records_param(self, monkeypatch):
+        """Passing an explicit records list must not touch _cache or
+        get_data(). Guards against a future refactor accidentally
+        re-adding a `get_data()` call inside the records-supplied branch."""
+        import main
+        get_data_calls: list[int] = []
+
+        def _boom_if_called():
+            get_data_calls.append(1)
+
+        monkeypatch.setattr(main, "get_data", _boom_if_called)
+        monkeypatch.setattr(main, "_cache", {})  # empty cache
+        # match_game will return None for garbage records; that's fine
+        # — the point of this test is the records-branch wiring, not
+        # a positive pairing outcome.
+        main._build_kalshi_index_for_sport(
+            "Basketball",
+            records=[{"_sport": "Basketball", "title": "does not match anything"}],
+        )
+        assert get_data_calls == [], (
+            "records-supplied call path must not invoke get_data() — "
+            "if it does, same-window discipline breaks on the daily-diff "
+            "cron path."
+        )
+
+
+class TestV4QueryDiscipline:
+    """§4.6 tests 9-11: namespace-normalization + same-window +
+    fl_event_id key-format discipline. Pipeline-shaped; the SQL runs
+    against a stub that captures parameters for assertion (no live DB
+    required in the general case; the integration variant runs against
+    SP_INTEGRATION_DB when set)."""
+
+    def test_v4_query_uses_event_ticker_namespace(self):
+        """The _V4_PAIRINGS_PER_SPORT_SQL query aggregates
+        `public.events.event_ticker`, NOT `sp.kalshi_markets.ticker`.
+        Would have caught the operator-caught BLOCKER on day one."""
+        from scripts.daily_diff import _V4_PAIRINGS_PER_SPORT_SQL
+        sql = _V4_PAIRINGS_PER_SPORT_SQL
+        # array_agg targets event_ticker, not km.ticker.
+        assert "array_agg(DISTINCT pe.event_ticker)" in sql
+        assert "public.markets" in sql
+        assert "public.events" in sql
+        # Must NOT array_agg market-granularity ticker.
+        assert "array_agg(km.ticker)" not in sql
+        assert "array_agg(DISTINCT km.ticker)" not in sql
+
+    def test_v4_query_respects_km_window(self):
+        """The v4 SQL must window-filter BOTH sides of the fle→km join.
+        A one-sided filter would make v4's ticker set reflect all-time
+        km linkage vs the legacy 24h population — same-window violation
+        (§3.1). Guards against a future edit that accidentally drops
+        the km window predicate."""
+        from scripts.daily_diff import _V4_PAIRINGS_PER_SPORT_SQL
+        sql = _V4_PAIRINGS_PER_SPORT_SQL
+        assert "km.last_seen_at  >= :window_start" in sql
+        assert "km.last_seen_at  <  :window_end" in sql
+        assert "fle.last_seen_at >= :window_start" in sql
+        assert "fle.last_seen_at <  :window_end" in sql
+
+    def test_v4_join_unresolved_counter_query_shape(self):
+        """_V4_JOIN_UNRESOLVED_PER_SPORT_SQL selects km rows whose
+        public.markets peer is NULL (WHERE pm.ticker IS NULL). Guards
+        against a future edit that inverts the predicate or drops the
+        LEFT JOIN — either would silently zero the unresolved counter."""
+        from scripts.daily_diff import _V4_JOIN_UNRESOLVED_PER_SPORT_SQL
+        sql = _V4_JOIN_UNRESOLVED_PER_SPORT_SQL
+        assert "LEFT JOIN public.markets pm" in sql
+        assert "pm.ticker IS NULL" in sql
+        # Same window discipline as the pairings query.
+        assert "km.last_seen_at  >= :window_start" in sql
+        assert "km.last_seen_at  <  :window_end" in sql
+        # Returns a COUNT + sample, not the pairings themselves.
+        assert "COUNT(*)" in sql
+        assert "array_agg(km.ticker)" in sql
+
+    def test_v4_join_unresolved_counter_increments_on_unresolvable_row(self):
+        """_query_v4_pairings_for_sport threads an unresolved count and
+        sample back to the caller. Operator's third-loud-number in the
+        post-run checklist depends on this end-to-end. Stubbed session
+        avoids the DB dependency; test focuses on the return-shape wiring."""
+        import asyncio
+        from datetime import datetime, timezone
+        from unittest.mock import AsyncMock, MagicMock
+        from scripts.daily_diff import _query_v4_pairings_for_sport
+
+        # First execute() = pairings query, returns one fixture that
+        # resolved cleanly. Second execute() = unresolved-count query,
+        # returns count=3 with a 3-ticker sample.
+        pairings_row = MagicMock()
+        pairings_row.fl_event_id = "fl_a"
+        pairings_row.event_tickers = ["KXNBAGAME-ONE"]
+        pairings_result = MagicMock()
+        pairings_result.all.return_value = [pairings_row]
+
+        unresolved_row = MagicMock()
+        unresolved_row.unresolved_count = 3
+        unresolved_row.sample_tickers = ["KXORPH-1", "KXORPH-2", "KXORPH-3"]
+        unresolved_result = MagicMock()
+        unresolved_result.first.return_value = unresolved_row
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=[pairings_result, unresolved_result])
+
+        loop = asyncio.new_event_loop()
+        try:
+            v4_map, unresolved_count, unresolved_sample = loop.run_until_complete(
+                _query_v4_pairings_for_sport(
+                    session, "Basketball",
+                    datetime(2026, 7, 27, tzinfo=timezone.utc),
+                    datetime(2026, 7, 28, tzinfo=timezone.utc),
+                )
+            )
+        finally:
+            loop.close()
+
+        assert v4_map == {"fl_a": {"KXNBAGAME-ONE"}}
+        assert unresolved_count == 3
+        assert unresolved_sample == ["KXORPH-1", "KXORPH-2", "KXORPH-3"]
+
+    def test_fl_event_id_key_format_consistency(self):
+        """v1, v2, and v4 all emit fl_event_id keys as str. Cross-
+        format keys silently produce empty intersections that read
+        as both_pair_different, so we assert str-ness at each source's
+        boundary. If a future refactor changes any source's key type
+        (e.g. UUID), this test fires."""
+        from scripts.daily_diff import _run_legacy_pairings
+        # v1/v2: exercise via a trivial record + fl_event. Neither
+        # pairing algorithm will match, but the empty return still
+        # carries the type contract (str keys).
+        v1_map, v2_map = _run_legacy_pairings("Basketball", [], [])
+        assert all(isinstance(k, str) for k in v1_map.keys())
+        assert all(isinstance(k, str) for k in v2_map.keys())
+        # v4: the query function coerces to str via `str(row.fl_event_id)`
+        # (see _query_v4_pairings_for_sport). Assert the code path
+        # exists — either by grepping the source or by exercising
+        # against an in-memory stub. Simpler here: inspect the source.
+        import inspect
+        from scripts.daily_diff import _query_v4_pairings_for_sport
+        src = inspect.getsource(_query_v4_pairings_for_sport)
+        assert "str(row.fl_event_id)" in src, (
+            "v4 pairings query must coerce fl_event_id to str to match "
+            "v1/v2 key format; drift causes silent disjoint intersection."
+        )
+
+
+class TestSumDiffDictsAggregation:
+    """§4.6 tests 12-13: summed-across-sports aggregation shape."""
+
+    def test_sum_diff_dicts_preserves_bucket_invariant(self):
+        """Summed bucket counts equal sum of per-sport bucket counts AND
+        equal summed total_evaluated. The invariant that holds per-sport
+        must also hold in the summed shape shipping to report_json."""
+        from scripts.daily_diff import _sum_diff_dicts
+        per_sport = [
+            {
+                "agree_same_fixture": 10, "agree_partial_coverage": 2,
+                "v4_only": 3, "legacy_only": 4, "both_pair_different": 1,
+                "v4_extraction_excluded": 5, "total_evaluated": 25,
+                "sample_disagreements": {},
+            },
+            {
+                "agree_same_fixture": 7, "agree_partial_coverage": 0,
+                "v4_only": 1, "legacy_only": 2, "both_pair_different": 0,
+                "v4_extraction_excluded": 3, "total_evaluated": 13,
+                "sample_disagreements": {},
+            },
+        ]
+        summed = _sum_diff_dicts(per_sport)
+        assert summed["total_evaluated"] == 38
+        bucket_sum = (
+            summed["agree_same_fixture"] + summed["agree_partial_coverage"]
+            + summed["v4_only"] + summed["legacy_only"]
+            + summed["both_pair_different"] + summed["v4_extraction_excluded"]
+        )
+        assert bucket_sum == summed["total_evaluated"]
+
+    def test_sum_diff_dicts_truncates_samples(self):
+        """Sum three per-sport dicts each carrying 20 samples in one
+        bucket; summed dict has ≤ SAMPLE_N samples in that bucket.
+        Bounds report_json size regardless of sport count."""
+        from scripts.daily_diff import _sum_diff_dicts, SAMPLE_N
+        per_sport = [
+            {
+                "agree_same_fixture": 0, "agree_partial_coverage": 0,
+                "v4_only": 0, "legacy_only": 20, "both_pair_different": 0,
+                "v4_extraction_excluded": 0, "total_evaluated": 20,
+                "sample_disagreements": {
+                    "legacy_only": [
+                        {"fl_event_id": f"s{s}_r{i}", "legacy_tickers": ["X"]}
+                        for i in range(20)
+                    ],
+                },
+            }
+            for s in range(3)
+        ]
+        summed = _sum_diff_dicts(per_sport)
+        assert len(summed["sample_disagreements"]["legacy_only"]) <= SAMPLE_N

@@ -7909,7 +7909,10 @@ def _collect_unpaired_h2h_for_sport(sport_name: str,
     return out
 
 
-def _build_kalshi_index_for_sport(sport_name: str) -> dict:
+def _build_kalshi_index_for_sport(
+    sport_name: str,
+    records: list[dict] | None = None,
+) -> dict:
     """Walk the Kalshi cache, return {fl_event_id: [kalshi_records]}
     for sports events whose title matches an FL game. Multiple
     records per FL event = multiple market types for the same
@@ -7929,10 +7932,19 @@ def _build_kalshi_index_for_sport(sport_name: str) -> dict:
     'San' substring overlap somewhere in their phrase lists,
     but the actual full team names don't appear in the Kalshi
     title at all).
+
+    Optional `records` parameter: when supplied, iterate over that
+    list instead of reading from the live `_cache`. Added for
+    Deliverable 1 (docs/measurement/deliverable-1-scope-2026-07-25.md
+    §3.1 same-window discipline) so the daily-diff pipeline can pair
+    against the exact 24h `sp.kalshi_markets` snapshot Deliverable 2
+    already pulls, rather than the live cache which drifts pass-to-
+    pass. Default preserves existing behavior for every legacy caller.
     """
     from flashlive_feed import match_game
-    get_data()
-    records = _cache.get("data_all") or _cache.get("data") or []
+    if records is None:
+        get_data()
+        records = _cache.get("data_all") or _cache.get("data") or []
     idx: dict = {}
     rejected = 0
     for r in records:
