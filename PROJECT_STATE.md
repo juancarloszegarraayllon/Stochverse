@@ -58,14 +58,14 @@ Replaced with §11.3's actual 8-item Phase 2 checklist. Status per Day-53 read-b
 | 4 | Three-loop resolver (hot LISTEN/NOTIFY + batch 30s + re-resolution 5–10 min) | **PARTIAL** | Hot loop: zero code matches on `LISTEN`/`NOTIFY`/`pg_notify` primitives across the repo (only docs + one env-var name collision + reresolution runner's `--candidate-set` "seam" comment). No listener, no NOTIFY trigger. Batch loop: selection logic EXISTS in `scripts/run_resolver_pass.py` (the daily runner's broad `fixture_id IS NULL` scan) — cadence is daily, not 30s. Re-resolution loop: `scripts/run_reresolution_pass.py` implemented with narrow Tier-1 selection (`fixture_id IS NULL AND last_seen_at > 3d AND latest.reason_code = 'no_match' AND fail_reason IN allowlist AND asymmetric_excluded IS NULL` per `:242-288`); paused pending PR #248 merge + dry-run verification. **Hot loop scoped as post-Phase-3 optimization** (see decision block below). **Batch cadence is operator-owned** (see decision block below). |
 | 5 | Admin review-queue UI (§7.5 minimum scope) | **DONE** | `admin/router.py`: `review_queue_list`, `review_queue_detail`; templates for list/detail/login/decision-form/decision-result/anchor-failed; auth in `admin/auth.py`; mounted at `/admin/*` per `main.py:385-386` |
 | 6 | Resolver running continuously against stored data | **PARTIAL / decision-dependent** | Daily crons run resolver against stored `sp.fl_events`/`sp.kalshi_markets` at 02:00/02:15 UTC. "Continuously" per §11.3 almost certainly means Item 4's three-loop cadence — on that reading, Item 6 is gated on Item 4's cadence decision (below), not a separate build |
-| 7 | Daily diff until acceptable | **PARTIAL — TWO BLANKS (Day-54 sharpening)** | `scripts/daily_diff.py` (1,168 lines), scheduled `0 3 * * *` via `daily-diff` service in `railway.toml`. Running — but half-built. Two independent gaps, both required for §13.1: (a) **"Acceptable" undefined in the code** (see decision block below); (b) **the diff itself is one-sided** — Day-54 read confirmed `daily_diff.py` runs the NEW resolver standalone and reports outcomes; `sp.daily_diff_reports.legacy_comparison_present` is hardcoded `False` at `scripts/daily_diff.py:1048` since the cron went live. What ships is Deliverable 2 (new-resolver-standalone telemetry); Deliverable 1 (legacy v3 comparison) never shipped despite the docstring line 15 flagging it as "future." §13.1's "do not cut over until diff is acceptable" is UNMEASURABLE against agreement-with-v3 in the current state — the script produces no agreement metric. Deliverable 1 scope-doc in PR #256 (days-not-weeks: v3 pairing is already callable directly via `main.py:_build_kalshi_index_for_sport` for v1 title-parse and `kalshi_join.build_kalshi_index + join_with_fl` for v2 identity-parse; no reconstruction or capture pipeline needed). |
+| 7 | Daily diff until acceptable | **CLOSED — Deliverable 1 shipped 2026-07-28** | Both blanks now filled. **(a) measurement dimension exists**: `scripts/daily_diff.py` writes `legacy_v1_diff` + `legacy_v2_diff` sub-dicts to `sp.daily_diff_reports.report_json` per §3.3 six-bucket schema (agree_same_fixture / agree_partial_coverage / v4_only / legacy_only / both_pair_different / v4_extraction_excluded), plus `legacy_diff_meta.fixture_linked_in_window_count` for population context. `legacy_comparison_present` flips True on every row. First Run 4 verification (2026-07-28 manual): v1 total=530 (17 agree + 10 partial + 43 v4_only + 449 legacy_only + 0 danger + 11 excluded), v2 total=359 (5+0+64+289+1+0). **Danger class stable at v1:0 / v2:1 across all four verification runs — clean signal.** **(b) threshold still operator-owned**, pending N days of cron report data to inform the number. First cron report tonight (03:00 UTC 2026-07-29); baseline-shift SQL run by operator alongside cron ownership handoff. See Session 2026-07-27 → 07-28 for the full shipping arc and the two follow-up tasks (S2b population narrowness, lone v2 danger record triage). |
 | 8 | Extract initial test corpus of ~100 cases from accumulated raw payloads (§12.1) | **NOT STARTED — silent violation** | `tests/corpus/` does not exist. `Makefile:95-96`'s `test-corpus: pytest tests/corpus/` target would fail on missing directory. §12.2 mandates replay-against-corpus as the gate for every resolver change; that gate has been silently absent through the entire Phase 2E arc (PRs #245, #250, #251, #252 all shipped resolver-adjacent changes without corpus replay). Corrective queued below |
 
 ### Two undecided numbers gating Phase 3 — operator-owned
 
 Both are product-latency / product-quality decisions, not code work. Surfaced explicitly here rather than buried in item status so future sessions don't accrete inherited numbers the way "<20 pending" did (that number arrived from working-memory drift, was treated as a bar for weeks, and turned out to be §7.5's health metric — the second-order failure was the anchoring, not the number itself).
 
-**Decision 1 — Item 7 acceptable-threshold**: `docs/reresolution/scope-2026-06-17.md` and §13.1 both say "do not cut over until diff is acceptable." No one has defined acceptable. **AND** (Day-54 sharpening): the measurement dimension the threshold would be set against doesn't currently exist — `daily_diff.py` produces new-resolver-standalone telemetry, not a v3-vs-v4 agreement metric. Two blanks, not one: threshold undefined AND comparison dimension absent. Deliverable 1 scope-doc in PR #256 fills the second blank (measurement dimension); once Deliverable 1 ships and reports accumulate, the operator sets the threshold from actual report data. Candidate threshold shapes (post-Deliverable-1): `both_pair_different` bucket count ceiling, `legacy_only` bucket count ceiling, matcher-capability rate on scope-filtered denominator, per-sport floors, or something else entirely. **Operator decision; no number proposed here.** A number proposed by anyone but the operator risks becoming the inherited bar a future session treats as canonical — exact same failure mode as `<20 pending` was.
+**Decision 1 — Item 7 acceptable-threshold**: `docs/reresolution/scope-2026-06-17.md` and §13.1 both say "do not cut over until diff is acceptable." The Day-54 TWO-BLANKS framing (threshold undefined AND comparison dimension absent) partially resolved 2026-07-28: **Deliverable 1 shipped (PRs #264 / #265 / #267) — the comparison dimension now exists**. `sp.daily_diff_reports.report_json.legacy_v1_diff` / `legacy_v2_diff` carry the six bucket counts on every row; `legacy_comparison_present` flips True. Threshold-setting is now unblocked but still operator-owned pending N days of cron data. **Reading discipline that emerged from the four verification runs**: Item 7's threshold gets set on `both_pair_different` (silent-wrong-linking, DANGEROUS) — NOT on `legacy_only` (which reflects population narrowness — see task #27, S2b — AND capability rate, both orthogonal to cutover risk) NOR on `agree_partial_coverage + both_pair_different` combined (folding the benign coverage-diff class into the dangerous class sets the threshold against noise, per scope doc §3.5). Run 4 baseline: v1 danger=0, v2 danger=1 stable across all four runs — the lone v2 record is task #28. **Operator decision; no number proposed here.** Same failure mode as `<20 pending` if a number lands from anyone but the operator.
 
 **Decision 2 — Item 4 batch-loop cadence**: the batch-loop SELECTION exists (daily runner's broad `fixture_id IS NULL` scan); the CADENCE is daily. §7.7 spec is 30s; re-resolution is 5–10 min. The genuine question is "what latency from provider-ingest to fixture-link is acceptable" — 30s vs 5 min vs daily is set by product, not architecture. Running the daily-shape scan every 30s is real work (~46k FL records/pass, connection budget, incremental scan design), so this is build-work-gated-on-a-decision, not a cron edit. **Operator decision; no number proposed here.**
 
@@ -132,6 +132,112 @@ apply in BOTH directions and must persist across sessions:
 
 If anything Academy-related surfaces in main-product work, flag it
 and leave it for the parallel Academy session.
+
+---
+
+## Session — 2026-07-27 → 2026-07-28: Deliverable 1 shipped — Gate #2 CLOSED, four verification runs to correctness
+
+Two-day arc closing §11.3 Item 7's second blank. Deliverable 2 was already shipping standalone-resolver telemetry; Deliverable 1 adds the v3-vs-v4 legacy comparison layer that has been marked `future` in `scripts/daily_diff.py` since day one. Threshold-setting itself remains operator-owned; this workstream produces the measurement dimension the threshold gets set against.
+
+### Day-56 (2026-07-27): Scope-doc review + amendments
+
+PR #256 (scope doc, filed Day-54 as part of the cost investigation session's Gate #2 sharpening) sat awaiting fresh-read review. Operator returned three substantive amendments + two minor:
+
+1. BLOCKER — ticker namespace: legacy maps collect `event_ticker`, §4.3 SQL aggregated `km.ticker` at market granularity → set equality impossible on day one.
+2. Same-window violation in §4.3: window filter only on fle, none on km.
+3. `agree_same_fixture` too strict — benign coverage differences (v4 superset, same fixture) would land in `both_pair_different`. Introduce `agree_partial_coverage` with an equal/overlap/disjoint partition rule (§3.5).
+
+Minor: per-sport vs summed aggregation shape explicit in §3.3/§4.5; `fl_event_id` key-format consistency in the test checklist. **All five amended; scope doc merged as PR #256.** Full six-bucket schema locked in; namespace + same-window disciplines named as failure modes to guard against.
+
+### Day-56 (2026-07-27): Initial implementation (PR #264)
+
+Per amended scope §4.1-4.7:
+- `main._build_kalshi_index_for_sport` — added `records: list | None = None` parameter, defaults preserve every legacy caller (§4.1).
+- `scripts.daily_diff` — added `_run_legacy_pairings` (v1+v2 in event_ticker namespace, §4.2), `_query_v4_pairings_for_sport` with JOIN through `public.markets` → `public.events` to normalize v4 to event_ticker (§4.3), `_diff_pairings` five-bucket classifier with bucket-sum invariant (§4.4), `_measure` fan-out + `_sum_diff_dicts` summed-across-sports aggregation (§4.5).
+- `tests/test_daily_diff.py` — 13 tests: seven classification + one refactor + three namespace/window/key discipline + two aggregation (§4.6).
+- `docs/measurement/deliverable-1-baseline-shift.sql` — staged for operator to run after first cron report writes with `legacy_present=True` (§4.7).
+
+Operator post-review flagged an additional dependency: the JOIN adds `public.markets` as a third population that the substring alternative wouldn't have needed. Post-review amendment added a `v4_join_unresolved_tickers` counter (count + sample) to `legacy_diff_meta` so the operator sees when `public.markets` drifts vs `sp.kalshi_markets`. Two more tests added.
+
+### Day-56 (2026-07-27): Run 1 — pipeline runs clean, smoke criterion FAILS
+
+Manual run against 2026-07-27 24h window. Bucket counts near-empty: v1 total=5, v2 total=252. `fixture_linked_in_window_count` not yet a field; `v4_join_unresolved=100` sample dominated by `KXKBO*`/`KXLMB*`/`KXMLBEXTRAS` and next-day games.
+
+**Cron ownership DEFERRED.** Baseline-shift SQL stays unrun. Three symptoms diagnosed separately:
+
+- **Symptom 1**: `_run_legacy_pairings`'s v1 path depends on `flashlive_feed.match_game`, which iterates the module-level `GAMES` dict populated only by `run_flashlive_feed()`'s polling loop in the WEB process. `daily_diff.py` runs standalone → `GAMES` empty → `match_game` returns None for every call → v1 map = 0.
+- **Symptom 2**: Two overlapping causes. **(2a) The scope-doc premise about the ticker namespace was wrong** — `sp.kalshi_markets.ticker` semantically stores event_ticker (populated at `ingestion/kalshi.py:179` via `record.get("event_ticker")`), NOT market_ticker. The DB column name misled us. The JOIN chain through `public.markets` (per-outcome tickers) → `public.events` compared market_ticker to event_ticker and silently dropped ~95% of km rows. **(2b)** Even a correct SQL still had a small fixture-linked window population — feeds task #27.
+- **Symptom 3**: v2's `legacy_only=247` was a downstream artifact of (2), not a real regression signal.
+
+### Day-56 (2026-07-27): Amended fix (PR #265) — S2a landed, S1 still broken
+
+Two disciplines corrected + one counter swapped:
+
+- **S2a fix (SQL rewrite)**: drop the `public.markets` / `public.events` JOINs entirely; `array_agg(DISTINCT km.ticker)` directly (already event_ticker). Drop the `sp.sports` JOIN and the per-sport SQL; issue ONE all-sports query. Partition by sport in Python from an `fl_id → sport_name` lookup built from `fl_rows`. Scope by D2's **loaded PK sets** (`kalshi_pks` + `fl_pks`) via `ANY(:pks)` rather than by re-evaluating a `last_seen_at` predicate at a slightly-later moment — insulates from PR #260's active-row `last_seen_at` bumps that would exclude still-active fixture-linked rows on any historical cron run. Rock-solid same-population by construction.
+- **S1 partial fix (games plumbing)**: refactor `match_game(title, sport, games=None)` — default preserves module-level GAMES for every legacy caller. `_build_kalshi_index_for_sport(games=None)` plumbs through. `_run_legacy_pairings(games=None)` plumbs through. New `_build_games_from_fl_events(fl_events)` helper constructs the games dict from the same fl_events D2 loaded via `flashlive_feed._parse_event`.
+- **Counter swap**: removed `v4_join_unresolved_tickers` (dependency on the removed `public.markets` JOIN — loses its purpose). Replaced with `fixture_linked_in_window_count` = `len(all_v4_map)` — one number contextualizing `total_evaluated`, feeds the task #27 S2b population question.
+- **Scope-doc §3.1/§4.3 correction bundled**: explicitly names the pre-2026-07-28 mistake so future readers don't re-derive it.
+- **Deferred workstream named** in scope doc §8: D2/D1 window-predicate semantics (`last_seen_at < end` excludes still-active rows for cron runs). Task #25.
+
+### Day-57 (2026-07-28): Run 2 — S2a confirmed, S1 still empty
+
+v1 still zero. v4 map healthy at fixture_linked=70. Manual diagnostic-only pass required — the S1 chain (`_build_games_from_fl_events` → `_parse_event` → games dict → `match_game`) silently produced empty output. `per_sport_errors=0` — no exceptions, silent filter miss.
+
+### Day-57 (2026-07-28): Diagnostic script (PR #266) — throwaway repo file
+
+Committed `scripts/diag_s1.py` — read-only chain probe with numbered stages `[1]-[12]`. Same sys.path setup as `scripts/daily_diff.py` so `python scripts/diag_s1.py` works in a Railway container. Two hypotheses pre-registered:
+
+- **H1**: `sp.fl_events.raw_payload` lacks SPORT_ID at the event level (FL nests it in the tournament wrapper) → `_parse_event` falls back to `SPORT_MAP.get("", "")` = `""` → every game gets `sport=""` → `match_game`'s sport-filter drops every candidate.
+- **H2**: `SPORT_MAP` label mismatch for some sports (`SPORT_MAP["5"] = "Football"` vs `"American Football"`, `SPORT_MAP["8"] = "Rugby"` vs `"Rugby Union"`/`"Rugby League"`).
+
+Run 3 paste-back conclusive on H1. Stage `[8]` MATCH?=False (raw SPORT_ID = `''`), stage `[10]` 0/313 games matched Basketball, stage `[12]` v1=0. Sample games key `":france u18:greece u18"` shows the empty sport slot verbatim.
+
+### Day-57 (2026-07-28): Final S1 fix (PR #267) — inject _sport from sp.sports JOIN
+
+`_measure` builds `fl_events_by_sport` from `fl_rows` — each row already carries `sport_name` from the `LEFT JOIN sp.sports` in `_FL_WINDOW_SQL`. Fix: enrich each raw_payload copy with `enriched["_sport"] = row.sport_name` before appending. `_parse_event` at `flashlive_feed.py:510` already prefers `_sport` over the SPORT_ID fallback — no change to `match_game`, `_build_games_from_fl_events`, `_parse_event`, or `SPORT_MAP`. Fix lives entirely at the data-injection point. One test (`test_build_games_from_fl_events_uses_injected_sport`) covers the exact regression. Scripts/diag_s1.py deleted per its throwaway contract.
+
+### Day-57 (2026-07-28): Run 4 — three loud numbers all pass, Gate #2 CLOSED
+
+- **v1_diff**: agree=17, partial=10, v4_only=43, legacy_only=449, **danger=0**, excluded=11, total=530
+- **v2_diff**: agree=5, partial=0, v4_only=64, legacy_only=289, **danger=1**, total=359 (same lone record all 4 runs — task #28)
+- **fixture_linked_in_window_count=70**, per_sport_errors=0
+- **Key reading**: v1's 27 agreements + 43 v4_only = 70 v4 pairings exactly — zero fixture disagreements wherever both pair.
+- **excluded=11** proves the extraction-exclusion classification pass fires.
+- **Criterion 3 resolves as a finding, not a bug**: fixture-linked window population is genuinely 70. The 449 v1 `legacy_only` is population narrowness + capability rate, orthogonal to cutover risk. Item 7's threshold reads on `both_pair_different` per scope doc §5's reading discipline. Task #27 tracks the S2b population question separately.
+
+Operator deleted the manual `report_date=2026-07-28` row to let tonight's 03:00 cron write the first owned report cleanly. Baseline-shift SQL run after that with `event_date=2026-07-28`, `created_by=PR #267`.
+
+### Day-57 (2026-07-28): Reading discipline that emerged
+
+- **Item 7 threshold set on `both_pair_different` ONLY.** `legacy_only` is the wrong metric — it reflects two orthogonal things (population narrowness AND matcher capability rate) neither of which is cutover risk. `agree_partial_coverage + both_pair_different` combined is also wrong — folds benign coverage-diff into the dangerous class, sets the threshold against noise. Both wrong-metric traps were pre-registered in scope doc §3.5 and §5; four verification runs of concrete data reinforced them.
+- **Population narrowness ≠ regression.** `fixture_linked_in_window_count=70` against a 5,186-fl_event window looks alarming but is a natural output of the resolver's current coverage. The bucket that names cutover risk (`both_pair_different`) is 0/1 across all four runs — clean. Task #27 investigates the 70 as a capability question, NOT a Deliverable 1 correctness question.
+
+### Days 56-57: Methodology bank additions
+
+- **Verification runs earn their name** — Run 1's near-empty output looked like a Deliverable 1 correctness failure. Diagnosis surfaced THREE distinct issues (scope-doc premise wrong; games-hydration missing; SPORT_ID absent from fl_events raw_payload). Each surfaced by data, not from re-reading the scope doc. Four runs to correctness is the honest count; the two intermediate runs (2 + 3) each named exactly one break-point and moved us closer.
+- **Diagnostic-as-committed-file beats console heredoc** — Run 2's paste-back attempt failed via web-console heredoc mangling + wrong import path guess. PR #266 (throwaway `scripts/diag_s1.py`) delivered stage-by-stage output in one clean run. Pattern: number the stages so paste-back is small; sys.path setup mirrors the module being probed; delete once fix lands. Kept as a reusable pattern, not the specific file.
+- **Same-population by PK-scope > same-window predicate** — Amendment 1 to the scope doc's §3.1 same-window discipline. "Use exactly the row set D2 already loaded" is stronger than "use the same predicate at a potentially-different moment." Insulates from any predicate drift (including PR #260's active-row `last_seen_at` bumps). Applied in PR #265's `_query_v4_pairings(session, kalshi_pks, fl_pks)`.
+
+### Days 56-57: PR state
+
+- **PR #256** (Deliverable 1 scope doc + amendments): merged 07-27
+- **PR #264** (initial implementation): merged 07-27, superseded by #265/#267
+- **PR #265** (amended fix — S2a namespace + PK-scope, partial S1): merged 07-27
+- **PR #266** (throwaway `scripts/diag_s1.py`): merged 07-28
+- **PR #267** (S1 final fix — inject `_sport`): merged 07-28
+
+### Days 56-57: Followups queued
+
+- **Task #25**: D2/D1 window-predicate semantics — 03:00 cron excludes still-active rows (their `last_seen_at` bumped past `window_end`). Documented in scope doc §8. Tomorrow's first cron report vs today's manual run will show the divergence in population counts if it happens — reads as data, not regression.
+- **Task #27**: fixture-linked window population narrowness (70 / 5,186). S2b — capability rate + coverage question, separate from Item 7 threshold.
+- **Task #28**: lone v2 danger record — stable across all four runs. Sample carries the info for manual triage; useful to calibrate what a "1" in `both_pair_different` looks like before threshold-setting.
+
+### Pending — next session
+
+- Tomorrow (Day-58): check first cron report — bucket counts, task #25 window-semantics divergence (does cron population differ from today's manual runs, and by how much / which direction?)
+- Task #27 investigation (population narrowness — capability rate workstream)
+- Task #28 triage (lone v2 danger record — sample the sub-dict)
+- N-day accumulation before Item 7 threshold-setting begins
 
 ---
 
