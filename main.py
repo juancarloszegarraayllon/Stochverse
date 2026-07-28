@@ -146,6 +146,17 @@ async def startup_event():
         await refresh_alias_sport_cache()
     except Exception as e:
         logging.getLogger("stochverse").warning("db init skipped: %s", e)
+    # Task #21 Surface A: warm-load the Kalshi /series metadata cache
+    # from cache_blobs BEFORE the get_data thread starts. Awaited (not
+    # fire-and-forget) because the first _build_cache pass classifies
+    # every market and would otherwise fire cold /series calls for
+    # every previously-seen series — that's the 429 storm this fixes.
+    try:
+        await _load_series_meta_from_db()
+    except Exception as e:
+        logging.getLogger("stochverse").warning(
+            "kalshi_series_meta warm-start skipped: %s", e,
+        )
     # Build the REST snapshot eagerly in a thread so the WS client has
     # tickers to subscribe to without waiting for a first user request.
     threading.Thread(target=get_data, daemon=True).start()
@@ -217,6 +228,10 @@ async def startup_event():
     asyncio.create_task(_load_tournament_brackets_from_db())
     asyncio.create_task(_load_team_caches_from_db())
     asyncio.create_task(_tournament_bracket_warm_loop())
+    # Task #21 Surface A: persist newly-fetched /series metadata back
+    # to cache_blobs on a 60s dirty-gated cadence so redeploys don't
+    # lose the cache.
+    asyncio.create_task(_series_meta_persist_loop())
     # Prewarm series→stage_id for EVERY sport series in get_data(),
     # not just the ones users have clicked into. This is what was
     # missing for CONCACAF / Copa Sudamericana / smaller cups: their
@@ -757,18 +772,48 @@ def get_sport(series_ticker):
 # ── Dynamic Kalshi /series metadata cache ────────────────────────────
 # Caches Kalshi's authoritative series metadata (category, tags, title)
 # so every classifier — sport bucket for Sports, friendly subcategory
-# label for any category — can pull from one source. One network call
-# per series per process, results cached in-memory; failures captured
-# in _SERIES_META_TRIED so we don't re-spam Kalshi for tickers it has
-# nothing useful for.
-_SERIES_META_DYNAMIC: dict = {}    # series_ticker (UPPER) → {category, tags, title}
-_SERIES_META_TRIED: set = set()    # series we've already tried
+# label for any category — can pull from one source.
+#
+# Task #21 Surface A (2026-07-29): cache is warm-loaded from the
+# `cache_blobs["kalshi_series_meta"]` blob at startup and persisted
+# back on a 60s dirty-gated cadence. Entries survive redeploys, so a
+# steady-state process makes ~zero /series calls. Fetches that do
+# happen are throttled to 10 rps and retry-with-backoff on 429.
+#
+# Explicit entry shape (writer and warm-loader MUST keep this in
+# sync — a shape drift silently breaks classification for warm-loaded
+# rows because the sport derivation re-runs against these fields):
+#     {
+#         "category":   str,          # Kalshi /series.category
+#         "tags":       list[str],    # Kalshi /series.tags
+#         "title":      str,          # Kalshi /series.title
+#         "fetched_at": float,        # unix seconds — used for TTL
+#     }
+_SERIES_META_DYNAMIC: dict = {}    # series_ticker (UPPER) → entry (see shape above)
 
 # Backward-compat: the old per-sport map kept for any callers that
 # only need the resolved sport. Populated as a side-effect of
 # _resolve_series_meta_dynamic.
 _SERIES_SPORT_DYNAMIC: dict = {}   # series_ticker (UPPER) → sport name
-_SERIES_SPORT_TRIED: set = _SERIES_META_TRIED  # alias, same semantics
+
+# ── Kalshi /series call throttle + retry state ─────────────────────
+#
+# _SERIES_META_DYNAMIC is populated from the sync `get_data` thread
+# (see `_build_cache`), so this throttle is sync — separate mechanism
+# from `flashlive_feed._fl_throttle` (async, called from asyncio tasks).
+# The dict-mutation lock protects concurrent read/write on the cache
+# dict itself between the get_data thread and the async persist loop.
+_kalshi_meta_throttle_lock = threading.Lock()
+_kalshi_meta_last_call_ts: float = 0.0
+_KALSHI_META_MIN_GAP_S: float = float(
+    os.environ.get("KALSHI_META_MIN_GAP_S", "0.1")
+)  # 10 rps default; overridable if Kalshi tightens their limits.
+_KALSHI_META_TTL_S: int = int(
+    os.environ.get("KALSHI_META_TTL_S", str(30 * 24 * 3600))
+)  # 30-day cache TTL — series metadata (category/tags/title) rarely churns.
+
+_kalshi_meta_dict_lock = threading.Lock()
+_series_meta_dirty: bool = False
 
 # Tag/title keyword → our sport bucket. Order is by descending
 # specificity so "table tennis" wins over "tennis", "american football"
@@ -826,41 +871,101 @@ def _derive_sport_from_kalshi_series(category: str, tags: list, title: str) -> s
     return best_sport
 
 
+def _kalshi_meta_throttle() -> None:
+    """Sync minimum-gap throttle for Kalshi /series calls. Enforces at
+    most 1 call per `_KALSHI_META_MIN_GAP_S` seconds process-wide.
+
+    Sync (not async) because it's called from the `get_data` daemon
+    thread. The lock also serializes concurrent bursts across any
+    future callers so the gap is observed globally, not per-caller."""
+    global _kalshi_meta_last_call_ts
+    with _kalshi_meta_throttle_lock:
+        now = time.monotonic()
+        gap = now - _kalshi_meta_last_call_ts
+        if gap < _KALSHI_META_MIN_GAP_S:
+            time.sleep(_KALSHI_META_MIN_GAP_S - gap)
+        _kalshi_meta_last_call_ts = time.monotonic()
+
+
+def _get_series_with_retry(client, series_ticker: str):
+    """Fetch /series with throttle + 429 backoff. Returns the raw
+    response object on success, None if all attempts hit 429. Any
+    non-429 exception propagates — callers handle it.
+
+    Module-level so tests can monkeypatch it without touching the
+    resolver's own contract."""
+    _log = logging.getLogger("stochverse")
+    for attempt in range(3):
+        try:
+            _kalshi_meta_throttle()
+            return client.get_series(series_ticker=series_ticker)
+        except Exception as e:
+            if "429" not in str(e):
+                raise
+            if attempt == 2:
+                _log.warning(
+                    "series-meta: %s exhausted 3 attempts after 429; dropping",
+                    series_ticker,
+                )
+                return None
+            backoff = min(2 ** attempt, 30)
+            _log.info(
+                "series-meta: %s hit 429 (attempt %d), sleeping %ds",
+                series_ticker, attempt + 1, backoff,
+            )
+            time.sleep(backoff)
+    return None
+
+
 def _resolve_series_meta_dynamic(series_ticker: str) -> dict:
     """Look up a series's full Kalshi /series metadata.
-    Returns {category, tags, title} dict (possibly empty values) on
-    success, or {} on failure. Cached in-memory; one network call per
-    series per process. Safe to call from sync code."""
+    Returns the cached entry (see shape at _SERIES_META_DYNAMIC decl)
+    on success, or {} on failure. Cached in-memory + persisted to
+    cache_blobs.
+
+    Exception boundary: this function NEVER raises. A transient
+    network error bubbling into `_build_cache`'s classifier loop
+    would abort the whole Kalshi REST snapshot; the caller only cares
+    about {} vs meta, not why the fetch failed."""
+    global _series_meta_dirty
     s = str(series_ticker or "").upper()
     if not s:
         return {}
     if s in _SERIES_META_DYNAMIC:
         return _SERIES_META_DYNAMIC[s]
-    if s in _SERIES_META_TRIED:
-        return {}
-    _SERIES_META_TRIED.add(s)
     try:
         client = get_client()
-        resp = client.get_series(series_ticker=s)
+        resp = _get_series_with_retry(client, s)
+        if resp is None:
+            # All 3 attempts hit 429 — leave uncached so a later pass
+            # can retry (Kalshi limits are short-lived). This is the
+            # key behavior change from the pre-Task-#21 code, which
+            # marked a 429'd series permanently-tried and never
+            # retried, silently mis-classifying the market forever.
+            return {}
         series_obj = getattr(resp, "series", None) or resp
         meta = {
-            "category": getattr(series_obj, "category", "") or "",
-            "tags":     list(getattr(series_obj, "tags", []) or []),
-            "title":    getattr(series_obj, "title", "") or "",
+            "category":   getattr(series_obj, "category", "") or "",
+            "tags":       list(getattr(series_obj, "tags", []) or []),
+            "title":      getattr(series_obj, "title", "") or "",
+            "fetched_at": time.time(),
         }
-        _SERIES_META_DYNAMIC[s] = meta
-        # Cache the derived sport too so old call sites stay fast.
-        sport = _derive_sport_from_kalshi_series(meta["category"], meta["tags"], meta["title"])
+        with _kalshi_meta_dict_lock:
+            _SERIES_META_DYNAMIC[s] = meta
+            _series_meta_dirty = True
+        sport = _derive_sport_from_kalshi_series(
+            meta["category"], meta["tags"], meta["title"],
+        )
         if sport:
             _SERIES_SPORT_DYNAMIC[s] = sport
         logging.getLogger("stochverse").info(
             "series-meta: %s → cat=%s sport=%s title=%r",
-            s, meta["category"], sport or "-", meta["title"][:60]
+            s, meta["category"], sport or "-", meta["title"][:60],
         )
         return meta
     except Exception as e:
         logging.getLogger("stochverse").warning(
-            "series-meta lookup failed for %s: %s", s, str(e)[:120]
+            "series-meta lookup failed for %s: %s", s, str(e)[:120],
         )
         return {}
 
@@ -895,6 +1000,102 @@ def _resolve_series_subcat_dynamic(series_ticker: str) -> str:
     # "Game", "Match" trailing on per-game series titles when the
     # ticker already implies it).
     return title[:60]
+
+
+async def _load_series_meta_from_db() -> None:
+    """Warm-load _SERIES_META_DYNAMIC from `cache_blobs["kalshi_series_meta"]`.
+
+    Awaited before the get_data thread starts so the first REST
+    snapshot pass finds a populated cache and classifies without
+    firing /series calls at all. Entries older than _KALSHI_META_TTL_S
+    are dropped so we periodically re-fetch stale metadata. Any error
+    is logged and swallowed — a missing warm-start is not fatal, just
+    forces the resolver to fetch cold."""
+    _log = logging.getLogger("stochverse")
+    try:
+        from db import load_cache_blob
+        prior = await load_cache_blob("kalshi_series_meta")
+        if not isinstance(prior, dict) or not prior:
+            _log.info("kalshi_series_meta warm-start: no prior blob")
+            return
+        now_ts = time.time()
+        cutoff = now_ts - _KALSHI_META_TTL_S
+        loaded = 0
+        expired = 0
+        # Loader mirrors the writer's entry shape (see _SERIES_META_DYNAMIC
+        # decl). If a key we depend on is missing on the loaded entry —
+        # e.g. an older on-disk blob with no `fetched_at` — treat it as
+        # expired so the resolver re-fetches and rewrites the current shape.
+        for series_raw, entry in prior.items():
+            if not isinstance(entry, dict):
+                continue
+            series = (series_raw or "").upper()
+            if not series:
+                continue
+            fetched_at = entry.get("fetched_at")
+            if not isinstance(fetched_at, (int, float)) or fetched_at < cutoff:
+                expired += 1
+                continue
+            _SERIES_META_DYNAMIC[series] = entry
+            sport = _derive_sport_from_kalshi_series(
+                entry.get("category", ""),
+                entry.get("tags", []) or [],
+                entry.get("title", ""),
+            )
+            if sport:
+                _SERIES_SPORT_DYNAMIC[series] = sport
+            loaded += 1
+        _log.info(
+            "kalshi_series_meta warm-start: loaded %d, expired %d (TTL %ds)",
+            loaded, expired, _KALSHI_META_TTL_S,
+        )
+    except Exception as e:
+        _log.warning("kalshi_series_meta warm-start failed: %s", e)
+
+
+async def _series_meta_persist_loop() -> None:
+    """Dirty-gated 60s persist loop for _SERIES_META_DYNAMIC.
+
+    Reads the on-disk blob first and merges it with the local snapshot
+    (local wins on key collision) so a co-worker's newly-discovered
+    series aren't clobbered by ours. Divergence between two workers'
+    caches is still possible mid-cycle, but bounded to a single 60s
+    persist tick and self-heals on the next save.
+
+    The dict()-snapshot is taken under `_kalshi_meta_dict_lock` to
+    avoid a RuntimeError from concurrent mutation (the resolver runs
+    in the get_data thread; this loop runs in the asyncio thread)."""
+    global _series_meta_dirty
+    _log = logging.getLogger("stochverse")
+    while True:
+        try:
+            await asyncio.sleep(60)
+            if not _series_meta_dirty:
+                continue
+            from db import load_cache_blob, save_cache_blob
+            with _kalshi_meta_dict_lock:
+                local_snapshot = dict(_SERIES_META_DYNAMIC)
+                # Clear the dirty flag BEFORE the save so writes that
+                # happen during the save are picked up next cycle. If
+                # the save itself fails we re-set dirty below.
+                _series_meta_dirty = False
+            existing = await load_cache_blob("kalshi_series_meta")
+            if not isinstance(existing, dict):
+                existing = {}
+            merged = {**existing, **local_snapshot}
+            ok = await save_cache_blob("kalshi_series_meta", merged)
+            if not ok:
+                _series_meta_dirty = True
+                continue
+            _log.info(
+                "kalshi_series_meta persist: local=%d existing=%d merged=%d",
+                len(local_snapshot), len(existing), len(merged),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _series_meta_dirty = True
+            _log.warning("kalshi_series_meta persist loop error: %s", e)
 
 
 # ── Game-market grouping ──────────────────────────────────────────────────────
