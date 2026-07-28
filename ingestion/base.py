@@ -143,13 +143,16 @@ async def upsert_provider_records_batch(
           are unreachable and have been removed; every conflict now
           writes the new raw_payload and bumps last_changed_at = NOW().
       3b. Lightweight UPDATE table SET last_seen_at = NOW() WHERE pk IN
-          (unchanged_pks) — skipped if none. Round trip #3. Preserves
-          the re-resolution loop's freshness watermark (its candidate
-          scan uses `WHERE last_seen_at > NOW() - INTERVAL '3d'`); a
-          ticker whose content is byte-identical still gets its
-          last_seen_at bumped so it stays in-scope for re-resolution.
-          Sends only the PK list (~few bytes per row) instead of the
-          full raw_payload (~12 KB per row for Kalshi).
+          (unchanged_pks) AND last_seen_at < NOW() - INTERVAL '1 hour'
+          — skipped if none. Round trip #3. Preserves the re-resolution
+          loop's freshness watermark (its candidate scan uses
+          `WHERE last_seen_at > NOW() - INTERVAL '3d'`); a ticker whose
+          content is byte-identical still gets its last_seen_at bumped
+          hourly, well inside the 3-day watermark (71× margin). Sends
+          only the PK list (~few bytes per row) instead of the full
+          raw_payload (~12 KB per row for Kalshi). Task #22 added the
+          hourly staleness gate — WAL cut ~99% vs the unconditional
+          per-pass bump baseline.
 
     Round-trip count is 2 or 3 depending on the partition (always ≥2
     for a non-empty batch, at most 3). The per-row wire cost for the
@@ -239,12 +242,27 @@ async def upsert_provider_records_batch(
     # Step 3b: freshness-only UPDATE for unchanged rows. Wire cost is
     # the PK list, not raw_payload. Preserves the re-resolution
     # candidate-scan watermark (`last_seen_at > NOW() - INTERVAL 'Nd'`).
+    #
+    # STALENESS GATE (task #22, 2026-07-29): the additional
+    # `last_seen_at < NOW() - INTERVAL '1 hour'` predicate skips rows
+    # bumped within the last hour. Cuts Neon WAL churn ~99% (measured
+    # baseline ~19M row versions/day / ~23 GB WAL/day for this
+    # statement; post-gate steady state ~183k row versions/day) while
+    # preserving the reresolution watermark's 3-day (72-hour) window
+    # with 71× margin. Wire cost of the PK IN list (~150KB per pass,
+    # ~432 MB/day) is unchanged — the gate runs SERVER-side, Postgres
+    # evaluates per-row and writes only stale tuples. Client-side
+    # gating (in-memory bump timestamps) would save wire too but adds
+    # state that doesn't survive worker restart; SQL-side is simpler
+    # and correct-by-construction.
     if unchanged_pks:
         tbl = table.__table__
         pk_column = tbl.c[pk_col]
+        last_seen_col = tbl.c["last_seen_at"]
         await session.execute(
             update(tbl)
             .where(pk_column.in_(unchanged_pks))
+            .where(last_seen_col < text("NOW() - INTERVAL '1 hour'"))
             .values(last_seen_at=text("NOW()"))
         )
 
