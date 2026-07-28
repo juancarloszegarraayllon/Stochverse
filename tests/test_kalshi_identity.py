@@ -440,6 +440,76 @@ class TestOutrightSeriesPrefixes:
         )
         assert i.kind == "outright"
 
+    # ── Mention-family substring rule (added 2026-07-29, task #29) ──
+    #
+    # Kalshi's "mention" product category is generatively named — 76
+    # distinct KX*MENTION series prefixes observed in sp.kalshi_markets
+    # 2026-07-29 (~1050 rows total), across sports (MLB/NBA/NHL/WNBA/
+    # ATP), news shows, politicians, and one-off pundits. New prefixes
+    # minted weekly. Rather than enumerate, _is_outright_series checks
+    # for the "MENTION" substring in series_base via
+    # _OUTRIGHT_SERIES_SUBSTRINGS. These five tests lock in the
+    # substring rule + one negative control confirming normal game
+    # tickers still classify as per_fixture.
+
+    def test_mention_family_sports_mlb(self):
+        """KXMLBMENTION — announcer-mention prop, not a game.
+        The task #28 danger record (rHTxr6dU) was this exact
+        family; post-fix v2 skips it at kalshi_join indexing since
+        parse_ticker now returns kind='outright'."""
+        i = parse_ticker(
+            "KXMLBMENTION-26JUL01CINMIL", "KXMLBMENTION", "Baseball",
+        )
+        assert i.kind == "outright"
+
+    def test_mention_family_sports_nba(self):
+        """Sibling: KXNBAMENTION-* — same treatment."""
+        i = parse_ticker(
+            "KXNBAMENTION-26MAY30SASOKC", "KXNBAMENTION", "Basketball",
+        )
+        assert i.kind == "outright"
+
+    def test_mention_family_non_sports_person(self):
+        """Non-sports mention family (political-figure mentions):
+        same substring rule catches them too. KXTRUMPMENTION had 52
+        rows in the 2026-07-29 sample — well beyond the sports
+        subset. Sport param is empty because this isn't a sports
+        product; outright classification doesn't depend on it."""
+        i = parse_ticker(
+            "KXTRUMPMENTION-25MAY06", "KXTRUMPMENTION", "",
+        )
+        assert i.kind == "outright"
+
+    def test_mention_family_hypothetical_future_prefix(self):
+        """Proves the rule generalizes to new prefixes minted next
+        week without a code change. Guards against a future refactor
+        that reverts _is_outright_series to prefix-list-only, which
+        would silently reintroduce the mention-noise regression."""
+        i = parse_ticker(
+            "KXFAKEMENTION-26AUG15", "KXFAKEMENTION", "",
+        )
+        assert i.kind == "outright"
+
+    def test_mention_substring_leaves_normal_series_alone(self):
+        """Negative control: legitimate per-fixture series must NOT
+        be caught by the substring rule. Sanity that adding the
+        substring didn't accidentally break normal game tickers.
+        Two shapes covered — MLB and NBA game tickers — since the
+        substring lives in _is_outright_series which sits upstream
+        of every per_fixture classification."""
+        i_mlb = parse_ticker(
+            "KXMLBGAME-26JUL281910CLECIN", "KXMLBGAME", "Baseball",
+        )
+        assert i_mlb.kind == "per_fixture", (
+            f"KXMLBGAME classified as {i_mlb.kind!r}, should be per_fixture"
+        )
+        i_nba = parse_ticker(
+            "KXNBAGAME-26MAY04MINSAS", "KXNBAGAME", "Basketball",
+        )
+        assert i_nba.kind == "per_fixture", (
+            f"KXNBAGAME classified as {i_nba.kind!r}, should be per_fixture"
+        )
+
 
 # ── Full snapshot sweep — every observed ticker must parse ──────
 

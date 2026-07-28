@@ -166,8 +166,32 @@ _OUTRIGHT_SERIES_PREFIXES = (
 )
 
 
+# Substring markers for generatively-named outright families whose
+# per-instance prefixes would need forever-maintenance to enumerate.
+# Added 2026-07-29 per task #29 diagnostic — 76 distinct KX*MENTION
+# series prefixes observed in sp.kalshi_markets (~1050 rows), all
+# mention-product markets (sports announcer mentions, political-
+# figure mentions, entertainment-show mentions, one-off pundits).
+# New prefixes minted weekly as new shows/people come online, so a
+# static enumeration is stale on arrival. Substring rule covers the
+# whole family without a maintainer forever.
+#
+# Extension pattern: add a substring here ONLY when (a) the marker
+# name has no legitimate per-fixture semantics anywhere in Kalshi's
+# ticker space — grep the codebase AND sample real ticker data
+# before adding, since a false positive silently kills matching for
+# a whole legitimate series family; and (b) the family is
+# generatively named (new prefixes minted continuously). For a
+# fixed small family — KXMLBTB / KXMLBHR / KXMLBHRR / KXNBASTL —
+# stay with the prefix list above: more precise and grep-visible.
+_OUTRIGHT_SERIES_SUBSTRINGS = (
+    "MENTION",   # announcer / person / show mention props
+)
+
+
 def _is_outright_series(series_base: str) -> bool:
-    """True if series_base matches a known outright-only prefix.
+    """True if series_base matches a known outright-only prefix OR
+    contains an outright-family substring marker.
 
     Short-circuits per_fixture classification for tickers whose
     shape is G1/G7 but whose semantics are outrights.
@@ -175,7 +199,11 @@ def _is_outright_series(series_base: str) -> bool:
     s = (series_base or "").upper()
     if not s:
         return False
-    return any(s.startswith(p) for p in _OUTRIGHT_SERIES_PREFIXES)
+    if any(s.startswith(p) for p in _OUTRIGHT_SERIES_PREFIXES):
+        return True
+    if any(m in s for m in _OUTRIGHT_SERIES_SUBSTRINGS):
+        return True
+    return False
 
 
 # ── Series-base extraction ───────────────────────────────────────
