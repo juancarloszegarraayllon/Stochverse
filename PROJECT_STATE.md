@@ -135,6 +135,110 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-07-29 → 2026-07-30: Task cleanup arc — outright classification, Neon WAL staleness gate, series-meta persistence, advisory-lock singletons
+
+Two-day arc taking the follow-up queue that piled up under the cost-investigation and Deliverable 1 sessions down to zero-or-decided. Four PRs shipped and verified end-to-end; Task #21 (originally scoped as "FL loop worker topology + advisory lock") decomposed into four surfaces on Day-58, three of them decided (Surface A + C shipped, Surface B queued, Surface D deferred). All four merged PRs verified with concrete numbers on the following day's read; two verifications caught methodology mistakes worth banking.
+
+### Day-58 (2026-07-29): PR #270 — KXMLBMENTION outright classification (Task #29)
+
+Small correctness fix to `kalshi_identity`'s outright classifier. Existing v4 code enumerated `_OUTRIGHT_SERIES_PREFIXES` (exact-string prefix match); the KXMLBMENTION family and other "mention" outrights sit under prefixes that had never been enumerated, and every mention-family Kalshi ticker was resolving into the paired flow, producing a lone `v2_danger=1` sample surfaced by Deliverable 1 Run 4 (Task #28 triage record `rHTxr6dU`). Fix adds `_OUTRIGHT_SERIES_SUBSTRINGS = ("MENTION",)` and a `contains-any` check running in parallel to the prefix check — substring rule chosen over a bigger prefix list because MENTION appears in KXMLBMENTION, KXNBAMENTION, KXNHLMENTION, KXNFLMENTION, KXCFBMENTION, all with different per-sport prefixes we'd otherwise have to keep in sync.
+
+### Day-58 (2026-07-29): PR #271 — Kalshi `last_seen_at` staleness gate (Task #22)
+
+Larger correctness + WAL-churn fix to `ingestion/base.upsert_provider_records_batch`'s Step 3b (unchanged-rows path). Pre-fix, Step 3b unconditionally UPDATEd `last_seen_at = NOW()` on every unchanged row on every pass — for Kalshi's ~50k-row inventory pulled every 60s, that's ~19M row versions/day of pure WAL churn producing ~23 GB/day of write-ahead log traffic that Neon bills against compute time. Fix adds a `WHERE last_seen_col < NOW() - INTERVAL '1 hour'` predicate so the UPDATE only fires when the row's freshness genuinely needs bumping. Correctness envelope: the re-resolution watermark uses a 3-day cutoff → 71× safety margin between the hourly bump cadence and the 3-day exclusion edge. Test file (`tests/test_ingestion_base.py`, three cases) locks in the SQL predicate presence, the envelope math, and the Step-3a-unchanged contract (changed rows still get unconditional NOW() bumps).
+
+### Day-58 (2026-07-29): Task #21 decomposition — from one "FL loop" ticket into four surfaces
+
+Task #21 originally read "FL loop worker topology + advisory lock." Stage-1 inventory across `startup_event` and its downstream loops surfaced that the ~89% egress cut on Day-56 had shifted the bottleneck: FL polling was NOT the top offender any more, and a 21:04 429 storm the operator flagged the previous evening actually root-caused to Kalshi's `_resolve_series_meta_dynamic` (unbounded `/series` calls, no throttle, no retry, and a `_SERIES_META_TRIED.add(s)` firing BEFORE the API call — every 429 permanently locked the series to `{}` for the process lifetime, silently misclassifying the market forever). Stage-2 decomposed into:
+- **Surface A**: Kalshi `_resolve_series_meta_dynamic` — 429 storm + silent misclassification. GO Day-58.
+- **Surface B**: FL live polling cadence — approved `b5.ii` (adaptive per-sport + 5s live upgrade). Queued.
+- **Surface C**: `_score_flush_loop` + `_price_prune_loop` advisory-lock singleton. GO Day-59.
+- **Surface D**: Kalshi cold-start pagination. DEFERRED.
+
+Operator's ranking of pain (FL spend > series misclassification > 429 storms > cleanliness > noise) plus the "zero staleness regression" bar on Surface B drove the sequence: A first (fixes both misclassification AND storm), C second (mechanical, ~30 LOC), B third (largest scope).
+
+### Day-58 (2026-07-29): PR #272 — Kalshi series-meta cache persistence (Task #21 Surface A)
+
+Operator approved with three adjustments folded in before the PR: (1) exception boundary — the resolver must never raise, since it's called from `_build_cache`'s classifier loop and any escaped exception would abort the entire Kalshi REST snapshot; (2) explicit entry shape — persisted entries carry `{category, tags, title, fetched_at}` and the shape is documented at the module-state block so the writer and warm-loader can't drift; (3) merge-on-save + concurrent-mutation guard — persist loop reads existing blob and unions with local snapshot (co-worker's fresh discoveries survive our save); dict snapshot taken under `_kalshi_meta_dict_lock` to avoid RuntimeError from the sync fetch thread + async persist loop race.
+
+Additions beyond the adjustments:
+- **Warm-load awaited BEFORE `get_data` thread starts** — awaiting (not fire-and-forget) matters because the first `_build_cache` pass classifies every market and would otherwise fire the storm cold on every redeploy.
+- **10 rps sync throttle** — `threading.Lock`, sync because `get_data` runs in a daemon thread not the asyncio loop. Separate mechanism from `flashlive_feed._fl_throttle`.
+- **Retry-with-429-backoff** — 1s → 2s → cap 30s, 3 attempts. Exhausted retry returns `None` and leaves the series UNCACHED so the next pass can retry.
+- **`_SERIES_META_TRIED` killed entirely** — no external references; the pre-fix mark-tried defect can't reappear because the mechanism itself no longer exists.
+- **8-case test file** (`tests/test_series_meta.py`) covering throttle, retry, retry non-429 propagation, the 429-doesn't-lock-series regression, the exception boundary, the entry-shape contract, warm-load TTL/shape-drift handling, and persist-loop dirty-gating + merge semantics.
+
+### Day-58 close-out
+
+Ledger: PRs #270/#271/#272 merged, tasks #22/#25/#28/#29 closed, task #21 decomposed with all surfaces decided (A shipped, C and b5.ii pre-approved, D deferred). Mark-tried correctness bug found and killed. Neon compute capped mid-session at 1 CU during a Neon dashboard resize; benign but marker for the next day's pg_stat window anchoring (see Day-59).
+
+### Day-59 (2026-07-30): PR #270 verification — cron report
+
+03:06 UTC cron reads: **v1** 24/29/50/687/**0**/8 = 798; **v2** 2/7/94/459/**0**/1 = 563; `fixture_linked_in_window_count=103`; `per_sport_errors=0`. Two things confirmed:
+- **`v2_danger 1 → 0`** — the lone stable record surfaced Day-57 (rHTxr6dU) vanished as predicted. Both flavors now read `danger=0`. Exact predicted-vs-observed match, first shot.
+- **v1 identity holds sixth verification run**: `agree + partial + v4only = 24 + 29 + 50 = 103 = fixture_linked_in_window_count`. Zero fixture disagreements wherever both flavors pair. Confirms the identity as a durable structural property of the resolver + Deliverable 1 pipeline, not a Day-57 coincidence.
+- **New signal**: `v2_excluded=1` appeared for the first time. Can't be the mention record (v2 no longer pairs mentions), so the exclusion pass caught a prop/doubles class pairing. Benign; logged for future triage.
+
+### Day-59 (2026-07-30): PR #271 verification — WAL churn measurement + methodology correction
+
+**Critical context**: pg_stat_statements counters had been reset at some point between the Day-58 measurement and Day-59's read (evidence: `entity_aliases` cumulative call count fell from 18.6M to 3.88M — impossible without reset). Anchoring the analysis window on `pg_stat_statements_info.stats_reset` before computing rates is now the discipline; the CU-resize/spending-limit event mid-Day-58 is the suspect. All Day-59 numbers below are from that clean post-reset window.
+
+Measured on the UPDATE `last_seen_at` statement family:
+- **rows/call**: 9.1 (vs pre-fix ~unmeasured but implied ~1 based on churn; the meaningful number is that we predicted 63 and got 9.1)
+- **WAL**: 0.123 GB/day (vs ~23 pre-fix, **−99.5%**). Matches the −99% engineering target.
+- **mean_ms**: 4.72 (vs ~22 pre-fix)
+
+**Denominator correction (methodology point)**: The pre-deploy prediction of ~63 rows/call was computed against per-PASS denominators (rows-per-full-inventory-scan). The actual statement fires ~8 chunk-calls per pass (the 1000-item IN batch shape upstream), so the correct prediction against per-CHUNK denominators was ~9.0 — observed 9.1, off by <2%. Physics confirmed at the correct scale. Predicted-vs-observed drift traced entirely to a unit mismatch in the prediction step, not a code defect.
+
+**Coverage tidy-ups from the read**:
+- **Kalshi full INSERT statement**: absent from top-60-by-calls. Consistent with PR #260's changed-only diff being dormant most of the time — nothing to insert on a clean pass.
+- **Re-resolution SELECTs**: absent from top-60-by-calls. Resolver alive by proxy — `resolution_log` accumulated 136k calls in-window. Belt-and-braces one-row `unresolved_*` SELECT probe available on request.
+
+### Day-59 (2026-07-30): New top-1 WAL producer — `INSERT INTO prices` at 9.12 GB/day
+
+The clean post-reset window surfaced a finding that pre-reset dilution had hidden: `INSERT INTO prices` (the WS price-flush path) now owns **~70% of remaining WAL churn** at 9.12 GB/day. Task #30 (WS-side last_seen_at gate, previously filed as "revisit if Neon churn stays material") gains a concrete number for prioritization. Placement in the queue pending post-Surface-C numbers landing on the WAL top-N; if `prices` stays the top producer once score-flush stops doubling, promote Task #30 above the Deliverable-adjacent Phase 2 work.
+
+### Day-59 (2026-07-30): PR #273 — Advisory-lock singleton for `_score_flush_loop` + `_price_prune_loop` (Task #21 Surface C)
+
+Approved 55 LOC accepted (5 in `ingestion/base.py`, ~65 in `main.py`, ~80 in a new constants sanity test). Pattern mirrors `ingestion/fl.py:343` — each loop opens one long-lived `async_session()`, calls `try_acquire_advisory_lock`, and either enters the loop body (holder) or logs "skipping" and returns (non-holder). Two new keys added to the reserved `0x5350_F1XX` band: `ADVISORY_LOCK_SCORE_FLUSH = 0x5350_F104`, `ADVISORY_LOCK_PRICE_PRUNE = 0x5350_F105`. Explicit callout in the PR body + score-flush docstring: **inherited crash-dormancy trade-off**. Non-holder returns permanently; there is NO re-race until the next redeploy. If the holder's `lock_session` dies (no supervisor wrapping these loops), the loop stays dormant until the container recycles. Benign here — score flush self-heals on next deploy, price prune tolerates a missed hour, same trade `ingestion/` already accepts. Retry-race upgrade path documented as future work if it ever matters.
+
+Task #11 (entity_aliases/entities no-op waste) impact: the every-5th-cycle `upsert_entities` call inside score-flush stops doubling immediately post-deploy → ~50% waste reduction from Surface C alone. Task #11 explicitly deferred pending 24h re-measure of the residual.
+
+### Day-59 (2026-07-30): Task #27 day-3 trend read
+
+Fixture-linked window population across three cron runs: 70 → 97 → 103. Deltas +27, +6 — sharp deceleration signature. Early plateau consistent with Model B (structural ceiling on which fl_events plausibly HAVE Kalshi coverage) over Model A (linear coverage growth). Day-5 read per the pre-registered framework decides between models. Comparator query proposed for Day-5: instead of scaling against all scope-filtered fl_events (5,186 denominator), scale against `fl_events` in-window whose sport/team pair could plausibly have Kalshi coverage (Kalshi doesn't ship every sport or every match) — closer to a genuine capability rate.
+
+### Day-58 → Day-59: Methodology bank additions
+
+- **pg_stat counter reset guard (Day-59)** — always anchor the analysis window on `pg_stat_statements_info.stats_reset` before computing rates. Cumulative counters that fell (18.6M → 3.88M) between two consecutive reads are dispositive evidence of a reset; treat every read as a fresh window until confirmed otherwise. A CU-resize or spending-limit event silently resets these counters.
+- **Denominator-shape check before predicted-vs-observed (Day-59)** — every prediction gets an explicit per-what denominator (per-pass? per-chunk? per-row?) named alongside the number itself. PR #271's 63 vs 9.1 gap was 100% denominator mismatch, 0% code error. If the reading discipline had asked "9.1 rows per WHAT call?" up front, the prediction would have been aligned before the deploy.
+- **Adjustment-batch pattern (Day-58 Surface A)** — three operator adjustments before the PR opened (exception boundary, entry shape, merge-on-save) each stated as a testable contract, each earning a targeted test in the file. Test #5 is the exception-boundary regression, test #6 is the entry-shape drift guard, test #8 is the merge semantics. Pattern: an adjustment isn't folded in until there's a test whose failure would surface a regression to the pre-adjustment behavior.
+- **Inherited-trade-off documentation (Day-59 Surface C)** — when a pattern is copied from working code, the trade-offs the source pattern already accepted travel too. Naming them explicitly in the new copy's docstring (plus the PR body) keeps them out of the shadows for the next reader debugging why a loop went dormant.
+
+### Day-58 → Day-59: PR state
+
+- **PR #270** (KXMLBMENTION outright classification): merged 07-29
+- **PR #271** (Kalshi `last_seen_at` staleness gate): merged 07-29
+- **PR #272** (Kalshi series-meta cache persistence — Surface A): merged 07-29
+- **PR #273** (advisory-lock singleton — Surface C): merged 07-30
+
+### Day-58 → Day-59: Task ledger movement
+
+Closed: #22, #25 (documented Day-57), #28 (rHTxr6dU triaged + fixed by #270), #29.
+Filed then closed same-arc: none.
+Filed and pending: Task #21 sub-tasks (Surface B queued, Surface D deferred); Task #30 gained a concrete number (9.12 GB/day, prioritize post-Surface-C).
+Deferred with named ceiling: Task #11 — post-Surface-C waste re-measure decides fate.
+
+### Pending — next session (Day-60)
+
+- Post-deploy verification for #272 (warm-start line: "loaded N entries", zero fetches, zero 429s — first restart since the blob was written) and #273 (paired "lock acquired" / "skipping" log lines per loop across the two workers).
+- Surface B (`b5.ii` FL live polling adaptive per-sport + 5s live upgrade) summary + diff shape.
+- Task #27 day-4 read against the plateau prediction; day-5 decides Model A vs Model B.
+- Task #11 re-measure once Surface C's 24h numbers land; decide keep / drop.
+- Task #30 (WS-side `last_seen_at` gate) priority set once Surface C's WAL top-N clears.
+
+---
+
 ## Session — 2026-07-27 → 2026-07-28: Deliverable 1 shipped — Gate #2 CLOSED, four verification runs to correctness
 
 Two-day arc closing §11.3 Item 7's second blank. Deliverable 2 was already shipping standalone-resolver telemetry; Deliverable 1 adds the v3-vs-v4 legacy comparison layer that has been marked `future` in `scripts/daily_diff.py` since day one. Threshold-setting itself remains operator-owned; this workstream produces the measurement dimension the threshold gets set against.
