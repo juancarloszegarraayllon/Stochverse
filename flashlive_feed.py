@@ -50,11 +50,32 @@ _ADDED_TIME_INFLIGHT: set = set()  # event_ids currently being fetched (dedup re
 # Adaptive poll cadence. RapidAPI Mega tier ships unlimited monthly
 # requests with a 10 req/sec rate cap, so we can run the broad poll
 # aggressively without quota anxiety. Defaults sized for "full feature
-# parity with Kalshi": 10 s live cadence so scores feel near-realtime,
-# 60 s idle cadence so the GAMES dict stays warm between matches.
+# parity with Kalshi": 5 s live cadence per Task #21 Surface B b5.ii
+# (was 10s under the pre-adaptive global-live loop), 60 s idle cadence
+# so the GAMES dict stays warm between matches. Tomorrow's fixtures
+# poll on their own separate shared cadence — see TOMORROW_POLL_INTERVAL.
 # Override via env vars if you ever switch tiers.
 POLL_INTERVAL = int(os.environ.get("FLASHLIVE_POLL_INTERVAL", "60"))
-LIVE_POLL_INTERVAL = int(os.environ.get("FLASHLIVE_LIVE_POLL_INTERVAL", "10"))
+LIVE_POLL_INTERVAL = int(os.environ.get("FLASHLIVE_LIVE_POLL_INTERVAL", "5"))
+# Task #21 Surface B b5.ii: tomorrow's fixtures decoupled from the
+# per-sport adaptive TODAY loop. Schedules don't change second-to-second
+# so polling at the 5s live cadence would waste a third of the approved
+# savings. One 300s sweep covers all sports' indent_days=1.
+TOMORROW_POLL_INTERVAL = int(os.environ.get("FLASHLIVE_TOMORROW_POLL_INTERVAL", "300"))
+# Time-based demotion: after LIVE_STICKY_S seconds without a live
+# observation for a sport, drop back to POLL_INTERVAL. 30 min chosen
+# to absorb halftimes, rain delays, medical timeouts, and inter-set
+# breaks without dropping cadence — 15s-hysteresis would send matches
+# rejoining after a delay to 60s lag before the first score update.
+# Cost of generosity: a few hundred extra calls/day per sport recently
+# active but now genuinely idle.
+LIVE_STICKY_S = int(os.environ.get("FLASHLIVE_LIVE_STICKY_S", str(30 * 60)))
+# Pre-game promotion window: sports with any state=="pre" game whose
+# kickoff is within PREGAME_PROMOTE_WINDOW_S get the fast cadence too.
+# Kickoff detection can't lag 60s on a speed-differentiated product;
+# 30 min matches the demotion window so the pre → in transition sees
+# no cadence gap.
+PREGAME_PROMOTE_WINDOW_S = int(os.environ.get("FLASHLIVE_PREGAME_WINDOW_S", str(30 * 60)))
 
 # Global FlashLive rate limiter. The default 0.20s gap (5 req/sec
 # sustained) was set when the project was on the 10 req/s consumer
@@ -126,6 +147,19 @@ ACTIVE_SPORTS = {
     "36": "Esports",
 }
 GAMES: dict = {}    # normalized key → game dict
+
+# Task #21 Surface B b5.ii — per-sport adaptive-cadence state.
+#
+# Each entry: sport_name → {
+#   "last_live_observation_ts": float | 0,   # unix seconds; 0 = never
+#   "cadence_s":                int,          # last computed cadence
+# }
+# last_live_observation_ts is bumped whenever the sport shows AT LEAST
+# ONE game with state=="in" OR at least one state=="pre" whose
+# scheduled kickoff is within PREGAME_PROMOTE_WINDOW_S. The cadence
+# gate below uses (now - last_live_observation_ts) vs LIVE_STICKY_S
+# for time-based demotion — no per-poll flap on half-time gaps.
+_SPORT_LIVE_STATE: dict = {}
 
 # Last known non-zero period per event_id. Persists across poll
 # cycles so a basketball card whose STAGE goes missing on one poll
@@ -425,83 +459,181 @@ def compact_label(g: dict) -> str:
     return f"{ha} {hs} - {aa} {as_}"
 
 
-async def _fetch_live_events(days=("0",)):
-    """Fetch events from FlashLive for the requested indent_days values.
+async def _fetch_one_sport(client, sport_id: str, sport_name: str, day: str):
+    """One /v1/events/list call for a single (sport, day) pair.
 
-    Defaults to today only — that's the live-feed hot path, hitting the
-    FlashLive edge len(ACTIVE_SPORTS) times per call. Tomorrow's events
-    are fetched on a slower loop (TOMORROW_REFRESH_INTERVAL) since
-    schedules don't change minute-to-minute.
-    """
+    Extracted from the pre-b5.ii `_fetch_live_events` inner loop so
+    the per-sport TODAY workers and the shared TOMORROW sweep can
+    call the same primitive at their own cadences without duplicating
+    the throttle / header / nested-event-unwrap contract.
+
+    Returns (events, error_str_or_none). Never raises — the loop
+    upstream keeps polling regardless of this call's fate."""
     if not API_KEY or httpx is None:
-        return []
+        return [], None
     headers = {
         "x-rapidapi-key": API_KEY,
         "x-rapidapi-host": API_HOST,
     }
-    all_events = []
-    raw_samples = []
-    errors = []
+    events: list = []
+    try:
+        # Global rate limiter — shared with the warm path's per-event
+        # _fl_get calls so the two code paths can't burst past Mega's
+        # 10 req/sec ceiling combined.
+        await _fl_throttle()
+        r = await client.get(
+            f"{BASE_URL}/v1/events/list",
+            headers=headers,
+            params={
+                "sport_id":    sport_id,
+                "indent_days": day,
+                "timezone":    "-4",
+                "locale":      "en_INT",
+            },
+        )
+        if r.status_code == 200:
+            data = r.json()
+            top_data = data.get("DATA", []) if isinstance(data, dict) else data
+            if isinstance(top_data, list):
+                for item in top_data:
+                    if isinstance(item, dict):
+                        if item.get("EVENT_ID"):
+                            item["_sport"] = sport_name
+                            events.append(item)
+                        for k in ("EVENTS", "events", "ITEMS", "items"):
+                            nested = item.get(k)
+                            if isinstance(nested, list):
+                                for ev in nested:
+                                    if isinstance(ev, dict):
+                                        ev["_sport"] = sport_name
+                                        ev["_league"] = item.get("SHORT_NAME") or item.get("NAME_PART_2") or ""
+                                        ev["_country"] = item.get("COUNTRY_NAME") or ""
+                                        ev["_tournament_id"] = str(item.get("TOURNAMENT_ID") or ev.get("TOURNAMENT_ID") or "")
+                                        ev["_tournament_season_id"] = str(item.get("TOURNAMENT_SEASON_ID") or ev.get("TOURNAMENT_SEASON_ID") or "")
+                                        ev["_tournament_stage_id"] = str(item.get("TOURNAMENT_STAGE_ID") or ev.get("TOURNAMENT_STAGE_ID") or "")
+                                        events.append(ev)
+            return events, None
+        return events, f"{sport_name} d{day}: HTTP {r.status_code} - {r.text[:200]}"
+    except Exception as e:
+        return events, f"{sport_name} d{day}: {str(e)[:200]}"
+
+
+async def _fetch_live_events(days=("0",)):
+    """Multi-sport, multi-day sweep — wrapper around _fetch_one_sport.
+
+    Kept for callers that want a full-sweep-in-one-call shape
+    (currently the TOMORROW sweep loop). The per-sport TODAY workers
+    call `_fetch_one_sport` directly at their own cadences.
+    """
+    if not API_KEY or httpx is None:
+        return []
+    all_events: list = []
+    raw_samples: list = []
+    errors: list = []
     async with httpx.AsyncClient(timeout=15.0) as client:
         for sport_id, sport_name in ACTIVE_SPORTS.items():
           for day in days:
-            try:
-                # Global rate limiter — shared with the warm path's
-                # per-event _fl_get calls so the two code paths can't
-                # burst past Mega's 10 req/sec ceiling combined.
-                await _fl_throttle()
-                r = await client.get(
-                    f"{BASE_URL}/v1/events/list",
-                    headers=headers,
-                    params={
-                        "sport_id": sport_id,
-                        "indent_days": day,
-                        "timezone": "-4",
-                        "locale": "en_INT",
-                    },
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    top_data = data.get("DATA", []) if isinstance(data, dict) else data
-                    # FlashLive nests events inside tournament groups.
-                    # Each item in DATA can be a tournament header or
-                    # an event. Events have an EVENT_ID field.
-                    for item in (top_data if isinstance(top_data, list) else []):
-                        if isinstance(item, dict):
-                            if item.get("EVENT_ID"):
-                                # Direct event
-                                item["_sport"] = sport_name
-                                all_events.append(item)
-                            # Check for nested events
-                            for k in ("EVENTS", "events", "ITEMS", "items"):
-                                nested = item.get(k)
-                                if isinstance(nested, list):
-                                    for ev in nested:
-                                        if isinstance(ev, dict):
-                                            ev["_sport"] = sport_name
-                                            ev["_league"] = item.get("SHORT_NAME") or item.get("NAME_PART_2") or ""
-                                            ev["_country"] = item.get("COUNTRY_NAME") or ""
-                                            ev["_tournament_id"] = str(item.get("TOURNAMENT_ID") or ev.get("TOURNAMENT_ID") or "")
-                                            ev["_tournament_season_id"] = str(item.get("TOURNAMENT_SEASON_ID") or ev.get("TOURNAMENT_SEASON_ID") or "")
-                                            ev["_tournament_stage_id"] = str(item.get("TOURNAMENT_STAGE_ID") or ev.get("TOURNAMENT_STAGE_ID") or "")
-                                            all_events.append(ev)
-                    # Save raw sample for debugging
-                    if len(raw_samples) < 2 and top_data:
-                        first = top_data[0] if isinstance(top_data, list) and top_data else {}
-                        raw_samples.append({
-                            "sport": sport_name,
-                            "total_items": len(top_data) if isinstance(top_data, list) else 0,
-                            "first_item_keys": list(first.keys())[:20] if isinstance(first, dict) else "?",
-                            "first_item_preview": str(first)[:800],
-                        })
-                else:
-                    errors.append(f"{sport_name}: HTTP {r.status_code} - {r.text[:200]}")
-            except Exception as e:
-                errors.append(f"{sport_name}: {str(e)[:200]}")
+            events, err = await _fetch_one_sport(client, sport_id, sport_name, day)
+            if err:
+                errors.append(err)
+            all_events.extend(events)
+            if len(raw_samples) < 2 and events:
+                first = events[0]
+                raw_samples.append({
+                    "sport": sport_name,
+                    "total_items": len(events),
+                    "first_item_keys": list(first.keys())[:20] if isinstance(first, dict) else "?",
+                    "first_item_preview": str(first)[:800],
+                })
     STATUS["last_error"] = errors[0] if errors else ("no events found" if not all_events else None)
     STATUS["all_errors"] = errors[:5]
     STATUS["raw_samples"] = raw_samples
     return all_events
+
+
+# ── Adaptive-cadence helpers (Task #21 Surface B b5.ii) ─────────
+
+def _game_counts_as_live(game: dict, now_s: float) -> bool:
+    """A game "counts as live" for cadence promotion if it's actually
+    in-play OR its scheduled kickoff is within PREGAME_PROMOTE_WINDOW_S.
+
+    Pre-game promotion prevents kickoff detection from lagging by up
+    to 60s (the idle cadence) on a product where opening-whistle
+    scores matter. Symmetric with the live-sticky window: a sport
+    that ramps up 30 min before kickoff and stays sticky 30 min
+    after last live observation covers the entire "match neighborhood"
+    at fast cadence with no gaps at the pre → in transition."""
+    state = game.get("state") or ""
+    if state == "in":
+        return True
+    if state == "pre":
+        kickoff_ms = game.get("scheduled_kickoff_ms") or 0
+        if not kickoff_ms:
+            return False
+        seconds_until_kickoff = (kickoff_ms / 1000.0) - now_s
+        # Window is symmetric: within 30 min OF kickoff, in either
+        # direction (a state=="pre" game whose kickoff has passed
+        # slightly is a match about to flip to "in").
+        return -PREGAME_PROMOTE_WINDOW_S <= seconds_until_kickoff <= PREGAME_PROMOTE_WINDOW_S
+    return False
+
+
+def _cadence_for_sport(sport_name: str, now_s: float) -> int:
+    """Return the current cadence in seconds for a sport based on
+    _SPORT_LIVE_STATE. Pure function — safe to test in isolation.
+
+    Time-based demotion: fast cadence sticks for LIVE_STICKY_S
+    seconds after the LAST live observation. If no live observation
+    ever happened, or the last one was older than LIVE_STICKY_S ago,
+    fall back to the idle cadence."""
+    entry = _SPORT_LIVE_STATE.get(sport_name) or {}
+    last_live = entry.get("last_live_observation_ts") or 0.0
+    if last_live and (now_s - last_live) <= LIVE_STICKY_S:
+        return LIVE_POLL_INTERVAL
+    return POLL_INTERVAL
+
+
+def _observe_sport_state(sport_name: str, sport_games_iter, now_s: float) -> None:
+    """Post-fetch state update. Scans the sport's game slice for any
+    entry that _game_counts_as_live for the current time; if found,
+    stamps last_live_observation_ts = now_s.
+
+    Called from the per-sport worker after every fetch pass. The
+    stamp only goes UP — an idle fetch after a live one does NOT
+    reset the stamp; the LIVE_STICKY_S window handles demotion.
+    That's the whole point of time-based hysteresis over per-poll
+    hysteresis: transient state=="ht" or between-innings gaps
+    can't accidentally demote a still-active match."""
+    entry = _SPORT_LIVE_STATE.setdefault(sport_name, {
+        "last_live_observation_ts": 0.0,
+        "cadence_s":                POLL_INTERVAL,
+    })
+    for g in sport_games_iter:
+        if _game_counts_as_live(g, now_s):
+            entry["last_live_observation_ts"] = now_s
+            break
+    entry["cadence_s"] = _cadence_for_sport(sport_name, now_s)
+
+
+def _seed_sport_state_from_warm_games(now_s: float) -> None:
+    """Populate _SPORT_LIVE_STATE from the warm-loaded GAMES dict so
+    a sport with live games in the cache starts at LIVE_POLL_INTERVAL
+    instead of paying a 60s beat before ramping up.
+
+    Called once, right after the warm-start load and before the
+    per-sport workers fan out. The GAMES key format is
+    `sport:home:away`, so we can partition per-sport directly from
+    the dict without re-parsing anything."""
+    per_sport: dict = {}
+    for key, g in GAMES.items():
+        if not isinstance(g, dict):
+            continue
+        sport = g.get("sport") or ""
+        if not sport:
+            continue
+        per_sport.setdefault(sport, []).append(g)
+    for sport, games in per_sport.items():
+        _observe_sport_state(sport, games, now_s)
 
 
 def _parse_event(ev):
@@ -1540,8 +1672,184 @@ def _sport_id_from_name(sport_name: str) -> str:
     return _SPORT_NAME_TO_FL_ID_LOCAL.get((sport_name or "").strip(), "")
 
 
+def _merge_parsed_events_into_games(events, source_label: str = "") -> tuple[int, dict]:
+    """Parse + merge a list of raw FL events into the module-level
+    GAMES dict. Returns (parsed_count, games_by_sport_dict).
+
+    Extracted from the pre-b5.ii loop body so the per-sport TODAY
+    workers and the shared TOMORROW sweep share one merge contract.
+    Stale-sweep is NOT here — it lives in a separate janitor task
+    so per-sport workers aren't racing on the sweep condition."""
+    parsed = 0
+    games_by_sport: dict = {}
+    for ev in events:
+        g = _parse_event(ev)
+        if g and g.get("home_name") and g.get("away_name"):
+            key = f"{g['sport']}:{_normalize(g['home_name'])}:{_normalize(g['away_name'])}"
+            GAMES[key] = g
+            parsed += 1
+            sp = g.get("sport") or "?"
+            games_by_sport[sp] = games_by_sport.get(sp, 0) + 1
+    return parsed, games_by_sport
+
+
+def _sweep_stale_games(now_s: float) -> int:
+    """Drop games not seen in 10 min + their added-time snapshots.
+    Returns the number of entries removed."""
+    stale_cutoff_ms = int((now_s - 600) * 1000)
+    stale_keys = [k for k, g in list(GAMES.items())
+                  if (g.get("captured_at_ms") or 0) < stale_cutoff_ms]
+    stale_event_ids = {GAMES[k].get("event_id") for k in stale_keys
+                       if GAMES.get(k, {}).get("event_id")}
+    for k in stale_keys:
+        GAMES.pop(k, None)
+    for eid in stale_event_ids:
+        _ADDED_TIME_CACHE.pop(eid, None)
+    return len(stale_keys)
+
+
+async def _sport_poll_loop(sport_id: str, sport_name: str) -> None:
+    """One asyncio task per sport. Polls indent_days=0 (TODAY) only
+    at a per-sport adaptive cadence — LIVE_POLL_INTERVAL if a live
+    or pre-game observation happened within LIVE_STICKY_S, else
+    POLL_INTERVAL. Tomorrow's schedule is handled by the shared
+    _tomorrow_sweep_loop at TOMORROW_POLL_INTERVAL.
+
+    Errors are contained per-sport — a single sport failing a fetch
+    doesn't affect the others. STATUS bookkeeping is stamped
+    incrementally so /api/flashlive_status reflects the most recent
+    per-sport tick."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while True:
+            try:
+                events, err = await _fetch_one_sport(client, sport_id, sport_name, "0")
+                if err:
+                    STATUS["last_error"] = err
+                parsed, games_by_sport = _merge_parsed_events_into_games(events, sport_name)
+                # Post-fetch state update from THIS sport's slice —
+                # partition GAMES by sport_name so a Basketball live
+                # observation doesn't accidentally sticky-promote
+                # Tennis (different data source, different match set).
+                sport_slice = [g for g in GAMES.values()
+                               if isinstance(g, dict) and g.get("sport") == sport_name]
+                now_s = time.time()
+                _observe_sport_state(sport_name, sport_slice, now_s)
+
+                if parsed:
+                    # Merge THIS sport's games_by_sport into the STATUS
+                    # rollup incrementally. Preserves other sports'
+                    # last-known counts between their ticks.
+                    rolled = STATUS.get("games_by_sport") or {}
+                    rolled[sport_name] = games_by_sport.get(sport_name, 0)
+                    STATUS["games_by_sport"] = rolled
+                    STATUS["last_fetch_ts"] = now_s
+                    STATUS["polls"] += 1
+                    STATUS["last_error"] = None
+
+                if not STATUS.get("ready") and parsed > 0:
+                    STATUS["ready"] = True
+                    STATUS["ready_at_ts"] = now_s
+                    _elapsed = now_s - (STATUS.get("started_at_ts") or now_s)
+                    log.info(
+                        "FlashLive ready: %s warmed %d games in %.1fs",
+                        sport_name, parsed, _elapsed,
+                    )
+            except Exception as e:
+                STATUS["last_error"] = f"{sport_name}: {str(e)[:200]}"
+                log.error("FlashLive %s poll error: %s", sport_name, e)
+
+            cadence = _cadence_for_sport(sport_name, time.time())
+            # Stamp cadence in STATUS so /api/flashlive_status can
+            # surface "Tennis: 5s (live), Soccer: 60s (idle)" at a glance.
+            sc = STATUS.get("sport_cadence") or {}
+            sc[sport_name] = cadence
+            STATUS["sport_cadence"] = sc
+            await asyncio.sleep(cadence)
+
+
+async def _tomorrow_sweep_loop() -> None:
+    """Shared loop: every TOMORROW_POLL_INTERVAL seconds, sweep all
+    ACTIVE_SPORTS for indent_days=1. Tomorrow's schedule is static
+    — no reason to poll it at the fast per-sport TODAY cadence.
+    One 300s sweep across 17 sports = 17 calls / 300s = 0.06 rps
+    vs the pre-b5.ii cost of ALL 17 sports polling tomorrow inside
+    the fast loop (up to 3.4 rps wasted)."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while True:
+            try:
+                total_parsed = 0
+                for sport_id, sport_name in ACTIVE_SPORTS.items():
+                    events, err = await _fetch_one_sport(client, sport_id, sport_name, "1")
+                    if err:
+                        STATUS["last_error"] = err
+                        continue
+                    parsed, _ = _merge_parsed_events_into_games(events, f"{sport_name}/tomorrow")
+                    total_parsed += parsed
+                if total_parsed:
+                    log.info("FlashLive tomorrow sweep: %d fixtures across all sports", total_parsed)
+            except Exception as e:
+                log.error("FlashLive tomorrow sweep error: %s", e)
+            await asyncio.sleep(TOMORROW_POLL_INTERVAL)
+
+
+async def _stale_sweep_loop() -> None:
+    """Background janitor: every 60s, drop games not seen in 10 min.
+    Separated from the per-sport workers so multiple workers aren't
+    racing on the sweep condition — one janitor owns the invariant."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            removed = _sweep_stale_games(time.time())
+            STATUS["games"] = len(GAMES)
+            if removed:
+                log.debug("FlashLive stale sweep: removed %d entries", removed)
+        except Exception as e:
+            log.error("FlashLive stale sweep error: %s", e)
+
+
+async def _persist_loop() -> None:
+    """Every _SAVE_INTERVAL_S, persist GAMES to cache_blobs. Separated
+    from the fetch path so save cadence isn't coupled to poll cadence.
+
+    Cost-investigation 2026-07-26 PR #3 rationale: 300s cadence caps
+    the JSONB payload egress at ~one write per 5 min regardless of
+    how fast the polling loops churn."""
+    _SAVE_INTERVAL_S = 300
+    while True:
+        await asyncio.sleep(_SAVE_INTERVAL_S)
+        if not GAMES:
+            continue
+        try:
+            from db import save_cache_blob as _save_cache_blob
+            # Snapshot — dict() copy so a concurrent update from a
+            # per-sport worker doesn't mutate the payload mid-serialize.
+            snapshot = dict(GAMES)
+            await _save_cache_blob("flashlive_games", snapshot)
+        except Exception as e:
+            log.warning("FlashLive persist failed: %s", e)
+
+
 async def run_flashlive_feed():
-    """Background task: poll FlashLive for live scores."""
+    """Background orchestrator — per-sport adaptive-cadence TODAY
+    workers + shared TOMORROW sweep + stale-sweep janitor + persist
+    loop.
+
+    Task #21 Surface B b5.ii (2026-07-30): the pre-b5.ii single-loop
+    design polled all 17 sports × 2 days at 10s whenever ANY game
+    was live anywhere (34 calls / 10s = 3.4 rps continuous during
+    any live evening, wasting ~90% of that on idle sports whose
+    scores hadn't moved in hours). Post-b5.ii: each sport polls
+    TODAY on its own cadence — 5s when live or pre-game within
+    PREGAME_PROMOTE_WINDOW_S, sticky for LIVE_STICKY_S after last
+    live observation, else 60s. Tomorrow's schedule polled once
+    every 300s across all sports.
+
+    Per-sport crash containment: if one sport's fetch loop crashes,
+    only that sport goes dark; the others keep polling. Inherited
+    crash-dormancy trade-off from ingestion/fl.py's pattern —
+    non-supervised bare create_task means a hard crash inside a
+    sport loop leaves it dormant until redeploy. Wrap in
+    ingestion.base.supervise if that ever matters."""
     if not API_KEY:
         log.info("FLASHLIVE_API_KEY not set — FlashLive feed disabled")
         return
@@ -1551,8 +1859,13 @@ async def run_flashlive_feed():
 
     STATUS["running"] = True
     STATUS["started_at_ts"] = time.time()
-    log.info("FlashLive feed starting (live poll: %ds, idle poll: %ds)",
-             LIVE_POLL_INTERVAL, POLL_INTERVAL)
+    log.info(
+        "FlashLive feed starting (live: %ds, idle: %ds, sticky: %ds, "
+        "pregame_window: %ds, tomorrow: %ds, sports: %d)",
+        LIVE_POLL_INTERVAL, POLL_INTERVAL, LIVE_STICKY_S,
+        PREGAME_PROMOTE_WINDOW_S, TOMORROW_POLL_INTERVAL,
+        len(ACTIVE_SPORTS),
+    )
 
     # Born-warm: load the GAMES dict from the previous container's
     # last save. Lets cards render LIVE pills + scores from the very
@@ -1575,98 +1888,26 @@ async def run_flashlive_feed():
                 STATUS["ready"] = True
                 STATUS["ready_at_ts"] = time.time()
                 STATUS["games"] = len(GAMES)
-                log.info("FlashLive warm-start: loaded %d games from cache_blobs", len(GAMES))
+                log.info(
+                    "FlashLive warm-start: loaded %d games from cache_blobs",
+                    len(GAMES),
+                )
     except Exception as e:
         log.warning("FlashLive warm-start failed: %s", e)
 
-    _last_save_ts = 0.0
-    # Cost-investigation 2026-07-26 PR #3: bumped from 30s to 300s. The
-    # 30s cadence was persisting a ~4 MB JSONB payload up to 2,880 times/
-    # day (~11 GB/day peak egress); the ONLY reader of this key is the
-    # startup warm-start above at :1555, so nothing on the hot path
-    # needs sub-5-minute freshness. Trade: after a container restart,
-    # warm-hydrated GAMES scores can be up to 5 min stale for the very
-    # first requests — the poll loop below refreshes them on its next
-    # cycle (10s while any game is live, 60s idle), so the stale window
-    # is bounded to the container's cold-start latency. `_last_save_ts =
-    # 0.0` above means the first save after startup always passes
-    # unconditionally; the throttle only caps steady-state.
-    _SAVE_INTERVAL_S = 300
+    # Seed _SPORT_LIVE_STATE from warm-loaded GAMES so a sport with
+    # live games in the cache starts at LIVE_POLL_INTERVAL instead
+    # of paying a 60s beat before ramping up.
+    _seed_sport_state_from_warm_games(time.time())
 
-    while True:
-        try:
-            # Mega tier: fetch today + tomorrow on every poll for full
-            # coverage. Tomorrow's events surface in the calendar
-            # immediately when FlashLive lists them.
-            events = await _fetch_live_events(days=("0", "1"))
-            parsed = 0
-            new_games = {}
-            games_by_sport: dict = {}
-            for ev in events:
-                g = _parse_event(ev)
-                if g and g.get("home_name") and g.get("away_name"):
-                    key = f"{g['sport']}:{_normalize(g['home_name'])}:{_normalize(g['away_name'])}"
-                    new_games[key] = g
-                    parsed += 1
-                    sp = g.get("sport") or "?"
-                    games_by_sport[sp] = games_by_sport.get(sp, 0) + 1
-            # Merge into GAMES rather than clear+update — that earlier
-            # clear left GAMES briefly empty between the two lines (any
-            # /api/events request landing in the gap saw no _live_state
-            # for any event), and any single sport-day FL request that
-            # transiently hiccupped would drop matches from GAMES until
-            # the next clean poll, flickering LIVE badges + scores on
-            # cards. Now: new entries overwrite old, and a stale-entry
-            # sweep removes anything we haven't seen in 10 minutes so
-            # the dict doesn't grow unbounded.
-            GAMES.update(new_games)
-            stale_cutoff_ms = int((time.time() - 600) * 1000)
-            stale_keys = [k for k, g in list(GAMES.items())
-                          if (g.get("captured_at_ms") or 0) < stale_cutoff_ms]
-            stale_event_ids = {GAMES[k].get("event_id") for k in stale_keys
-                               if GAMES.get(k, {}).get("event_id")}
-            for k in stale_keys:
-                GAMES.pop(k, None)
-            # Drop the added-time snapshot for any event that just left
-            # GAMES — keeps the cache bounded to the live universe.
-            for eid in stale_event_ids:
-                _ADDED_TIME_CACHE.pop(eid, None)
-            STATUS["games"] = len(GAMES)
-            STATUS["games_by_sport"] = games_by_sport
-            STATUS["last_fetch_ts"] = time.time()
-            STATUS["polls"] += 1
-            STATUS["last_error"] = None
-            # First successful poll — flip ready so /readyz starts
-            # returning 200 and Railway swaps traffic to this container.
-            if not STATUS["ready"] and parsed > 0:
-                STATUS["ready"] = True
-                STATUS["ready_at_ts"] = time.time()
-                _elapsed = STATUS["ready_at_ts"] - (STATUS["started_at_ts"] or STATUS["ready_at_ts"])
-                log.info("FlashLive ready: %d games warmed in %.1fs", parsed, _elapsed)
-            if parsed:
-                log.info("FlashLive: %d games across all sports (kept %d, swept %d stale)",
-                         parsed, len(GAMES), len(stale_keys))
-            # Persist GAMES so the next container starts warm. Throttled
-            # to one save per _SAVE_INTERVAL_S so we don't hammer the
-            # DB during fast-cadence live polling.
-            _now = time.time()
-            if parsed and _now - _last_save_ts >= _SAVE_INTERVAL_S:
-                try:
-                    from db import save_cache_blob as _save_cache_blob
-                    # Snapshot — dict() copy so a concurrent update
-                    # doesn't mutate the payload mid-serialize.
-                    asyncio.create_task(_save_cache_blob("flashlive_games", dict(GAMES)))
-                    _last_save_ts = _now
-                except Exception as e:
-                    log.warning("FlashLive cache save scheduling failed: %s", e)
-        except Exception as e:
-            STATUS["last_error"] = str(e)[:200]
-            log.error("FlashLive poll error: %s", e)
-
-        # Adaptive cadence — fast when at least one game is currently
-        # live so scores update at near-Kalshi refresh speed, slow
-        # otherwise to spare the API quota.
-        has_live = any(g.get("state") == "in" for g in GAMES.values())
-        sleep_for = LIVE_POLL_INTERVAL if has_live else POLL_INTERVAL
-        STATUS["last_sleep_s"] = sleep_for
-        await asyncio.sleep(sleep_for)
+    # Fan out per-sport TODAY workers + shared TOMORROW sweep +
+    # stale janitor + persist loop. asyncio.gather propagates
+    # cancellation cleanly on shutdown.
+    tasks = [
+        _sport_poll_loop(sid, sname)
+        for sid, sname in ACTIVE_SPORTS.items()
+    ]
+    tasks.append(_tomorrow_sweep_loop())
+    tasks.append(_stale_sweep_loop())
+    tasks.append(_persist_loop())
+    await asyncio.gather(*tasks)
