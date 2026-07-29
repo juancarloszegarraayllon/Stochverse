@@ -414,63 +414,117 @@ if os.path.isdir(_admin_static_dir):
 async def _price_prune_loop():
     """Hourly: delete price rows older than PRICE_RETENTION_HOURS.
     Also runs once immediately on startup to clear any overflow
-    from a previous session (e.g. hitting the 512 MB Neon limit)."""
+    from a previous session (e.g. hitting the 512 MB Neon limit).
+
+    Task #21 Surface C (2026-07-30): singleton-enforced via Postgres
+    advisory lock so this loop runs on ONE worker under
+    WEB_CONCURRENCY=2 (was firing twice/hour, harmless waste). See
+    docstring on _score_flush_loop for the inherited crash-dormancy
+    trade-off — same guarantees apply here."""
     _log = logging.getLogger("price_prune")
     await asyncio.sleep(10)  # let DB init finish
-    while True:
-        try:
-            from db import prune_old_prices
-            deleted = await prune_old_prices()
-            if deleted and deleted > 0:
-                _log.info("pruned %d old price rows", deleted)
-        except Exception as e:
-            _log.error("prune loop error: %s", e)
-        await asyncio.sleep(3600)  # every hour
+
+    from db import async_session, DATABASE_URL
+    if not DATABASE_URL or async_session is None:
+        _log.info("skipping — no DATABASE_URL")
+        return
+
+    from ingestion.base import (
+        ADVISORY_LOCK_PRICE_PRUNE, try_acquire_advisory_lock,
+    )
+    async with async_session() as lock_session:
+        if not await try_acquire_advisory_lock(
+            lock_session, ADVISORY_LOCK_PRICE_PRUNE,
+        ):
+            _log.info("skipping — another worker holds the lock")
+            return
+        _log.info("lock acquired; running")
+        while True:
+            try:
+                from db import prune_old_prices
+                deleted = await prune_old_prices()
+                if deleted and deleted > 0:
+                    _log.info("pruned %d old price rows", deleted)
+            except Exception as e:
+                _log.error("prune loop error: %s", e)
+            await asyncio.sleep(3600)  # every hour
 
 
 async def _score_flush_loop():
     """Every 30s, snapshot the in-memory game lists from ESPN,
     SportsDB, and SofaScore into the game_scores table, then
-    seed any newly-seen teams into the entities/aliases tables."""
+    seed any newly-seen teams into the entities/aliases tables.
+
+    Task #21 Surface C (2026-07-30): singleton-enforced via Postgres
+    advisory lock. Pre-fix, under WEB_CONCURRENCY=2, both workers
+    ran this loop → every sync_scores_to_db call doubled and the
+    every-5th-cycle upsert_entities call doubled too (harmless
+    thanks to ON CONFLICT DO NOTHING, but ~50% wasted DB traffic).
+
+    Inherited crash-dormancy trade-off (same as ingestion/fl.py):
+    non-holder returns permanently; there is NO re-race until the
+    next redeploy. If the holder's session dies (connection reset,
+    supervisor-less crash — this loop is not wrapped by supervise),
+    the lock releases, but neither worker retries — the loop stays
+    dormant until the container recycles. Benign here: score flush
+    self-heals on next deploy, price prune tolerates a missed hour.
+    Upgrade path if it ever matters: wrap the acquire-and-loop in
+    an outer retry-with-backoff that re-races on session close."""
     _log = logging.getLogger("score_flush")
     await asyncio.sleep(15)  # let feeds warm up before first flush
-    _seed_counter = 0  # only seed entities every 5th cycle (~2.5 min)
-    while True:
-        try:
-            from db import sync_scores_to_db
-            flashlive_snap = []
-            try:
-                from flashlive_feed import GAMES as FL_GAMES
-                flashlive_snap = list(FL_GAMES.values())
-                if flashlive_snap:
-                    await sync_scores_to_db("flashlive", flashlive_snap)
-            except Exception as e:
-                _log.error("flashlive score flush: %s", e)
 
-            # Phase 5: seed entities every 5th cycle (~2.5 min)
-            _seed_counter += 1
-            if _seed_counter >= 5:
-                _seed_counter = 0
+    from db import async_session, DATABASE_URL
+    if not DATABASE_URL or async_session is None:
+        _log.info("skipping — no DATABASE_URL")
+        return
+
+    from ingestion.base import (
+        ADVISORY_LOCK_SCORE_FLUSH, try_acquire_advisory_lock,
+    )
+    async with async_session() as lock_session:
+        if not await try_acquire_advisory_lock(
+            lock_session, ADVISORY_LOCK_SCORE_FLUSH,
+        ):
+            _log.info("skipping — another worker holds the lock")
+            return
+        _log.info("lock acquired; running")
+        _seed_counter = 0  # only seed entities every 5th cycle (~2.5 min)
+        while True:
+            try:
+                from db import sync_scores_to_db
+                flashlive_snap = []
                 try:
-                    from entity_seeder import extract_teams
-                    from db import upsert_entities, refresh_alias_sport_cache
-                    all_teams = []
+                    from flashlive_feed import GAMES as FL_GAMES
+                    flashlive_snap = list(FL_GAMES.values())
                     if flashlive_snap:
-                        # Add home_display/away_display aliases for entity seeder
-                        for g in flashlive_snap:
-                            if not g.get("home_display"):
-                                g["home_display"] = g.get("home_name", "")
-                            if not g.get("away_display"):
-                                g["away_display"] = g.get("away_name", "")
-                        all_teams.extend(extract_teams(flashlive_snap, "flashlive"))
-                    if all_teams:
-                        await upsert_entities(all_teams)
-                    await refresh_alias_sport_cache()
+                        await sync_scores_to_db("flashlive", flashlive_snap)
                 except Exception as e:
-                    _log.error("entity seed: %s", e)
-        except Exception as e:
-            _log.error("score flush loop error: %s", e)
-        await asyncio.sleep(30)
+                    _log.error("flashlive score flush: %s", e)
+
+                # Phase 5: seed entities every 5th cycle (~2.5 min)
+                _seed_counter += 1
+                if _seed_counter >= 5:
+                    _seed_counter = 0
+                    try:
+                        from entity_seeder import extract_teams
+                        from db import upsert_entities, refresh_alias_sport_cache
+                        all_teams = []
+                        if flashlive_snap:
+                            # Add home_display/away_display aliases for entity seeder
+                            for g in flashlive_snap:
+                                if not g.get("home_display"):
+                                    g["home_display"] = g.get("home_name", "")
+                                if not g.get("away_display"):
+                                    g["away_display"] = g.get("away_name", "")
+                            all_teams.extend(extract_teams(flashlive_snap, "flashlive"))
+                        if all_teams:
+                            await upsert_entities(all_teams)
+                        await refresh_alias_sport_cache()
+                    except Exception as e:
+                        _log.error("entity seed: %s", e)
+            except Exception as e:
+                _log.error("score flush loop error: %s", e)
+            await asyncio.sleep(30)
 
 UTC = timezone.utc
 
