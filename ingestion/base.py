@@ -285,6 +285,11 @@ ADVISORY_LOCK_FL = 0x5350_F100   # 'SP' \xF1 \x00 — FL ingestion
 ADVISORY_LOCK_KALSHI = 0x5350_F101
 ADVISORY_LOCK_POLYMARKET = 0x5350_F102
 ADVISORY_LOCK_ODDSAPI = 0x5350_F103
+# Task #21 Surface C (2026-07-30): singleton-enforce the two
+# main.py-hosted background loops that were previously duplicated
+# under WEB_CONCURRENCY=2.
+ADVISORY_LOCK_SCORE_FLUSH = 0x5350_F104   # main._score_flush_loop
+ADVISORY_LOCK_PRICE_PRUNE = 0x5350_F105   # main._price_prune_loop
 
 
 async def try_acquire_advisory_lock(session: AsyncSession, key: int) -> bool:
