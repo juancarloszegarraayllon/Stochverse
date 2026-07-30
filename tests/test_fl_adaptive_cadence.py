@@ -113,17 +113,21 @@ def test_pregame_within_window_counts_as_live():
     """A state=="pre" game whose kickoff is within
     PREGAME_PROMOTE_WINDOW_S counts as live for cadence promotion.
     Prevents kickoff detection from lagging up to 60s on a
-    speed-differentiated product."""
+    speed-differentiated product.
+
+    Uses Basketball (not in _LIVE_POLL_INTERVAL_BY_SPORT) so the
+    assertion targets the default LIVE_POLL_INTERVAL — Soccer/Tennis
+    get their own dedicated payload-aware-override tests below."""
     import flashlive_feed as fl
     now = 1_800_000_000.0
     pregame = {
         "state": "pre",
-        "sport": "Soccer",
+        "sport": "Basketball",
         # Kickoff in 20 min — inside the 30-min window.
         "scheduled_kickoff_ms": int((now + 20 * 60) * 1000),
     }
-    fl._observe_sport_state("Soccer", [pregame], now)
-    assert fl._cadence_for_sport("Soccer", now) == fl.LIVE_POLL_INTERVAL
+    fl._observe_sport_state("Basketball", [pregame], now)
+    assert fl._cadence_for_sport("Basketball", now) == fl.LIVE_POLL_INTERVAL
 
 
 def test_pregame_outside_window_does_not_promote():

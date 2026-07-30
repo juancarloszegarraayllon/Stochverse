@@ -14,6 +14,7 @@ scores on Kalshi event cards.
 import asyncio
 import logging
 import os
+import random
 import re
 import time
 
@@ -77,21 +78,40 @@ LIVE_STICKY_S = int(os.environ.get("FLASHLIVE_LIVE_STICKY_S", str(30 * 60)))
 # no cadence gap.
 PREGAME_PROMOTE_WINDOW_S = int(os.environ.get("FLASHLIVE_PREGAME_WINDOW_S", str(30 * 60)))
 
-# Global FlashLive rate limiter. The default 0.20s gap (5 req/sec
-# sustained) was set when the project was on the 10 req/s consumer
-# tier. With RapidAPI Mega the per-second limit is dramatically
-# higher, and the old 200ms gap was forcing the 6-probe parallel
-# fan-out in /normalized to *serialize* — each panel load was eating
-# ~1s of pure throttle wait that the API itself didn't require.
+# Global FlashLive rate limiter.
 #
-# Default now 0.025s (40 req/sec sustained) — tight enough that 6
-# parallel probes finish in real-parallel (~25ms apart), loose enough
-# to absorb both the broad poll and per-event warm path under heavy
-# load. Override via FLASHLIVE_MIN_GAP_S env var if you see 429s
-# (push it back up) or if you switch to a higher tier (push down).
+# 2026-07-31 RapidAPI dashboard read: Mega tier caps at 10 req/sec
+# SHARED PER KEY. Both Railway workers use the same key → combined
+# budget is 10 rps, per-worker budget is 5 rps → per-worker gap is
+# 0.2s. The pre-2026-07-31 default of 0.025s permitted 40 rps per
+# worker = 80 rps combined = 8× over ceiling; explains all historical
+# 429 storms including the 63-in-17s standings-walk burst that
+# surfaced Day-59. No per-endpoint sub-limits observed on the
+# dashboard — the 10 rps ceiling is global across /v1/events/list,
+# /v1/tournaments/standings, and the warm-path per-event calls.
+#
+# Override via FLASHLIVE_MIN_GAP_S if the rate limit changes upstream
+# or if the key ever gets its own dedicated Mega subscription (per-
+# worker gap could drop back to 0.1s = 10 rps each).
 _FL_THROTTLE_LOCKS: dict = {}
 _FL_LAST_CALL_TS = 0.0
-_FL_MIN_GAP_S = float(os.environ.get("FLASHLIVE_MIN_GAP_S", "0.025"))
+_FL_MIN_GAP_S = float(os.environ.get("FLASHLIVE_MIN_GAP_S", "0.2"))
+
+# Per-sport live-cadence override. Payload-aware refinement over the
+# global LIVE_POLL_INTERVAL default (5s) — Tennis and Soccer own >85%
+# of billed bandwidth on the always-live sports (Tennis ~1.08 MB/call,
+# Soccer ~421 KB/call) so their 10s → 5s doubling under b5.ii's
+# initial cut precisely canceled the tomorrow-decoupling win. Cap
+# them at 10s (pre-b5.ii Tennis/Soccer speed → ZERO staleness
+# regression on those sports) while Basketball/Baseball/Hockey keep
+# the 5s upgrade (their payloads are 87-128 KB, so the freshness
+# improvement is nearly free at the bandwidth budget).
+# 2026-07-31 gzip-adjusted model: this refinement cuts steady-state
+# bandwidth ~41% vs the b5.ii-flat-5s regime.
+_LIVE_POLL_INTERVAL_BY_SPORT: dict = {
+    "Tennis": int(os.environ.get("FLASHLIVE_LIVE_POLL_TENNIS_S", "10")),
+    "Soccer": int(os.environ.get("FLASHLIVE_LIVE_POLL_SOCCER_S", "10")),
+}
 
 
 async def _fl_throttle():
@@ -585,11 +605,18 @@ def _cadence_for_sport(sport_name: str, now_s: float) -> int:
     Time-based demotion: fast cadence sticks for LIVE_STICKY_S
     seconds after the LAST live observation. If no live observation
     ever happened, or the last one was older than LIVE_STICKY_S ago,
-    fall back to the idle cadence."""
+    fall back to the idle cadence.
+
+    Payload-aware override: sports in _LIVE_POLL_INTERVAL_BY_SPORT
+    get their per-sport fast cadence instead of the LIVE_POLL_INTERVAL
+    default. Currently Tennis and Soccer (both >85% of billed bandwidth)
+    cap at 10s vs the 5s default — zero staleness regression relative
+    to pre-b5.ii while restoring the tomorrow-decoupling win to the
+    bottom line."""
     entry = _SPORT_LIVE_STATE.get(sport_name) or {}
     last_live = entry.get("last_live_observation_ts") or 0.0
     if last_live and (now_s - last_live) <= LIVE_STICKY_S:
-        return LIVE_POLL_INTERVAL
+        return _LIVE_POLL_INTERVAL_BY_SPORT.get(sport_name, LIVE_POLL_INTERVAL)
     return POLL_INTERVAL
 
 
@@ -1708,7 +1735,44 @@ def _sweep_stale_games(now_s: float) -> int:
     return len(stale_keys)
 
 
-async def _sport_poll_loop(sport_id: str, sport_name: str) -> None:
+def _herd_desync_initial_sleep_s(sport_index: int, sport_count: int,
+                                 worker_jitter_s: float) -> float:
+    """Compute the initial-sleep offset before a sport-poll loop's
+    first fetch. Deterministic per-sport slot + per-worker jitter.
+
+    Deterministic component: `sport_index * (POLL_INTERVAL / sport_count)`
+    — 17 sports across a 60s window = 3.53s slot width. Sport 0 fires
+    at t=0, sport 1 at t=3.53, sport 16 at t=56.5, etc. Subsequent
+    60s idle sleeps preserve the offset naturally, so the 60s wake
+    window is spread out for the entire process lifetime.
+
+    Per-worker jitter component: `random.uniform(0, 2.0)` computed
+    once at startup, added on top so both workers' sport-0 don't land
+    on the same second. 0-2s range chosen to be larger than the ~1s
+    fetch execution time but small enough that the deterministic
+    stagger still dominates.
+
+    Pre-2026-07-31 herd shape (deploy-time thundering herd): all 13
+    idle-sport loops started synchronized → ~26 near-simultaneous
+    calls per minute (13 × 2 workers) burst past FL's 10 rps combined
+    ceiling, ~12-20 bounced with 429. This function's output makes
+    that impossible even under the aligned 0.2s gap."""
+    if sport_count <= 0:
+        return worker_jitter_s
+    slot_width_s = POLL_INTERVAL / float(sport_count)
+    return (sport_index * slot_width_s) + worker_jitter_s
+
+
+# Per-process worker jitter — computed once in run_flashlive_feed()
+# at startup so all this process's sport loops share the same jitter
+# offset (their deterministic slots still spread them relative to
+# each other; the jitter only separates THIS worker from other
+# workers polling the same key).
+_WORKER_JITTER_S: float = 0.0
+
+
+async def _sport_poll_loop(sport_id: str, sport_name: str,
+                           sport_index: int = 0, sport_count: int = 1) -> None:
     """One asyncio task per sport. Polls indent_days=0 (TODAY) only
     at a per-sport adaptive cadence — LIVE_POLL_INTERVAL if a live
     or pre-game observation happened within LIVE_STICKY_S, else
@@ -1718,7 +1782,21 @@ async def _sport_poll_loop(sport_id: str, sport_name: str) -> None:
     Errors are contained per-sport — a single sport failing a fetch
     doesn't affect the others. STATUS bookkeeping is stamped
     incrementally so /api/flashlive_status reflects the most recent
-    per-sport tick."""
+    per-sport tick.
+
+    Herd desync: initial sleep = _herd_desync_initial_sleep_s so
+    idle-cadence wake-ups are spread across the 60s window instead
+    of clustering on a single second (the deploy-time all-sync
+    problem observed on the b5.ii Day-59 shakedown)."""
+    initial_sleep = _herd_desync_initial_sleep_s(
+        sport_index, sport_count, _WORKER_JITTER_S,
+    )
+    if initial_sleep > 0:
+        log.debug(
+            "FlashLive %s: initial stagger sleep %.2fs (index=%d, jitter=%.2fs)",
+            sport_name, initial_sleep, sport_index, _WORKER_JITTER_S,
+        )
+        await asyncio.sleep(initial_sleep)
     async with httpx.AsyncClient(timeout=15.0) as client:
         while True:
             try:
@@ -1900,12 +1978,28 @@ async def run_flashlive_feed():
     # of paying a 60s beat before ramping up.
     _seed_sport_state_from_warm_games(time.time())
 
+    # Per-worker jitter for herd desync — computed ONCE at startup
+    # so this process's sport loops share the same jitter offset
+    # while both workers get statistically-independent offsets. The
+    # deterministic per-sport stagger inside _sport_poll_loop's
+    # initial-sleep separates sports WITHIN a worker; this jitter
+    # separates the two workers FROM EACH OTHER.
+    global _WORKER_JITTER_S
+    _WORKER_JITTER_S = random.uniform(0, 2.0)
+    log.info(
+        "FlashLive worker jitter: %.3fs (herd-desync per-worker offset)",
+        _WORKER_JITTER_S,
+    )
+
     # Fan out per-sport TODAY workers + shared TOMORROW sweep +
     # stale janitor + persist loop. asyncio.gather propagates
-    # cancellation cleanly on shutdown.
+    # cancellation cleanly on shutdown. sport_index + sport_count
+    # feed the herd-desync stagger inside _sport_poll_loop.
+    sport_list = list(ACTIVE_SPORTS.items())
+    sport_count = len(sport_list)
     tasks = [
-        _sport_poll_loop(sid, sname)
-        for sid, sname in ACTIVE_SPORTS.items()
+        _sport_poll_loop(sid, sname, sport_index=i, sport_count=sport_count)
+        for i, (sid, sname) in enumerate(sport_list)
     ]
     tasks.append(_tomorrow_sweep_loop())
     tasks.append(_stale_sweep_loop())
