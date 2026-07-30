@@ -485,6 +485,22 @@ Once Deliverable 1 is shipping daily reports, the operator has the raw material 
 
 The `sample_disagreements` block gives the operator concrete records to eyeball. Not the full disagreement set (which could be thousands of records/day at peak); the top-N samples per bucket, capped at some N that keeps `report_json` under a reasonable size ceiling. `SAMPLE_N = 30` in the draft code; adjustable.
 
+### 5.1 Expected v2 noise classes (attribution key for `both_pair_different` triage)
+
+**Item 7 threshold context**: v2's date-blind matching produces a small recurring background of `both_pair_different` records that are v2 defects, NOT v4 defects. v2 is being decommissioned, so we document these classes rather than fix them — the threshold-setter needs to know which slice of the `v2_diff.both_pair_different` count is attributable noise floor vs actual v4 defect signal.
+
+Known v2 noise classes as of Day-60 (2 lifetime occurrences, both triaged, v4 record still clean):
+
+- **Mention/outright class** (rHTxr6dU, Day-57 → PR #270): v2 pairs an fl_event's team pair to a Kalshi outright-mentions series (e.g. `KXMLBMENTION`) when the substring-based mention exclusion isn't triggered. Closed as a v4 fix (extend `_OUTRIGHT_SERIES_SUBSTRINGS`); the class shouldn't reappear post-#270. **Verification pattern**: check whether the Kalshi series is a `*MENTION*` ticker.
+- **Adjacent-day-series class** (CUjfSzVI, Day-60): v2 joins an fl_event to the same team-pair's tickers on an ADJACENT day when a back-to-back series is in play. Cause is date-blind team-pair joining — v2 collapses `STL@TOR JUL31` and `STL@TOR AUG1` into one match because the team-pair key is date-agnostic. Recurring shape (MLB series, NBA back-to-backs, NHL home stands) so expect this class at low volume as long as v2 runs. **Verification pattern**: compare `fl_event.START_UTIME` UTC-date against the Kalshi series date component in the ticker (e.g. `26AUG011507STLTOR` → Aug 1); mismatch confirms v2 date-blindness.
+
+**Reading protocol for the report** — when a `v2_diff.both_pair_different` count moves past the operator-set threshold, sample the top-N records and classify each into:
+
+1. Known v2 noise class (mention, adjacent-day-series, future classes as documented) → attribute to noise floor, does not count against Item 7 threshold.
+2. New shape not on this list → first-real-v4-defect candidate; halt cutover, add to this doc as a new noise class or ship the v4 fix.
+
+v1's `both_pair_different` bucket does not have this issue at meaningful volume — v1 was the earlier iteration and its known noise classes are subsumed under v2's; v1 danger counts of 0 across the last N days confirm.
+
 ---
 
 ## 6. Success criteria

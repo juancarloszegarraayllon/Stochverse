@@ -869,6 +869,25 @@ _KALSHI_META_TTL_S: int = int(
 _kalshi_meta_dict_lock = threading.Lock()
 _series_meta_dirty: bool = False
 
+# Request-path warm cap for /api/events?warm=...
+#
+# The frontend sends up to 30 visible-card tickers per request; the
+# warm helper fires one FL /v1/events/data probe per ticker in parallel
+# and waits up to 2s (see _warm_specific_events at :12399). Pre-PR-#276
+# the FL throttle allowed 40 rps/worker → 30 probes finished in ~0.75s
+# → all completed. Post-#276 the throttle is 0.2s (5 rps/worker to
+# match Mega's 10-rps-shared-per-key ceiling) → 30 probes serialize
+# to ~6s → only ~10 finish in 2s, the other 20 get canceled = wasted
+# resolver work with no coverage benefit.
+#
+# Cap at 10 = what actually completes anyway under the aligned gap.
+# Uncovered cards fall back to poller-fresh _live_state (≤5-10s stale
+# on fast sports under b5.ii), so the freshness delta from request-fresh
+# is small — the warm path's job shrank because the poller improved.
+# Escalation path if frontend feel says otherwise: split _fl_throttle
+# into poller + warm-path budgets (~30 LOC), documented in PR #276.
+_FLASHLIVE_WARM_CAP: int = int(os.environ.get("FLASHLIVE_WARM_CAP", "10"))
+
 # Tag/title keyword → our sport bucket. Order is by descending
 # specificity so "table tennis" wins over "tennis", "american football"
 # wins over "football", etc. The matcher scans concatenated tags +
@@ -2393,10 +2412,18 @@ def get_events(
 ):
     # Per-event live refresh — frontend sends the comma-separated
     # tickers of currently-visible cards so the response carries fresh
-    # _live_state for them even between broad-poll cycles. Bounded at
-    # 30 tickers per call to cap fan-out cost.
+    # _live_state for them even between broad-poll cycles. Bounded by
+    # FLASHLIVE_WARM_CAP (default 10) so the request-path fan-out sits
+    # inside the 2s timeout under the 0.2s per-worker FL throttle gap
+    # (PR #276 gap alignment): 10 × 0.2s = 2s, all probes complete.
+    # Pre-alignment (40 rps/worker) allowed 30 in ~0.75s; under 5 rps/
+    # worker only ~10 finish in 2s, so a cap >10 leaves 20 warms to be
+    # canceled — wasted resolver work with no coverage benefit.
+    # Uncovered cards fall back to poller-fresh _live_state (≤5-10s
+    # stale on fast sports under b5.ii), so the freshness delta from
+    # request-fresh is small.
     if warm:
-        warm_list = [t for t in warm.split(",") if t][:30]
+        warm_list = [t for t in warm.split(",") if t][:_FLASHLIVE_WARM_CAP]
         if warm_list:
             _warm_specific_events(warm_list)
     from datetime import date as _date
