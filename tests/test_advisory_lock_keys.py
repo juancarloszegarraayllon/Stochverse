@@ -79,3 +79,29 @@ def test_surface_c_constants_present():
     assert isinstance(ADVISORY_LOCK_SCORE_FLUSH, int)
     assert isinstance(ADVISORY_LOCK_PRICE_PRUNE, int)
     assert ADVISORY_LOCK_SCORE_FLUSH != ADVISORY_LOCK_PRICE_PRUNE
+
+
+def test_standings_walk_constants_present():
+    """Day-62 standings-walk PR added two new keys. Same regression
+    guard as Surface C — rename or removal reintroduces both-worker
+    duplication on ~215k/day of standings calls."""
+    from ingestion.base import (
+        ADVISORY_LOCK_BRACKET_WALK,
+        ADVISORY_LOCK_MULTI_STAGE_DISC,
+    )
+    assert isinstance(ADVISORY_LOCK_BRACKET_WALK, int)
+    assert isinstance(ADVISORY_LOCK_MULTI_STAGE_DISC, int)
+    assert ADVISORY_LOCK_BRACKET_WALK != ADVISORY_LOCK_MULTI_STAGE_DISC
+    # And distinct from the pre-existing pair, guaranteed by the
+    # test_advisory_lock_keys_are_distinct sweep above but stated
+    # explicitly here so a renamed constant fails BOTH tests.
+    from ingestion.base import (
+        ADVISORY_LOCK_SCORE_FLUSH,
+        ADVISORY_LOCK_PRICE_PRUNE,
+    )
+    assert ADVISORY_LOCK_BRACKET_WALK not in (
+        ADVISORY_LOCK_SCORE_FLUSH, ADVISORY_LOCK_PRICE_PRUNE,
+    )
+    assert ADVISORY_LOCK_MULTI_STAGE_DISC not in (
+        ADVISORY_LOCK_SCORE_FLUSH, ADVISORY_LOCK_PRICE_PRUNE,
+    )

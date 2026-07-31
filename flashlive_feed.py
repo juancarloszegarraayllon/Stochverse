@@ -1097,6 +1097,56 @@ _FL_OBSERVE_PATHS = (
 )
 
 
+async def _fl_get_with_status(path: str, params: dict = None):
+    """Status-aware sibling of _fl_get. Returns `(body, status_code)`
+    — body is None on any failure, status_code is the HTTP code from
+    FL or None on network exception / no-API-key / no-httpx.
+
+    Added Day-62 for the standings-walk negative-cache work: the walk
+    needs to distinguish TRUE 404 (permanently-dead stage → stamp
+    marker) from transient failures (429/timeout/5xx/network → leave
+    cache unchanged, re-probe next TTL cycle). Legacy `_fl_get`
+    collapses all failures to None, which is fine for the ~20 other
+    callers but insufficient for the one that needs status.
+
+    Preserves the throttle contract, observability event emission,
+    and the observe-endpoint FL_OBS=1 logging path so this sibling
+    stays byte-identical to _fl_get on the wire."""
+    from observability import _CallTimer
+
+    if not API_KEY or httpx is None:
+        return None, None
+    headers = {"x-rapidapi-key": API_KEY, "x-rapidapi-host": API_HOST}
+    if params is None:
+        params = {}
+    params.setdefault("locale", "en_INT")
+    await _fl_throttle()
+    observe = any(path.startswith(p) for p in _FL_OBSERVE_PATHS)
+
+    body = None
+    status: int | None = None
+    with _CallTimer(provider="fl", endpoint=path) as timer:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                r = await client.get(
+                    f"{BASE_URL}{path}", headers=headers, params=params,
+                )
+                status = r.status_code
+                timer.status = r.status_code
+                if r.status_code == 200:
+                    body = r.json()
+                    timer.response_bytes = len(r.content)
+            except Exception as exc:
+                timer.error = type(exc).__name__
+                status = None
+        if observe:
+            log.info(
+                "FL_OBS provider=fl endpoint=%s status=%s bytes=%s",
+                path, timer.status, timer.response_bytes,
+            )
+    return body, status
+
+
 async def _fl_get(path: str, params: dict = None):
     """Shared GET helper for FlashLive API calls.
 
@@ -1397,6 +1447,19 @@ async def fetch_bracket_draw(tournament_stage_id: str, season_id: str = ""):
     if season_id:
         params["tournament_season_id"] = season_id
     return await _fl_get("/v1/tournaments/standings", params)
+
+
+async def fetch_bracket_draw_with_status(tournament_stage_id: str, season_id: str = ""):
+    """Status-aware sibling of fetch_bracket_draw. Returns
+    `(body, status_code)`. Used by the standings-walk refresh path
+    to distinguish TRUE 404 (permanently-dead stage → negative cache)
+    from transient failures (leave cache unchanged, retry next TTL)."""
+    if not tournament_stage_id:
+        return None, None
+    params = {"tournament_stage_id": tournament_stage_id, "standing_type": "draw"}
+    if season_id:
+        params["tournament_season_id"] = season_id
+    return await _fl_get_with_status("/v1/tournaments/standings", params)
 
 
 def find_flashlive_event_id(title: str, sport: str = ""):
