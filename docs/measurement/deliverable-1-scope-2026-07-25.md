@@ -513,9 +513,16 @@ Deliverable 1 is considered shipped when:
 4. `v4_extraction_excluded` count is non-zero on FL cron reports (proves the classification pass fires; population is at least the KXMLBMENTION + doubles rate).
 5. **Smoke evidence that namespace normalization works**: `agree_same_fixture + agree_partial_coverage` count on the first report is materially above zero for a sport with known-overlapping v3/v4 coverage (e.g. NBA regular-season games). If this bucket is near-zero on day one, the ticker-namespace normalization has silently regressed to the pre-fix state and every diff lands in `both_pair_different`. Fail loud, don't debug in production.
 6. `sp.baseline_shifts` row exists documenting the measurement expansion per §4.7.
-7. Gate #2 status in `PROJECT_STATE.md` moves from "REOPENED Day-54 — HALF-BUILT" to "CLOSED Day-N — Deliverable 1 shipped; Item 7 threshold still operator-owned."
+7. Gate #2 status in `PROJECT_STATE.md` moves from "REOPENED Day-54 — HALF-BUILT" to "CLOSED — Deliverable 1 shipped 2026-07-28; threshold SET 2026-08-01."
 
-Item 7's acceptable-threshold gets set separately, from N days of report data, by the operator. This workstream does not set the threshold — it produces the measurement dimension the threshold gets set against.
+**THRESHOLD SET 2026-08-01 (Day-61, operator-approved).** Evidence basis: 7 consecutive cron reports, danger range 0-2/day 100% v2-attributed (3 adjudications: rHTxr6dU mention → PR #270, CUjfSzVI + 4We9ZQLk adjacent-day-series → §5.1 documented), v1 identity 7/7, coverage +30/day. Four gates:
+
+1. **PRIMARY — `both_pair_different` ≤ 3/day PER FLAVOR** (`v1_danger` and `v2_danger` counted each, not summed), AND every occurrence must be triage-verified to a documented §5.1 v2 defect class via the START_UTIME playbook. Untriaged records count against the gate until triaged. **ANY v4 adjudication = automatic hold regardless of count.**
+2. **SECONDARY — `legacy_only` gated on trend, not count**: `fixture_linked_in_window_count` must be non-declining week-over-week at each flag decision.
+3. **INSTRUMENT-HEALTH PRECONDITIONS** — `per_sport_errors = 0` AND v1 identity (`agree_same_fixture + agree_partial_coverage + v4_only = fixture_linked_in_window_count`) holding on any report used for a flag decision. Sick instrument = no decision.
+4. **ROLLOUT CADENCE** — daily report read at each stage (5% → 25% → 100%); any breach freezes the current percentage (no rollback; v3 serves the remainder).
+
+Gate readings are on the reports this scope doc's measurement dimension produces — this workstream owns the instrument, the four-gate spec owns the decisions the instrument feeds. Phase 3 opens with the flag-wiring, soccer-first rollout plan, and 5% flip plan documented in `PROJECT_STATE.md` phase status header.
 
 ---
 
@@ -537,7 +544,7 @@ No schema migration to reverse, no data cleanup. Same reason `sp.daily_diff_repo
 - **D2/D1 window-predicate semantics — cron populations exclude still-active rows**. D2's `_KALSHI_WINDOW_SQL` / `_FL_WINDOW_SQL` load rows via `last_seen_at >= :window_start AND last_seen_at < :window_end`. Deliverable 1's `_query_v4_pairings` inherits this via PK-scope (D1 sees exactly what D2 loaded). Under the 03:00 UTC cron with a 24h historical window, rows still active at run time have `last_seen_at ≈ NOW() > window_end` and are EXCLUDED (PR #260 bumps `last_seen_at` on every ingestion pass regardless of content change). Consequence: **the cron population is dominated by records that concluded / delisted / went stale during the window; still-active records at run time are absent.** Manual runs with a `window_end` at or after "now" capture active records too. Two different populations for the "same" nominal window. Possibly acceptable as a documented choice (concluded-events-only gives more stable measurement), but **must be a decision, not a default**. Options: (a) keep + document explicitly so the first cron report's different character doesn't read as regression, (b) change the anchor to `last_changed_at` (bumps only on content change, more stable), (c) extend the predicate to include "still-active at run time" rows. Decision is a separate workstream — this scope doc does not resolve it. Tracked as task #25.
 - **Sport-level diff breakdowns**. Not required to close Gate #2; natural extension once Deliverable 1 is shipping.
 - **Alerting on `both_pair_different` step-changes**. Once trend data exists, a Nth-percentile step-detector is worth wiring. Not urgent; the manual weekly-read discipline works at current volume.
-- **Automated cutover gating**. When Item 7's threshold is set, `/api/v4` traffic-flag flips can be conditioned on `both_pair_different <= threshold AND legacy_only <= threshold`. Separate scope, needs product decision on gate semantics (soft-warn vs hard-block).
+- **Automated cutover gating**. Threshold now SET (see §6 above) — `/api/v4` traffic-flag flips can be conditioned on the four-gate spec. Implementation deferred to Phase 3's flag-wiring workstream. Gate semantics locked as **hard-block on primary** (untriaged `both_pair_different` > 3/day per flavor OR any v4 adjudication → stage-freeze) plus **soft-warn on secondary** (declining `fixture_linked_in_window_count` trend → alert for operator review, no automatic freeze).
 - **`v1_vs_v2` sub-diff surfaced explicitly**. The math already exists at `main.py:8390-8440`. Adding it to `report_json` as `legacy_v1_vs_v2` gives triage a "both v3 flavors disagree with each other AND with v4" three-way split. Marginal work; deferrable.
 
 ---

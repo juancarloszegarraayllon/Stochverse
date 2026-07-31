@@ -15,8 +15,13 @@ accuracy is a critical INPUT to the product, not a substitute for it.
 
 ### Current position
 
-**Phase 2 (Resolution) — IN PROGRESS.** Next boundary: **Phase 3
-(v4 cutover) — NOT STARTED.**
+**Phase 2 (Resolution) — COMPLETE 2026-08-01.** Both blocking Item 7
+blanks now filled — Deliverable 1 shipped (measurement dimension
+exists) and threshold SET (cutover-acceptable criteria approved by
+operator on 7 consecutive reports, 3 danger triages, v1 identity 7/7,
+coverage +30/day). Next boundary: **Phase 3 (v4 cutover) — OPENS
+next session.** Deliverables: flag-wiring review + soccer-first
+rollout plan + 5% flip plan.
 
 ### Seven-phase status
 
@@ -27,11 +32,14 @@ accuracy is a critical INPUT to the product, not a substitute for it.
   ingestion modules writing to `sp.*`; 30-day backfill scripts. The
   end-of-phase §6.5 archival job to object storage is still NOT
   BUILT — see exit gates.)
-- **Phase 2 — Resolution**: IN PROGRESS. Matcher built
+- **Phase 2 — Resolution**: **COMPLETE 2026-08-01.** Matcher built
   (`resolver/matcher.py`), Tier 1–4 ported (`resolver/alias_tier/`,
   `resolver/fuzzy_tier/`, FL + Kalshi modules), `sp.resolution_log`
-  writing, admin UI mounted (`admin/router.py`, `main.py:386`).
-  Missing pieces in the exit gates below.
+  writing, admin UI mounted (`admin/router.py`, `main.py:386`), daily
+  diff shipped (PRs #264/#265/#267), threshold SET Day-61. See §11.3
+  checklist below for per-item status — all cutover-relevant items
+  closed; Item 4 batch cadence + Item 8 corpus reclassified as
+  Phase 3 concurrent workstreams (see "What Phase 3 needs" below).
 - **Phase 3 — Cutover** (`/api/v4` feature-flagged): NOT STARTED.
   `grep "/api/v4" main.py` returns zero. No flag scaffold; frontend
   still on legacy endpoints.
@@ -58,16 +66,29 @@ Replaced with §11.3's actual 8-item Phase 2 checklist. Status per Day-53 read-b
 | 4 | Three-loop resolver (hot LISTEN/NOTIFY + batch 30s + re-resolution 5–10 min) | **PARTIAL** | Hot loop: zero code matches on `LISTEN`/`NOTIFY`/`pg_notify` primitives across the repo (only docs + one env-var name collision + reresolution runner's `--candidate-set` "seam" comment). No listener, no NOTIFY trigger. Batch loop: selection logic EXISTS in `scripts/run_resolver_pass.py` (the daily runner's broad `fixture_id IS NULL` scan) — cadence is daily, not 30s. Re-resolution loop: `scripts/run_reresolution_pass.py` implemented with narrow Tier-1 selection (`fixture_id IS NULL AND last_seen_at > 3d AND latest.reason_code = 'no_match' AND fail_reason IN allowlist AND asymmetric_excluded IS NULL` per `:242-288`); paused pending PR #248 merge + dry-run verification. **Hot loop scoped as post-Phase-3 optimization** (see decision block below). **Batch cadence is operator-owned** (see decision block below). |
 | 5 | Admin review-queue UI (§7.5 minimum scope) | **DONE** | `admin/router.py`: `review_queue_list`, `review_queue_detail`; templates for list/detail/login/decision-form/decision-result/anchor-failed; auth in `admin/auth.py`; mounted at `/admin/*` per `main.py:385-386` |
 | 6 | Resolver running continuously against stored data | **PARTIAL / decision-dependent** | Daily crons run resolver against stored `sp.fl_events`/`sp.kalshi_markets` at 02:00/02:15 UTC. "Continuously" per §11.3 almost certainly means Item 4's three-loop cadence — on that reading, Item 6 is gated on Item 4's cadence decision (below), not a separate build |
-| 7 | Daily diff until acceptable | **CLOSED — Deliverable 1 shipped 2026-07-28** | Both blanks now filled. **(a) measurement dimension exists**: `scripts/daily_diff.py` writes `legacy_v1_diff` + `legacy_v2_diff` sub-dicts to `sp.daily_diff_reports.report_json` per §3.3 six-bucket schema (agree_same_fixture / agree_partial_coverage / v4_only / legacy_only / both_pair_different / v4_extraction_excluded), plus `legacy_diff_meta.fixture_linked_in_window_count` for population context. `legacy_comparison_present` flips True on every row. First Run 4 verification (2026-07-28 manual): v1 total=530 (17 agree + 10 partial + 43 v4_only + 449 legacy_only + 0 danger + 11 excluded), v2 total=359 (5+0+64+289+1+0). **Danger class stable at v1:0 / v2:1 across all four verification runs — clean signal.** **(b) threshold still operator-owned**, pending N days of cron report data to inform the number. First cron report tonight (03:00 UTC 2026-07-29); baseline-shift SQL run by operator alongside cron ownership handoff. See Session 2026-07-27 → 07-28 for the full shipping arc and the two follow-up tasks (S2b population narrowness, lone v2 danger record triage). |
+| 7 | Daily diff until acceptable | **CLOSED — Deliverable 1 shipped 2026-07-28; threshold SET 2026-08-01** | Both blanks filled. **(a) measurement dimension** shipped as `scripts/daily_diff.py`'s `legacy_v1_diff` + `legacy_v2_diff` sub-dicts on `sp.daily_diff_reports.report_json` per §3.3 six-bucket schema (agree_same_fixture / agree_partial_coverage / v4_only / legacy_only / both_pair_different / v4_extraction_excluded) plus `legacy_diff_meta.fixture_linked_in_window_count`. **(b) threshold SET Day-61** — see Decision 1 block below for the operator-approved criteria (four gates: primary danger + secondary trend + instrument-health preconditions + rollout cadence). Evidence basis: 7 consecutive reports, danger range 0-2/day 100% v2-attributed (3 adjudications: 1 mention → PR #270, 2 adjacent-day → §5.1 documented), v1 identity 7/7, coverage +30/day. See Session 2026-07-27 → 07-28 for the Deliverable 1 shipping arc, Session 2026-07-31 → 08-01 for the threshold-setting arc. |
 | 8 | Extract initial test corpus of ~100 cases from accumulated raw payloads (§12.1) | **NOT STARTED — silent violation** | `tests/corpus/` does not exist. `Makefile:95-96`'s `test-corpus: pytest tests/corpus/` target would fail on missing directory. §12.2 mandates replay-against-corpus as the gate for every resolver change; that gate has been silently absent through the entire Phase 2E arc (PRs #245, #250, #251, #252 all shipped resolver-adjacent changes without corpus replay). Corrective queued below |
 
-### Two undecided numbers gating Phase 3 — operator-owned
+### Cutover-acceptable threshold — SET 2026-08-01 (operator-approved Day-61)
 
-Both are product-latency / product-quality decisions, not code work. Surfaced explicitly here rather than buried in item status so future sessions don't accrete inherited numbers the way "<20 pending" did (that number arrived from working-memory drift, was treated as a bar for weeks, and turned out to be §7.5's health metric — the second-order failure was the anchoring, not the number itself).
+The Item 7 threshold, the standing "should we cut over" bar. Approved
+by operator Day-61 on the evidence basis of 7 consecutive cron reports,
+3 danger triages (all v2-attributed, zero v4 defects), v1 identity
+holding 7/7, coverage +30/day.
 
-**Decision 1 — Item 7 acceptable-threshold**: `docs/reresolution/scope-2026-06-17.md` and §13.1 both say "do not cut over until diff is acceptable." The Day-54 TWO-BLANKS framing (threshold undefined AND comparison dimension absent) partially resolved 2026-07-28: **Deliverable 1 shipped (PRs #264 / #265 / #267) — the comparison dimension now exists**. `sp.daily_diff_reports.report_json.legacy_v1_diff` / `legacy_v2_diff` carry the six bucket counts on every row; `legacy_comparison_present` flips True. Threshold-setting is now unblocked but still operator-owned pending N days of cron data. **Reading discipline that emerged from the four verification runs**: Item 7's threshold gets set on `both_pair_different` (silent-wrong-linking, DANGEROUS) — NOT on `legacy_only` (which reflects population narrowness — see task #27, S2b — AND capability rate, both orthogonal to cutover risk) NOR on `agree_partial_coverage + both_pair_different` combined (folding the benign coverage-diff class into the dangerous class sets the threshold against noise, per scope doc §3.5). Run 4 baseline: v1 danger=0, v2 danger=1 stable across all four runs — the lone v2 record is task #28. **Operator decision; no number proposed here.** Same failure mode as `<20 pending` if a number lands from anyone but the operator.
+**1. PRIMARY GATE — `both_pair_different` ≤ 3/day PER FLAVOR** (`v1_danger` and `v2_danger` counted each, not summed), AND every occurrence must be triage-verified to a documented §5.1 v2 defect class via the START_UTIME playbook. **Untriaged records count against the gate until triaged** — the threshold is satisfied by demonstrating noise, never by assuming it. **ANY occurrence adjudicated as a v4 error = automatic hold regardless of count.**
 
-**Decision 2 — Item 4 batch-loop cadence**: the batch-loop SELECTION exists (daily runner's broad `fixture_id IS NULL` scan); the CADENCE is daily. §7.7 spec is 30s; re-resolution is 5–10 min. The genuine question is "what latency from provider-ingest to fixture-link is acceptable" — 30s vs 5 min vs daily is set by product, not architecture. Running the daily-shape scan every 30s is real work (~46k FL records/pass, connection budget, incremental scan design), so this is build-work-gated-on-a-decision, not a cron edit. **Operator decision; no number proposed here.**
+**2. SECONDARY — `legacy_only` gated on trend, not count**: `fixture_linked_in_window_count` must be non-declining week-over-week at each flag decision. Absolute count is orthogonal to cutover risk (see prior reading discipline on population narrowness); direction of travel is not.
+
+**3. INSTRUMENT-HEALTH PRECONDITIONS** — `per_sport_errors = 0` and the v1 identity (`agree_same_fixture + agree_partial_coverage + v4_only = fixture_linked_in_window_count`) holding on any report used for a flag decision. **Sick instrument = no decision.**
+
+**4. ROLLOUT CADENCE** — daily report read at each stage (5% → 25% → 100%); any breach freezes the current percentage (no rollback; v3 serves the remainder). Freeze semantics documented so a stage-freeze is a known state, not an incident.
+
+Reading discipline preserved from Deliverable 1's four verification runs: the threshold reads on `both_pair_different` (silent-wrong-linking, DANGEROUS) — NOT on `legacy_only` (population narrowness + capability rate, orthogonal to cutover risk) NOR on `agree_partial_coverage + both_pair_different` combined (folding the benign coverage-diff class into the dangerous class sets the threshold against noise). Per-flavor counts prevent one flavor's silence from masking the other's regression.
+
+### One remaining undecided number — Phase 3 concurrent, not blocking
+
+**Decision 2 — Item 4 batch-loop cadence** (unchanged): the batch-loop SELECTION exists (daily runner's broad `fixture_id IS NULL` scan); the CADENCE is daily. §7.7 spec is 30s; re-resolution is 5–10 min. The genuine question is "what latency from provider-ingest to fixture-link is acceptable" — 30s vs 5 min vs daily is set by product, not architecture. Running the daily-shape scan every 30s is real work (~46k FL records/pass, connection budget, incremental scan design), so this is build-work-gated-on-a-decision, not a cron edit. **Operator decision; reclassified from Phase-2-blocking to Phase-3-concurrent** — cutover to v4 doesn't require the 30s cadence to land first; it requires the resolver to work correctly at whatever cadence it's running at. Item 6's "resolver running continuously" is met by the daily-batch shape; upgrading to 30s is a latency improvement, not a correctness gate.
 
 ### Reclassified out of Phase 2 exit gates
 
@@ -76,11 +97,13 @@ Both are product-latency / product-quality decisions, not code work. Surfaced ex
 
 ### What Phase 3 actually needs from us
 
-Three things:
+With Item 7 threshold SET, Phase 3 opens. Concrete deliverables per operator's Day-61 close-out:
 
-1. **Decision 1 above** — Item 7's acceptable-threshold. Blocks the "should we cut over" call itself.
-2. **Decision 2 above** — Item 4's batch cadence. Blocks Item 6 completion.
-3. **`/api/v4/sports/{id}/feed` scaffolding** — unchanged from prior framing. `grep "/api/v4" main.py` returns zero. Not started.
+1. **Flag-wiring review** — the traffic-flag scaffold that conditions `/api/v4/*` on the operator's 5%/25%/100% percentage. Reads the current cutover-threshold spec and stops/holds a stage-freeze per the four-gate spec above.
+2. **Soccer-first rollout plan** — sport-scoped cutover so the highest-payload, highest-coverage sport can validate the gate spec against real traffic before other sports flip. Reasoning: Soccer's b5.ii-observed always-live characteristic means the gate reads accumulate quickly; if the threshold is going to breach, soccer surfaces it first.
+3. **5% flip plan** — the specific mechanics: pre-flip verification checklist against instrument-health preconditions, first-hour monitoring cadence, stage-freeze triggers, communication path when a freeze fires.
+
+Decision 2 (Item 4 batch cadence) reclassified above as Phase-3-concurrent, not Phase-3-blocking. Item 8 corpus similarly runs concurrent with Phase 3 (silent violation named Day-53; not a cutover gate but a resolver-change hygiene requirement).
 
 ### Silent-violation corrective — Item 8 test corpus
 
