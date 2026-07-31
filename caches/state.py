@@ -15,6 +15,8 @@ companion sentinel variables via `global` statements. Moving those
 helpers into this module is a separate refactor step.
 """
 
+import os
+
 # ─────────────────────────────────────────────────────────────────
 # FL game lookup cache
 #
@@ -64,7 +66,26 @@ _EVICT_FROM_WARM_START = {
 # Key: stage_id. Value: {bracket, ts, season_id, league_name}.
 # ─────────────────────────────────────────────────────────────────
 _TOURNAMENT_BRACKET_CACHE: dict = {}
-_BRACKET_CACHE_TTL_S: float = 300.0  # refresh each entry every 5 min
+# Bracket TTL bumped Day-62 300s → 1800s. Brackets are static data;
+# aggregate/leg tallies only change when a match plays and per-match
+# freshness lives in GAMES + _live_state, not here. 5-min freshness
+# on the aggregate bought nothing measurable but drove ~200k/day of
+# /v1/tournaments/standings traffic (~215k/day observed on Day-61 —
+# now the dominant caller). 30-min refresh keeps _aggregate_bracket_for_event
+# inside the "day-scale accurate" bar.
+_BRACKET_CACHE_TTL_S: float = float(os.environ.get("FLASHLIVE_BRACKET_TTL_S", "1800"))
+
+# Negative-cache TTL for stages FL returns 404 on (historical
+# qualifiers, cancelled brackets, cup rounds that never got a group
+# phase). Pre-Day-62 those stages got re-probed every _BRACKET_CACHE_TTL_S
+# and re-404'd because _fl_get collapsed all failures to None → no
+# cache learning. 24h re-check window balances zero-cost mistakes
+# (FL later adds standings — never observed) against dominant error
+# reduction. Only TRUE 404 stamps a marker; transient failures
+# (429/5xx/network) leave the cache unchanged.
+_NEGATIVE_BRACKET_TTL_S: float = float(
+    os.environ.get("FLASHLIVE_BRACKET_NEG_TTL_S", str(24 * 3600))
+)
 
 
 # ─────────────────────────────────────────────────────────────────

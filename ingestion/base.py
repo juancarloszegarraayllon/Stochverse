@@ -290,6 +290,11 @@ ADVISORY_LOCK_ODDSAPI = 0x5350_F103
 # under WEB_CONCURRENCY=2.
 ADVISORY_LOCK_SCORE_FLUSH = 0x5350_F104   # main._score_flush_loop
 ADVISORY_LOCK_PRICE_PRUNE = 0x5350_F105   # main._price_prune_loop
+# Day-62 standings-walk singletons — both loops previously ran on
+# both WEB_CONCURRENCY=2 workers, doubling ~215k/day of standings
+# calls. Aligned to Surface C's pattern.
+ADVISORY_LOCK_BRACKET_WALK      = 0x5350_F106   # main._tournament_bracket_warm_loop
+ADVISORY_LOCK_MULTI_STAGE_DISC  = 0x5350_F107   # main._multi_stage_discovery_loop
 
 
 async def try_acquire_advisory_lock(session: AsyncSession, key: int) -> bool:

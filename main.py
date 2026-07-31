@@ -23,6 +23,7 @@ from caches.state import (
     _EVICT_FROM_WARM_START,
     _TOURNAMENT_BRACKET_CACHE,
     _BRACKET_CACHE_TTL_S,
+    _NEGATIVE_BRACKET_TTL_S,
     _FL_TOURNAMENTS_CACHE,
     _FL_TOURNAMENTS_TTL,
     _EVENT_CAPS_CACHE,
@@ -5772,25 +5773,71 @@ async def _prewarm_series_stages():
 _bracket_warm_task_started: bool = False
 
 
+def _bracket_needs_refresh(entry, now_s: float) -> bool:
+    """Refresh-eligibility gate for a `_TOURNAMENT_BRACKET_CACHE`
+    entry. Consolidated Day-62 so `_tournament_bracket_warm_loop`
+    and `_multi_stage_discovery_loop` share one contract.
+
+    Rules:
+      - Missing entry → True (never fetched).
+      - Marker entry (`http_status == 404`) → True only if aged past
+        `_NEGATIVE_BRACKET_TTL_S` (default 24h). Prevents re-probing
+        permanently-dead stages every TTL cycle — the pre-Day-62
+        behavior that made standings walk the dominant caller.
+      - Regular bracket entry → True only if aged past
+        `_BRACKET_CACHE_TTL_S` (Day-62 default 1800s, was 300s)."""
+    if not isinstance(entry, dict):
+        return True
+    ts = entry.get("ts") or 0
+    if entry.get("http_status") == 404:
+        return (now_s - ts) >= _NEGATIVE_BRACKET_TTL_S
+    return (now_s - ts) >= _BRACKET_CACHE_TTL_S
+
+
 async def _refresh_tournament_bracket(stage_id: str, season_id: str = "",
                                        league_name: str = "") -> bool:
     """Fetch + compact one tournament's bracket and store it in the
-    cache. Returns True on success. Failure is non-fatal — old cache
-    entry (if any) stays put so transient FL errors don't blank out
-    aggregates. Persists the cache to cache_blobs after a successful
-    refresh so the next container starts with the bracket already
-    loaded.
+    cache. Returns True on success (either fresh data OR a fresh
+    negative marker; both count as "the cache learned something").
+    Transient failures (429/5xx/timeout/network) return False and
+    leave the existing cache entry unchanged so a hiccup doesn't
+    blank out aggregates.
 
-    `league_name` is stored alongside the bracket so the multi-stage
-    fallback in _bracket_aggregate_for_event can group brackets by
-    league when the cached series→stage_id mapping points to the
-    wrong sub-stage (e.g. UCL qualifying vs knockout)."""
+    Day-62 status-aware refactor: uses `fetch_bracket_draw_with_status`
+    so a TRUE 404 stamps a negative marker (`{http_status: 404, ts,
+    league_name}`) that the walk skips for `_NEGATIVE_BRACKET_TTL_S`.
+    ONLY status_code == 404 stamps a marker — any other outcome
+    (transient failure OR successful non-404 response) never earns
+    one. Guards against permanently-marking a stage as dead after
+    a transient 429 storm.
+
+    `league_name` is stored alongside so `_bracket_aggregate_for_event`
+    can group brackets by league when the cached series→stage_id
+    mapping points to the wrong sub-stage (e.g. UCL qualifying vs
+    knockout)."""
     if not stage_id:
         return False
     try:
-        from flashlive_feed import fetch_bracket_draw
-        raw = await fetch_bracket_draw(stage_id, season_id or "")
-        if not raw:
+        from flashlive_feed import fetch_bracket_draw_with_status
+        raw, status = await fetch_bracket_draw_with_status(stage_id, season_id or "")
+        if raw is None:
+            # No body — either FL returned non-200 or the request
+            # blew up on the wire. TRUE 404 stamps a negative marker;
+            # everything else leaves the cache alone. This is the
+            # review-note-1 contract: transient failures never earn
+            # a 24h negative marker.
+            if status == 404:
+                _TOURNAMENT_BRACKET_CACHE[stage_id] = {
+                    "http_status": 404,
+                    "ts":          time.time(),
+                    "league_name": league_name or "",
+                    "season_id":   season_id or "",
+                }
+                logging.getLogger("stochverse").info(
+                    "bracket marker stamped (404): stage=%s league=%r",
+                    stage_id, league_name,
+                )
+                return True
             return False
         compact = _compact_bracket(raw)
         if not compact:
@@ -5843,7 +5890,12 @@ _LAST_BRACKET_SAVE_MONOTONIC: float = 0.0
 def _bracket_content_hash() -> str:
     """Stable content-only hash of _TOURNAMENT_BRACKET_CACHE. Excludes
     `ts` (bumped on every refresh regardless of content) so the hash
-    reflects only what a warm-restart would actually restore differently."""
+    reflects only what a warm-restart would actually restore differently.
+
+    Day-62 includes `http_status` in the hash so a newly-stamped 404
+    marker triggers a save — otherwise negative-cache markers would
+    live only in memory and every restart would re-probe every dead
+    stage, defeating the whole point of the negative cache."""
     import hashlib as _hashlib
     import json as _json
     view = {
@@ -5851,6 +5903,7 @@ def _bracket_content_hash() -> str:
             "bracket":     entry.get("bracket"),
             "season_id":   entry.get("season_id") or "",
             "league_name": entry.get("league_name") or "",
+            "http_status": entry.get("http_status"),
         }
         for sid, entry in _TOURNAMENT_BRACKET_CACHE.items()
         if isinstance(entry, dict)
@@ -5951,9 +6004,38 @@ async def _multi_stage_discovery_loop():
     Aggressively rate-limited: 1 req/s sustained, 30-min cycle.
     Runs after a 30s grace period so the FL poller and the bracket
     warm loop's initial pass finish first.
+
+    Day-62: advisory-lock singleton so only one WEB_CONCURRENCY=2
+    worker runs this. Pre-lock, both workers duplicated the whole
+    walk. Same crash-dormancy trade-off Surface C accepts — see
+    _score_flush_loop docstring for the pattern.
     """
     _log = logging.getLogger("stochverse")
     await asyncio.sleep(30)
+
+    from db import async_session, DATABASE_URL
+    if not DATABASE_URL or async_session is None:
+        _log.info("multi_stage_discovery_loop: skipping — no DATABASE_URL")
+        return
+
+    from ingestion.base import (
+        ADVISORY_LOCK_MULTI_STAGE_DISC, try_acquire_advisory_lock,
+    )
+    async with async_session() as lock_session:
+        if not await try_acquire_advisory_lock(
+            lock_session, ADVISORY_LOCK_MULTI_STAGE_DISC,
+        ):
+            _log.info(
+                "multi_stage_discovery_loop: skipping — another worker holds the lock",
+            )
+            return
+        _log.info("multi_stage_discovery_loop: lock acquired; running")
+        await _multi_stage_discovery_loop_body(_log)
+
+
+async def _multi_stage_discovery_loop_body(_log):
+    """Extracted body so the advisory-lock wrapper stays clean.
+    Behavior identical to the pre-Day-62 loop body."""
     while True:
         try:
             seen: set = set()
@@ -6028,8 +6110,37 @@ async def _tournament_bracket_warm_loop():
 
     Steady-state passes (every 60s after the first) keep the per-
     stage spacing because there's nothing to gain from bursting
-    when only a few entries have aged past TTL."""
+    when only a few entries have aged past TTL.
+
+    Day-62: advisory-lock singleton — pre-lock, both WEB_CONCURRENCY=2
+    workers duplicated the entire walk (~215k/day of standings calls
+    → ~107k/day post-lock). Same crash-dormancy trade-off Surface C
+    accepts."""
     _log = logging.getLogger("stochverse")
+
+    from db import async_session, DATABASE_URL
+    if not DATABASE_URL or async_session is None:
+        _log.info("tournament_bracket_warm_loop: skipping — no DATABASE_URL")
+        return
+
+    from ingestion.base import (
+        ADVISORY_LOCK_BRACKET_WALK, try_acquire_advisory_lock,
+    )
+    async with async_session() as lock_session:
+        if not await try_acquire_advisory_lock(
+            lock_session, ADVISORY_LOCK_BRACKET_WALK,
+        ):
+            _log.info(
+                "tournament_bracket_warm_loop: skipping — another worker holds the lock",
+            )
+            return
+        _log.info("tournament_bracket_warm_loop: lock acquired; running")
+        await _tournament_bracket_warm_loop_body(_log)
+
+
+async def _tournament_bracket_warm_loop_body(_log):
+    """Extracted body so the advisory-lock wrapper stays clean.
+    Behavior identical to the pre-Day-62 loop body."""
 
     # Brief wait for the cache_blobs warm-start tasks to land. They
     # run as separate tasks in startup_event to keep startup_event
@@ -6074,8 +6185,11 @@ async def _tournament_bracket_warm_loop():
         if not stage_id:
             continue
         cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
-        if cached and (now - (cached.get("ts") or 0)) < _BRACKET_CACHE_TTL_S:
-            continue  # warm-started from cache_blobs already
+        # Day-62: uses _bracket_needs_refresh so negative markers
+        # (http_status=404) are respected across the initial pass
+        # too — otherwise every restart re-probes every dead stage.
+        if not _bracket_needs_refresh(cached, now):
+            continue  # warm-started from cache_blobs already (real bracket OR fresh 404 marker)
         season_id = entry.get("season_id") or ""
         league_name = entry.get("league_name") or ""
         initial_tasks.append(warm_one(stage_id, season_id, league_name))
@@ -6114,8 +6228,8 @@ async def _tournament_bracket_warm_loop():
                 if not stage_id:
                     continue
                 cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
-                if cached and (now - (cached.get("ts") or 0)) < _BRACKET_CACHE_TTL_S:
-                    continue  # still fresh
+                if not _bracket_needs_refresh(cached, now):
+                    continue  # still fresh (bracket data OR negative marker within 24h re-check window)
                 season_id = entry.get("season_id") or ""
                 league_name = entry.get("league_name") or ""
                 ok = await _refresh_tournament_bracket(stage_id, season_id, league_name)
