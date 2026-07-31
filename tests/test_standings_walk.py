@@ -295,3 +295,168 @@ def test_negative_bracket_ttl_default_is_24h():
         f"_NEGATIVE_BRACKET_TTL_S = {_NEGATIVE_BRACKET_TTL_S}; expected "
         f"86400 (24h re-check window)"
     )
+
+
+# ── Day-62 shakedown-fix regression tests (integration-shaped) ──
+
+def test_dedupe_series_to_stage_worklist_collapses_duplicates():
+    """N series pointing to M unique stages → M entries in the
+    worklist, not N. First-seen wins for the entry payload —
+    same-stage series always carry identical season_id / league_name
+    in production data (they're derived from the same FL tournament)."""
+    import main
+    series_cache = {
+        "KXA_1": {"stage_id": "STAGE_A", "season_id": "S1", "league_name": "L"},
+        "KXA_2": {"stage_id": "STAGE_A", "season_id": "S1", "league_name": "L"},
+        "KXA_3": {"stage_id": "STAGE_A", "season_id": "S1", "league_name": "L"},
+        "KXB_1": {"stage_id": "STAGE_B", "season_id": "S1", "league_name": "L"},
+        "KXNULL": {"stage_id": "", "season_id": "S1", "league_name": "L"},
+        "KXBAD":  "not a dict",  # skipped by isinstance guard
+    }
+    unique = main._dedupe_series_to_stage_worklist(series_cache)
+    assert set(unique.keys()) == {"STAGE_A", "STAGE_B"}, (
+        f"dedupe produced {sorted(unique.keys())}; expected "
+        f"{{'STAGE_A', 'STAGE_B'}} — 3 series behind STAGE_A + 1 "
+        f"behind STAGE_B should collapse to 2 unique stages"
+    )
+
+
+def test_initial_pass_fires_one_refresh_per_unique_stage(monkeypatch):
+    """Day-62 shakedown-fix regression guard. Pre-fix production log:
+    `xdgtXAxR` marker stamped 7× in 2s because 7 series pointed to
+    that stage_id and the semaphore-2 gather burst-fired all 7
+    tasks before any cache write landed to gate them.
+
+    This test rebuilds the exact many-series-per-stage worklist,
+    runs one initial pass through the extracted
+    `_run_bracket_warm_initial_pass_once`, and asserts exactly
+    ONE refresh fires per unique stage_id — proving the dedupe
+    invariant holds at the same layer the bug lived."""
+    import main
+    from caches.state import _SERIES_TO_STAGE_CACHE, _TOURNAMENT_BRACKET_CACHE
+
+    _SERIES_TO_STAGE_CACHE.clear()
+    _TOURNAMENT_BRACKET_CACHE.clear()
+
+    # 5 series → STAGE_A (mimics an EPL bracket serving ~5-10 series),
+    # 3 series → STAGE_B (mimics a smaller cup).
+    for i in range(5):
+        _SERIES_TO_STAGE_CACHE[f"KXFAKE_A{i}"] = {
+            "stage_id": "STAGE_A", "season_id": "S1", "league_name": "L",
+        }
+    for i in range(3):
+        _SERIES_TO_STAGE_CACHE[f"KXFAKE_B{i}"] = {
+            "stage_id": "STAGE_B", "season_id": "S1", "league_name": "L",
+        }
+
+    call_counts: dict = {}
+
+    async def _fake_refresh(stage_id, season_id="", league_name=""):
+        # Simulate a real fetch with realistic latency so the semaphore
+        # gate actually has to serialize. If refresh returned instantly
+        # the parallel burst would drain in one event-loop tick and
+        # any burst-fire bug would go undetected.
+        import asyncio
+        await asyncio.sleep(0.01)
+        call_counts[stage_id] = call_counts.get(stage_id, 0) + 1
+        _TOURNAMENT_BRACKET_CACHE[stage_id] = {
+            "bracket": {"legs": []}, "ts": time.time(),
+            "season_id": season_id, "league_name": league_name,
+        }
+        return True
+
+    monkeypatch.setattr(main, "_refresh_tournament_bracket", _fake_refresh)
+
+    import asyncio
+    import logging
+    fake_log = logging.getLogger("test_initial_pass")
+    try:
+        asyncio.run(main._run_bracket_warm_initial_pass_once(fake_log))
+
+        assert call_counts == {"STAGE_A": 1, "STAGE_B": 1}, (
+            f"initial pass fired duplicate probes: {call_counts}. "
+            f"Regression to the Day-62 burst-stamp shape — every "
+            f"series behind a shared stage_id built a duplicate task "
+            f"in the parallel gather. Production log evidence: "
+            f"xdgtXAxR marker stamped 7× in 2s, Iq4v1CJG ~20 fetches/min."
+        )
+
+        # SECOND PASS: cache now populated. Must fire ZERO fetches
+        # because _bracket_needs_refresh returns False for fresh entries.
+        # Guards against a subtle regression where the dedupe helper is
+        # correct but the gate is bypassed some other way (e.g. the
+        # write-side key drifts from the read-side key — the other
+        # hypothesis considered during the Day-62 diagnosis).
+        call_counts.clear()
+        asyncio.run(main._run_bracket_warm_initial_pass_once(fake_log))
+        assert call_counts == {}, (
+            f"second pass fired {call_counts}; cache didn't gate. "
+            f"Either _bracket_needs_refresh isn't being consulted, "
+            f"the write key doesn't match the read key, or the "
+            f"eligibility gate is being bypassed altogether."
+        )
+    finally:
+        _SERIES_TO_STAGE_CACHE.clear()
+        _TOURNAMENT_BRACKET_CACHE.clear()
+
+
+def test_initial_pass_respects_prepopulated_markers(monkeypatch):
+    """Extension of the above: if the warm-load populated the cache
+    with a marker (from a prior deploy's saved blob), the initial
+    pass MUST NOT re-probe that stage within `_NEGATIVE_BRACKET_TTL_S`.
+
+    This is the production-critical case for the Day-62 acceptance
+    criteria: post-fix deploy, warm-load restores markers + brackets
+    accumulated by prior deploys, and the initial pass should be
+    near-silent (fetch only stages first-seen since last save)."""
+    import main
+    from caches.state import _SERIES_TO_STAGE_CACHE, _TOURNAMENT_BRACKET_CACHE
+
+    _SERIES_TO_STAGE_CACHE.clear()
+    _TOURNAMENT_BRACKET_CACHE.clear()
+
+    _SERIES_TO_STAGE_CACHE["KXDEAD"] = {
+        "stage_id": "STAGE_DEAD_MARKER", "season_id": "S1", "league_name": "L",
+    }
+    _SERIES_TO_STAGE_CACHE["KXLIVE"] = {
+        "stage_id": "STAGE_LIVE_BRACKET", "season_id": "S1", "league_name": "L",
+    }
+    _SERIES_TO_STAGE_CACHE["KXNEW"] = {
+        "stage_id": "STAGE_NEW", "season_id": "S1", "league_name": "L",
+    }
+
+    now = time.time()
+    _TOURNAMENT_BRACKET_CACHE["STAGE_DEAD_MARKER"] = {
+        "http_status": 404, "ts": now - 3600, "league_name": "L",
+    }
+    _TOURNAMENT_BRACKET_CACHE["STAGE_LIVE_BRACKET"] = {
+        "bracket": {"legs": []}, "ts": now - 60, "league_name": "L",
+    }
+
+    call_counts: dict = {}
+
+    async def _fake_refresh(stage_id, season_id="", league_name=""):
+        call_counts[stage_id] = call_counts.get(stage_id, 0) + 1
+        _TOURNAMENT_BRACKET_CACHE[stage_id] = {
+            "bracket": {"legs": []}, "ts": time.time(),
+            "season_id": season_id, "league_name": league_name,
+        }
+        return True
+
+    monkeypatch.setattr(main, "_refresh_tournament_bracket", _fake_refresh)
+
+    import asyncio
+    import logging
+    fake_log = logging.getLogger("test_initial_pass_warm")
+    try:
+        asyncio.run(main._run_bracket_warm_initial_pass_once(fake_log))
+        assert call_counts == {"STAGE_NEW": 1}, (
+            f"initial pass fired {call_counts}; expected only "
+            f"{{'STAGE_NEW': 1}}. Warm-loaded marker and fresh "
+            f"bracket entries should be respected by the gate — "
+            f"regression here reintroduces the Day-62 shape where "
+            f"every stage got re-probed on every deploy."
+        )
+    finally:
+        _SERIES_TO_STAGE_CACHE.clear()
+        _TOURNAMENT_BRACKET_CACHE.clear()
