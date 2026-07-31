@@ -135,6 +135,101 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-07-31 → 2026-08-01: FL campaign closed + combined follow-up + prediction-scope correction, danger ledger at 3
+
+Two-day arc closing Task #21 Surface B's post-deploy shakedown. PR #276 shipped the combined FL follow-up (gap alignment + herd desync + payload-aware overrides + request-path warm cap); Day-61's dashboard read surfaced a prediction-scope correction that owns cleanly (the "481k → 185k" claim modeled the POLLER only; dashboard total includes the standings walk, now measured at ~200-230k/day and promoted to the next fix). Danger ledger extended to three occurrences — all v2 date-blind, zero v4 defects — with the adjacent-day-series class now on a durable footing (two confirmed instances).
+
+### Day-60 (2026-07-31): dashboard finding — 10 rps shared per key + MB billing
+
+RapidAPI dashboard read revealed two spec-changing facts. **(1) Rate limit** is 10 rps SHARED PER KEY, not per worker. Both Railway workers share one key → combined budget 10 rps → per-worker gap 0.2s (5 rps each). The pre-fix `_FL_MIN_GAP_S = 0.025s` allowed 40 rps per worker = 80 rps combined = 8× over ceiling, quantitatively explaining every historical 429 storm including the Day-59 63-in-17s standings-walk burst. **Baseline error rate**: 34% (~4.9M failed calls/mo out of 14.44M total). **(2) Billing unit is MEGABYTES, not calls** — 10,240 MB/mo included, $0.001/MB after. Per-call payload sizes from log inspection: idle sports 114 B, Basketball ~87 KB, Baseball ~128 KB, Soccer ~421 KB, Tennis ~1.08 MB. 429s bill zero bytes (bandwidth-only meter). Invoice cross-check implies ~13× gzip factor (raw-payload model predicted ~58 GB/day vs ~134 GB/mo actual billed).
+
+Consequence for b5.ii economics: Tennis and Soccer are effectively live 24/7 (278 / 594 events in GAMES) so they never demote. The 5s upgrade DOUBLED call rate on the two heaviest payloads while saving bytes only on 114-byte idle sports. b5.ii cut call count 63% (the rate-ceiling / 429 win, real) but was approximately break-even on bandwidth — the tomorrow-decoupling win was exactly canceled by the TODAY 5s doubling on Tennis+Soccer.
+
+### Day-60 (2026-07-31): PR #276 — combined follow-up shipped and verified
+
+Four mechanisms folded into one PR since they share the same economics:
+
+1. **Throttle gap alignment**: `_FL_MIN_GAP_S` 0.025 → 0.2 matching Mega's shared-per-key ceiling.
+2. **Minute-mark herd desync**: `_herd_desync_initial_sleep_s(index, count, jitter)` = deterministic per-sport slot (`index × POLL_INTERVAL/count`, 3.53s slot width for 17 sports over 60s) + per-worker `random.uniform(0, 2.0)` jitter, additive composition. Prevents the deploy-time all-sync problem observed as ~26 calls/min bursts at :28-:31 of every minute on the Day-59 shakedown.
+3. **Payload-aware per-sport override**: `_LIVE_POLL_INTERVAL_BY_SPORT{"Tennis": 10, "Soccer": 10}` — Tennis/Soccer capped at 10s (pre-b5.ii speed → zero staleness regression on those sports) while Basketball/Baseball/Hockey keep the 5s upgrade at 87-128 KB/call. Predicted ~41% bandwidth cut vs the b5.ii flat-5s regime, ~53% vs pre-b5.ii OLD regime per the invoice-derived gzip model.
+4. **Request-path warm cap (in-PR addendum)**: pre-merge check surfaced that `_warm_events_async` on `/api/events?warm=` fans out up to 30 parallel FL probes through the same `_fl_throttle`; under the aligned 0.2s gap they serialize to ~6s and hit the 2s `wait_for` ceiling, leaving ~20 warms canceled per request. New `_FLASHLIVE_WARM_CAP` env (default 10, matches `2s / 0.2s = 10` completable probes). Acceptable because the poller's own 5s/10s cadence keeps uncovered cards ≤5-10s stale vs request-fresh — the warm path's job shrank because the poller improved. Throttle-split (poller + warm-path budgets) held in reserve as documented escalation path.
+
+Post-deploy verification (`/api/flashlive_status`): Soccer=10, Tennis=10 (payload caps holding while live), Basketball/Baseball/Hockey/Darts=5 (live + cheap = fast lane, engine promoting correctly), idle sports=60. 429 filter silent (vs 68-in-17s pre-fix baseline). `last_error=null`, 1595 games, fresh container. Docs bundled: §5.1 addendum to the Deliverable 1 scope doc documenting the two known v2 noise classes (mention and adjacent-day-series) with per-class verification patterns and a reading protocol for the Item 7 threshold-setter.
+
+### Day-60 (2026-07-31): CUjfSzVI triage — v4 correct, v2 date-blind #2
+
+Adjacent-day-series flavor of the #28 defect family (first instance was rHTxr6dU, closed by PR #270). v2 joined the FL event's team pair to the JUL31 STL@TOR slate (`GAME`/`EXTRAS`/`RFI`); v4 linked AUG1 STL@TOR (`GAME` only). Both sides coherent, one had the wrong date. **Verdict**: v4 CORRECT — FL `START_UTIME = Aug 1 19:07 UTC = 15:07 ET`, matching v4's ticker `26AUG011507STLTOR` to the minute. v2 collapsed adjacent-day series via date-blind team-pair joining — recurring shape (MLB back-to-back series, NBA back-to-backs, NHL home stands) so expected at low volume as long as v2 runs. v2 is being decommissioned, so we document (§5.1 addendum in PR #276) rather than fix.
+
+### Day-60: prediction-scope error noticed but not corrected until Day-61
+
+The PR #276 body carried a "481k → ~185k calls/day (~-61%)" target derived from the b5.ii per-sport-cadence math. That math was correct for the POLLER but ignored the standings walk. The scope error survived merge because Day-60's post-deploy verification was `/api/flashlive_status`-only (poller cadence map), not the RapidAPI Analytics total.
+
+### Day-61 (2026-08-01): Dashboard read — prediction-scope correction OWNED
+
+Post-#276 24h totals: **~493k calls/day, 33% error rate**. Decomposition:
+- Pollers (b5.ii + payload-aware): ~210k/day (matches the corrected model within ~13%).
+- SP ingestion (FL + Kalshi cadence loops): ~45k/day.
+- **Standings walk: ~200-230k/day** — now the DOMINANT caller.
+
+Error mass on the walk is 404s (stages with no standings — historical qualifiers, cancelled brackets, cup rounds that never got a group phase) plus ceiling-riding 429s during bursts. Neither is fixable by the throttle-gap alignment PR #276 shipped; they need source-side changes to the walk itself.
+
+**Correction owned**: the "481k → 185k" claim modeled the poller only. Post-#276 the standings walk (which shares `_fl_throttle` but was outside the b5.ii scope) accounts for ~45% of total calls. Per-endpoint dashboard line pulls (`/v1/events/list` vs `/v1/tournaments/standings`) predicted: events/list stepped-down + clean, standings flat-high + dirty. This is the honest post-merge shape for PR #276 — the mechanisms it introduced work as designed on their scope; the standings walk is a separate surface that was never addressed.
+
+### Day-61 (2026-08-01): standings-walk task promoted with a number
+
+Root-cause traced through `_tournament_bracket_warm_loop` (main.py:6017) + `_multi_stage_discovery_loop` (main.py:5945):
+- ~350-400 stages in `_SERIES_TO_STAGE_CACHE` × (86400/300s TTL) × 2 workers ≈ 200k/day.
+- 404 mass = permanently-dead stages re-probed every 300s because `_fl_get` collapses all failures to `None` (no negative caching).
+- 429 mass = ceiling-riding bursts when many TTLs expire in the same tick.
+
+Three-lever spec approved end-of-Day-61: (1) negative-cache 404s only (24h TTL, transient failures must NEVER earn a marker), (2) TTL 300s → 1800s (brackets are static; 5-min freshness bought nothing), (3) advisory-lock singleton on both walk loops (F106/F107). Layered impact estimate: ~215k/day → ~11k/day (~95% cut). Marker entries must be inert to every reader (`_aggregate_bracket_for_event`, warm-load, blob round-trip) with test coverage guarding it. PR write scheduled Day-62.
+
+### Day-61 (2026-08-01): 4We9ZQLk triage — v4 correct, v2 date-blind #3
+
+KBO SSG/Kiwoom adjacent-day. **Verdict**: v4 CORRECT — FL `START_UTIME Aug 2 05:00 UTC = 01:00 ET`, matching v4's ticker `26AUG020100` exactly. Third adjudication lifetime, third v2 date-blindness, second confirmed instance of the adjacent-day-series class. Adjacent-day family now on a durable footing (two confirmed occurrences from independent sports — MLB and KBO — same shape). §5.1 reading protocol handles both future instances.
+
+### Day-61 (2026-08-01): Neon cap glance + fixture_linked trend
+
+Neon compute averaging 0.88 CU vs the 1 CU cap = 12% headroom, −36% from the pre-#271 baseline. Task #27 fixture_linked day-4 = 134 (extends the 70 → 97 → 103 → 134 series). Curve now +27, +6, +31 — one hard read against the plateau prediction to go (day-5 next cron). Comparator query proposed Day-59 (denominator = fl_events in-window whose sport/team pair could plausibly have Kalshi coverage) still pending Day-5 read for the model A vs model B decision.
+
+### Danger ledger — lifetime standing
+
+3 occurrences triaged / 3 v2 defects / **0 v4 defects**:
+
+| # | Record | Day | Class | Verification | Verdict |
+|---|---|---|---|---|---|
+| 1 | rHTxr6dU | Day-57 | mention/outright | KXMLBMENTION substring | v2 defect; fixed in PR #270 |
+| 2 | CUjfSzVI | Day-60 | adjacent-day-series | START_UTIME Aug 1 vs v4 26AUG01… | v2 date-blind; documented in §5.1 |
+| 3 | 4We9ZQLk | Day-61 | adjacent-day-series | START_UTIME Aug 2 vs v4 26AUG02… | v2 date-blind; §5.1 covers it |
+
+Both v2 noise classes have ≥1 verified triage; adjacent-day now has 2. Item 7 threshold-setter can treat the known-noise-class attribution as durable — every `v2_diff.both_pair_different` sample gets classified as (mention | adjacent-day-series | new shape); the first two attribute out of the threshold, only "new shape" is real signal. v1 danger has held at 0 across six verification runs.
+
+### Days 60-61: Methodology bank additions
+
+- **Prediction-scope declaration before deploy** — every "post-deploy X → Y" prediction gets an explicit scope declaration alongside the number ("this is the poller only; standings walk not included"). If the scope isn't stated, the post-deploy verification will silently include out-of-scope traffic and either (a) look worse than the change actually achieved or (b) look successful when it wasn't. PR #276's target was correct for its scope but its scope was implicit; the correction cost one dashboard read to own.
+- **Dashboard-signal decomposition before conclusion** — a total call rate is not a verification metric on its own; decompose into per-caller (poller / ingestion / walk / warm-path) BEFORE comparing to a prediction. The Day-61 210k / 45k / 220k split immediately localized the surviving mass to the walk; a "493k vs 185k target" comparison without decomposition would have looked like PR #276 failed rather than shipped-as-designed-on-its-scope.
+- **Adjacent-day-series confirmation on two independent sports (KBO + MLB) → durable class** — one occurrence is anecdote, two on different sports is a pattern. The §5.1 reading protocol was pre-registered on n=1; Day-61's KBO verification promotes it to n=2 with independent sport → durable enough to treat as attributed noise floor when the Item 7 threshold gets set.
+- **Verify-only-what-shipped on the deploy window** — Day-60's post-deploy check was `/api/flashlive_status` (poller cadence map). That covers what PR #276 changed. The RapidAPI-total check that surfaced the prediction-scope error is a NEXT-day cross-check, not a same-window blocker for merge. The lesson: shipping and verifying are two windows; predicting is a third; getting them out of sync loses fidelity.
+
+### Days 60-61: PR state
+
+- **PR #276** (FL throttle + herd desync + payload-aware + warm-cap): merged 07-31 (Day-60); post-deploy verified via `/api/flashlive_status` same-day; RapidAPI Analytics per-endpoint dashboard read pending as the final verification signal.
+
+### Days 60-61: Task ledger movement
+
+Closed: PR #276 (Task #21 Surface B combined follow-up).
+Promoted with a number: **standings-walk task** — was "filed for later" on Day-59, now quantified at ~200-230k/day and specced as three levers for a Day-62 PR.
+Filed: none new — CUjfSzVI and 4We9ZQLk both attribute to the pre-existing §5.1 classes (mention / adjacent-day-series). §5.1 addendum in PR #276 was the durable filing.
+
+### Pending — next session (Day-62)
+
+- Standings-walk PR: three levers (negative-cache 404s only; TTL 300s → 1800s; advisory-lock singleton on both walk loops F106/F107). Summary + diff shape drafted end-of-Day-61 with review notes 1 (only true 404 stamps marker, transient failures never do) and 2 (marker entries inert to every reader with explicit test coverage). ~90 code LOC + ~110 test LOC.
+- Item 7 threshold recording task (operator-side draft landing shortly per Day-61 heads-up): update Deliverable 1 scope doc §6, PROJECT_STATE Gate #2 ledger from "CLOSED Day-N — Deliverable 1 shipped; Item 7 threshold still operator-owned" to "threshold SET" with the specific number.
+- Task #27 day-5 read + comparator-query proposal.
+- Post-standings-walk-PR RapidAPI Analytics per-endpoint cross-check — the belt-and-braces final signal on the combined FL campaign.
+
+---
+
 ## Session — 2026-07-29 → 2026-07-30: Task cleanup arc — outright classification, Neon WAL staleness gate, series-meta persistence, advisory-lock singletons
 
 Two-day arc taking the follow-up queue that piled up under the cost-investigation and Deliverable 1 sessions down to zero-or-decided. Four PRs shipped and verified end-to-end; Task #21 (originally scoped as "FL loop worker topology + advisory lock") decomposed into four surfaces on Day-58, three of them decided (Surface A + C shipped, Surface B queued, Surface D deferred). All four merged PRs verified with concrete numbers on the following day's read; two verifications caught methodology mistakes worth banking.
