@@ -158,6 +158,94 @@ and leave it for the parallel Academy session.
 
 ---
 
+## Session — 2026-08-02: Standings-walk arc closes — three levers shipped, two shakedown bugs killed, defect class named
+
+Single-day arc closing the standings-walk task promoted Day-61. Three-lever PR (#279) shipped and immediately failed post-deploy verification against acceptance signals — production log evidence localized bug #1 (initial-pass no-dedupe) inside 30 minutes. Fix PR (#280) merged with a mutation-checked regression guard, immediately failed a NEW acceptance signal — bug #2 (startup ordering race) surfaced through a different failure mode by the same root defect class. Fix PR (#281) landed both a belt-and-braces two-layer fix and closed the defect class explicitly with independent guards per layer.
+
+**Endpoint outcome, verified**: `/v1/tournaments/standings` calls in the post-#281 monitoring window went from ~215k/day baseline (Day-61 measured) → **zero calls in-window** at the acceptance measurement. Predicted ~11k/day steady-state (single-digit calls/min average). Rate reduction ~-95% on the endpoint. Warm-load 787 entries on both workers. Standings-walk arc CLOSED.
+
+### Day-62 (2026-08-02): PR #279 — three levers shipped, two silently broken
+
+Combined PR (negative-cache 404 stages + TTL 300s → 1800s + advisory-lock singleton F106/F107) shipped end-of-Day-61, merged early Day-62. Predicted ~215k → ~11k/day. 20/20 unit tests + adjacent sweep green pre-merge. Advisory lock was the only lever that actually held post-deploy (`"lock acquired" / "skipping"` pairs clean); negative-cache stamping and TTL gating were both inert in production. Net rate ~2 calls/sec ≈ pre-fix baseline.
+
+### Day-62 (2026-08-02): PR #279 shakedown #1 — dedupe bug, diagnosed and fixed as PR #280
+
+Log evidence from the 2-min post-deploy window:
+- `xdgtXAxR` marker stamped 7× in 2s.
+- `dhMsZnHO` marker stamped 4× in 600ms.
+- `U3iTWJUr` stamped and re-404'd dozens of times, still probing 4 min post-deploy.
+- Not marker-specific: 200-OK stages re-fetched continuously (`Iq4v1CJG` ~20×/min; `j37Fw0fC` ~15×/min; `fHXsHzBm` 7× in 4s).
+
+**Two hypotheses considered**: (1) key mismatch between write and read sites; (2) gate bypass, specifically build-time-check with no in-pass dedupe. Source-quoted diagnosis ruled out (1) — writes and both reads use `stage_id` — and confirmed (2): the initial-pass task constructor at pre-fix main.py:6216-6230 enumerated per-series over `_SERIES_TO_STAGE_CACHE`, which has many-series-per-stage cardinality (a soccer bracket serves ~10-20 series per gameweek). Eligibility gate ran at build time BEFORE any task started; every duplicate series pointing to the same `stage_id` saw "nothing in cache yet" and appended a task. Semaphore-2 gather then burst-fired all N. Log evidence matched the mechanism precisely.
+
+Fix (PR #280): `_dedupe_series_to_stage_worklist(series_cache)` helper collapses many-series-per-stage to unique `(stage_id → entry)` pairs. Used by BOTH walk paths (initial pass + steady-state). Extracted `_run_bracket_warm_initial_pass_once(_log)` so the dedupe invariant is unit-testable without running the endless-loop body. Cheap `seen_stage_ids: set` guard also applied to `_multi_stage_discovery_loop_body` — belt-and-braces even though FL's list-stages response doesn't ship duplicates today.
+
+**Regression guard mutation-checked**: pre-fix code path fires `{STAGE_A: 5}` for a 5-series-behind-STAGE_A fixture; fixed path fires `{STAGE_A: 1}`. Recorded in the PR body so the "test-passes-doesn't-mean-guard-fires" gap that let PR #279 ship the bug is closed with an explicit mutation-check trail.
+
+### Day-62 (2026-08-02): PR #280 shakedown #2 — startup ordering race, diagnosed and fixed as PR #281
+
+PR #280 verified in production (every stage exactly once, zero in-window repeats, 307/309 summary line, one 429, locks clean). NEW acceptance-signal failure: initial pass ran against an empty `_TOURNAMENT_BRACKET_CACHE`; 307/309 fired; ~110 markers (24h TTL, only 20 min old) and in-TTL brackets all treated as missing. Production timeline:
+
+```
+00:05:53.404  lock acquired → initial-pass enumeration
+00:05:53.455  tournament_brackets warm-start loaded 757
+```
+
+51ms gap.
+
+Source-quoted diagnosis. `startup_event` at main.py:229-231 fires `_load_tournament_brackets_from_db()` and `_tournament_bracket_warm_loop()` as sibling `create_task` calls with no dependency edge. Walk body's pre-work sync at main.py:6245-6248 polls `_SERIES_TO_STAGE_CACHE` only (a 2s poll that was correct pre-#279 when the initial pass consulted only that cache; silently wrong after #279's negative-cache work grew a second cache dependency). Loader entry-shape ruled out — writer / loader / gate keys all match; loader was simply never allowed to run before enumeration.
+
+Fix (PR #281) — **belt-and-braces, two layers**:
+
+- **Layer 1 (ordering)**: walk body directly awaits `_load_tournament_brackets_from_db()` before `_run_bracket_warm_initial_pass_once`. NO timeout — a timeout is a documented "proceed against maybe-empty cache" mode, i.e. bug #2 as a feature. If the load genuinely hangs (Neon transient), the walk stalls; correct behavior for a workload whose whole point is the cache surviving the redeploy.
+- **Layer 2 (fire-time re-check)**: `warm_one` re-checks the cache under the semaphore before calling `_refresh_tournament_bracket`. Returns `True` on skip so the ok-count log still reflects "cache learned it" outcomes. Closes the entire **check-at-build-time defect class** — bugs #1 and #2 are both instances of it.
+
+Summary log line updated per operator amendment to serve as the acceptance-artifact instrument: `"initial pass fired X, skipped Y (cache), of Z unique stages"`. Skip-count visibility distinguishes layer-1 regression (X near total) from layer-2 regression (Y near zero when X is small).
+
+Two independent regression guards, each proving its layer, each mutation-checked:
+- `test_initial_pass_recheck_short_circuits_late_warm_load` — mocks `_bracket_needs_refresh` to return True at build-time and False at fire-time; asserts zero refreshes fire. Mutation-check under a pre-fix `warm_one` (no re-check) fires 5 refreshes.
+- `test_walk_body_awaits_bracket_load_before_initial_pass` — mocks loader + refresh to append to a shared events list; asserts `load_done` appears BEFORE `refresh_STAGE_X` in the sequence.
+
+### Day-62 (2026-08-02): PR #281 verification — PASS
+
+Post-deploy summary line: **`"fired 0, skipped 0, of 309 unique stages (everything already fresh at build time)"`**. Reading: ordering await let the build-time gate do all the work; layer-2 armed but unneeded on this deploy — expected outcome once the cache had accumulated overnight. Warm-load 787 entries on both workers. Standings filter: **zero calls in-window** (was ~2/sec pre-#279). Same lock pairs; no tracebacks; `flashlive_status` healthy.
+
+**Benign finding for the record**: warm-start log line appeared 3× not 2× (one per worker load + one on the lock holder). The extra line at `.484` is the walk body's own `await _load_tournament_brackets_from_db()` invoking the loader a second time on the lock-holder worker rather than awaiting the existing `create_task` handle from main.py:229. **Duplicate blob read per boot, idempotent, harmless.** Correct fix: promote the startup call to a module-level task handle (`_BRACKET_WARM_LOAD_TASK = asyncio.create_task(...)`) so the walk body can `await _BRACKET_WARM_LOAD_TASK` instead of calling the function a second time. Queued as a Day-63 housekeeping PR — no fix cycle now.
+
+### Day-62 shakedown lineage — what the PR trail actually looks like
+
+- **PR #279** (three levers, dedupe latent + ordering latent): merged 08-02, both bugs surfaced within 30 minutes.
+- **PR #280** (dedupe fix + mutation-checked guard): merged 08-02, exposed the ordering bug the same night through a different failure mode.
+- **PR #281** (ordering await + fire-time re-check + belt-and-braces): merged 08-02, both diagnosis layers guarded independently.
+
+Two ship-then-diagnose-then-fix cycles in one day. Blast radius bounded by shape (worst-case one ~309-call sweep per redeploy for bug #2; ~10-min drainage window for bug #1). Zero incidents outside the drain windows.
+
+### Day-62: Methodology bank additions
+
+- **Seam tests for warm loops** — the 20 unit tests shipped with PR #279 validated the composable primitives (`_refresh_tournament_bracket`, `_bracket_needs_refresh`) in isolation and green-lit a merge that broke twice in the LOOP WIRING that connected them under parallelism. Function-level tests can't catch race conditions or ordering assumptions that live BETWEEN functions. **Rule**: any change to a warm-loop's fan-out, gating, or startup ordering needs at least one integration-shaped test that exercises the composed flow (task construction → gather → cache reads/writes → post-drain state). PR #280's `test_initial_pass_fires_one_refresh_per_unique_stage` and PR #281's two layer-guards are the shape.
+- **Re-derive sync conditions when a path grows a state dependency** — the walk body's 2s poll on `_SERIES_TO_STAGE_CACHE` was correct pre-#279 (when the initial-pass gate consulted only that cache) and silently wrong after #279 grew a second cache dependency on `_TOURNAMENT_BRACKET_CACHE`. **Rule**: when a code path grows a new state dependency (a new cache read, a new module-level flag consulted, a new async task's output relied upon), grep for the code paths that pre-syncs against the OLD dependency set and re-derive whether they cover the new one. Silent expansion of the dependency graph is the exact class of drift that made PR #279 ship an ordering bug that had been latent since day one. Sibling of the read-don't-derive family (docs/dedup/lmb-2026-07-19.md §13) — same corrective, applied to code state instead of documentation.
+
+Both additions ride on a shared meta-rule already banked from prior sessions: **verification-by-integration-signal, not test-suite-count**. PR #279 had 20/20 tests passing and shipped two bugs. PR #280 had 23/23 tests + mutation-check and shipped one bug. PR #281 had 21/21 + two mutation-checks and cleared its acceptance signals. The load-bearing verification is always "does the acceptance-signal instrument on-record before deploy read as predicted post-deploy" — every incremental unit test only reduces the residual by whatever contract it locks in.
+
+### Day-62: PR state
+
+- **PR #279** (standings-walk three levers): merged 08-02
+- **PR #280** (dedupe fix + mutation-checked guard): merged 08-02
+- **PR #281** (ordering await + fire-time re-check + belt-and-braces): merged 08-02
+
+### Day-62: Task ledger movement
+
+- **Standings-walk task** (promoted Day-61 with a number): CLOSED — three levers live, two shakedown bugs fixed, defect class killed with belt-and-braces + mutation-checked guards.
+- **Warm-load duplicate blob read**: new housekeeping task queued for Day-63 (promote startup `create_task` to module-level task handle; walk body awaits handle). Blast radius: 1 KB extra blob read per redeploy per lock-holder worker. Idempotent, harmless — quality-only cleanup, not a correctness bar.
+
+### Pending — next session (Day-63)
+
+- **Dashboard reads (owed)** — RapidAPI Analytics per-endpoint line for `/v1/tournaments/standings` cratering toward ~11k/day; account error rate out of the 34% regime. Also the previously-owed per-endpoint shots from PR #276 verification. Closing exhibits alongside each other.
+- **Housekeeping**: warm-load task-handle dedup (~5 LOC change).
+- **Phase 3 opens**: flag-wiring review + soccer-first rollout plan + 5% flip plan (per Item 7 threshold recorded PR #278 / Day-61).
+
+---
+
 ## Session — 2026-07-31 → 2026-08-01: FL campaign closed + combined follow-up + prediction-scope correction, danger ledger at 3
 
 Two-day arc closing Task #21 Surface B's post-deploy shakedown. PR #276 shipped the combined FL follow-up (gap alignment + herd desync + payload-aware overrides + request-path warm cap); Day-61's dashboard read surfaced a prediction-scope correction that owns cleanly (the "481k → 185k" claim modeled the POLLER only; dashboard total includes the standings walk, now measured at ~200-230k/day and promoted to the next fix). Danger ledger extended to three occurrences — all v2 date-blind, zero v4 defects — with the adjacent-day-series class now on a durable footing (two confirmed instances).
