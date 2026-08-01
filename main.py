@@ -5773,6 +5773,41 @@ async def _prewarm_series_stages():
 _bracket_warm_task_started: bool = False
 
 
+def _dedupe_series_to_stage_worklist(series_cache) -> dict:
+    """Collapse `_SERIES_TO_STAGE_CACHE`'s many-series-per-stage
+    shape into UNIQUE (stage_id → representative entry) pairs.
+
+    Day-62 shakedown bug (PR #279): production `_SERIES_TO_STAGE_CACHE`
+    has many-series-per-stage cardinality (a soccer bracket serves
+    ~10-20 series per gameweek). The initial parallel warm pass
+    enumerated per-series and built one task per series, so a stage
+    behind N series produced N duplicate tasks in the semaphore-2
+    gather — all seeing "nothing in cache yet" because the
+    eligibility gate was checked at build time before any task ran,
+    then all firing in a burst that stamped the same marker N times.
+
+    Log evidence Day-62 post-#279 deploy: `xdgtXAxR` marker stamped
+    7× in 2s; `Iq4v1CJG` (200-OK) re-fetched ~20×/min for its
+    ~10-min initial-pass drainage window. Steady-state (sequential
+    with 0.3s spacing) is fine — cache populates between iterations
+    — but the parallel initial-pass burst-fired every duplicate
+    before the first write landed.
+
+    Both walk-loop paths use this helper so the invariant "N series
+    behind M unique stages → M refresh tasks, not N" is testable
+    at one call site. First-seen wins for `season_id` / `league_name`
+    which are identical across duplicates in production data."""
+    unique: dict = {}
+    for series, entry in series_cache.items():
+        if not isinstance(entry, dict):
+            continue
+        stage_id = entry.get("stage_id") or ""
+        if not stage_id:
+            continue
+        unique.setdefault(stage_id, entry)
+    return unique
+
+
 def _bracket_needs_refresh(entry, now_s: float) -> bool:
     """Refresh-eligibility gate for a `_TOURNAMENT_BRACKET_CACHE`
     entry. Consolidated Day-62 so `_tournament_bracket_warm_loop`
@@ -6068,10 +6103,20 @@ async def _multi_stage_discovery_loop_body(_log):
                         )
                         await asyncio.sleep(1.0)
                         continue
+                    # Day-62 shakedown fix (cheap belt-and-braces):
+                    # dedupe stage_ids in-league before probing. FL's
+                    # list-stages response doesn't ship duplicates
+                    # today, but relying on in-cache membership means
+                    # the FIRST duplicate in a burst enumeration
+                    # slips through if any exist. This shape matches
+                    # the initial-pass fix and keeps a single dedupe
+                    # invariant across every walk path.
+                    seen_stage_ids: set = set()
                     for st in stages:
                         sid = st.get("stage_id") or ""
-                        if not sid or sid in _TOURNAMENT_BRACKET_CACHE:
+                        if not sid or sid in seen_stage_ids or sid in _TOURNAMENT_BRACKET_CACHE:
                             continue
+                        seen_stage_ids.add(sid)
                         try:
                             ok = await _refresh_tournament_bracket(
                                 sid,
@@ -6138,6 +6183,55 @@ async def _tournament_bracket_warm_loop():
         await _tournament_bracket_warm_loop_body(_log)
 
 
+async def _run_bracket_warm_initial_pass_once(_log) -> int:
+    """One initial parallel warm pass over the current
+    _SERIES_TO_STAGE_CACHE. Returns the number of refresh tasks
+    actually fired (post-dedupe, post-eligibility-filter).
+
+    Extracted from _tournament_bracket_warm_loop_body so the
+    dedupe invariant is unit-testable without running the entire
+    loop body. See _dedupe_series_to_stage_worklist for the
+    Day-62 shakedown context.
+
+    Semaphore-2 concurrency preserved so a fresh container with
+    a dozen+ tournaments still gets every bracket loaded in
+    ~1 second rather than sequential 0.3s/stage."""
+    sem = asyncio.Semaphore(2)
+
+    async def warm_one(stage_id, season_id, league_name=""):
+        async with sem:
+            return await _refresh_tournament_bracket(stage_id, season_id, league_name)
+
+    now = time.time()
+    # Day-62 shakedown fix: dedupe BEFORE building the task list.
+    # Pre-fix, per-series enumeration built N duplicate tasks for
+    # a stage behind N series; semaphore-2 gather then burst-fired
+    # them all because the eligibility gate saw "nothing in cache
+    # yet" for every duplicate (cache writes hadn't run yet). Log
+    # evidence: xdgtXAxR marker stamped 7× in 2s, Iq4v1CJG re-fetched
+    # ~20×/min for its ~10-min initial-pass drainage.
+    unique_stages = _dedupe_series_to_stage_worklist(_SERIES_TO_STAGE_CACHE)
+    initial_tasks = []
+    for stage_id, entry in unique_stages.items():
+        cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
+        if not _bracket_needs_refresh(cached, now):
+            continue  # warm-started from cache_blobs (real bracket OR fresh 404 marker)
+        season_id = entry.get("season_id") or ""
+        league_name = entry.get("league_name") or ""
+        initial_tasks.append(warm_one(stage_id, season_id, league_name))
+    if not initial_tasks:
+        return 0
+    results = await asyncio.gather(*initial_tasks, return_exceptions=True)
+    ok_count = sum(1 for r in results if r is True)
+    _log.info(
+        "bracket warm-loop: initial pass fired %d/%d unique-stage refreshes",
+        ok_count, len(initial_tasks),
+    )
+    # Consolidated save for the whole parallel batch.
+    await _maybe_save_tournament_brackets()
+    return len(initial_tasks)
+
+
 async def _tournament_bracket_warm_loop_body(_log):
     """Extracted body so the advisory-lock wrapper stays clean.
     Behavior identical to the pre-Day-62 loop body."""
@@ -6170,38 +6264,7 @@ async def _tournament_bracket_warm_loop_body(_log):
     #    a slow-paced background loop below so it doesn't compete
     #    with user-facing /normalized requests for FL bandwidth at
     #    startup.
-    sem = asyncio.Semaphore(2)  # ≤2 concurrent FL fetches at startup
-
-    async def warm_one(stage_id, season_id, league_name=""):
-        async with sem:
-            return await _refresh_tournament_bracket(stage_id, season_id, league_name)
-
-    initial_tasks = []
-    now = time.time()
-    for series, entry in list(_SERIES_TO_STAGE_CACHE.items()):
-        if not isinstance(entry, dict):
-            continue
-        stage_id = entry.get("stage_id") or ""
-        if not stage_id:
-            continue
-        cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
-        # Day-62: uses _bracket_needs_refresh so negative markers
-        # (http_status=404) are respected across the initial pass
-        # too — otherwise every restart re-probes every dead stage.
-        if not _bracket_needs_refresh(cached, now):
-            continue  # warm-started from cache_blobs already (real bracket OR fresh 404 marker)
-        season_id = entry.get("season_id") or ""
-        league_name = entry.get("league_name") or ""
-        initial_tasks.append(warm_one(stage_id, season_id, league_name))
-    if initial_tasks:
-        results = await asyncio.gather(*initial_tasks, return_exceptions=True)
-        ok_count = sum(1 for r in results if r is True)
-        _log.info(
-            "bracket warm-loop: initial pass refreshed %d/%d cached-stage brackets",
-            ok_count, len(initial_tasks),
-        )
-        # Consolidated save for the whole parallel batch.
-        await _maybe_save_tournament_brackets()
+    await _run_bracket_warm_initial_pass_once(_log)
 
     # ── Multi-stage discovery — runs OUT of the hot path so it
     #    doesn't starve user requests. Walks each unique league_name
@@ -6221,12 +6284,15 @@ async def _tournament_bracket_warm_loop_body(_log):
         await asyncio.sleep(60)
         try:
             now = time.time()
-            for series, entry in list(_SERIES_TO_STAGE_CACHE.items()):
-                if not isinstance(entry, dict):
-                    continue
-                stage_id = entry.get("stage_id") or ""
-                if not stage_id:
-                    continue
+            # Day-62 shakedown fix: dedupe by stage_id before walking.
+            # Steady-state is sequential and dedupes naturally via cache
+            # lookups (each write is visible to the next iteration), but
+            # using the same helper as the initial pass keeps the "N series
+            # behind M stages → M refreshes, not N" invariant testable
+            # at one call site.
+            for stage_id, entry in _dedupe_series_to_stage_worklist(
+                _SERIES_TO_STAGE_CACHE
+            ).items():
                 cached = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
                 if not _bracket_needs_refresh(cached, now):
                     continue  # still fresh (bracket data OR negative marker within 24h re-check window)
@@ -6234,8 +6300,7 @@ async def _tournament_bracket_warm_loop_body(_log):
                 league_name = entry.get("league_name") or ""
                 ok = await _refresh_tournament_bracket(stage_id, season_id, league_name)
                 if ok:
-                    _log.debug("bracket refreshed: series=%s stage=%s",
-                               series, stage_id)
+                    _log.debug("bracket refreshed: stage=%s", stage_id)
                 # Small spacing so we don't burst the FL rate limiter
                 # when several stages happen to expire at the same
                 # tick.
