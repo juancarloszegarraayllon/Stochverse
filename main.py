@@ -6195,15 +6195,36 @@ async def _run_bracket_warm_initial_pass_once(_log) -> int:
 
     Semaphore-2 concurrency preserved so a fresh container with
     a dozen+ tournaments still gets every bracket loaded in
-    ~1 second rather than sequential 0.3s/stage."""
+    ~1 second rather than sequential 0.3s/stage.
+
+    Day-62 shakedown fix #2 — belt-and-braces re-check at fire time:
+    build-time gating alone lets any state change between enumeration
+    and fire (loader completion, sibling-worker write, TTL flip)
+    slip through and fire a task that's now unnecessary. warm_one
+    re-checks the cache under the semaphore before calling
+    _refresh_tournament_bracket. Closes the entire
+    check-at-build-time defect class — bug #1 (dedupe) and bug #2
+    (startup ordering) are both instances of it."""
     sem = asyncio.Semaphore(2)
+    skip_counter = {"n": 0}   # tracked via dict for closure-mutation
 
     async def warm_one(stage_id, season_id, league_name=""):
         async with sem:
+            # Fire-time re-check: cache may have been populated
+            # after this task was queued but before the semaphore
+            # slot opened (warm-load completion during the enumerate
+            # → fire gap, another task's write for a stage with
+            # overlapping content, etc.). Idempotent short-circuit
+            # returns True so the ok-count log line still reflects
+            # "cache learned it" outcomes.
+            cached_now = _TOURNAMENT_BRACKET_CACHE.get(stage_id)
+            if not _bracket_needs_refresh(cached_now, time.time()):
+                skip_counter["n"] += 1
+                return True
             return await _refresh_tournament_bracket(stage_id, season_id, league_name)
 
     now = time.time()
-    # Day-62 shakedown fix: dedupe BEFORE building the task list.
+    # Day-62 shakedown fix #1: dedupe BEFORE building the task list.
     # Pre-fix, per-series enumeration built N duplicate tasks for
     # a stage behind N series; semaphore-2 gather then burst-fired
     # them all because the eligibility gate saw "nothing in cache
@@ -6219,33 +6240,66 @@ async def _run_bracket_warm_initial_pass_once(_log) -> int:
         season_id = entry.get("season_id") or ""
         league_name = entry.get("league_name") or ""
         initial_tasks.append(warm_one(stage_id, season_id, league_name))
+    total_unique = len(unique_stages)
     if not initial_tasks:
+        _log.info(
+            "bracket warm-loop: initial pass fired 0, skipped 0 (cache), "
+            "of %d unique stages (everything already fresh at build time)",
+            total_unique,
+        )
         return 0
     results = await asyncio.gather(*initial_tasks, return_exceptions=True)
     ok_count = sum(1 for r in results if r is True)
+    fired = len(initial_tasks) - skip_counter["n"]
     _log.info(
-        "bracket warm-loop: initial pass fired %d/%d unique-stage refreshes",
-        ok_count, len(initial_tasks),
+        "bracket warm-loop: initial pass fired %d, skipped %d (cache), "
+        "of %d unique stages",
+        fired, skip_counter["n"], total_unique,
     )
     # Consolidated save for the whole parallel batch.
     await _maybe_save_tournament_brackets()
-    return len(initial_tasks)
+    return fired
 
 
 async def _tournament_bracket_warm_loop_body(_log):
     """Extracted body so the advisory-lock wrapper stays clean.
     Behavior identical to the pre-Day-62 loop body."""
 
-    # Brief wait for the cache_blobs warm-start tasks to land. They
-    # run as separate tasks in startup_event to keep startup_event
-    # non-blocking. Polling here is cheap and bails fast — 50ms ticks
-    # up to 2s ceiling. If they haven't loaded by then, we proceed
-    # anyway (the steady-state loop catches new stage IDs after a
-    # minute regardless).
+    # Brief wait for _SERIES_TO_STAGE_CACHE warm-load. Still a poll
+    # because the series→stage loader is a fire-and-forget sibling
+    # task; if the warm-loop wins the race we'd enumerate an empty
+    # worklist and skip everything. 2s max — same as before, no
+    # behavior change on this cache.
     for _ in range(40):  # 40 × 50ms = 2s max
         if _SERIES_TO_STAGE_CACHE:
             break
         await asyncio.sleep(0.05)
+
+    # ── Day-62 shakedown fix #2: DIRECT AWAIT on the bracket load.
+    #
+    # startup_event fires _load_tournament_brackets_from_db() and
+    # _tournament_bracket_warm_loop() as sibling create_task calls;
+    # no dependency edge between them. Pre-fix the walk body only
+    # polled _SERIES_TO_STAGE_CACHE (correct pre-#279 when the
+    # initial pass only consulted that cache; silently wrong after
+    # #279's negative-cache work grew a second cache dependency).
+    # Shakedown #2 log evidence: lock at 00:05:53.404, warm-start
+    # loaded 757 at 00:05:53.455 — the 51ms gap was the window in
+    # which the initial pass enumerated 309 stages against an empty
+    # _TOURNAMENT_BRACKET_CACHE and fired refreshes for all of them.
+    #
+    # NO TIMEOUT: a timeout would be a documented "proceed against
+    # maybe-empty cache" mode — bug #2 as a feature. If the load
+    # genuinely hangs (Neon transient), the walk stalls; that's
+    # correct behavior for a workload whose whole point is the
+    # cache surviving the redeploy. Fire-time re-check inside
+    # warm_one is the secondary defense.
+    try:
+        await _load_tournament_brackets_from_db()
+    except Exception as e:
+        logging.getLogger("stochverse").warning(
+            "bracket warm-loop: warm-load await failed, proceeding: %s", e,
+        )
 
     # ── Initial pass: parallel-warm anything that doesn't already
     #    have fresh bracket data from the cache_blobs warm-start.
