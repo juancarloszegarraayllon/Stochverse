@@ -400,6 +400,178 @@ def test_initial_pass_fires_one_refresh_per_unique_stage(monkeypatch):
         _TOURNAMENT_BRACKET_CACHE.clear()
 
 
+def test_initial_pass_recheck_short_circuits_late_warm_load(monkeypatch):
+    """Day-62 shakedown bug #2 regression guard — layer 2 (fire-time
+    re-check).
+
+    Isolates the fire-time re-check contract from timing considerations
+    by mocking `_bracket_needs_refresh` to return True at build-time
+    (so tasks queue) and False at fire-time (so warm_one under the
+    semaphore short-circuits). If the re-check exists and is called,
+    zero refreshes fire; if the re-check is missing (pre-fix behavior)
+    every queued task fires.
+
+    Guards against the entire check-at-build-time defect class:
+    even if some future refactor breaks the ordering await, or a
+    sibling task writes mid-enumeration, or a bracket entry ages
+    then gets re-refreshed by another walk pass, the fire-time
+    re-check catches it. Bug #1 (dedupe) and bug #2 (startup
+    ordering) are both instances of this class."""
+    import asyncio
+    import logging
+    import main
+    from caches.state import _SERIES_TO_STAGE_CACHE, _TOURNAMENT_BRACKET_CACHE
+
+    _SERIES_TO_STAGE_CACHE.clear()
+    _TOURNAMENT_BRACKET_CACHE.clear()
+
+    for i in range(5):
+        _SERIES_TO_STAGE_CACHE[f"KX_{i}"] = {
+            "stage_id": f"STAGE_{i}", "season_id": "S1", "league_name": "L",
+        }
+
+    # `_bracket_needs_refresh` semantics: True → refresh needed;
+    # False → skip. Return True for the first N calls (build-time
+    # enumeration; each unique stage triggers one call) then False
+    # forever (fire-time re-checks — the layer-2 contract). Simulates
+    # "cache was populated between build and fire" without depending
+    # on scheduler timing.
+    n_stages = 5
+    call_count = {"n": 0}
+
+    def _mock_needs_refresh(entry, now_s):
+        call_count["n"] += 1
+        return call_count["n"] <= n_stages  # True for build, False for re-check
+
+    monkeypatch.setattr(main, "_bracket_needs_refresh", _mock_needs_refresh)
+
+    refresh_call_counts: dict = {}
+
+    async def _fake_refresh(stage_id, season_id="", league_name=""):
+        refresh_call_counts[stage_id] = refresh_call_counts.get(stage_id, 0) + 1
+        return True
+
+    monkeypatch.setattr(main, "_refresh_tournament_bracket", _fake_refresh)
+
+    try:
+        asyncio.run(main._run_bracket_warm_initial_pass_once(
+            logging.getLogger("test_recheck"),
+        ))
+        assert refresh_call_counts == {}, (
+            f"fire-time re-check failed to catch late-populated cache: "
+            f"{refresh_call_counts} refreshes fired despite gate saying "
+            f"False at fire time. Regression to Day-62 shakedown bug #2 "
+            f"— warm_one is not consulting _bracket_needs_refresh under "
+            f"the semaphore, so any state change between enumeration "
+            f"and fire slips through as a wasted refresh."
+        )
+        # Sanity: 5 build-time calls + 5 fire-time calls = 10 total.
+        # Guards against a partial implementation where only some tasks
+        # re-check (e.g. the check runs but on wrong data).
+        assert call_count["n"] == 2 * n_stages, (
+            f"_bracket_needs_refresh called {call_count['n']}× total; "
+            f"expected {2 * n_stages} (5 build-time enumeration + 5 "
+            f"fire-time re-checks). The re-check either isn't running "
+            f"or is running on a different code path."
+        )
+    finally:
+        _SERIES_TO_STAGE_CACHE.clear()
+        _TOURNAMENT_BRACKET_CACHE.clear()
+
+
+def test_walk_body_awaits_bracket_load_before_initial_pass(monkeypatch):
+    """Day-62 shakedown bug #2 regression guard — layer 1 (ordering).
+
+    startup_event fires _load_tournament_brackets_from_db() and
+    _tournament_bracket_warm_loop() as sibling create_task calls
+    with no dependency edge. Pre-fix the walk body's only pre-work
+    sync was a 2s poll on _SERIES_TO_STAGE_CACHE — the WRONG cache
+    for the initial-pass eligibility gate, which post-#279 also
+    consulted _TOURNAMENT_BRACKET_CACHE.
+
+    Post-fix the walk body directly awaits
+    _load_tournament_brackets_from_db() before the initial pass.
+    This test proves the ordering contract holds by mocking the
+    loader to record completion via a flag, running the walk body,
+    and asserting the flag was set before the initial pass fired."""
+    import asyncio
+    import logging
+    import main
+    from caches.state import _SERIES_TO_STAGE_CACHE, _TOURNAMENT_BRACKET_CACHE
+
+    _SERIES_TO_STAGE_CACHE.clear()
+    _TOURNAMENT_BRACKET_CACHE.clear()
+    _SERIES_TO_STAGE_CACHE["KXTEST"] = {
+        "stage_id": "STAGE_X", "season_id": "S1", "league_name": "L",
+    }
+
+    events: list = []
+
+    async def _fake_loader():
+        # Simulate the ~50ms Neon read.
+        await asyncio.sleep(0.02)
+        events.append("load_done")
+
+    async def _fake_refresh(stage_id, season_id="", league_name=""):
+        events.append(f"refresh_{stage_id}")
+        return True
+
+    monkeypatch.setattr(main, "_load_tournament_brackets_from_db", _fake_loader)
+    monkeypatch.setattr(main, "_refresh_tournament_bracket", _fake_refresh)
+
+    # Stub the DB + lock so the walk body enters the loop-body path
+    # without needing a real Postgres.
+    class _FakeSession:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+    def _fake_session_factory():
+        return _FakeSession()
+    async def _fake_try_lock(session, key):
+        return True
+
+    import db, ingestion.base as base_mod
+    monkeypatch.setattr(db, "DATABASE_URL", "postgres://fake")
+    monkeypatch.setattr(db, "async_session", _fake_session_factory)
+    monkeypatch.setattr(base_mod, "try_acquire_advisory_lock", _fake_try_lock)
+
+    async def _run():
+        # Kick off the loop, cancel after the initial pass completes
+        # (before the 60s steady-state sleep).
+        task = asyncio.create_task(main._tournament_bracket_warm_loop())
+        # Give initial pass ~500ms to complete.
+        for _ in range(50):
+            if any(e.startswith("refresh_") for e in events):
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    try:
+        asyncio.run(_run())
+        assert "load_done" in events, (
+            "loader never completed — test setup broken, not the fix"
+        )
+        assert "refresh_STAGE_X" in events, (
+            "initial pass never ran — test setup broken, not the fix "
+            "(loop may not have advanced past the load await)"
+        )
+        load_idx = events.index("load_done")
+        refresh_idx = events.index("refresh_STAGE_X")
+        assert load_idx < refresh_idx, (
+            f"initial pass fired before warm-load completed: "
+            f"events={events}. Regression to Day-62 shakedown bug #2 "
+            f"— walk body no longer awaits _load_tournament_brackets_from_db "
+            f"before running the initial pass, reintroducing the "
+            f"empty-cache race observed in production 00:05:53.404-455."
+        )
+    finally:
+        _SERIES_TO_STAGE_CACHE.clear()
+        _TOURNAMENT_BRACKET_CACHE.clear()
+
+
 def test_initial_pass_respects_prepopulated_markers(monkeypatch):
     """Extension of the above: if the warm-load populated the cache
     with a marker (from a prior deploy's saved blob), the initial
