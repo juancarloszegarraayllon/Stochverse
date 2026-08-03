@@ -245,12 +245,25 @@ async def _ingest_pass(
 
         if batch:
             try:
-                inserted, updated, unchanged = await upsert_provider_records_batch(
-                    session, FLEvent, batch,
+                # Layer C: 4-tuple return — see ingestion/base.py's
+                # upsert_provider_records_batch docstring for the
+                # 2026-08-01 Kalshi outage context on why the counter
+                # split matters.
+                inserted, updated, unchanged, freshness_bumped = (
+                    await upsert_provider_records_batch(
+                        session, FLEvent, batch,
+                    )
                 )
                 result.inserted += inserted
                 result.updated += updated
                 result.unchanged += unchanged
+                # FL's IngestionResult doesn't currently carry
+                # freshness_bumped; log line surfaces it below via
+                # a local accumulator.
+                result_freshness_bumped = (
+                    getattr(result, "_freshness_bumped", 0) + freshness_bumped
+                )
+                result._freshness_bumped = result_freshness_bumped
             except Exception as exc:
                 result.failed += len(batch)
                 _log.warning(
@@ -277,9 +290,13 @@ async def _ingest_pass(
         inserted=result.inserted,
         updated=result.updated,
         unchanged=result.unchanged,
+        freshness_bumped=getattr(result, "_freshness_bumped", 0),
         schema_drift=result.schema_drift,
         duration_ms=result.duration_ms,
     )
+    # Layer C: stamp the health registry on every successful pass.
+    from .health import stamp_pass_complete
+    stamp_pass_complete("fl")
     return result
 
 

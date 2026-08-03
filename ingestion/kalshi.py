@@ -226,16 +226,26 @@ async def _ingest_pass(session: AsyncSession) -> IngestionResult:
     # very large statements get parsed/planned slowly). 1000 rows per
     # chunk is a comfortable middle ground.
     CHUNK_SIZE = 1000
+    total_freshness_bumped = 0
     for i in range(0, len(batch), CHUNK_SIZE):
         chunk = batch[i:i + CHUNK_SIZE]
         try:
-            inserted, updated, unchanged = await upsert_provider_records_batch(
-                session, KalshiMarket, chunk,
+            # Layer C (2026-08-03): 4-tuple return — freshness_bumped
+            # captures Step 3b's actual write count (which the pre-fix
+            # counter-shape didn't expose, letting the 2026-08-01
+            # persistence outage hide behind an "unchanged=~9500,
+            # upd=0, ins=0" log line that was compatible with both
+            # "everything fresh" and "task hung, zero writes.")
+            inserted, updated, unchanged, freshness_bumped = (
+                await upsert_provider_records_batch(
+                    session, KalshiMarket, chunk,
+                )
             )
             result.inserted += inserted
             result.updated += updated
             result.unchanged += unchanged
             result.fetched += len(chunk)
+            total_freshness_bumped += freshness_bumped
             await session.commit()
         except Exception as exc:
             result.failed += len(chunk)
@@ -258,9 +268,16 @@ async def _ingest_pass(session: AsyncSession) -> IngestionResult:
         inserted=result.inserted,
         updated=result.updated,
         unchanged=result.unchanged,
+        freshness_bumped=total_freshness_bumped,
         schema_drift=result.schema_drift,
         duration_ms=result.duration_ms,
     )
+    # Layer C: stamp the health registry on every successful pass.
+    # Called REGARDLESS of whether any writes fired — the task being
+    # alive and completing the pass IS the health signal. A pass that
+    # fetched=0 upserted=0 bumped=0 still proves the loop is running.
+    from .health import stamp_pass_complete
+    stamp_pass_complete("kalshi")
     return result
 
 

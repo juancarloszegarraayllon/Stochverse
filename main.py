@@ -440,12 +440,20 @@ async def _price_prune_loop():
             _log.info("skipping — another worker holds the lock")
             return
         _log.info("lock acquired; running")
+        # Layer C: register at holder entry so /api/ingestion_status
+        # surfaces this task before its first successful pass.
+        from ingestion.health import register, stamp_pass_complete, set_state, STATE_HOLDER_RUNNING
+        register("price_prune")
+        set_state("price_prune", STATE_HOLDER_RUNNING)
         while True:
             try:
                 from db import prune_old_prices
                 deleted = await prune_old_prices()
                 if deleted and deleted > 0:
                     _log.info("pruned %d old price rows", deleted)
+                # Stamp regardless of deleted count — the loop being
+                # alive IS the health signal, not the delete rowcount.
+                stamp_pass_complete("price_prune")
             except Exception as e:
                 _log.error("prune loop error: %s", e)
             await asyncio.sleep(3600)  # every hour
@@ -489,6 +497,11 @@ async def _score_flush_loop():
             _log.info("skipping — another worker holds the lock")
             return
         _log.info("lock acquired; running")
+        # Layer C: register at holder entry so /api/ingestion_status
+        # surfaces this task before its first cycle completes.
+        from ingestion.health import register, stamp_pass_complete, set_state, STATE_HOLDER_RUNNING
+        register("score_flush")
+        set_state("score_flush", STATE_HOLDER_RUNNING)
         _seed_counter = 0  # only seed entities every 5th cycle (~2.5 min)
         while True:
             try:
@@ -523,6 +536,12 @@ async def _score_flush_loop():
                         await refresh_alias_sport_cache()
                     except Exception as e:
                         _log.error("entity seed: %s", e)
+                # Cycle-complete stamp — loop is alive, aggregate
+                # signal for /api/ingestion_status. Runs regardless
+                # of whether inner try blocks logged flashlive/seed
+                # errors (those are per-source degradations, not
+                # loop-level death).
+                stamp_pass_complete("score_flush")
             except Exception as e:
                 _log.error("score flush loop error: %s", e)
             await asyncio.sleep(30)
@@ -6065,6 +6084,9 @@ async def _multi_stage_discovery_loop():
             )
             return
         _log.info("multi_stage_discovery_loop: lock acquired; running")
+        from ingestion.health import register, set_state, STATE_HOLDER_RUNNING
+        register("multi_stage_disc")
+        set_state("multi_stage_disc", STATE_HOLDER_RUNNING)
         await _multi_stage_discovery_loop_body(_log)
 
 
@@ -6136,6 +6158,12 @@ async def _multi_stage_discovery_loop_body(_log):
                 # Consolidated save: one write per walk if any newly-
                 # discovered stage changed content (typical), zero if not.
                 await _maybe_save_tournament_brackets()
+            # Layer C: cycle-complete stamp — 30-min iteration
+            # completed without a top-level throw. Under the 5400s
+            # threshold (30min × 3), this stamps well inside the
+            # alert window.
+            from ingestion.health import stamp_pass_complete as _stamp
+            _stamp("multi_stage_disc")
         except Exception as e:
             _log.warning("multi_stage_discovery_loop iter failed: %s", e)
         await asyncio.sleep(30 * 60)
@@ -6180,6 +6208,9 @@ async def _tournament_bracket_warm_loop():
             )
             return
         _log.info("tournament_bracket_warm_loop: lock acquired; running")
+        from ingestion.health import register, set_state, STATE_HOLDER_RUNNING
+        register("bracket_walk")
+        set_state("bracket_walk", STATE_HOLDER_RUNNING)
         await _tournament_bracket_warm_loop_body(_log)
 
 
@@ -6362,6 +6393,11 @@ async def _tournament_bracket_warm_loop_body(_log):
             # Consolidated save at end of each 60s pass: one write iff
             # any refresh above changed content, zero writes otherwise.
             await _maybe_save_tournament_brackets()
+            # Layer C: cycle-complete stamp — 60s loop iteration
+            # finished. Under the 3600s threshold (30-min TTL × 2),
+            # this stamps ~60× more often than the alert would fire.
+            from ingestion.health import stamp_pass_complete as _stamp
+            _stamp("bracket_walk")
         except Exception as e:
             _log.warning("tournament_bracket_warm_loop iter failed: %s", e)
 
@@ -14353,6 +14389,72 @@ async def debug_top_scorers(stage_id: str, season_id: str):
         "top_keys": list(data.keys()) if isinstance(data, dict) else "?",
         "row_count": len(rows),
         "first_row": rows[0] if rows else None,
+    }
+
+
+@app.get("/api/ingestion_status")
+def ingestion_status():
+    """Aggregate liveness for every supervised + bare-create_task
+    ingestion loop.
+
+    Load-bearing observability surface added Layer C (2026-08-03).
+    Backstop for the class of failure the 2026-08-01 → 08-03 Kalshi
+    persistence outage exposed: task was ALIVE but blocked on an
+    unbounded await for ~58h; only externally-visible signal was the
+    absence of `sp.kalshi_markets.last_seen_at` fossils, spotted by
+    manual DB query. Monitoring should alert on any `stale=true`
+    entry — that turns the next silent death into a ≤5-minute
+    detection instead of a 2-day investigation.
+
+    Per-task entry shape:
+      name, state, last_pass_complete_ts, seconds_since_last_pass,
+      staleness_threshold_sec, stale (bool), attempt,
+      recent_crashes_window, last_error_class, last_error_msg.
+
+    `stale = (seconds_since_last_pass > staleness_threshold_sec)`.
+    Per-task thresholds are env-tunable via
+    INGESTION_STALENESS_<TASK>_S (defaults in
+    ingestion/health.py:DEFAULT_STALENESS_THRESHOLDS_S)."""
+    from ingestion.health import snapshot
+    tasks = snapshot()
+    return {
+        "tasks":          tasks,
+        "task_count":     len(tasks),
+        "any_stale":      any(t.get("stale") for t in tasks),
+        "any_dead":       any(t.get("state") == "dead" for t in tasks),
+        "checked_at_ts":  time.time(),
+    }
+
+
+@app.get("/api/kalshi_status")
+def kalshi_status():
+    """Per-provider mirror of /api/flashlive_status shape for Kalshi.
+
+    Load-bearing signal is the aggregate /api/ingestion_status
+    endpoint; this route exists as a nicety so operators can hit
+    it by name the same way they hit flashlive_status. Reads the
+    same underlying TASK_HEALTH entry — no independent state."""
+    from ingestion.health import get_entry
+    entry = get_entry("kalshi")
+    if entry is None:
+        return {"running": False, "reason": "task not yet registered"}
+    now = time.time()
+    last_ts = entry.get("last_pass_complete_ts") or 0.0
+    secs = (now - last_ts) if last_ts > 0 else None
+    threshold = entry.get("staleness_threshold_sec") or 0
+    stale = secs is not None and threshold > 0 and secs > threshold
+    return {
+        "running":                 entry.get("state") == "holder_running",
+        "state":                   entry.get("state"),
+        "last_pass_complete_ts":   last_ts if last_ts > 0 else None,
+        "seconds_since_last_pass": secs,
+        "staleness_threshold_sec": threshold,
+        "stale":                   stale,
+        "attempt":                 entry.get("attempt"),
+        "recent_crashes_window":   entry.get("recent_crashes_window"),
+        "last_error_class":        entry.get("last_error_class"),
+        "last_error_msg":          entry.get("last_error_msg"),
+        "checked_at_ts":           now,
     }
 
 
