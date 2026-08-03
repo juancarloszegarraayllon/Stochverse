@@ -363,6 +363,104 @@ class NotLockHolder(Exception):
     Root cause the 2026-08-01 Kalshi incident exposed."""
 
 
+# ── Layer D (2026-08-03): pass-timeout tiers + boot-path bound ─
+#
+# Actual fix for the 2026-08-01 Kalshi incident class: task alive
+# but blocked on an unbounded await for ~58h. Audit at PR-Layer-D
+# quoted six unbounded awaits in the pass path (Step 1 payload_hash
+# SELECT, Step 3a UPSERT, Step 3b freshness UPDATE, session.commit,
+# session.rollback, session-context acquire) — any of which can
+# hang forever on a dead TCP socket. Postgres server-side
+# statement_timeout=60s only protects against RUNAWAY QUERIES, not
+# against a socket that stops delivering bytes (Neon compute
+# autoscale-to-zero + TCP-idle-timeout by an intermediate proxy is
+# a documented scenario).
+#
+# TWO-TIER PASS CEILING (per operator amendment from PR #283
+# deploy tuning): first pass after task (re)start gets a longer
+# boot ceiling (default 300s) because catch-up work after a
+# restart can legitimately take longer (measured 77.6s post-#283
+# on a slow-boot kalshi pass = 65% of the pre-tuning 120s ceiling;
+# a healthy slow-boot must not trip the watchdog into a kill/
+# restart/slow-boot loop). Subsequent passes get the steady
+# ceiling (120s = ~4× normal 30s pass duration).
+#
+# D.1b — BOOT PATH: run()'s lock-session acquire + try_acquire
+# is ALSO wrapped in wait_for. The Aug 1 death confirmed the hang
+# window as [00:36, ~01:29] which is EITHER boot-path or first-
+# pass — the boot-path bound closes the boot flavor regardless.
+INGESTION_PASS_TIMEOUT_STEADY_S: float = float(
+    os.environ.get("INGESTION_PASS_TIMEOUT_STEADY_S", "120.0")
+)
+INGESTION_PASS_TIMEOUT_BOOT_S: float = float(
+    os.environ.get("INGESTION_PASS_TIMEOUT_BOOT_S", "300.0")
+)
+INGESTION_BOOT_TIMEOUT_S: float = float(
+    os.environ.get("INGESTION_BOOT_TIMEOUT_S", "60.0")
+)
+
+
+def pass_timeout_for(is_first_pass: bool) -> float:
+    """Return the wait_for ceiling for a pass. Callers track their
+    own `first_pass: bool` local (True until the first pass completes,
+    then False for the rest of the loop's lifetime — supervise-restart
+    creates a fresh call and resets first_pass to True)."""
+    return INGESTION_PASS_TIMEOUT_BOOT_S if is_first_pass else INGESTION_PASS_TIMEOUT_STEADY_S
+
+
+async def acquire_lock_session_bounded(
+    session_factory,
+    lock_key: int,
+    *,
+    log_name: str,
+    logger=None,
+    timeout_s: float | None = None,
+):
+    """Bounded session-acquire + advisory-lock-acquire (Layer D.1b).
+
+    Wraps the whole boot-path in asyncio.wait_for(INGESTION_BOOT_TIMEOUT_S).
+    Timeout raises TimeoutError → propagates to supervise → crash-restart.
+
+    Returns `(session_cm, session, got_lock)`. Caller MUST call
+    `await session_cm.__aexit__(None, None, None)` in a finally block
+    to release the session's connection when done (long-lived lock
+    sessions live for the loop's lifetime; on exception or
+    NotLockHolder, exit unwinds cleanly).
+
+    Shape mirrors kalshi.run / fl.run explicit context-manager usage
+    rather than a plain `async with` because the wait_for wrapping
+    needs to bound the entire acquire operation, not just the
+    try_acquire call."""
+    if logger is None:
+        logger = _log
+    if timeout_s is None:
+        timeout_s = INGESTION_BOOT_TIMEOUT_S
+
+    async def _do_acquire():
+        session_cm = session_factory()
+        session = await session_cm.__aenter__()
+        try:
+            got_lock = await try_acquire_advisory_lock(session, lock_key)
+        except Exception:
+            await session_cm.__aexit__(None, None, None)
+            raise
+        return session_cm, session, got_lock
+
+    try:
+        return await asyncio.wait_for(_do_acquire(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        # printf-style format works with BOTH stdlib logging and
+        # structlog — the helper is called from mixed logger contexts
+        # (main.py's F104-F107 use stdlib loggers; ingestion.* uses
+        # structlog via observability.get_logger).
+        logger.warning(
+            "ingestion.task.boot_timeout task=%s timeout_sec=%s note=%s",
+            log_name, timeout_s,
+            "lock-session acquire hung; raising to supervise for restart",
+        )
+        raise
+
+
 # ── Supervisor: restart-on-crash with exponential backoff ────────
 #
 # Architecture v1.3 §6.1: long-lived asyncio coroutines must be

@@ -454,17 +454,19 @@ async def _price_prune_loop():
         return
 
     from ingestion.base import (
-        ADVISORY_LOCK_PRICE_PRUNE, NotLockHolder, try_acquire_advisory_lock,
+        ADVISORY_LOCK_PRICE_PRUNE,
+        NotLockHolder,
+        acquire_lock_session_bounded,
     )
-    async with async_session() as lock_session:
-        if not await try_acquire_advisory_lock(
-            lock_session, ADVISORY_LOCK_PRICE_PRUNE,
-        ):
+    session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
+        async_session, ADVISORY_LOCK_PRICE_PRUNE,
+        log_name="price_prune", logger=_log,
+    )
+    try:
+        if not got_lock:
             _log.info("not_holder — another worker holds the lock")
             raise NotLockHolder()
         _log.info("lock acquired; running")
-        # Layer C: register at holder entry so /api/ingestion_status
-        # surfaces this task before its first successful pass.
         from ingestion.health import register, stamp_pass_complete, set_state, STATE_HOLDER_RUNNING
         register("price_prune")
         set_state("price_prune", STATE_HOLDER_RUNNING)
@@ -474,12 +476,12 @@ async def _price_prune_loop():
                 deleted = await prune_old_prices()
                 if deleted and deleted > 0:
                     _log.info("pruned %d old price rows", deleted)
-                # Stamp regardless of deleted count — the loop being
-                # alive IS the health signal, not the delete rowcount.
                 stamp_pass_complete("price_prune")
             except Exception as e:
                 _log.error("prune loop error: %s", e)
             await asyncio.sleep(3600)  # every hour
+    finally:
+        await session_cm.__aexit__(None, None, None)
 
 
 async def _score_flush_loop():
@@ -511,15 +513,18 @@ async def _score_flush_loop():
         return
 
     from ingestion.base import (
-        ADVISORY_LOCK_SCORE_FLUSH, try_acquire_advisory_lock,
+        ADVISORY_LOCK_SCORE_FLUSH,
+        NotLockHolder,
+        acquire_lock_session_bounded,
     )
-    async with async_session() as lock_session:
-        if not await try_acquire_advisory_lock(
-            lock_session, ADVISORY_LOCK_SCORE_FLUSH,
-        ):
-            # Layer A: raise NotLockHolder so supervise re-races.
+    # Layer D.1b: bounded boot-path acquire.
+    session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
+        async_session, ADVISORY_LOCK_SCORE_FLUSH,
+        log_name="score_flush", logger=_log,
+    )
+    try:
+        if not got_lock:
             _log.info("not_holder — another worker holds the lock")
-            from ingestion.base import NotLockHolder
             raise NotLockHolder()
         _log.info("lock acquired; running")
         from ingestion.health import register, stamp_pass_complete, set_state, STATE_HOLDER_RUNNING
@@ -568,6 +573,11 @@ async def _score_flush_loop():
             except Exception as e:
                 _log.error("score flush loop error: %s", e)
             await asyncio.sleep(30)
+    finally:
+        # Layer D.1b: manual session close matches acquire_lock_session_bounded's
+        # "caller owns cleanup" contract. Runs on happy path, on
+        # NotLockHolder, and on any exception that escapes the loop.
+        await session_cm.__aexit__(None, None, None)
 
 UTC = timezone.utc
 
@@ -6096,12 +6106,16 @@ async def _multi_stage_discovery_loop():
         return
 
     from ingestion.base import (
-        ADVISORY_LOCK_MULTI_STAGE_DISC, NotLockHolder, try_acquire_advisory_lock,
+        ADVISORY_LOCK_MULTI_STAGE_DISC,
+        NotLockHolder,
+        acquire_lock_session_bounded,
     )
-    async with async_session() as lock_session:
-        if not await try_acquire_advisory_lock(
-            lock_session, ADVISORY_LOCK_MULTI_STAGE_DISC,
-        ):
+    session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
+        async_session, ADVISORY_LOCK_MULTI_STAGE_DISC,
+        log_name="multi_stage_disc", logger=_log,
+    )
+    try:
+        if not got_lock:
             _log.info(
                 "multi_stage_discovery_loop: not_holder — another worker holds the lock",
             )
@@ -6111,6 +6125,8 @@ async def _multi_stage_discovery_loop():
         register("multi_stage_disc")
         set_state("multi_stage_disc", STATE_HOLDER_RUNNING)
         await _multi_stage_discovery_loop_body(_log)
+    finally:
+        await session_cm.__aexit__(None, None, None)
 
 
 async def _multi_stage_discovery_loop_body(_log):
@@ -6220,12 +6236,16 @@ async def _tournament_bracket_warm_loop():
         return
 
     from ingestion.base import (
-        ADVISORY_LOCK_BRACKET_WALK, NotLockHolder, try_acquire_advisory_lock,
+        ADVISORY_LOCK_BRACKET_WALK,
+        NotLockHolder,
+        acquire_lock_session_bounded,
     )
-    async with async_session() as lock_session:
-        if not await try_acquire_advisory_lock(
-            lock_session, ADVISORY_LOCK_BRACKET_WALK,
-        ):
+    session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
+        async_session, ADVISORY_LOCK_BRACKET_WALK,
+        log_name="bracket_walk", logger=_log,
+    )
+    try:
+        if not got_lock:
             _log.info(
                 "tournament_bracket_warm_loop: not_holder — another worker holds the lock",
             )
@@ -6235,6 +6255,8 @@ async def _tournament_bracket_warm_loop():
         register("bracket_walk")
         set_state("bracket_walk", STATE_HOLDER_RUNNING)
         await _tournament_bracket_warm_loop_body(_log)
+    finally:
+        await session_cm.__aexit__(None, None, None)
 
 
 async def _run_bracket_warm_initial_pass_once(_log) -> int:
