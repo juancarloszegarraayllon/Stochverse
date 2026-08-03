@@ -41,6 +41,7 @@ from sp_models import FLEvent
 from .base import (
     ADVISORY_LOCK_FL,
     IngestionResult,
+    NotLockHolder,
     new_run_id,
     try_acquire_advisory_lock,
     upsert_provider_records_batch,
@@ -362,11 +363,17 @@ async def run(
             lock_session, ADVISORY_LOCK_FL,
         )
         if not got_lock:
+            # Layer A: raise NotLockHolder instead of clean return.
+            # supervise() catches this specifically and enters a
+            # slow-poll re-race, preserving a live non-holder that
+            # takes over when the holder dies. Pre-Layer-A this was
+            # `return` → supervise treated as complete → task DEAD
+            # forever on the non-holder worker (2026-08-01 root cause).
             _log.info(
-                "ingestion.fl.skipping",
+                "ingestion.fl.not_holder",
                 reason="another worker holds the FL ingestion advisory lock",
             )
-            return
+            raise NotLockHolder()
 
         _log.info(
             "ingestion.fl.starting",

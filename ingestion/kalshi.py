@@ -35,6 +35,7 @@ from sp_models import KalshiMarket
 from .base import (
     ADVISORY_LOCK_KALSHI,
     IngestionResult,
+    NotLockHolder,
     new_run_id,
     try_acquire_advisory_lock,
     upsert_provider_records_batch,
@@ -313,11 +314,16 @@ async def run(session_factory) -> None:
             lock_session, ADVISORY_LOCK_KALSHI,
         )
         if not got_lock:
+            # Layer A: see NotLockHolder docstring in ingestion.base
+            # for the 2026-08-01 death-door context. Pre-Layer-A this
+            # `return` let supervise treat the non-holder as complete
+            # and exit — non-holder worker's kalshi task DEAD forever,
+            # exactly the shape the incident hit.
             _log.info(
-                "ingestion.kalshi.skipping",
+                "ingestion.kalshi.not_holder",
                 reason="another worker holds the Kalshi ingestion advisory lock",
             )
-            return
+            raise NotLockHolder()
 
         _log.info(
             "ingestion.kalshi.starting",

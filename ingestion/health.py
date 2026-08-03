@@ -37,6 +37,17 @@ import time
 from typing import Any
 
 
+# Worker process ID captured at import time — every /api/ingestion_status
+# response tags this so operators can distinguish which of the two
+# WEB_CONCURRENCY workers served the read. Layer C's endpoint reflected
+# only the SERVING worker's process-local TASK_HEALTH; aggregate cross-
+# worker liveness required resampling until an operator hit both workers.
+# Layer A payload carries WORKER_ID so a single sample is unambiguous
+# about which worker's view it represents; cross-worker aggregation via
+# a DB-backed heartbeat table is Layer-3 future work (not this PR).
+WORKER_ID: int = os.getpid()
+
+
 # Per-task entry shape — the ONE contract every writer must respect.
 # Missing keys default to `None` at read time; add new keys freely.
 #     {
@@ -55,11 +66,12 @@ TASK_HEALTH: dict[str, dict] = {}
 # State strings — enumerate here for grep discoverability. Not an
 # enum type because monitoring (which may be on a different deploy
 # cadence) shouldn't fail on an unknown state string.
-STATE_UNKNOWN                 = "unknown"
+STATE_UNKNOWN                 = "unknown"          # task never observed on this worker
+STATE_STARTING                = "starting"         # supervise attempt in flight but no pass complete yet
 STATE_HOLDER_RUNNING          = "holder_running"
-STATE_NOT_HOLDER_POLLING      = "not_holder_polling"  # Layer A
+STATE_NOT_HOLDER_POLLING      = "not_holder_polling"  # Layer A — lost the lock race, sleeping until next re-race
 STATE_CRASHED_RESTARTING      = "crashed_restarting"
-STATE_DEAD                    = "dead"                # supervise clean-returned
+STATE_DEAD                    = "dead"             # supervise clean-returned (pre-Layer-A residual only)
 STATE_CANCELLED               = "cancelled"
 
 
@@ -86,6 +98,23 @@ DEFAULT_STALENESS_THRESHOLDS_S: dict[str, int] = {
     "multi_stage_disc":  5400,   # 30-min cycle × 3 = 5400s
 }
 
+# Every ingestion surface must appear in this list. `register_all()`
+# populates TASK_HEALTH with STATE_UNKNOWN entries for every name at
+# startup so absence-from-registry never happens on any worker —
+# an absent task and a never-started task must not look identical
+# (Layer C snapshot analysis, 2026-08-03: bracket_walk and
+# multi_stage_disc were missing from non-holder worker's snapshot
+# entirely because they only registered inside the holder-entry
+# advisory-lock block).
+INGESTION_TASK_NAMES: tuple[str, ...] = (
+    "fl",
+    "kalshi",
+    "score_flush",
+    "price_prune",
+    "bracket_walk",
+    "multi_stage_disc",
+)
+
 
 def register(name: str) -> None:
     """Initialize a task's health entry. Idempotent — a second call
@@ -100,6 +129,7 @@ def register(name: str) -> None:
         "name":                     name,
         "state":                    STATE_UNKNOWN,
         "last_pass_complete_ts":    0.0,
+        "registered_at_ts":         time.time(),
         "staleness_threshold_sec":  _threshold(
             name, DEFAULT_STALENESS_THRESHOLDS_S.get(name, 300),
         ),
@@ -108,6 +138,22 @@ def register(name: str) -> None:
         "last_error_class":         None,
         "last_error_msg":           None,
     }
+
+
+def register_all() -> None:
+    """Pre-register every ingestion surface in INGESTION_TASK_NAMES.
+    Called from startup_event so `/api/ingestion_status` surfaces
+    every task from the moment the worker is up, even before any
+    task has run its own register() at holder entry.
+
+    Fixes the Layer C snapshot gap: bracket_walk and multi_stage_disc
+    were absent from the non-holder worker's snapshot entirely
+    because they only registered inside their advisory-lock-held
+    block — the non-holder never entered that block. Post-fix an
+    absent task and a never-started task are visually distinct
+    (absent = programming bug; never-started = STATE_UNKNOWN)."""
+    for name in INGESTION_TASK_NAMES:
+        register(name)
 
 
 def stamp_pass_complete(name: str) -> None:

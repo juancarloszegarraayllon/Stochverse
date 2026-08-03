@@ -147,6 +147,20 @@ async def startup_event():
         await refresh_alias_sport_cache()
     except Exception as e:
         logging.getLogger("stochverse").warning("db init skipped: %s", e)
+    # Layer A (2026-08-03): pre-register every ingestion surface in
+    # the health registry so /api/ingestion_status surfaces all six
+    # tasks from the moment this worker boots — even before any task's
+    # own register() call at holder entry. Fixes the Layer C snapshot
+    # gap where bracket_walk / multi_stage_disc were absent on the
+    # non-holder worker (they register only inside their holder-
+    # entry advisory-lock block, which the non-holder never enters).
+    try:
+        from ingestion.health import register_all
+        register_all()
+    except Exception as e:
+        logging.getLogger("stochverse").warning(
+            "ingestion health register_all skipped: %s", e,
+        )
     # Task #21 Surface A: warm-load the Kalshi /series metadata cache
     # from cache_blobs BEFORE the get_data thread starts. Awaited (not
     # fire-and-forget) because the first _build_cache pass classifies
@@ -228,7 +242,15 @@ async def startup_event():
     asyncio.create_task(_load_series_cache_from_db())
     asyncio.create_task(_load_tournament_brackets_from_db())
     asyncio.create_task(_load_team_caches_from_db())
-    asyncio.create_task(_tournament_bracket_warm_loop())
+    # Layer A (2026-08-03): wrap F106/F107/F104/F105 in supervise() so
+    # NotLockHolder → re-race semantics apply uniformly (was bare
+    # create_task; non-holder returns cleanly = task DEAD from boot on
+    # that worker). supervise() catches NotLockHolder and slow-polls;
+    # takes over on holder-death.
+    from ingestion.base import supervise as _supervise
+    asyncio.create_task(_supervise(
+        "bracket_walk", _tournament_bracket_warm_loop,
+    ))
     # Task #21 Surface A: persist newly-fetched /series metadata back
     # to cache_blobs on a 60s dirty-gated cadence so redeploys don't
     # lose the cache.
@@ -242,10 +264,11 @@ async def startup_event():
     # ships its bracket data.
     asyncio.create_task(_prewarm_series_stages())
     # Phase 4: periodically flush live scores from all feeds to the DB.
-    asyncio.create_task(_score_flush_loop())
+    # Layer A: supervise-wrapped (was bare create_task).
+    asyncio.create_task(_supervise("score_flush", _score_flush_loop))
     # Phase 5: periodically prune old price rows to stay within
     # Neon free-tier storage limits (512 MB). Runs hourly.
-    asyncio.create_task(_price_prune_loop())
+    asyncio.create_task(_supervise("price_prune", _price_prune_loop))
 
 
 @app.on_event("shutdown")
@@ -431,14 +454,14 @@ async def _price_prune_loop():
         return
 
     from ingestion.base import (
-        ADVISORY_LOCK_PRICE_PRUNE, try_acquire_advisory_lock,
+        ADVISORY_LOCK_PRICE_PRUNE, NotLockHolder, try_acquire_advisory_lock,
     )
     async with async_session() as lock_session:
         if not await try_acquire_advisory_lock(
             lock_session, ADVISORY_LOCK_PRICE_PRUNE,
         ):
-            _log.info("skipping — another worker holds the lock")
-            return
+            _log.info("not_holder — another worker holds the lock")
+            raise NotLockHolder()
         _log.info("lock acquired; running")
         # Layer C: register at holder entry so /api/ingestion_status
         # surfaces this task before its first successful pass.
@@ -494,11 +517,11 @@ async def _score_flush_loop():
         if not await try_acquire_advisory_lock(
             lock_session, ADVISORY_LOCK_SCORE_FLUSH,
         ):
-            _log.info("skipping — another worker holds the lock")
-            return
+            # Layer A: raise NotLockHolder so supervise re-races.
+            _log.info("not_holder — another worker holds the lock")
+            from ingestion.base import NotLockHolder
+            raise NotLockHolder()
         _log.info("lock acquired; running")
-        # Layer C: register at holder entry so /api/ingestion_status
-        # surfaces this task before its first cycle completes.
         from ingestion.health import register, stamp_pass_complete, set_state, STATE_HOLDER_RUNNING
         register("score_flush")
         set_state("score_flush", STATE_HOLDER_RUNNING)
@@ -6073,16 +6096,16 @@ async def _multi_stage_discovery_loop():
         return
 
     from ingestion.base import (
-        ADVISORY_LOCK_MULTI_STAGE_DISC, try_acquire_advisory_lock,
+        ADVISORY_LOCK_MULTI_STAGE_DISC, NotLockHolder, try_acquire_advisory_lock,
     )
     async with async_session() as lock_session:
         if not await try_acquire_advisory_lock(
             lock_session, ADVISORY_LOCK_MULTI_STAGE_DISC,
         ):
             _log.info(
-                "multi_stage_discovery_loop: skipping — another worker holds the lock",
+                "multi_stage_discovery_loop: not_holder — another worker holds the lock",
             )
-            return
+            raise NotLockHolder()
         _log.info("multi_stage_discovery_loop: lock acquired; running")
         from ingestion.health import register, set_state, STATE_HOLDER_RUNNING
         register("multi_stage_disc")
@@ -6197,16 +6220,16 @@ async def _tournament_bracket_warm_loop():
         return
 
     from ingestion.base import (
-        ADVISORY_LOCK_BRACKET_WALK, try_acquire_advisory_lock,
+        ADVISORY_LOCK_BRACKET_WALK, NotLockHolder, try_acquire_advisory_lock,
     )
     async with async_session() as lock_session:
         if not await try_acquire_advisory_lock(
             lock_session, ADVISORY_LOCK_BRACKET_WALK,
         ):
             _log.info(
-                "tournament_bracket_warm_loop: skipping — another worker holds the lock",
+                "tournament_bracket_warm_loop: not_holder — another worker holds the lock",
             )
-            return
+            raise NotLockHolder()
         _log.info("tournament_bracket_warm_loop: lock acquired; running")
         from ingestion.health import register, set_state, STATE_HOLDER_RUNNING
         register("bracket_walk")
@@ -6358,7 +6381,12 @@ async def _tournament_bracket_warm_loop_body(_log):
     #    This is what catches UCL qualifying-vs-knockout, etc.
     #    Sequential with 1s spacing → at most 1 req/s. Re-runs
     #    every 30 min so newly-listed cup stages get caught.
-    asyncio.create_task(_multi_stage_discovery_loop())
+    # Layer A: supervise-wrapped so non-holder yields via NotLockHolder
+    # instead of clean-return-then-dead.
+    from ingestion.base import supervise as _supervise
+    asyncio.create_task(_supervise(
+        "multi_stage_disc", _multi_stage_discovery_loop,
+    ))
 
     # ── Steady-state refresh loop. Each pass refreshes any stage
     #    whose bracket entry has aged past TTL; passes run every
@@ -14415,13 +14443,24 @@ def ingestion_status():
     Per-task thresholds are env-tunable via
     INGESTION_STALENESS_<TASK>_S (defaults in
     ingestion/health.py:DEFAULT_STALENESS_THRESHOLDS_S)."""
-    from ingestion.health import snapshot
+    from ingestion.health import snapshot, WORKER_ID
     tasks = snapshot()
+    # Layer A additions: worker_id identifies WHICH of the two
+    # WEB_CONCURRENCY workers served this response, so a single sample
+    # is unambiguous about scope. Pre-Layer-A "dead" on one worker was
+    # benign (supervise-treats-clean-return-as-complete on the non-
+    # holder path); post-Layer-A that path raises NotLockHolder →
+    # STATE_NOT_HOLDER_POLLING, and "dead" becomes a true alarm.
+    # Cross-worker aggregation via a DB-backed heartbeat table is
+    # Layer-3 future work — not built here.
     return {
         "tasks":          tasks,
         "task_count":     len(tasks),
         "any_stale":      any(t.get("stale") for t in tasks),
         "any_dead":       any(t.get("state") == "dead" for t in tasks),
+        "any_not_holder": any(t.get("state") == "not_holder_polling" for t in tasks),
+        "worker_id":      WORKER_ID,
+        "worker_role":    "holder_view",  # per-worker scope; aggregate is DB-Layer-3
         "checked_at_ts":  time.time(),
     }
 
@@ -14434,10 +14473,14 @@ def kalshi_status():
     endpoint; this route exists as a nicety so operators can hit
     it by name the same way they hit flashlive_status. Reads the
     same underlying TASK_HEALTH entry — no independent state."""
-    from ingestion.health import get_entry
+    from ingestion.health import get_entry, WORKER_ID
     entry = get_entry("kalshi")
     if entry is None:
-        return {"running": False, "reason": "task not yet registered"}
+        return {
+            "running":   False,
+            "reason":    "task not yet registered",
+            "worker_id": WORKER_ID,
+        }
     now = time.time()
     last_ts = entry.get("last_pass_complete_ts") or 0.0
     secs = (now - last_ts) if last_ts > 0 else None
@@ -14454,6 +14497,7 @@ def kalshi_status():
         "recent_crashes_window":   entry.get("recent_crashes_window"),
         "last_error_class":        entry.get("last_error_class"),
         "last_error_msg":          entry.get("last_error_msg"),
+        "worker_id":               WORKER_ID,
         "checked_at_ts":           now,
     }
 

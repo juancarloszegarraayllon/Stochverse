@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -330,6 +331,38 @@ async def try_acquire_advisory_lock(session: AsyncSession, key: int) -> bool:
     return bool(result.scalar())
 
 
+# ── NotLockHolder sentinel (Layer A, 2026-08-03) ───────────────
+#
+# The 2026-08-01 Kalshi incident-class fix. Pre-Layer-A, every
+# advisory-lock-guarded task's non-holder path returned cleanly:
+#
+#     if not got_lock:
+#         _log.info("skipping — another worker holds the lock")
+#         return
+#
+# `supervise()` treated the clean return as `ingestion.task.complete`
+# and EXITED without restart — the non-holder worker's task was DEAD
+# from boot. Any subsequent holder-crash (via supervise-restart on
+# a pooled connection reuse landing on a different backend, or via
+# any other transient failure) would then non-deterministically leave
+# BOTH workers with dead tasks — silent forever.
+#
+# Post-Layer-A, non-holder paths raise NotLockHolder. supervise()
+# catches this SPECIFICALLY (before the generic Exception handler),
+# updates health state to STATE_NOT_HOLDER_POLLING, sleeps
+# NOT_HOLDER_POLL_S, and re-invokes coro_factory to re-race for the
+# lock. Preserves a LIVE non-holder task that periodically re-races.
+
+class NotLockHolder(Exception):
+    """Signal from an advisory-lock-guarded task's run() that it lost
+    the acquire race. supervise() catches this specifically and enters
+    a slow-poll re-race schedule instead of exiting or exponential-
+    backoff. Preserves a live non-holder task that periodically re-
+    races for the lock, so a holder-death (crash-path or pool-leaked-
+    lock) doesn't leave the workload permanently dead on both workers.
+    Root cause the 2026-08-01 Kalshi incident exposed."""
+
+
 # ── Supervisor: restart-on-crash with exponential backoff ────────
 #
 # Architecture v1.3 §6.1: long-lived asyncio coroutines must be
@@ -370,6 +403,15 @@ async def supervise(
     crash_times: list[float] = []
     attempt = 0
 
+    # Slow-poll interval between non-holder re-race attempts (Layer A).
+    # 60s default: fast enough that a holder-death recovery lands
+    # within the same operator-visible window (staleness thresholds
+    # for the two supervised tasks are 300s and 120s), slow enough
+    # that the re-race doesn't spam Postgres advisory-lock traffic.
+    not_holder_poll_s = float(
+        os.environ.get("INGESTION_NOT_HOLDER_POLL_S", "60.0")
+    )
+
     while True:
         attempt += 1
         try:
@@ -379,23 +421,43 @@ async def supervise(
                 attempt=attempt,
             )
             _health.set_state(
-                name, _health.STATE_HOLDER_RUNNING,
+                name, _health.STATE_STARTING,
                 attempt=attempt,
             )
             await coro_factory()
+            # A clean return post-Layer-A is either (a) a task designed
+            # to complete (none currently exist) or (b) a bug in a
+            # non-holder path that still uses `return` instead of
+            # `raise NotLockHolder`. Either way surface as `dead`.
             _log.info("ingestion.task.complete", task=name)
-            # Clean return = task decided its own work was done. Layer
-            # A (queued) will convert non-holder path from clean-return
-            # to raise NotLockHolder so THIS branch stops being reachable
-            # for the AL death class. Until then, a clean return here
-            # is a permanent-death signal — surface it as `dead` in the
-            # registry so monitoring can alert on it.
             _health.set_state(name, _health.STATE_DEAD)
             return
         except asyncio.CancelledError:
             _log.info("ingestion.task.cancelled", task=name)
             _health.set_state(name, _health.STATE_CANCELLED)
             raise
+        except NotLockHolder:
+            # Layer A: non-holder yields for `not_holder_poll_s` then
+            # re-races. Distinct log line so monitoring can distinguish
+            # legitimate non-holder-yield (benign, expected under
+            # WEB_CONCURRENCY=2) from crash-restart (indicative).
+            _log.info(
+                "ingestion.task.not_holder_yield",
+                task=name,
+                attempt=attempt,
+                retry_in_sec=not_holder_poll_s,
+            )
+            _health.set_state(
+                name, _health.STATE_NOT_HOLDER_POLLING,
+                attempt=attempt,
+            )
+            await asyncio.sleep(not_holder_poll_s)
+            # Reset backoff — non-holder yield is NOT a crash and
+            # shouldn't compound exponential backoff on subsequent
+            # transient crashes.
+            backoff = 1.0
+            # fall through to next iteration of while True — re-race.
+            continue
         except Exception as exc:
             now = time.monotonic()
             crash_times.append(now)
