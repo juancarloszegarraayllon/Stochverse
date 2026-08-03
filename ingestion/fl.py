@@ -306,11 +306,31 @@ async def _today_pre_game_loop(
     sport_ids: list[int],
     interval_sec: float = 60.0,
 ) -> None:
-    """Loop: every 60s, refresh today's events for all sports."""
+    """Loop: every 60s, refresh today's events for all sports.
+
+    Layer D: pass wrapped in wait_for with two-tier ceiling — see
+    ingestion.base.pass_timeout_for + kalshi._markets_loop docstring
+    for the 2026-08-01 in-pass hang context."""
+    from .base import pass_timeout_for
+    first_pass = True
     while True:
         try:
             async with session_factory() as session:
-                await _ingest_pass(session, sport_ids=sport_ids, indent_days=0)
+                timeout_s = pass_timeout_for(first_pass)
+                try:
+                    await asyncio.wait_for(
+                        _ingest_pass(session, sport_ids=sport_ids, indent_days=0),
+                        timeout=timeout_s,
+                    )
+                except asyncio.TimeoutError:
+                    _log.warning(
+                        "ingestion.fl.pass_timeout",
+                        loop="today_pre_game",
+                        timeout_sec=timeout_s,
+                        first_pass=first_pass,
+                    )
+                    raise
+                first_pass = False
         except Exception:
             # Supervisor handles logging + restart; raise so it sees us crash.
             raise
@@ -322,14 +342,37 @@ async def _week_loop(
     sport_ids: list[int],
     interval_sec: float = 600.0,
 ) -> None:
-    """Loop: every ~10 min, refresh fixtures 1..7 days out."""
+    """Loop: every ~10 min, refresh fixtures 1..7 days out.
+
+    Layer D: EACH per-day pass (7 per iteration) wrapped separately
+    in wait_for so one slow day doesn't consume the whole loop's
+    budget. First-pass semantics apply per-outer-iteration, not
+    per-day-inner-pass, so the boot ceiling covers the entire
+    7-day sweep on the first outer iteration."""
+    from .base import pass_timeout_for
+    first_pass = True
     while True:
         try:
             async with session_factory() as session:
+                timeout_s = pass_timeout_for(first_pass)
                 for d in range(1, 8):
-                    await _ingest_pass(
-                        session, sport_ids=sport_ids, indent_days=d,
-                    )
+                    try:
+                        await asyncio.wait_for(
+                            _ingest_pass(
+                                session, sport_ids=sport_ids, indent_days=d,
+                            ),
+                            timeout=timeout_s,
+                        )
+                    except asyncio.TimeoutError:
+                        _log.warning(
+                            "ingestion.fl.pass_timeout",
+                            loop="week",
+                            day=d,
+                            timeout_sec=timeout_s,
+                            first_pass=first_pass,
+                        )
+                        raise
+                first_pass = False
         except Exception:
             raise
         await asyncio.sleep(interval_sec)
@@ -358,10 +401,36 @@ async def run(
     # below. Inside that session we don't actually issue writes —
     # the cadence loops open their own per-pass sessions. We just
     # need ONE session held open so the lock stays held.
-    async with session_factory() as lock_session:
-        got_lock = await try_acquire_advisory_lock(
-            lock_session, ADVISORY_LOCK_FL,
+    # Layer D.1b: boot-path wait_for on the lock-session acquire +
+    # try_acquire_advisory_lock sequence. See kalshi.run for the
+    # 2026-08-01 boot-vs-first-pass hang context — same defense.
+    from .base import INGESTION_BOOT_TIMEOUT_S
+
+    async def _acquire_lock_session():
+        session_cm = session_factory()
+        session = await session_cm.__aenter__()
+        try:
+            got_lock = await try_acquire_advisory_lock(
+                session, ADVISORY_LOCK_FL,
+            )
+        except Exception:
+            await session_cm.__aexit__(None, None, None)
+            raise
+        return session_cm, session, got_lock
+
+    try:
+        session_cm, lock_session, got_lock = await asyncio.wait_for(
+            _acquire_lock_session(), timeout=INGESTION_BOOT_TIMEOUT_S,
         )
+    except asyncio.TimeoutError:
+        _log.warning(
+            "ingestion.fl.boot_timeout",
+            timeout_sec=INGESTION_BOOT_TIMEOUT_S,
+            note="lock-session acquire hung; raising to supervise for restart",
+        )
+        raise
+
+    try:
         if not got_lock:
             # Layer A: raise NotLockHolder instead of clean return.
             # supervise() catches this specifically and enters a
@@ -391,3 +460,5 @@ async def run(
             _today_pre_game_loop(session_factory, sport_ids, interval_sec=60.0),
             _week_loop(session_factory, sport_ids, interval_sec=600.0),
         )
+    finally:
+        await session_cm.__aexit__(None, None, None)

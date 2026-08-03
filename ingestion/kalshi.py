@@ -286,11 +286,40 @@ async def _markets_loop(
     session_factory,
     interval_sec: float = 30.0,
 ) -> None:
-    """Loop: every 30s, refresh sp.kalshi_markets from the cache."""
+    """Loop: every 30s, refresh sp.kalshi_markets from the cache.
+
+    Layer D (2026-08-03): each pass wrapped in asyncio.wait_for with
+    a two-tier ceiling — boot (first pass after task or supervise
+    restart, 300s default) vs steady (subsequent passes, 120s
+    default). Timeout raises TimeoutError → propagates to supervise
+    → crash-restart. Fixes the 2026-08-01 in-pass hang class: one
+    of six unbounded awaits in the pass path can hang forever on
+    a dead TCP socket, and Postgres server-side statement_timeout
+    only helps if the server is reachable.
+
+    First pass isn't reset mid-loop — it flips False after the first
+    iteration completes, stays False forever within this call.
+    Supervise restart creates a fresh _markets_loop invocation which
+    re-initializes first_pass=True naturally."""
+    from .base import pass_timeout_for
+    first_pass = True
     while True:
         try:
             async with session_factory() as session:
-                await _ingest_pass(session)
+                timeout_s = pass_timeout_for(first_pass)
+                try:
+                    await asyncio.wait_for(
+                        _ingest_pass(session), timeout=timeout_s,
+                    )
+                except asyncio.TimeoutError:
+                    _log.warning(
+                        "ingestion.kalshi.pass_timeout",
+                        timeout_sec=timeout_s,
+                        first_pass=first_pass,
+                        note="pass exceeded ceiling; raising to supervise for restart",
+                    )
+                    raise
+                first_pass = False
         except Exception:
             # Surface crashes to the supervisor.
             raise
@@ -309,10 +338,42 @@ async def run(session_factory) -> None:
     Returns when cancelled. Crashes inside the loop are caught by
     the surrounding supervisor (ingestion.base.supervise).
     """
-    async with session_factory() as lock_session:
-        got_lock = await try_acquire_advisory_lock(
-            lock_session, ADVISORY_LOCK_KALSHI,
+    # Layer D.1b (2026-08-03): boot path — session acquire +
+    # try_acquire_advisory_lock — wrapped in wait_for. The Aug 1
+    # kalshi task's death window was [00:36, ~01:29] UTC and could
+    # have been the boot path OR the first-pass; this bound closes
+    # the boot flavor regardless. Timeout raises TimeoutError →
+    # propagates to supervise → crash-restart. INGESTION_BOOT_TIMEOUT_S
+    # default 60s (env-tunable).
+    from .base import INGESTION_BOOT_TIMEOUT_S
+
+    async def _acquire_lock_session():
+        # Encapsulated for wait_for wrapping — the entire acquire
+        # sequence including session __aenter__.
+        session_cm = session_factory()
+        session = await session_cm.__aenter__()
+        try:
+            got_lock = await try_acquire_advisory_lock(
+                session, ADVISORY_LOCK_KALSHI,
+            )
+        except Exception:
+            await session_cm.__aexit__(None, None, None)
+            raise
+        return session_cm, session, got_lock
+
+    try:
+        session_cm, lock_session, got_lock = await asyncio.wait_for(
+            _acquire_lock_session(), timeout=INGESTION_BOOT_TIMEOUT_S,
         )
+    except asyncio.TimeoutError:
+        _log.warning(
+            "ingestion.kalshi.boot_timeout",
+            timeout_sec=INGESTION_BOOT_TIMEOUT_S,
+            note="lock-session acquire hung; raising to supervise for restart",
+        )
+        raise
+
+    try:
         if not got_lock:
             # Layer A: see NotLockHolder docstring in ingestion.base
             # for the 2026-08-01 death-door context. Pre-Layer-A this
@@ -331,3 +392,8 @@ async def run(session_factory) -> None:
         )
 
         await _markets_loop(session_factory, interval_sec=30.0)
+    finally:
+        # Manual exit mirrors the try/finally shape a plain
+        # `async with` would give — required because we opened the
+        # session inside wait_for above rather than in a with block.
+        await session_cm.__aexit__(None, None, None)

@@ -77,6 +77,20 @@ _server_settings.setdefault("statement_timeout", "60000")                    # 6
 _server_settings.setdefault("lock_timeout", "30000")                         # 30s — kills waits for advisory/row locks
 _server_settings.setdefault("application_name", "stochverse-web")            # surfaces in pg_stat_activity for triage
 
+# Layer D (2026-08-03): CLIENT-side per-command ceiling. The server-
+# side statement_timeout/lock_timeout/idle_in_transaction_session_timeout
+# floors above kill runaway QUERIES, but they require a live connection
+# and the server actually executing. On a dead TCP socket (Neon compute
+# autoscale-to-zero + TCP-idle-timeout by an intermediate proxy is a
+# documented scenario), asyncpg's socket read blocks forever waiting
+# for bytes that never come. command_timeout is asyncpg's CLIENT-side
+# floor — cancels the query after N seconds regardless of whether the
+# server is reachable. Set LARGER than server statement_timeout so
+# server-side kills happen first (clean error path); client-side is
+# the last-resort ceiling for dead-socket cases. 2026-08-01 Kalshi
+# in-pass hang was the failure mode this defends against.
+_connect_args.setdefault("command_timeout", 90.0)
+
 engine = None
 async_session = None
 
@@ -100,6 +114,12 @@ if DATABASE_URL:
             # seconds. Defends against provider restarts that
             # invalidate every connection in the pool.
             pool_recycle=300,
+            # Layer D (2026-08-03): explicit pool_timeout — was
+            # relying on SQLAlchemy's implicit 30s default. Named
+            # here so any tuning is source-visible; complements
+            # asyncpg's command_timeout (per-command ceiling) and
+            # ingestion's task-level asyncio.wait_for wraps.
+            pool_timeout=30.0,
             connect_args=_connect_args,
         )
         async_session = async_sessionmaker(engine, expire_on_commit=False)
