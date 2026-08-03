@@ -255,18 +255,34 @@ async def upsert_provider_records_batch(
     # gating (in-memory bump timestamps) would save wire too but adds
     # state that doesn't survive worker restart; SQL-side is simpler
     # and correct-by-construction.
+    # Step 3b rowcount capture (Layer C, 2026-08-03): pre-fix, the
+    # actual freshness-bump work was invisible — the returned
+    # `unchanged_count` reflected CLIENT-SIDE hash classification (all
+    # rows whose payload was byte-identical), not Postgres's write
+    # count (which is gated at ~1h staleness server-side). A pass with
+    # "unchanged=9500 upd=0 ins=0" was ambiguous between "everything
+    # fresh, zero writes" and "everything stale-bumped, ~9500 writes"
+    # — exactly the observability gap that let the Aug 1-3 Kalshi
+    # persistence outage hide behind an in-window-appearing counter.
+    # Now: capture and return the actual rowcount for Step 3b so
+    # pass_complete log lines can surface it.
+    freshness_bumped = 0
     if unchanged_pks:
         tbl = table.__table__
         pk_column = tbl.c[pk_col]
         last_seen_col = tbl.c["last_seen_at"]
-        await session.execute(
+        result = await session.execute(
             update(tbl)
             .where(pk_column.in_(unchanged_pks))
             .where(last_seen_col < text("NOW() - INTERVAL '1 hour'"))
             .values(last_seen_at=text("NOW()"))
         )
+        # asyncpg / SQLAlchemy: result.rowcount reports the number of
+        # rows the server touched. Guarded with `or 0` because some
+        # dialects can return -1 when rowcount is unavailable.
+        freshness_bumped = result.rowcount or 0
 
-    return (inserted_count, updated_count, unchanged_count)
+    return (inserted_count, updated_count, unchanged_count, freshness_bumped)
 
 
 # ── Postgres advisory lock for singleton enforcement ─────────────
@@ -341,6 +357,15 @@ async def supervise(
     tries again. Repeated crashes within a window emit a louder
     structured log event so monitoring can alert.
     """
+    # Layer C (2026-08-03): register task in the health registry
+    # BEFORE the first attempt so /api/ingestion_status surfaces it
+    # from the moment the task starts, not only after the first
+    # successful pass. The registry is single-writer-per-key by
+    # convention; supervise owns the state transitions, per-pass
+    # code owns last_pass_complete_ts.
+    from . import health as _health
+    _health.register(name)
+
     backoff = 1.0
     crash_times: list[float] = []
     attempt = 0
@@ -353,11 +378,23 @@ async def supervise(
                 task=name,
                 attempt=attempt,
             )
+            _health.set_state(
+                name, _health.STATE_HOLDER_RUNNING,
+                attempt=attempt,
+            )
             await coro_factory()
             _log.info("ingestion.task.complete", task=name)
+            # Clean return = task decided its own work was done. Layer
+            # A (queued) will convert non-holder path from clean-return
+            # to raise NotLockHolder so THIS branch stops being reachable
+            # for the AL death class. Until then, a clean return here
+            # is a permanent-death signal — surface it as `dead` in the
+            # registry so monitoring can alert on it.
+            _health.set_state(name, _health.STATE_DEAD)
             return
         except asyncio.CancelledError:
             _log.info("ingestion.task.cancelled", task=name)
+            _health.set_state(name, _health.STATE_CANCELLED)
             raise
         except Exception as exc:
             now = time.monotonic()
@@ -378,6 +415,12 @@ async def supervise(
                 recent_crashes=recent_crashes,
                 next_backoff_sec=backoff,
                 exc_info=True,
+            )
+            _health.set_state(
+                name, _health.STATE_CRASHED_RESTARTING,
+                recent_crashes_window=recent_crashes,
+                last_error_class=type(exc).__name__,
+                last_error_msg=str(exc)[:500],
             )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, max_backoff_sec)
