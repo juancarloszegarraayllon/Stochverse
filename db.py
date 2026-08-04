@@ -94,12 +94,47 @@ _connect_args.setdefault("command_timeout", 90.0)
 engine = None
 async_session = None
 
+# Layer B (2026-08-04): dedicated NullPool engine for advisory-lock-
+# holding sessions. Rationale: the pooled `engine` above reuses
+# connections across sessions — when a session's `async with` exits,
+# the underlying connection returns to the pool but the Postgres
+# backend process (and its session-level advisory locks) stays alive
+# until the pool discards or the backend dies. That's the "pool-
+# leaked-lock" flavor of the 2026-08-01 death class: a crashed
+# holder's session-exit returned its connection to the pool with the
+# lock still held; a restart's fresh session grabbed a DIFFERENT
+# pool connection and lost the try_acquire → non-holder → death-door
+# (pre-Layer-A).
+#
+# NullPool closes the connection on session __aexit__ AND on garbage
+# collection of an orphaned session — advisory lock releases
+# IMMEDIATELY when the AL-holding session drops. Post-Layer-A the
+# death-door itself is closed via NotLockHolder + re-race, so this
+# is defense-in-depth (operator note: mechanism DISFAVORED per
+# corrected-timeline evidence but still worth hardening for future).
+#
+# Cost model: one extra Neon connection open (~50-100ms) per
+# lock-acquire cycle. Steady state cost zero — the AL-holding
+# session is opened once at run() entry and held for the process
+# lifetime. Only pays on task startup / supervise-restart. Data-
+# side sessions inside _ingest_pass keep using the pooled `engine`
+# for per-pass throughput.
+#
+# Also closes the connection-leak edge case on boot_timeout flagged
+# during PR-Layer-D review: if wait_for cancels _acquire_lock_session
+# after __aenter__ succeeded, NullPool releases the connection on
+# garbage-collection of the orphaned session_cm regardless of
+# whether __aexit__ was called explicitly.
+advisory_lock_engine = None
+advisory_lock_session = None
+
 if DATABASE_URL:
     try:
         from sqlalchemy.ext.asyncio import (
             create_async_engine,
             async_sessionmaker,
         )
+        from sqlalchemy.pool import NullPool
         # Keep pool small so we stay well under providers' connection
         # limits (Railway: 20, Neon free: 100, Supabase free: 60).
         engine = create_async_engine(
@@ -123,13 +158,30 @@ if DATABASE_URL:
             connect_args=_connect_args,
         )
         async_session = async_sessionmaker(engine, expire_on_commit=False)
+
+        # Layer B: dedicated NullPool engine for AL-holding sessions.
+        # SAME connect_args (same command_timeout, same server-side
+        # timeouts) — only the pool class differs.
+        advisory_lock_engine = create_async_engine(
+            DATABASE_URL,
+            poolclass=NullPool,
+            connect_args=_connect_args,
+        )
+        advisory_lock_session = async_sessionmaker(
+            advisory_lock_engine, expire_on_commit=False,
+        )
+
         log.info(
-            "database engine created (pool_size=5, pool_recycle=300, ssl=%s)",
+            "database engines created (pooled pool_size=5, pool_recycle=300; "
+            "advisory_lock NullPool; ssl=%s)",
             _connect_args.get("ssl", "default"),
         )
     except Exception as e:
         log.warning("failed to create database engine: %s", e)
         engine = None
+        async_session = None
+        advisory_lock_engine = None
+        advisory_lock_session = None
         async_session = None
 else:
     log.info("DATABASE_URL not set — running in memory-only mode")

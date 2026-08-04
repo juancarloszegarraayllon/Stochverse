@@ -273,12 +273,10 @@ async def _ingest_pass(session: AsyncSession) -> IngestionResult:
         schema_drift=result.schema_drift,
         duration_ms=result.duration_ms,
     )
-    # Layer C: stamp the health registry on every successful pass.
-    # Called REGARDLESS of whether any writes fired — the task being
-    # alive and completing the pass IS the health signal. A pass that
-    # fetched=0 upserted=0 bumped=0 still proves the loop is running.
-    from .health import stamp_pass_complete
-    stamp_pass_complete("kalshi")
+    # Note: iteration-alive stamp for "kalshi" fires at TOP of
+    # _markets_loop (Layer B, 2026-08-04) — not here. Fires every
+    # cadence tick regardless of whether this specific pass hangs
+    # or throws.
     return result
 
 
@@ -302,8 +300,16 @@ async def _markets_loop(
     Supervise restart creates a fresh _markets_loop invocation which
     re-initializes first_pass=True naturally."""
     from .base import pass_timeout_for
+    from .health import stamp_pass_complete
     first_pass = True
     while True:
+        # Layer B (2026-08-04): iteration-alive stamp at TOP — proves
+        # the loop is running regardless of pass outcome. Pre-Layer-B
+        # stamp fired inside _ingest_pass AFTER commit, which meant
+        # a hung pass (bounded by Layer D at 120s steady / 300s boot)
+        # left the stamp stale until the timeout fired. Now the stamp
+        # advances every 30s cadence tick regardless.
+        stamp_pass_complete("kalshi")
         try:
             async with session_factory() as session:
                 timeout_s = pass_timeout_for(first_pass)
@@ -339,18 +345,25 @@ async def run(session_factory) -> None:
     the surrounding supervisor (ingestion.base.supervise).
     """
     # Layer D.1b (2026-08-03): boot path — session acquire +
-    # try_acquire_advisory_lock — wrapped in wait_for. The Aug 1
-    # kalshi task's death window was [00:36, ~01:29] UTC and could
-    # have been the boot path OR the first-pass; this bound closes
-    # the boot flavor regardless. Timeout raises TimeoutError →
-    # propagates to supervise → crash-restart. INGESTION_BOOT_TIMEOUT_S
-    # default 60s (env-tunable).
+    # try_acquire_advisory_lock — wrapped in wait_for.
+    # Layer B (2026-08-04): lock-holding session uses NullPool-backed
+    # `advisory_lock_session` for immediate lock release on session
+    # drop. Data-side sessions inside _markets_loop keep the pooled
+    # `session_factory` for per-pass throughput.
     from .base import INGESTION_BOOT_TIMEOUT_S
+
+    from db import advisory_lock_session as _al_session_factory
+    if _al_session_factory is None:
+        # DATABASE_URL missing or engine init failed — fall back to
+        # the passed session_factory so behavior in memory-only mode
+        # matches pre-Layer-B (which is: never reached, because
+        # runner.py short-circuits earlier).
+        _al_session_factory = session_factory
 
     async def _acquire_lock_session():
         # Encapsulated for wait_for wrapping — the entire acquire
         # sequence including session __aenter__.
-        session_cm = session_factory()
+        session_cm = _al_session_factory()
         session = await session_cm.__aenter__()
         try:
             got_lock = await try_acquire_advisory_lock(

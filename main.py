@@ -471,12 +471,15 @@ async def _price_prune_loop():
         register("price_prune")
         set_state("price_prune", STATE_HOLDER_RUNNING)
         while True:
+            # Layer B: iteration-alive stamp at TOP — proves the loop
+            # is running regardless of prune_old_prices' outcome.
+            # See _score_flush_loop for the Day-64 rationale.
+            stamp_pass_complete("price_prune")
             try:
                 from db import prune_old_prices
                 deleted = await prune_old_prices()
                 if deleted and deleted > 0:
                     _log.info("pruned %d old price rows", deleted)
-                stamp_pass_complete("price_prune")
             except Exception as e:
                 _log.error("prune loop error: %s", e)
             await asyncio.sleep(3600)  # every hour
@@ -532,6 +535,15 @@ async def _score_flush_loop():
         set_state("score_flush", STATE_HOLDER_RUNNING)
         _seed_counter = 0  # only seed entities every 5th cycle (~2.5 min)
         while True:
+            # Layer B (2026-08-04): iteration-alive stamp fires FIRST,
+            # before any work — proves the loop is running regardless
+            # of whether this iteration finds work to do. Pre-Layer-B
+            # placement was AFTER the work; operator's Day-64 evidence
+            # showed the stamp only advanced during flush-with-work
+            # periods, false-alarming stale=true during quiet windows
+            # (score_flush's 90s threshold vs 30s cadence gave no
+            # margin if flushing took a full pass to reach the stamp).
+            stamp_pass_complete("score_flush")
             try:
                 from db import sync_scores_to_db
                 flashlive_snap = []
@@ -564,12 +576,6 @@ async def _score_flush_loop():
                         await refresh_alias_sport_cache()
                     except Exception as e:
                         _log.error("entity seed: %s", e)
-                # Cycle-complete stamp — loop is alive, aggregate
-                # signal for /api/ingestion_status. Runs regardless
-                # of whether inner try blocks logged flashlive/seed
-                # errors (those are per-source degradations, not
-                # loop-level death).
-                stamp_pass_complete("score_flush")
             except Exception as e:
                 _log.error("score flush loop error: %s", e)
             await asyncio.sleep(30)
@@ -6132,7 +6138,11 @@ async def _multi_stage_discovery_loop():
 async def _multi_stage_discovery_loop_body(_log):
     """Extracted body so the advisory-lock wrapper stays clean.
     Behavior identical to the pre-Day-62 loop body."""
+    from ingestion.health import stamp_pass_complete as _stamp
     while True:
+        # Layer B: iteration-alive stamp at TOP — proves the 30-min
+        # loop is running regardless of walk outcome.
+        _stamp("multi_stage_disc")
         try:
             seen: set = set()
             leagues_to_walk: list = []
@@ -6197,12 +6207,6 @@ async def _multi_stage_discovery_loop_body(_log):
                 # Consolidated save: one write per walk if any newly-
                 # discovered stage changed content (typical), zero if not.
                 await _maybe_save_tournament_brackets()
-            # Layer C: cycle-complete stamp — 30-min iteration
-            # completed without a top-level throw. Under the 5400s
-            # threshold (30min × 3), this stamps well inside the
-            # alert window.
-            from ingestion.health import stamp_pass_complete as _stamp
-            _stamp("multi_stage_disc")
         except Exception as e:
             _log.warning("multi_stage_discovery_loop iter failed: %s", e)
         await asyncio.sleep(30 * 60)
@@ -6415,8 +6419,12 @@ async def _tournament_bracket_warm_loop_body(_log):
     #    60s so a freshly-added stage_id starts populating within
     #    a minute. Sequential with small spacing here is fine —
     #    there's no urgency, just bounded background freshness.
+    from ingestion.health import stamp_pass_complete as _stamp
     while True:
         await asyncio.sleep(60)
+        # Layer B: iteration-alive stamp at TOP — proves the 60s
+        # steady-state loop is running regardless of walk outcome.
+        _stamp("bracket_walk")
         try:
             now = time.time()
             # Day-62 shakedown fix: dedupe by stage_id before walking.
@@ -6443,11 +6451,9 @@ async def _tournament_bracket_warm_loop_body(_log):
             # Consolidated save at end of each 60s pass: one write iff
             # any refresh above changed content, zero writes otherwise.
             await _maybe_save_tournament_brackets()
-            # Layer C: cycle-complete stamp — 60s loop iteration
-            # finished. Under the 3600s threshold (30-min TTL × 2),
-            # this stamps ~60× more often than the alert would fire.
-            from ingestion.health import stamp_pass_complete as _stamp
-            _stamp("bracket_walk")
+            # Note: iteration-alive stamp fires at TOP of loop
+            # (Layer B), not here — proves loop is running even if
+            # this iteration hangs before reaching this line.
         except Exception as e:
             _log.warning("tournament_bracket_warm_loop iter failed: %s", e)
 
@@ -14467,22 +14473,32 @@ def ingestion_status():
     ingestion/health.py:DEFAULT_STALENESS_THRESHOLDS_S)."""
     from ingestion.health import snapshot, WORKER_ID
     tasks = snapshot()
-    # Layer A additions: worker_id identifies WHICH of the two
-    # WEB_CONCURRENCY workers served this response, so a single sample
-    # is unambiguous about scope. Pre-Layer-A "dead" on one worker was
-    # benign (supervise-treats-clean-return-as-complete on the non-
-    # holder path); post-Layer-A that path raises NotLockHolder →
-    # STATE_NOT_HOLDER_POLLING, and "dead" becomes a true alarm.
-    # Cross-worker aggregation via a DB-backed heartbeat table is
-    # Layer-3 future work — not built here.
+    # Layer B (2026-08-04): derive worker_role from actual task
+    # states rather than hardcoding "holder_view". Post-Layer-A each
+    # AL task is EITHER holder_running OR not_holder_polling on a
+    # given worker; the aggregate across tasks tells you what role
+    # this worker plays. Pre-Layer-B "holder_view" read identically
+    # on both workers, giving operators no signal.
+    holder_count     = sum(1 for t in tasks if t.get("state") == "holder_running")
+    non_holder_count = sum(1 for t in tasks if t.get("state") == "not_holder_polling")
+    if holder_count > 0 and non_holder_count > 0:
+        worker_role = "mixed"        # some tasks holder, some not — expected
+    elif holder_count > 0:
+        worker_role = "holder"       # holds one or more AL surfaces
+    elif non_holder_count > 0:
+        worker_role = "non_holder"   # yields on all AL surfaces
+    else:
+        worker_role = "unknown"      # early boot / no tasks reporting yet
     return {
         "tasks":          tasks,
         "task_count":     len(tasks),
         "any_stale":      any(t.get("stale") for t in tasks),
         "any_dead":       any(t.get("state") == "dead" for t in tasks),
-        "any_not_holder": any(t.get("state") == "not_holder_polling" for t in tasks),
+        "any_not_holder": non_holder_count > 0,
+        "holder_count":   holder_count,
+        "non_holder_count": non_holder_count,
         "worker_id":      WORKER_ID,
-        "worker_role":    "holder_view",  # per-worker scope; aggregate is DB-Layer-3
+        "worker_role":    worker_role,
         "checked_at_ts":  time.time(),
     }
 
