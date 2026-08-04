@@ -459,10 +459,6 @@ async def _price_prune_loop():
     await asyncio.sleep(10)  # let DB init finish
 
     from db import async_session, DATABASE_URL, advisory_lock_engine
-    if not DATABASE_URL or async_session is None or advisory_lock_engine is None:
-        _log.info("skipping — no DATABASE_URL or advisory_lock_engine")
-        return
-
     from ingestion.base import (
         ADVISORY_LOCK_PRICE_PRUNE,
         NotLockHolder,
@@ -470,6 +466,25 @@ async def _price_prune_loop():
         holder_heartbeat,
         pass_timeout_for,
     )
+    if not DATABASE_URL or async_session is None:
+        # No pooled data engine at all — the loop's work is DB-side.
+        # Nothing to do; return quietly (memory-only mode).
+        _log.info("skipping — no DATABASE_URL")
+        return
+    if advisory_lock_engine is None:
+        # E-rev-b-hotfix (2026-08-07): AL engine init failed (bad
+        # DATABASE_URL_DIRECT env var, transient Neon fault at boot,
+        # etc.). Raise NotLockHolder so supervise re-races indefinitely
+        # instead of clean-returning into STATE_DEAD. Once the operator
+        # fixes the env var (or the transient clears), the retry lands
+        # on a healthy advisory_lock_engine and the loop comes alive
+        # WITHOUT a redeploy. Pre-hotfix clean-return regressed the
+        # Day-63 defect class through a new door.
+        _log.warning(
+            "price_prune: advisory_lock_engine unavailable — raising "
+            "NotLockHolder for supervise re-race",
+        )
+        raise NotLockHolder()
     # Layer E-rev-b: pinned AsyncConnection on DIRECT Neon endpoint.
     conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
         advisory_lock_engine, ADVISORY_LOCK_PRICE_PRUNE,
@@ -546,10 +561,6 @@ async def _score_flush_loop():
 
     from db import async_session, DATABASE_URL
     from db import advisory_lock_engine
-    if not DATABASE_URL or async_session is None or advisory_lock_engine is None:
-        _log.info("skipping — no DATABASE_URL or advisory_lock_engine")
-        return
-
     from ingestion.base import (
         ADVISORY_LOCK_SCORE_FLUSH,
         NotLockHolder,
@@ -557,6 +568,16 @@ async def _score_flush_loop():
         holder_heartbeat,
         pass_timeout_for,
     )
+    if not DATABASE_URL or async_session is None:
+        _log.info("skipping — no DATABASE_URL")
+        return
+    if advisory_lock_engine is None:
+        # E-rev-b-hotfix: see _price_prune_loop for rationale.
+        _log.warning(
+            "score_flush: advisory_lock_engine unavailable — raising "
+            "NotLockHolder for supervise re-race",
+        )
+        raise NotLockHolder()
     # Layer E-rev-b: pinned AsyncConnection on DIRECT Neon endpoint.
     conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
         advisory_lock_engine, ADVISORY_LOCK_SCORE_FLUSH,
@@ -6308,18 +6329,22 @@ async def _multi_stage_discovery_loop():
     await asyncio.sleep(30)
 
     from db import async_session, DATABASE_URL, advisory_lock_engine
-    if not DATABASE_URL or async_session is None or advisory_lock_engine is None:
-        _log.info(
-            "multi_stage_discovery_loop: skipping — no DATABASE_URL or advisory_lock_engine",
-        )
-        return
-
     from ingestion.base import (
         ADVISORY_LOCK_MULTI_STAGE_DISC,
         NotLockHolder,
         acquire_lock_connection_bounded,
         holder_heartbeat,
     )
+    if not DATABASE_URL or async_session is None:
+        _log.info("multi_stage_discovery_loop: skipping — no DATABASE_URL")
+        return
+    if advisory_lock_engine is None:
+        # E-rev-b-hotfix: see _price_prune_loop for rationale.
+        _log.warning(
+            "multi_stage_discovery_loop: advisory_lock_engine unavailable "
+            "— raising NotLockHolder for supervise re-race",
+        )
+        raise NotLockHolder()
     # Layer E-rev-b: pinned AsyncConnection on DIRECT Neon endpoint.
     conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
         advisory_lock_engine, ADVISORY_LOCK_MULTI_STAGE_DISC,
@@ -6483,18 +6508,22 @@ async def _tournament_bracket_warm_loop():
     _log = logging.getLogger("stochverse")
 
     from db import async_session, DATABASE_URL, advisory_lock_engine
-    if not DATABASE_URL or async_session is None or advisory_lock_engine is None:
-        _log.info(
-            "tournament_bracket_warm_loop: skipping — no DATABASE_URL or advisory_lock_engine",
-        )
-        return
-
     from ingestion.base import (
         ADVISORY_LOCK_BRACKET_WALK,
         NotLockHolder,
         acquire_lock_connection_bounded,
         holder_heartbeat,
     )
+    if not DATABASE_URL or async_session is None:
+        _log.info("tournament_bracket_warm_loop: skipping — no DATABASE_URL")
+        return
+    if advisory_lock_engine is None:
+        # E-rev-b-hotfix: see _price_prune_loop for rationale.
+        _log.warning(
+            "tournament_bracket_warm_loop: advisory_lock_engine "
+            "unavailable — raising NotLockHolder for supervise re-race",
+        )
+        raise NotLockHolder()
     # Layer E-rev-b: pinned AsyncConnection on DIRECT Neon endpoint.
     conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
         advisory_lock_engine, ADVISORY_LOCK_BRACKET_WALK,

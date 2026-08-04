@@ -422,11 +422,14 @@ async def run(
 
     from db import advisory_lock_engine as _al_engine
     if _al_engine is None:
+        # E-rev-b-hotfix (2026-08-07): see ingestion.kalshi.run for
+        # rationale — raise NotLockHolder so supervise re-races,
+        # rather than clean-return into STATE_DEAD.
         _log.warning(
             "ingestion.fl.no_al_engine",
-            note="advisory_lock_engine is None; skipping",
+            note="advisory_lock_engine unavailable — raising NotLockHolder for supervise re-race",
         )
-        return
+        raise NotLockHolder()
 
     conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
         _al_engine, ADVISORY_LOCK_FL,
