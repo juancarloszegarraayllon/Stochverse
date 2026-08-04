@@ -914,3 +914,35 @@ async def load_cache_blob(key: str):
     except Exception as e:
         log.warning("load_cache_blob(%s) failed: %s", key, e)
         return None
+
+
+async def load_cutover_config_row():
+    """Read the sp.cutover_config singleton row. Returns None on any
+    failure (DB unavailable, table missing, no row). Called from the
+    background _cutover_config_refresh_loop in main.py — NEVER from
+    the request path.
+
+    Returns a dict with keys: traffic_pct, enabled_sports (list[str]),
+    min_cohort_series. Field names match the migration schema.
+    """
+    if not DATABASE_URL or engine is None:
+        return None
+    try:
+        from sqlalchemy import text as _text
+        sql = _text(
+            "SELECT traffic_pct, enabled_sports, min_cohort_series "
+            "FROM sp.cutover_config WHERE id = 1"
+        )
+        async with engine.begin() as conn:
+            r = await conn.execute(sql)
+            row = r.first()
+            if row is None:
+                return None
+            return {
+                "traffic_pct":       int(row[0]),
+                "enabled_sports":    tuple(row[1] or ()),
+                "min_cohort_series": int(row[2]),
+            }
+    except Exception as e:
+        log.warning("load_cutover_config_row failed: %s", e)
+        return None

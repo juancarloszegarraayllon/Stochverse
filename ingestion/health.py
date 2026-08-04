@@ -96,6 +96,7 @@ DEFAULT_STALENESS_THRESHOLDS_S: dict[str, int] = {
     "price_prune":       7200,   # hourly × 2 = 7200s
     "bracket_walk":      3600,   # 30-min steady-state × 2 = 3600s
     "multi_stage_disc":  5400,   # 30-min cycle × 3 = 5400s
+    "cutover_config_refresh": 30,  # 5s cadence × 6 = 30s
 }
 
 # Every ingestion surface must appear in this list. `register_all()`
@@ -113,6 +114,8 @@ INGESTION_TASK_NAMES: tuple[str, ...] = (
     "price_prune",
     "bracket_walk",
     "multi_stage_disc",
+    # Phase 3 (2026-08-04): cutover config bg refresh loop.
+    "cutover_config_refresh",
 )
 
 

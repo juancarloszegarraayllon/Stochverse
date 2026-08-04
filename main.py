@@ -255,6 +255,16 @@ async def startup_event():
     # to cache_blobs on a 60s dirty-gated cadence so redeploys don't
     # lose the cache.
     asyncio.create_task(_series_meta_persist_loop())
+    # Phase 3 (2026-08-04): background refresh loop for the cutover
+    # config singleton. Supervise-wrapped so it inherits Layer-A
+    # NotLockHolder + Layer-D timeouts + Layer-C health-registry
+    # semantics. Both workers refresh independently (config is read-
+    # only from the worker's perspective — write is the operator's
+    # Neon UPDATE).
+    from ingestion.base import supervise as _supervise
+    asyncio.create_task(_supervise(
+        "cutover_config_refresh", _cutover_config_refresh_loop,
+    ))
     # Prewarm series→stage_id for EVERY sport series in get_data(),
     # not just the ones users have clicked into. This is what was
     # missing for CONCACAF / Copa Sudamericana / smaller cups: their
@@ -1228,6 +1238,99 @@ async def _series_meta_persist_loop() -> None:
         except Exception as e:
             _series_meta_dirty = True
             _log.warning("kalshi_series_meta persist loop error: %s", e)
+
+
+# ── Phase 3 cutover config bg refresh (2026-08-04) ──────────────
+#
+# House pattern per Layer C/A/D/B lineage: bg loop, supervise-
+# wrapped, Layer-D-bounded, registered in ingestion.health. Reads
+# sp.cutover_config every _CUTOVER_REFRESH_INTERVAL_S seconds and
+# writes to cutover._CURRENT_CONFIG. Serving path (is_v4_cohort +
+# /api/cutover_status + /api/events branching) reads RAM only —
+# ZERO Neon round-trips per request, per operator's architectural
+# constraint.
+#
+# Flip propagation ≤ INTERVAL_S. Default 5s (env-tunable).
+
+_CUTOVER_REFRESH_INTERVAL_S = int(
+    os.environ.get("CUTOVER_REFRESH_INTERVAL_S", "5")
+)
+
+
+def _apply_v4_linkage_placeholder(record: dict) -> None:
+    """Placeholder for the v4 fixture-linkage pathway (deferred to
+    the follow-up linkage-cache PR). Today this function is
+    unreachable — /api/events wiring short-circuits at pct=0 default
+    so no call site enters this body. When the linkage-cache PR
+    lands, this becomes the actual v4 lookup: read the in-memory
+    event_ticker → fixture_id map (bg-loop refreshed) and merge
+    fixture-derived fields into `record`. Kept as an explicit
+    NotImplementedError so any early-firing bug surfaces loudly
+    rather than serving inconsistent state.
+
+    Present in this PR so the branching wiring parses cleanly and
+    the fallback-counter contract is testable end-to-end. Ship
+    order: flag-wiring (this PR, no behavior change at pct=0) →
+    linkage-cache follow-up PR (implements this function) → operator
+    flips pct=5 for soccer."""
+    raise NotImplementedError(
+        "v4 linkage pathway not yet wired — this call is unreachable "
+        "at pct=0 default. Follow-up linkage-cache PR implements "
+        "the actual lookup + merge."
+    )
+
+
+async def _cutover_config_refresh_loop():
+    """Every 5s, load sp.cutover_config and update cutover module
+    state. Supervise-wrapped in startup_event so it inherits the
+    NotLockHolder / crash-restart / health-registry semantics.
+
+    No advisory lock — every worker refreshes independently (config
+    is read-only; write is the operator's Neon UPDATE). Both workers
+    converge to the same _CURRENT_CONFIG within one INTERVAL_S of
+    the operator's flip."""
+    _log = logging.getLogger("cutover_config")
+    from ingestion.health import register, stamp_pass_complete, set_state, STATE_HOLDER_RUNNING
+    from ingestion.base import pass_timeout_for
+    from cutover import CutoverConfig, set_current_config
+    import time as _time
+
+    register("cutover_config_refresh")
+    set_state("cutover_config_refresh", STATE_HOLDER_RUNNING)
+    first_pass = True
+    while True:
+        # Layer B (stamp at TOP of iteration): iteration-alive
+        # signal fires regardless of DB read outcome.
+        stamp_pass_complete("cutover_config_refresh")
+        try:
+            from db import load_cutover_config_row
+            timeout_s = pass_timeout_for(first_pass)
+            try:
+                row = await asyncio.wait_for(
+                    load_cutover_config_row(), timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                _log.warning(
+                    "cutover_config_refresh_timeout timeout_sec=%s first_pass=%s",
+                    timeout_s, first_pass,
+                )
+                raise
+            if row is not None:
+                cfg = CutoverConfig(
+                    traffic_pct=row["traffic_pct"],
+                    enabled_sports=row["enabled_sports"],
+                    min_cohort_series=row["min_cohort_series"],
+                    source="db",
+                    loaded_at_ts=_time.time(),
+                )
+                set_current_config(cfg)
+                first_pass = False
+            # If row is None (DB unreachable or table missing), leave
+            # the current config alone — env_fallback (or last-known
+            # DB values) stays in effect until the next refresh.
+        except Exception as e:
+            _log.warning("cutover_config_refresh error: %s", e)
+        await asyncio.sleep(_CUTOVER_REFRESH_INTERVAL_S)
 
 
 # ── Game-market grouping ──────────────────────────────────────────────────────
@@ -2495,6 +2598,50 @@ def get_events(
         records = _cache["data_all"]
     else:
         records = _cache.get("data") or []
+
+    # ── Phase 3 v4 cutover branching (2026-08-04) ──────────────
+    # Guarded per-record: cohort membership check short-circuits
+    # on sport/pct=0 (fast path); v4 pathway itself is not yet
+    # wired (separate follow-up PR for the event_ticker→fixture
+    # linkage cache), so this call ALWAYS short-circuits today
+    # (pct=0 default). Ships the wiring first with strict no-op
+    # semantics per operator's "safe to merge" contract; the
+    # linkage cache PR adds _apply_v4_linkage() with real work.
+    try:
+        from cutover import (
+            is_v4_cohort as _is_v4_cohort,
+            increment_fallback_counter as _incr_v4_fb,
+            get_current_config as _get_cutover_cfg,
+        )
+        _cutover_cfg = _get_cutover_cfg()
+        # Only enter the per-record branching loop if the config
+        # actually has any potential cohort — avoids the per-record
+        # cost of is_v4_cohort()'s sport-lookup at pct=0 default.
+        if _cutover_cfg.traffic_pct > 0 and _cutover_cfg.enabled_sports:
+            for _r in records:
+                _st = _r.get("series_ticker") or ""
+                if not _is_v4_cohort(_st, cfg=_cutover_cfg):
+                    continue
+                try:
+                    # v4 pathway not yet implemented — placeholder
+                    # for the follow-up linkage-cache PR. Today this
+                    # branch is unreachable because the wiring above
+                    # short-circuits (pct=0 default).
+                    _apply_v4_linkage_placeholder(_r)
+                except Exception as _v4_exc:
+                    _new_count = _incr_v4_fb()
+                    logging.getLogger("stochverse").warning(
+                        "v4_fallback ticker=%s error_class=%s "
+                        "error=%s fallback_count=%d",
+                        _r.get("event_ticker"), type(_v4_exc).__name__,
+                        str(_v4_exc)[:200], _new_count,
+                    )
+                    # Fall through — record stays with its v3 state.
+    except Exception:
+        # Cutover machinery import/read failure MUST NOT break
+        # /api/events. Silent fall-through — every record serves v3.
+        pass
+
     today = _date.today()
     from datetime import datetime as _dt
     now_utc = _dt.now(timezone.utc)
@@ -14500,6 +14647,52 @@ def ingestion_status():
         "worker_id":      WORKER_ID,
         "worker_role":    worker_role,
         "checked_at_ts":  time.time(),
+    }
+
+
+@app.get("/api/cutover_status")
+def cutover_status():
+    """Phase 3 v4-cutover state surface. Sole visibility endpoint
+    for the operator's flip flow.
+
+    Reads cutover module state in RAM (populated by the bg refresh
+    loop) — ZERO Neon round-trips per request. Fields:
+      - traffic_pct:         raw operator-set target (0-100)
+      - enabled_sports:      sport whitelist (empty = v4 off)
+      - min_cohort_series:   MIN-COHORT FLOOR
+      - cohort_size:         actual N (deterministic from
+                             lowest-hash-N-in-enabled-sports)
+      - cohort_sample:       first 10 series_tickers in cohort
+      - v4_fallback_count:   this worker's fallback counter (v4
+                             raised → served v3). Cross-worker
+                             aggregate = sum across sample responses.
+      - config_source:       'db' (bg loop loaded successfully) |
+                             'env_fallback' (bg loop never
+                             completed) | 'default' (module init).
+      - config_loaded_at_ts: unix seconds of last successful load.
+      - worker_id:           os.getpid()
+
+    Runbook: operator flips via `UPDATE sp.cutover_config SET
+    traffic_pct=N, enabled_sports='{Soccer}' WHERE id=1;`. Bg loop
+    picks up within CUTOVER_REFRESH_INTERVAL_S (default 5s)."""
+    from cutover import (
+        get_current_config, cohort_series_list,
+        fallback_counter_value,
+    )
+    from ingestion.health import WORKER_ID
+    cfg = get_current_config()
+    cohort = cohort_series_list(cfg)
+    return {
+        "traffic_pct":         cfg.traffic_pct,
+        "enabled_sports":      list(cfg.enabled_sports),
+        "min_cohort_series":   cfg.min_cohort_series,
+        "cohort_size":         len(cohort),
+        "cohort_sample":       cohort[:10],
+        "v4_fallback_count":   fallback_counter_value(),
+        "config_source":       cfg.source,
+        "config_loaded_at_ts": cfg.loaded_at_ts if cfg.loaded_at_ts > 0 else None,
+        "worker_id":           WORKER_ID,
+        "checked_at_ts":       time.time(),
     }
 
 
