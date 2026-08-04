@@ -9,6 +9,7 @@ SQLAlchemy abstractions and Postgres advisory locks.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -363,6 +364,136 @@ class NotLockHolder(Exception):
     Root cause the 2026-08-01 Kalshi incident exposed."""
 
 
+# ── LockGripLost sentinel (Layer E, 2026-08-05) ────────────────
+#
+# Day-65 mutual-exclusion failure post-Layer-B: BOTH workers reported
+# holder_running for all AL surfaces with independently-advancing
+# stamps + fl_last_error=InterfaceError("connection is closed") on
+# the AL session. Mechanism (Layer A+B+D interaction class):
+#
+#   1. NullPool AL session left BEGIN-open after try_acquire (no
+#      commit). Server-side idle_in_transaction_session_timeout=60s
+#      terminates the connection. Session-level advisory lock releases.
+#      → Fixed by Layer E.1 (commit-after-acquire).
+#
+#   2. Even with the commit, Neon proxy silently reaps TCP-idle
+#      connections after ~5-10min. Same outcome: connection dies,
+#      lock releases, dead-holder loop keeps stamping.
+#      → Fixed by Layer E.2 (heartbeat + LockGripLost + supervise re-race).
+#
+# A holder that can't prove its grip must stop being a holder.
+# Heartbeat runs SELECT 1 on the AL session every AL_HEARTBEAT_INTERVAL_S
+# seconds. On failure (InterfaceError / OperationalError / any exception
+# from execute), heartbeat cancels the parent task, which unwinds and
+# raises LockGripLost. supervise() catches LockGripLost as a peer of
+# NotLockHolder (before generic Exception), logs distinctly, and re-races.
+
+AL_HEARTBEAT_INTERVAL_S: float = float(
+    os.environ.get("AL_HEARTBEAT_INTERVAL_S", "20.0")
+)
+
+
+class LockGripLost(Exception):
+    """Signal from a holder's heartbeat that the advisory-lock session
+    lost its grip on the underlying Postgres connection (heartbeat
+    SELECT 1 raised InterfaceError / OperationalError / connection-
+    closed → session-level advisory lock has released silently on the
+    server side). supervise() catches this specifically (peer of
+    NotLockHolder, before generic Exception) and re-races for the
+    lock. Root cause the 2026-08-05 dual-holder incident exposed."""
+
+
+async def _al_heartbeat_body(
+    session,
+    lock_key: int,
+    log_name: str,
+    parent_task: asyncio.Task,
+    grip_ref: dict,
+) -> None:
+    """Heartbeat body — every AL_HEARTBEAT_INTERVAL_S, SELECT 1 on the
+    AL session. On failure, stamp grip_ref and cancel parent_task.
+
+    SELECT 1 serves two purposes: (a) proves the TCP connection +
+    backend are alive; (b) keeps the session non-idle so Neon proxy /
+    intermediate load balancers don't reap the connection during a
+    long quiet period between real queries. E.1's commit-after-acquire
+    closes the server-side idle-in-txn fuse (60s); this keepalive
+    closes the proxy-side TCP-idle fuse (~5-10min).
+
+    Exits cleanly on CancelledError (parent teardown). Exits after
+    stamping grip_ref on any other exception (grip lost — parent will
+    unwind and raise LockGripLost via the holder_heartbeat CM)."""
+    _log = get_logger(f"al_heartbeat.{log_name}")
+    while True:
+        try:
+            await asyncio.sleep(AL_HEARTBEAT_INTERVAL_S)
+            await session.execute(text("SELECT 1"))
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _log.warning(
+                "al_heartbeat.grip_lost",
+                task=log_name,
+                lock_key=hex(lock_key),
+                error_class=type(exc).__name__,
+                error_msg=str(exc)[:200],
+            )
+            grip_ref["lost"] = True
+            grip_ref["error"] = exc
+            if not parent_task.done():
+                parent_task.cancel()
+            return
+
+
+@contextlib.asynccontextmanager
+async def holder_heartbeat(session, lock_key: int, log_name: str):
+    """Async context manager: spawn the AL-session heartbeat while the
+    body runs, cancel it cleanly on exit, and translate heartbeat-
+    driven parent cancellation into a `LockGripLost` raise.
+
+    Usage:
+        async with holder_heartbeat(lock_session, ADVISORY_LOCK_X, "x"):
+            while True:
+                ...  # per-pass work (bounded by wait_for)
+
+    Semantics:
+      - Normal completion of the body → heartbeat cancelled cleanly.
+      - Exception inside the body → heartbeat cancelled; exception
+        propagates unchanged.
+      - Heartbeat detects grip loss → heartbeat cancels the parent
+        task → the body's next await sees CancelledError → this CM
+        checks grip_ref and re-raises as LockGripLost (which supervise
+        catches distinctly).
+      - External cancellation (supervise teardown) → CancelledError
+        propagates unchanged (grip_ref not stamped → no translation).
+    """
+    parent_task = asyncio.current_task()
+    if parent_task is None:
+        raise RuntimeError(
+            "holder_heartbeat must be entered from within an asyncio task",
+        )
+    grip_ref: dict = {"lost": False, "error": None}
+    hb_task = asyncio.create_task(
+        _al_heartbeat_body(session, lock_key, log_name, parent_task, grip_ref),
+        name=f"al_heartbeat.{log_name}",
+    )
+    try:
+        yield
+    except asyncio.CancelledError:
+        if grip_ref["lost"]:
+            err = grip_ref["error"]
+            raise LockGripLost(
+                f"al_heartbeat detected grip loss task={log_name} "
+                f"error_class={type(err).__name__} "
+                f"error={str(err)[:200]}"
+            ) from err
+        raise
+    finally:
+        hb_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await hb_task
+
+
 # ── Layer D (2026-08-03): pass-timeout tiers + boot-path bound ─
 #
 # Actual fix for the 2026-08-01 Kalshi incident class: task alive
@@ -468,6 +599,25 @@ async def acquire_lock_session_bounded(
         session = await session_cm.__aenter__()
         try:
             got_lock = await try_acquire_advisory_lock(session, lock_key)
+            if got_lock:
+                # Layer E.1 (2026-08-05): commit-after-acquire.
+                # SQLAlchemy async_session runs `session.execute()` inside
+                # an implicit BEGIN that stays open until the caller
+                # commits/rollbacks. Post-Layer-B on NullPool the AL
+                # session was left BEGIN-open forever — the server-side
+                # `idle_in_transaction_session_timeout=60000` (db.py:75)
+                # then TERMINATED the connection after 60s, silently
+                # releasing the session-level advisory lock. The other
+                # worker's Layer-A supervise re-race then acquired the
+                # now-free lock → dual holders (Day-64 evidence).
+                #
+                # Postgres session-level advisory locks are transaction-
+                # independent (only pg_advisory_xact_lock is txn-scoped).
+                # Committing here ends the implicit txn; the lock persists
+                # until the connection closes. Defense against server-
+                # side idle-in-txn kill. E.2 heartbeat additionally
+                # defends against Neon-proxy TCP-idle reap (~5-10min).
+                await session.commit()
         except Exception:
             await session_cm.__aexit__(None, None, None)
             raise
@@ -582,6 +732,33 @@ async def supervise(
             # transient crashes.
             backoff = 1.0
             # fall through to next iteration of while True — re-race.
+            continue
+        except LockGripLost as exc:
+            # Layer E: heartbeat detected the AL session lost its grip
+            # (Neon proxy TCP-idle reap, DBA-side pg_terminate_backend,
+            # or connection drop). Session-level advisory lock has
+            # released silently server-side. Yield same as NotLockHolder
+            # so the sibling worker (or this one on re-race) can pick
+            # up cleanly — grip loss is an infrastructural signal, NOT
+            # counted against crash_alert_threshold. Distinct log line
+            # + STATE_NOT_HOLDER_POLLING with last_error_class=LockGripLost
+            # so operators can tell grip-loss re-race apart from clean
+            # not-holder yield.
+            _log.warning(
+                "ingestion.task.grip_lost",
+                task=name,
+                attempt=attempt,
+                error_msg=str(exc)[:200],
+                retry_in_sec=not_holder_poll_s,
+            )
+            _health.set_state(
+                name, _health.STATE_NOT_HOLDER_POLLING,
+                attempt=attempt,
+                last_error_class="LockGripLost",
+                last_error_msg=str(exc)[:500],
+            )
+            await asyncio.sleep(not_holder_poll_s)
+            backoff = 1.0
             continue
         except Exception as exc:
             now = time.monotonic()

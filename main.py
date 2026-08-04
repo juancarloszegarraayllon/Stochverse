@@ -467,6 +467,8 @@ async def _price_prune_loop():
         ADVISORY_LOCK_PRICE_PRUNE,
         NotLockHolder,
         acquire_lock_session_bounded,
+        holder_heartbeat,
+        pass_timeout_for,
     )
     session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
         async_session, ADVISORY_LOCK_PRICE_PRUNE,
@@ -480,19 +482,40 @@ async def _price_prune_loop():
         from ingestion.health import register, stamp_pass_complete, set_state, STATE_HOLDER_RUNNING
         register("price_prune")
         set_state("price_prune", STATE_HOLDER_RUNNING)
-        while True:
-            # Layer B: iteration-alive stamp at TOP — proves the loop
-            # is running regardless of prune_old_prices' outcome.
-            # See _score_flush_loop for the Day-64 rationale.
-            stamp_pass_complete("price_prune")
-            try:
-                from db import prune_old_prices
-                deleted = await prune_old_prices()
-                if deleted and deleted > 0:
-                    _log.info("pruned %d old price rows", deleted)
-            except Exception as e:
-                _log.error("prune loop error: %s", e)
-            await asyncio.sleep(3600)  # every hour
+        first_pass = True
+
+        async def _price_prune_pass():
+            from db import prune_old_prices
+            deleted = await prune_old_prices()
+            if deleted and deleted > 0:
+                _log.info("pruned %d old price rows", deleted)
+
+        # Layer E: heartbeat + per-pass wait_for (E.3 + E.4). Hourly
+        # cadence with an unbounded prune_old_prices was invisible for
+        # up to an hour on a dead-socket hang; now bounded per pass.
+        async with holder_heartbeat(
+            lock_session, ADVISORY_LOCK_PRICE_PRUNE, "price_prune",
+        ):
+            while True:
+                # Layer B: iteration-alive stamp at TOP — proves the loop
+                # is running regardless of prune_old_prices' outcome.
+                stamp_pass_complete("price_prune")
+                timeout_s = pass_timeout_for(first_pass)
+                try:
+                    await asyncio.wait_for(
+                        _price_prune_pass(), timeout=timeout_s,
+                    )
+                    first_pass = False
+                except asyncio.TimeoutError:
+                    _log.warning(
+                        "ingestion.task.pass_timeout task=price_prune "
+                        "timeout_sec=%s first_pass=%s",
+                        timeout_s, first_pass,
+                    )
+                    raise
+                except Exception as e:
+                    _log.error("prune loop error: %s", e)
+                await asyncio.sleep(3600)  # every hour
     finally:
         await session_cm.__aexit__(None, None, None)
 
@@ -529,6 +552,8 @@ async def _score_flush_loop():
         ADVISORY_LOCK_SCORE_FLUSH,
         NotLockHolder,
         acquire_lock_session_bounded,
+        holder_heartbeat,
+        pass_timeout_for,
     )
     # Layer D.1b: bounded boot-path acquire.
     session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
@@ -543,56 +568,81 @@ async def _score_flush_loop():
         from ingestion.health import register, stamp_pass_complete, set_state, STATE_HOLDER_RUNNING
         register("score_flush")
         set_state("score_flush", STATE_HOLDER_RUNNING)
-        _seed_counter = 0  # only seed entities every 5th cycle (~2.5 min)
-        while True:
-            # Layer B (2026-08-04): iteration-alive stamp fires FIRST,
-            # before any work — proves the loop is running regardless
-            # of whether this iteration finds work to do. Pre-Layer-B
-            # placement was AFTER the work; operator's Day-64 evidence
-            # showed the stamp only advanced during flush-with-work
-            # periods, false-alarming stale=true during quiet windows
-            # (score_flush's 90s threshold vs 30s cadence gave no
-            # margin if flushing took a full pass to reach the stamp).
-            stamp_pass_complete("score_flush")
-            try:
-                from db import sync_scores_to_db
-                flashlive_snap = []
-                try:
-                    from flashlive_feed import GAMES as FL_GAMES
-                    flashlive_snap = list(FL_GAMES.values())
-                    if flashlive_snap:
-                        await sync_scores_to_db("flashlive", flashlive_snap)
-                except Exception as e:
-                    _log.error("flashlive score flush: %s", e)
+        _seed_counter_ref = {"n": 0}   # only seed entities every 5th cycle
+        first_pass = True
 
-                # Phase 5: seed entities every 5th cycle (~2.5 min)
-                _seed_counter += 1
-                if _seed_counter >= 5:
-                    _seed_counter = 0
-                    try:
-                        from entity_seeder import extract_teams
-                        from db import upsert_entities, refresh_alias_sport_cache
-                        all_teams = []
-                        if flashlive_snap:
-                            # Add home_display/away_display aliases for entity seeder
-                            for g in flashlive_snap:
-                                if not g.get("home_display"):
-                                    g["home_display"] = g.get("home_name", "")
-                                if not g.get("away_display"):
-                                    g["away_display"] = g.get("away_name", "")
-                            all_teams.extend(extract_teams(flashlive_snap, "flashlive"))
-                        if all_teams:
-                            await upsert_entities(all_teams)
-                        await refresh_alias_sport_cache()
-                    except Exception as e:
-                        _log.error("entity seed: %s", e)
+        async def _score_flush_pass():
+            from db import sync_scores_to_db
+            flashlive_snap = []
+            try:
+                from flashlive_feed import GAMES as FL_GAMES
+                flashlive_snap = list(FL_GAMES.values())
+                if flashlive_snap:
+                    await sync_scores_to_db("flashlive", flashlive_snap)
             except Exception as e:
-                _log.error("score flush loop error: %s", e)
-            await asyncio.sleep(30)
+                _log.error("flashlive score flush: %s", e)
+
+            _seed_counter_ref["n"] += 1
+            if _seed_counter_ref["n"] >= 5:
+                _seed_counter_ref["n"] = 0
+                try:
+                    from entity_seeder import extract_teams
+                    from db import upsert_entities, refresh_alias_sport_cache
+                    all_teams = []
+                    if flashlive_snap:
+                        # Add home_display/away_display aliases for entity seeder
+                        for g in flashlive_snap:
+                            if not g.get("home_display"):
+                                g["home_display"] = g.get("home_name", "")
+                            if not g.get("away_display"):
+                                g["away_display"] = g.get("away_name", "")
+                        all_teams.extend(extract_teams(flashlive_snap, "flashlive"))
+                    if all_teams:
+                        await upsert_entities(all_teams)
+                    await refresh_alias_sport_cache()
+                except Exception as e:
+                    _log.error("entity seed: %s", e)
+
+        # Layer E (2026-08-05): holder_heartbeat runs SELECT 1 on the
+        # AL session every AL_HEARTBEAT_INTERVAL_S. On grip loss (Neon
+        # proxy reap / connection death), heartbeat cancels the parent
+        # task; the CM re-raises as LockGripLost → supervise re-races.
+        async with holder_heartbeat(
+            lock_session, ADVISORY_LOCK_SCORE_FLUSH, "score_flush",
+        ):
+            while True:
+                # Layer B (2026-08-04): iteration-alive stamp fires FIRST,
+                # before any work — proves the loop is running regardless
+                # of whether this iteration finds work to do.
+                stamp_pass_complete("score_flush")
+                # Layer E.3 (2026-08-05): per-pass wait_for wrap. Pre-E,
+                # this loop had NO wait_for around sync_scores_to_db /
+                # upsert_entities — a hang on a dead socket blocked the
+                # loop indefinitely; stamp-at-top fired once and never
+                # advanced (operator's Day-65 evidence: stale 430-471s
+                # with zero pass_timeout log lines because there was no
+                # wait_for to raise TimeoutError). D.1b covered only the
+                # BOOT path, not per-pass work.
+                timeout_s = pass_timeout_for(first_pass)
+                try:
+                    await asyncio.wait_for(
+                        _score_flush_pass(), timeout=timeout_s,
+                    )
+                    first_pass = False
+                except asyncio.TimeoutError:
+                    _log.warning(
+                        "ingestion.task.pass_timeout task=score_flush "
+                        "timeout_sec=%s first_pass=%s",
+                        timeout_s, first_pass,
+                    )
+                    raise
+                except Exception as e:
+                    _log.error("score flush loop error: %s", e)
+                await asyncio.sleep(30)
     finally:
         # Layer D.1b: manual session close matches acquire_lock_session_bounded's
         # "caller owns cleanup" contract. Runs on happy path, on
-        # NotLockHolder, and on any exception that escapes the loop.
+        # NotLockHolder, on LockGripLost, and on any exception.
         await session_cm.__aexit__(None, None, None)
 
 UTC = timezone.utc
@@ -6262,6 +6312,7 @@ async def _multi_stage_discovery_loop():
         ADVISORY_LOCK_MULTI_STAGE_DISC,
         NotLockHolder,
         acquire_lock_session_bounded,
+        holder_heartbeat,
     )
     session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
         async_session, ADVISORY_LOCK_MULTI_STAGE_DISC,
@@ -6277,15 +6328,49 @@ async def _multi_stage_discovery_loop():
         from ingestion.health import register, set_state, STATE_HOLDER_RUNNING
         register("multi_stage_disc")
         set_state("multi_stage_disc", STATE_HOLDER_RUNNING)
-        await _multi_stage_discovery_loop_body(_log)
+        # Layer E (2026-08-05): heartbeat on the AL session; grip loss
+        # (Neon proxy reap / connection death) → LockGripLost → supervise
+        # re-races. See ingestion.base.holder_heartbeat for semantics.
+        async with holder_heartbeat(
+            lock_session, ADVISORY_LOCK_MULTI_STAGE_DISC, "multi_stage_disc",
+        ):
+            await _multi_stage_discovery_loop_body(_log)
     finally:
         await session_cm.__aexit__(None, None, None)
 
 
 async def _multi_stage_discovery_loop_body(_log):
     """Extracted body so the advisory-lock wrapper stays clean.
-    Behavior identical to the pre-Day-62 loop body."""
+    Behavior identical to the pre-Day-62 loop body.
+
+    Layer E.3 (2026-08-05): individual sub-operations (per-league
+    list-stages, per-stage refresh, consolidated save) wrapped in
+    asyncio.wait_for(pass_timeout_for(...)) so a dead-socket hang on
+    ANY single call trips a pass_timeout log and propagates to
+    supervise for restart. Cannot wrap the whole outer pass — 1 req/s
+    walk over N leagues has a legitimate multi-minute duration; a
+    per-pass ceiling that fits the pass defeats the hang-detection
+    purpose. Per-call ceiling defends against the real failure mode."""
     from ingestion.health import stamp_pass_complete as _stamp
+    from ingestion.base import pass_timeout_for
+    first_pass = True
+
+    async def _bounded(coro, op_name: str):
+        # Per-op wait_for with pass_timeout_for cadence. Timeout →
+        # log distinct pass_timeout line + raise → supervise catches
+        # → crash-restart → re-race. Bounded surface = single FL HTTP
+        # or single DB call, not the whole 1-req/s walk.
+        timeout_s = pass_timeout_for(first_pass)
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            _log.warning(
+                "ingestion.task.pass_timeout task=multi_stage_disc "
+                "op=%s timeout_sec=%s first_pass=%s",
+                op_name, timeout_s, first_pass,
+            )
+            raise
+
     while True:
         # Layer B: iteration-alive stamp at TOP — proves the 30-min
         # loop is running regardless of walk outcome.
@@ -6313,7 +6398,12 @@ async def _multi_stage_discovery_loop_body(_log):
                 discovered_total = 0
                 for sport, league_name in leagues_to_walk:
                     try:
-                        stages = await _find_all_stages_for_league(sport, league_name)
+                        stages = await _bounded(
+                            _find_all_stages_for_league(sport, league_name),
+                            "find_all_stages_for_league",
+                        )
+                    except asyncio.TimeoutError:
+                        raise
                     except Exception as e:
                         _log.warning(
                             "multi-stage: list-stages for %r failed: %s",
@@ -6322,13 +6412,7 @@ async def _multi_stage_discovery_loop_body(_log):
                         await asyncio.sleep(1.0)
                         continue
                     # Day-62 shakedown fix (cheap belt-and-braces):
-                    # dedupe stage_ids in-league before probing. FL's
-                    # list-stages response doesn't ship duplicates
-                    # today, but relying on in-cache membership means
-                    # the FIRST duplicate in a burst enumeration
-                    # slips through if any exist. This shape matches
-                    # the initial-pass fix and keeps a single dedupe
-                    # invariant across every walk path.
+                    # dedupe stage_ids in-league before probing.
                     seen_stage_ids: set = set()
                     for st in stages:
                         sid = st.get("stage_id") or ""
@@ -6336,13 +6420,18 @@ async def _multi_stage_discovery_loop_body(_log):
                             continue
                         seen_stage_ids.add(sid)
                         try:
-                            ok = await _refresh_tournament_bracket(
-                                sid,
-                                st.get("season_id") or "",
-                                st.get("league_name") or league_name,
+                            ok = await _bounded(
+                                _refresh_tournament_bracket(
+                                    sid,
+                                    st.get("season_id") or "",
+                                    st.get("league_name") or league_name,
+                                ),
+                                "refresh_tournament_bracket",
                             )
                             if ok:
                                 discovered_total += 1
+                        except asyncio.TimeoutError:
+                            raise
                         except Exception:
                             pass
                         await asyncio.sleep(1.0)
@@ -6353,7 +6442,13 @@ async def _multi_stage_discovery_loop_body(_log):
                 )
                 # Consolidated save: one write per walk if any newly-
                 # discovered stage changed content (typical), zero if not.
-                await _maybe_save_tournament_brackets()
+                await _bounded(
+                    _maybe_save_tournament_brackets(),
+                    "maybe_save_tournament_brackets",
+                )
+                first_pass = False
+        except asyncio.TimeoutError:
+            raise
         except Exception as e:
             _log.warning("multi_stage_discovery_loop iter failed: %s", e)
         await asyncio.sleep(30 * 60)
@@ -6390,6 +6485,7 @@ async def _tournament_bracket_warm_loop():
         ADVISORY_LOCK_BRACKET_WALK,
         NotLockHolder,
         acquire_lock_session_bounded,
+        holder_heartbeat,
     )
     session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
         async_session, ADVISORY_LOCK_BRACKET_WALK,
@@ -6405,7 +6501,11 @@ async def _tournament_bracket_warm_loop():
         from ingestion.health import register, set_state, STATE_HOLDER_RUNNING
         register("bracket_walk")
         set_state("bracket_walk", STATE_HOLDER_RUNNING)
-        await _tournament_bracket_warm_loop_body(_log)
+        # Layer E (2026-08-05): heartbeat + grip-loss re-race.
+        async with holder_heartbeat(
+            lock_session, ADVISORY_LOCK_BRACKET_WALK, "bracket_walk",
+        ):
+            await _tournament_bracket_warm_loop_body(_log)
     finally:
         await session_cm.__aexit__(None, None, None)
 
@@ -6566,7 +6666,29 @@ async def _tournament_bracket_warm_loop_body(_log):
     #    60s so a freshly-added stage_id starts populating within
     #    a minute. Sequential with small spacing here is fine —
     #    there's no urgency, just bounded background freshness.
+    #
+    # Layer E.3 (2026-08-05): per-op wait_for on _refresh_tournament_bracket
+    # and _maybe_save_tournament_brackets. Cannot wrap the outer pass:
+    # a walk over N aged stages at 0.3s spacing has legitimate multi-
+    # second duration and a per-pass ceiling that fits defeats hang
+    # detection. Per-call ceiling defends against the real failure mode
+    # (single FL HTTP or DB write hung on a dead socket).
     from ingestion.health import stamp_pass_complete as _stamp
+    from ingestion.base import pass_timeout_for
+    first_pass = True
+
+    async def _bounded(coro, op_name: str):
+        timeout_s = pass_timeout_for(first_pass)
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            _log.warning(
+                "ingestion.task.pass_timeout task=bracket_walk "
+                "op=%s timeout_sec=%s first_pass=%s",
+                op_name, timeout_s, first_pass,
+            )
+            raise
+
     while True:
         await asyncio.sleep(60)
         # Layer B: iteration-alive stamp at TOP — proves the 60s
@@ -6575,11 +6697,6 @@ async def _tournament_bracket_warm_loop_body(_log):
         try:
             now = time.time()
             # Day-62 shakedown fix: dedupe by stage_id before walking.
-            # Steady-state is sequential and dedupes naturally via cache
-            # lookups (each write is visible to the next iteration), but
-            # using the same helper as the initial pass keeps the "N series
-            # behind M stages → M refreshes, not N" invariant testable
-            # at one call site.
             for stage_id, entry in _dedupe_series_to_stage_worklist(
                 _SERIES_TO_STAGE_CACHE
             ).items():
@@ -6588,7 +6705,10 @@ async def _tournament_bracket_warm_loop_body(_log):
                     continue  # still fresh (bracket data OR negative marker within 24h re-check window)
                 season_id = entry.get("season_id") or ""
                 league_name = entry.get("league_name") or ""
-                ok = await _refresh_tournament_bracket(stage_id, season_id, league_name)
+                ok = await _bounded(
+                    _refresh_tournament_bracket(stage_id, season_id, league_name),
+                    "refresh_tournament_bracket",
+                )
                 if ok:
                     _log.debug("bracket refreshed: stage=%s", stage_id)
                 # Small spacing so we don't burst the FL rate limiter
@@ -6597,10 +6717,13 @@ async def _tournament_bracket_warm_loop_body(_log):
                 await asyncio.sleep(0.3)
             # Consolidated save at end of each 60s pass: one write iff
             # any refresh above changed content, zero writes otherwise.
-            await _maybe_save_tournament_brackets()
-            # Note: iteration-alive stamp fires at TOP of loop
-            # (Layer B), not here — proves loop is running even if
-            # this iteration hangs before reaching this line.
+            await _bounded(
+                _maybe_save_tournament_brackets(),
+                "maybe_save_tournament_brackets",
+            )
+            first_pass = False
+        except asyncio.TimeoutError:
+            raise
         except Exception as e:
             _log.warning("tournament_bracket_warm_loop iter failed: %s", e)
 

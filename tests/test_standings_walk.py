@@ -524,6 +524,15 @@ def test_walk_body_awaits_bracket_load_before_initial_pass(monkeypatch):
     class _FakeSession:
         async def __aenter__(self): return self
         async def __aexit__(self, *a): pass
+        # Layer E: acquire_lock_session_bounded calls session.commit()
+        # immediately after try_acquire returns True (E.1); holder_heartbeat
+        # calls session.execute(text("SELECT 1")) every AL_HEARTBEAT_INTERVAL_S
+        # (E.2). Fake session must accept both.
+        async def commit(self): pass
+        async def execute(self, *args, **kwargs):
+            class _Res:
+                def scalar(self): return True
+            return _Res()
     def _fake_session_factory():
         return _FakeSession()
     async def _fake_try_lock(session, key):
