@@ -295,9 +295,8 @@ async def _ingest_pass(
         schema_drift=result.schema_drift,
         duration_ms=result.duration_ms,
     )
-    # Layer C: stamp the health registry on every successful pass.
-    from .health import stamp_pass_complete
-    stamp_pass_complete("fl")
+    # Note: iteration-alive stamp for "fl" fires at TOP of each
+    # loop iteration (Layer B, 2026-08-04) — not here.
     return result
 
 
@@ -312,8 +311,13 @@ async def _today_pre_game_loop(
     ingestion.base.pass_timeout_for + kalshi._markets_loop docstring
     for the 2026-08-01 in-pass hang context."""
     from .base import pass_timeout_for
+    from .health import stamp_pass_complete
     first_pass = True
     while True:
+        # Layer B: iteration-alive stamp at TOP. See kalshi._markets_loop
+        # for the Day-64 rationale. FL's stamp key is shared across
+        # both loops ("fl") — either loop iterating counts as alive.
+        stamp_pass_complete("fl")
         try:
             async with session_factory() as session:
                 timeout_s = pass_timeout_for(first_pass)
@@ -350,8 +354,12 @@ async def _week_loop(
     per-day-inner-pass, so the boot ceiling covers the entire
     7-day sweep on the first outer iteration."""
     from .base import pass_timeout_for
+    from .health import stamp_pass_complete
     first_pass = True
     while True:
+        # Layer B: iteration-alive stamp at TOP. Shared "fl" key
+        # with _today_pre_game_loop.
+        stamp_pass_complete("fl")
         try:
             async with session_factory() as session:
                 timeout_s = pass_timeout_for(first_pass)
@@ -402,12 +410,19 @@ async def run(
     # the cadence loops open their own per-pass sessions. We just
     # need ONE session held open so the lock stays held.
     # Layer D.1b: boot-path wait_for on the lock-session acquire +
-    # try_acquire_advisory_lock sequence. See kalshi.run for the
-    # 2026-08-01 boot-vs-first-pass hang context — same defense.
+    # try_acquire_advisory_lock sequence.
+    # Layer B: lock-holding session uses NullPool advisory_lock_session
+    # for immediate lock release on session drop. Cadence loops
+    # inside _today_pre_game_loop / _week_loop keep the pooled
+    # session_factory for per-pass throughput.
     from .base import INGESTION_BOOT_TIMEOUT_S
 
+    from db import advisory_lock_session as _al_session_factory
+    if _al_session_factory is None:
+        _al_session_factory = session_factory
+
     async def _acquire_lock_session():
-        session_cm = session_factory()
+        session_cm = _al_session_factory()
         session = await session_cm.__aenter__()
         try:
             got_lock = await try_acquire_advisory_lock(

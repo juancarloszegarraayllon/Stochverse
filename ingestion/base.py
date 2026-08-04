@@ -415,11 +415,24 @@ async def acquire_lock_session_bounded(
     log_name: str,
     logger=None,
     timeout_s: float | None = None,
+    use_null_pool: bool = True,
 ):
     """Bounded session-acquire + advisory-lock-acquire (Layer D.1b).
 
     Wraps the whole boot-path in asyncio.wait_for(INGESTION_BOOT_TIMEOUT_S).
     Timeout raises TimeoutError → propagates to supervise → crash-restart.
+
+    Layer B (2026-08-04): `use_null_pool=True` (default) redirects the
+    lock-holding session to `db.advisory_lock_session` — a NullPool-
+    backed engine that closes the connection on session __aexit__ AND
+    on garbage-collection of an orphaned session_cm. Advisory locks
+    release IMMEDIATELY when the session drops, closing the "pool-
+    leaked-lock" flavor of the 2026-08-01 death class as defense-in-
+    depth. Caller passes its usual `session_factory` (pooled) — the
+    helper swaps to `advisory_lock_session` internally when
+    use_null_pool is True and the NullPool engine is available.
+    Set `use_null_pool=False` to force the caller-provided factory
+    (test seams).
 
     Returns `(session_cm, session, got_lock)`. Caller MUST call
     `await session_cm.__aexit__(None, None, None)` in a finally block
@@ -436,8 +449,22 @@ async def acquire_lock_session_bounded(
     if timeout_s is None:
         timeout_s = INGESTION_BOOT_TIMEOUT_S
 
+    # Resolve the lock-holding factory. Import inside the function
+    # so tests can stub `db.advisory_lock_session` without needing
+    # module-level import gymnastics.
+    lock_factory = session_factory
+    if use_null_pool:
+        try:
+            from db import advisory_lock_session as _al
+            if _al is not None:
+                lock_factory = _al
+        except Exception:
+            # No DB available or import failed — fall back to
+            # caller's factory (memory-only / test paths).
+            pass
+
     async def _do_acquire():
-        session_cm = session_factory()
+        session_cm = lock_factory()
         session = await session_cm.__aenter__()
         try:
             got_lock = await try_acquire_advisory_lock(session, lock_key)
