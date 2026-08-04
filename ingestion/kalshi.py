@@ -344,55 +344,37 @@ async def run(session_factory) -> None:
     Returns when cancelled. Crashes inside the loop are caught by
     the surrounding supervisor (ingestion.base.supervise).
     """
-    # Layer D.1b (2026-08-03): boot path — session acquire +
-    # try_acquire_advisory_lock — wrapped in wait_for.
-    # Layer B (2026-08-04): lock-holding session uses NullPool-backed
-    # `advisory_lock_session` for immediate lock release on session
-    # drop. Data-side sessions inside _markets_loop keep the pooled
-    # `session_factory` for per-pass throughput.
-    from .base import INGESTION_BOOT_TIMEOUT_S
+    # Layer E-rev-b (2026-08-06): pinned-AsyncConnection acquire on
+    # DIRECT Neon endpoint. Rev-a's session-mediated AL was broken
+    # (session.commit released the DBAPI connection under NullPool,
+    # dropping the lock at acquisition; heartbeat autobegin'd a fresh
+    # connection proving nothing). Rev-b uses acquire_lock_connection_
+    # bounded → engine.connect() (pinned AsyncConnection); heartbeat
+    # runs on the SAME conn. Data-side sessions inside _markets_loop
+    # keep the pooled session_factory for per-pass throughput.
+    from .base import (
+        acquire_lock_connection_bounded, holder_heartbeat,
+    )
 
-    from db import advisory_lock_session as _al_session_factory
-    if _al_session_factory is None:
-        # DATABASE_URL missing or engine init failed — fall back to
-        # the passed session_factory so behavior in memory-only mode
-        # matches pre-Layer-B (which is: never reached, because
-        # runner.py short-circuits earlier).
-        _al_session_factory = session_factory
-
-    async def _acquire_lock_session():
-        # Encapsulated for wait_for wrapping — the entire acquire
-        # sequence including session __aenter__.
-        session_cm = _al_session_factory()
-        session = await session_cm.__aenter__()
-        try:
-            got_lock = await try_acquire_advisory_lock(
-                session, ADVISORY_LOCK_KALSHI,
-            )
-        except Exception:
-            await session_cm.__aexit__(None, None, None)
-            raise
-        return session_cm, session, got_lock
-
-    try:
-        session_cm, lock_session, got_lock = await asyncio.wait_for(
-            _acquire_lock_session(), timeout=INGESTION_BOOT_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
+    from db import advisory_lock_engine as _al_engine
+    if _al_engine is None:
+        # DATABASE_URL missing or engine init failed — memory-only
+        # mode (runner.py short-circuits earlier so this is defensive).
         _log.warning(
-            "ingestion.kalshi.boot_timeout",
-            timeout_sec=INGESTION_BOOT_TIMEOUT_S,
-            note="lock-session acquire hung; raising to supervise for restart",
+            "ingestion.kalshi.no_al_engine",
+            note="advisory_lock_engine is None; skipping",
         )
-        raise
+        return
+
+    conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
+        _al_engine, ADVISORY_LOCK_KALSHI,
+        log_name="kalshi", logger=_log,
+    )
 
     try:
         if not got_lock:
             # Layer A: see NotLockHolder docstring in ingestion.base
-            # for the 2026-08-01 death-door context. Pre-Layer-A this
-            # `return` let supervise treat the non-holder as complete
-            # and exit — non-holder worker's kalshi task DEAD forever,
-            # exactly the shape the incident hit.
+            # for the 2026-08-01 death-door context.
             _log.info(
                 "ingestion.kalshi.not_holder",
                 reason="another worker holds the Kalshi ingestion advisory lock",
@@ -404,9 +386,12 @@ async def run(session_factory) -> None:
             cadences={"markets_sec": 30},
         )
 
-        await _markets_loop(session_factory, interval_sec=30.0)
+        async with holder_heartbeat(
+            lock_conn, ADVISORY_LOCK_KALSHI, "kalshi",
+        ):
+            await _markets_loop(session_factory, interval_sec=30.0)
     finally:
         # Manual exit mirrors the try/finally shape a plain
         # `async with` would give — required because we opened the
-        # session inside wait_for above rather than in a with block.
-        await session_cm.__aexit__(None, None, None)
+        # connection inside wait_for above rather than in a with block.
+        await conn_cm.__aexit__(None, None, None)

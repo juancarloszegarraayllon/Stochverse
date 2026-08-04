@@ -405,54 +405,37 @@ async def run(
     """
     sport_ids = sport_ids or DEFAULT_FL_SPORT_IDS
 
-    # The advisory lock is held for the lifetime of the session
-    # below. Inside that session we don't actually issue writes —
-    # the cadence loops open their own per-pass sessions. We just
-    # need ONE session held open so the lock stays held.
-    # Layer D.1b: boot-path wait_for on the lock-session acquire +
-    # try_acquire_advisory_lock sequence.
-    # Layer B: lock-holding session uses NullPool advisory_lock_session
-    # for immediate lock release on session drop. Cadence loops
-    # inside _today_pre_game_loop / _week_loop keep the pooled
-    # session_factory for per-pass throughput.
-    from .base import INGESTION_BOOT_TIMEOUT_S
+    # The advisory lock is held for the lifetime of the AsyncConnection
+    # below. Inside that connection we don't issue writes — the cadence
+    # loops open their own per-pass sessions on the pooled engine.
+    # We just need ONE pinned connection held open so the lock stays.
+    #
+    # Layer E-rev-b (2026-08-06): pinned-AsyncConnection acquire on
+    # DIRECT Neon endpoint. Rev-a's session-mediated AL released the
+    # DBAPI connection on commit under NullPool, dropping the lock at
+    # acquisition; heartbeat autobegin'd a fresh connection. Rev-b
+    # uses engine.connect() (pinned AsyncConnection); heartbeat runs
+    # on the SAME conn.
+    from .base import (
+        acquire_lock_connection_bounded, holder_heartbeat,
+    )
 
-    from db import advisory_lock_session as _al_session_factory
-    if _al_session_factory is None:
-        _al_session_factory = session_factory
-
-    async def _acquire_lock_session():
-        session_cm = _al_session_factory()
-        session = await session_cm.__aenter__()
-        try:
-            got_lock = await try_acquire_advisory_lock(
-                session, ADVISORY_LOCK_FL,
-            )
-        except Exception:
-            await session_cm.__aexit__(None, None, None)
-            raise
-        return session_cm, session, got_lock
-
-    try:
-        session_cm, lock_session, got_lock = await asyncio.wait_for(
-            _acquire_lock_session(), timeout=INGESTION_BOOT_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
+    from db import advisory_lock_engine as _al_engine
+    if _al_engine is None:
         _log.warning(
-            "ingestion.fl.boot_timeout",
-            timeout_sec=INGESTION_BOOT_TIMEOUT_S,
-            note="lock-session acquire hung; raising to supervise for restart",
+            "ingestion.fl.no_al_engine",
+            note="advisory_lock_engine is None; skipping",
         )
-        raise
+        return
+
+    conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
+        _al_engine, ADVISORY_LOCK_FL,
+        log_name="fl", logger=_log,
+    )
 
     try:
         if not got_lock:
             # Layer A: raise NotLockHolder instead of clean return.
-            # supervise() catches this specifically and enters a
-            # slow-poll re-race, preserving a live non-holder that
-            # takes over when the holder dies. Pre-Layer-A this was
-            # `return` → supervise treated as complete → task DEAD
-            # forever on the non-holder worker (2026-08-01 root cause).
             _log.info(
                 "ingestion.fl.not_holder",
                 reason="another worker holds the FL ingestion advisory lock",
@@ -471,9 +454,10 @@ async def run(
         # asyncio.gather both loops; if one returns or raises, we
         # let the surrounding supervisor handle restart of the whole
         # run() call — keeps the lock semantics simple.
-        await asyncio.gather(
-            _today_pre_game_loop(session_factory, sport_ids, interval_sec=60.0),
-            _week_loop(session_factory, sport_ids, interval_sec=600.0),
-        )
+        async with holder_heartbeat(lock_conn, ADVISORY_LOCK_FL, "fl"):
+            await asyncio.gather(
+                _today_pre_game_loop(session_factory, sport_ids, interval_sec=60.0),
+                _week_loop(session_factory, sport_ids, interval_sec=600.0),
+            )
     finally:
-        await session_cm.__aexit__(None, None, None)
+        await conn_cm.__aexit__(None, None, None)

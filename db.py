@@ -94,38 +94,47 @@ _connect_args.setdefault("command_timeout", 90.0)
 engine = None
 async_session = None
 
-# Layer B (2026-08-04): dedicated NullPool engine for advisory-lock-
-# holding sessions. Rationale: the pooled `engine` above reuses
-# connections across sessions — when a session's `async with` exits,
-# the underlying connection returns to the pool but the Postgres
-# backend process (and its session-level advisory locks) stays alive
-# until the pool discards or the backend dies. That's the "pool-
-# leaked-lock" flavor of the 2026-08-01 death class: a crashed
-# holder's session-exit returned its connection to the pool with the
-# lock still held; a restart's fresh session grabbed a DIFFERENT
-# pool connection and lost the try_acquire → non-holder → death-door
-# (pre-Layer-A).
+# Layer E-rev-b (2026-08-06): AL engine on the DIRECT Neon endpoint.
 #
-# NullPool closes the connection on session __aexit__ AND on garbage
-# collection of an orphaned session — advisory lock releases
-# IMMEDIATELY when the AL-holding session drops. Post-Layer-A the
-# death-door itself is closed via NotLockHolder + re-race, so this
-# is defense-in-depth (operator note: mechanism DISFAVORED per
-# corrected-timeline evidence but still worth hardening for future).
+# Rev-a (PR #289) misdiagnosed. Master root cause: DATABASE_URL points
+# at Neon's pgbouncer POOLED endpoint (p11-pooler.c-3.us-west-2.aws.
+# neon.tech, transaction-mode). Session-level advisory locks
+# (pg_try_advisory_lock) are FUNDAMENTALLY INCOMPATIBLE with pgbouncer
+# transaction-mode pooling: after each txn boundary, pgbouncer can
+# rebind the app-side connection to a DIFFERENT physical backend. The
+# lock lives on the backend that acquired it; the next statement on
+# our "same connection" may hit a different backend that has no lock.
 #
-# Cost model: one extra Neon connection open (~50-100ms) per
-# lock-acquire cycle. Steady state cost zero — the AL-holding
-# session is opened once at run() entry and held for the process
-# lifetime. Only pays on task startup / supervise-restart. Data-
-# side sessions inside _ingest_pass keep using the pooled `engine`
-# for per-pass throughput.
+# Rev-a additionally used SQLAlchemy AsyncSession.commit(), which
+# returns the DBAPI connection to the pool. Under NullPool that
+# closes the connection instantly → session-level lock released at
+# acquisition time → every acquire was a no-op → the "restored
+# holder/non_holder split" was actually workers churning through
+# ephemeral acquires.
 #
-# Also closes the connection-leak edge case on boot_timeout flagged
-# during PR-Layer-D review: if wait_for cancels _acquire_lock_session
-# after __aenter__ succeeded, NullPool releases the connection on
-# garbage-collection of the orphaned session_cm regardless of
-# whether __aexit__ was called explicitly.
+# Fix (two parts):
+#   1. DATABASE_URL_DIRECT — separate env var pointing at Neon's
+#      DIRECT endpoint (strip `-pooler` from the host). Data engine
+#      stays on pooled DATABASE_URL for throughput; ONLY the AL
+#      engine uses direct. Falls back to DATABASE_URL if unset (dev
+#      environments, single-endpoint providers).
+#   2. Pinned AsyncConnection instead of AsyncSession — see
+#      ingestion.base.acquire_lock_connection_bounded. AsyncConnection
+#      holds the underlying DBAPI connection for its explicit CM
+#      lifetime; commit()/rollback() end transactions but do NOT
+#      release the connection.
+#
+# NullPool retained on the AL engine as belt-and-braces: with direct
+# endpoint + pinned AsyncConnection, we don't need pooling for AL
+# (one persistent connection per holder task); NullPool ensures no
+# pool-side reuse can accidentally hand our AL connection to another
+# caller.
+DATABASE_URL_DIRECT = os.environ.get("DATABASE_URL_DIRECT", "") or DATABASE_URL
+
 advisory_lock_engine = None
+# Retained as None for import-compat during the E-rev-b transition;
+# do NOT use — see ingestion.base.acquire_lock_connection_bounded.
+# Kept until every caller has migrated to the pinned-connection API.
 advisory_lock_session = None
 
 if DATABASE_URL:
@@ -159,22 +168,26 @@ if DATABASE_URL:
         )
         async_session = async_sessionmaker(engine, expire_on_commit=False)
 
-        # Layer B: dedicated NullPool engine for AL-holding sessions.
-        # SAME connect_args (same command_timeout, same server-side
-        # timeouts) — only the pool class differs.
+        # Layer E-rev-b: AL engine on DIRECT endpoint (bypass pgbouncer
+        # txn-mode multiplexing) + NullPool. Callers acquire via
+        # `advisory_lock_engine.connect()` (AsyncConnection, pinned
+        # DBAPI connection for CM lifetime). See ingestion.base.
+        # acquire_lock_connection_bounded. `advisory_lock_session`
+        # (sessionmaker) is intentionally NOT created — session.commit
+        # releases the connection, breaking the lock on NullPool. Any
+        # legacy caller that tries to import it will get None and fail
+        # fast.
         advisory_lock_engine = create_async_engine(
-            DATABASE_URL,
+            DATABASE_URL_DIRECT,
             poolclass=NullPool,
             connect_args=_connect_args,
         )
-        advisory_lock_session = async_sessionmaker(
-            advisory_lock_engine, expire_on_commit=False,
-        )
 
+        _direct_note = "same_as_pooled" if DATABASE_URL_DIRECT == DATABASE_URL else "DIRECT"
         log.info(
             "database engines created (pooled pool_size=5, pool_recycle=300; "
-            "advisory_lock NullPool; ssl=%s)",
-            _connect_args.get("ssl", "default"),
+            "advisory_lock NullPool endpoint=%s; ssl=%s)",
+            _direct_note, _connect_args.get("ssl", "default"),
         )
     except Exception as e:
         log.warning("failed to create database engine: %s", e)
@@ -182,7 +195,6 @@ if DATABASE_URL:
         async_session = None
         advisory_lock_engine = None
         advisory_lock_session = None
-        async_session = None
 else:
     log.info("DATABASE_URL not set — running in memory-only mode")
 

@@ -521,13 +521,29 @@ def test_walk_body_awaits_bracket_load_before_initial_pass(monkeypatch):
 
     # Stub the DB + lock so the walk body enters the loop-body path
     # without needing a real Postgres.
+    #
+    # Layer E-rev-b (2026-08-06): the AL path uses engine.connect()
+    # (pinned AsyncConnection) via acquire_lock_connection_bounded.
+    # Fake conn/engine mimic that shape: connect() returns a CM whose
+    # __aenter__ yields a conn with execute() (for pg_try_advisory_lock
+    # + heartbeat SELECT 1) and commit().
+    class _FakeConn:
+        async def execute(self, *args, **kwargs):
+            class _Res:
+                def scalar(self): return True   # try_acquire → True
+            return _Res()
+        async def commit(self): pass
+    class _FakeConnCM:
+        async def __aenter__(self): return _FakeConn()
+        async def __aexit__(self, *a): pass
+    class _FakeEngine:
+        def connect(self): return _FakeConnCM()
+
+    # Data session factory (used by other DB paths inside the walk
+    # body that aren't the AL path).
     class _FakeSession:
         async def __aenter__(self): return self
         async def __aexit__(self, *a): pass
-        # Layer E: acquire_lock_session_bounded calls session.commit()
-        # immediately after try_acquire returns True (E.1); holder_heartbeat
-        # calls session.execute(text("SELECT 1")) every AL_HEARTBEAT_INTERVAL_S
-        # (E.2). Fake session must accept both.
         async def commit(self): pass
         async def execute(self, *args, **kwargs):
             class _Res:
@@ -535,13 +551,11 @@ def test_walk_body_awaits_bracket_load_before_initial_pass(monkeypatch):
             return _Res()
     def _fake_session_factory():
         return _FakeSession()
-    async def _fake_try_lock(session, key):
-        return True
 
-    import db, ingestion.base as base_mod
+    import db
     monkeypatch.setattr(db, "DATABASE_URL", "postgres://fake")
     monkeypatch.setattr(db, "async_session", _fake_session_factory)
-    monkeypatch.setattr(base_mod, "try_acquire_advisory_lock", _fake_try_lock)
+    monkeypatch.setattr(db, "advisory_lock_engine", _FakeEngine())
 
     async def _run():
         # Kick off the loop, cancel after the initial pass completes
