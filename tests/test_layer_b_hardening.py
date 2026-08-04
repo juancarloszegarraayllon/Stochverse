@@ -66,22 +66,25 @@ def test_advisory_lock_engine_uses_same_dsn_and_connect_args_as_pooled():
     )
 
 
-def test_acquire_lock_session_bounded_uses_null_pool_by_default(monkeypatch):
-    """The Layer D helper `acquire_lock_session_bounded` MUST swap
-    to `db.advisory_lock_session` when `use_null_pool=True` (default).
-    This is the wiring that carries the NullPool benefit to
-    F104-F107 without each caller having to import it manually."""
-    from ingestion.base import acquire_lock_session_bounded
-    src = inspect.getsource(acquire_lock_session_bounded)
-    assert "from db import advisory_lock_session" in src, (
-        "acquire_lock_session_bounded no longer imports "
-        "advisory_lock_session — Layer B wiring lost, F104-F107 "
-        "regress to pooled AL sessions"
+def test_acquire_lock_connection_bounded_uses_engine_connect():
+    """Layer E-rev-b (2026-08-06): rev-a's `acquire_lock_session_bounded`
+    was proven broken (session.commit released the DBAPI connection
+    under NullPool, dropping the lock at acquisition). Rev-b replaces
+    it with `acquire_lock_connection_bounded` using engine.connect()
+    (pinned AsyncConnection). This test — originally the Layer-B
+    NullPool wiring guard — now enforces the pinned-conn contract.
+
+    Full pinned-conn assertions live in tests/test_layer_e_hardening.py::
+    test_al_path_never_uses_sessionmaker_or_session_commit; this is
+    the shortest source-inspect check to catch a Layer-B-style
+    regression (someone re-adds the session-mediated helper)."""
+    from ingestion.base import acquire_lock_connection_bounded
+    src = inspect.getsource(acquire_lock_connection_bounded)
+    assert "engine.connect()" in src, (
+        "acquire_lock_connection_bounded lost engine.connect() — "
+        "regression reopens rev-a's session-mediated AL defect"
     )
-    assert "use_null_pool" in src, (
-        "acquire_lock_session_bounded no longer accepts the "
-        "use_null_pool parameter — test-seam contract broken"
-    )
+    assert "async_sessionmaker" not in src
 
 
 # ── Layer B fold: stamp fires at TOP of iteration ───────────────

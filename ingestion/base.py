@@ -364,29 +364,44 @@ class NotLockHolder(Exception):
     Root cause the 2026-08-01 Kalshi incident exposed."""
 
 
-# ── LockGripLost sentinel (Layer E, 2026-08-05) ────────────────
+# ── LockGripLost sentinel + pinned AsyncConnection heartbeat (Layer E-rev-b, 2026-08-06) ───
 #
-# Day-65 mutual-exclusion failure post-Layer-B: BOTH workers reported
-# holder_running for all AL surfaces with independently-advancing
-# stamps + fl_last_error=InterfaceError("connection is closed") on
-# the AL session. Mechanism (Layer A+B+D interaction class):
+# Day-65 mutual-exclusion failure — corrected root-cause history:
 #
-#   1. NullPool AL session left BEGIN-open after try_acquire (no
-#      commit). Server-side idle_in_transaction_session_timeout=60s
-#      terminates the connection. Session-level advisory lock releases.
-#      → Fixed by Layer E.1 (commit-after-acquire).
+#   Rev-a (PR #289, 2026-08-05) misdiagnosed. Rev-a used
+#   SQLAlchemy AsyncSession.commit() on a NullPool AL engine —
+#   Session.commit() RETURNS the underlying DBAPI connection to the
+#   pool (default 2.0 behavior); under NullPool that CLOSES the
+#   connection instantly → session-level advisory lock released at
+#   acquisition time. Additionally: heartbeat's next session.execute()
+#   autobegin'd a FRESH connection from the pool (proving nothing
+#   about the original lock). Behavioral proof (23:23Z): 3/6 lock
+#   pids migrated in 10min, 2 locks per pid, zero LockGripLost logs.
 #
-#   2. Even with the commit, Neon proxy silently reaps TCP-idle
-#      connections after ~5-10min. Same outcome: connection dies,
-#      lock releases, dead-holder loop keeps stamping.
-#      → Fixed by Layer E.2 (heartbeat + LockGripLost + supervise re-race).
+#   Master root cause (confirmed 2026-08-06): DATABASE_URL points at
+#   Neon's pgbouncer POOLED endpoint (transaction-mode). Session-level
+#   advisory locks are FUNDAMENTALLY INCOMPATIBLE with pgbouncer
+#   transaction-mode: after each txn boundary pgbouncer may rebind
+#   the app-side connection to a different backend, so the lock lives
+#   on one backend while our "same connection" hits another.
+#
+# Rev-b (two-part fix):
+#   1. AL engine bound to DATABASE_URL_DIRECT (Neon DIRECT endpoint,
+#      bypasses pgbouncer). See db.py:advisory_lock_engine.
+#   2. Pinned AsyncConnection instead of AsyncSession. AsyncConnection
+#      holds the underlying DBAPI connection for its explicit CM
+#      lifetime; commit()/rollback() end transactions but do NOT
+#      release the connection. Acquire AND heartbeat run on the SAME
+#      connection — session-mediated checkout is impossible.
 #
 # A holder that can't prove its grip must stop being a holder.
-# Heartbeat runs SELECT 1 on the AL session every AL_HEARTBEAT_INTERVAL_S
-# seconds. On failure (InterfaceError / OperationalError / any exception
-# from execute), heartbeat cancels the parent task, which unwinds and
-# raises LockGripLost. supervise() catches LockGripLost as a peer of
-# NotLockHolder (before generic Exception), logs distinctly, and re-races.
+# Heartbeat runs SELECT 1 on the pinned AsyncConnection every
+# AL_HEARTBEAT_INTERVAL_S; commits after each SELECT to stay
+# out-of-txn between pulses (belt-and-braces vs idle_in_transaction
+# floor). On any exception (InterfaceError / OperationalError /
+# connection-closed), heartbeat cancels the parent task; the CM
+# re-raises LockGripLost. supervise() catches LockGripLost as a
+# peer of NotLockHolder (before generic Exception).
 
 AL_HEARTBEAT_INTERVAL_S: float = float(
     os.environ.get("AL_HEARTBEAT_INTERVAL_S", "20.0")
@@ -394,31 +409,35 @@ AL_HEARTBEAT_INTERVAL_S: float = float(
 
 
 class LockGripLost(Exception):
-    """Signal from a holder's heartbeat that the advisory-lock session
-    lost its grip on the underlying Postgres connection (heartbeat
-    SELECT 1 raised InterfaceError / OperationalError / connection-
-    closed → session-level advisory lock has released silently on the
-    server side). supervise() catches this specifically (peer of
-    NotLockHolder, before generic Exception) and re-races for the
-    lock. Root cause the 2026-08-05 dual-holder incident exposed."""
+    """Signal from a holder's heartbeat that the pinned AsyncConnection
+    holding the advisory lock lost its grip (heartbeat SELECT 1 raised
+    InterfaceError / OperationalError / connection-closed → session-
+    level advisory lock has released silently on the server side).
+    supervise() catches this specifically (peer of NotLockHolder,
+    before generic Exception) and re-races for the lock. Root cause
+    the 2026-08-05 dual-holder incident exposed; rev-b closes the
+    fix (pgbouncer-txn-mode substrate + session-releases-connection)."""
 
 
 async def _al_heartbeat_body(
-    session,
+    conn,
     lock_key: int,
     log_name: str,
     parent_task: asyncio.Task,
     grip_ref: dict,
 ) -> None:
     """Heartbeat body — every AL_HEARTBEAT_INTERVAL_S, SELECT 1 on the
-    AL session. On failure, stamp grip_ref and cancel parent_task.
+    pinned AsyncConnection holding the lock. On failure, stamp grip_ref
+    and cancel parent_task.
 
     SELECT 1 serves two purposes: (a) proves the TCP connection +
-    backend are alive; (b) keeps the session non-idle so Neon proxy /
-    intermediate load balancers don't reap the connection during a
-    long quiet period between real queries. E.1's commit-after-acquire
-    closes the server-side idle-in-txn fuse (60s); this keepalive
-    closes the proxy-side TCP-idle fuse (~5-10min).
+    backend are alive; (b) keeps the connection non-idle so Neon
+    proxy / intermediate load balancers don't reap it during a long
+    quiet period between real queries. Commit after each SELECT so
+    the AL connection is never idle-in-txn between pulses (defense
+    against server-side idle_in_transaction_session_timeout=60s).
+    AsyncConnection.commit() ends the txn but does NOT release the
+    DBAPI connection — only conn.close() / CM __aexit__ does that.
 
     Exits cleanly on CancelledError (parent teardown). Exits after
     stamping grip_ref on any other exception (grip lost — parent will
@@ -427,7 +446,8 @@ async def _al_heartbeat_body(
     while True:
         try:
             await asyncio.sleep(AL_HEARTBEAT_INTERVAL_S)
-            await session.execute(text("SELECT 1"))
+            await conn.execute(text("SELECT 1"))
+            await conn.commit()
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -446,15 +466,22 @@ async def _al_heartbeat_body(
 
 
 @contextlib.asynccontextmanager
-async def holder_heartbeat(session, lock_key: int, log_name: str):
-    """Async context manager: spawn the AL-session heartbeat while the
-    body runs, cancel it cleanly on exit, and translate heartbeat-
-    driven parent cancellation into a `LockGripLost` raise.
+async def holder_heartbeat(conn, lock_key: int, log_name: str):
+    """Async context manager: spawn the pinned-AsyncConnection heartbeat
+    while the body runs, cancel it cleanly on exit, and translate
+    heartbeat-driven parent cancellation into a `LockGripLost` raise.
 
     Usage:
-        async with holder_heartbeat(lock_session, ADVISORY_LOCK_X, "x"):
-            while True:
-                ...  # per-pass work (bounded by wait_for)
+        conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
+            advisory_lock_engine, ADVISORY_LOCK_X, log_name="x",
+        )
+        try:
+            if not got_lock: raise NotLockHolder()
+            async with holder_heartbeat(lock_conn, ADVISORY_LOCK_X, "x"):
+                while True:
+                    ...  # per-pass work (bounded by wait_for)
+        finally:
+            await conn_cm.__aexit__(None, None, None)
 
     Semantics:
       - Normal completion of the body → heartbeat cancelled cleanly.
@@ -466,6 +493,11 @@ async def holder_heartbeat(session, lock_key: int, log_name: str):
         catches distinctly).
       - External cancellation (supervise teardown) → CancelledError
         propagates unchanged (grip_ref not stamped → no translation).
+
+    The `conn` argument MUST be the same pinned AsyncConnection that
+    acquired the lock — heartbeat on any other connection is a
+    correctness bug (rev-a's original defect). See
+    `acquire_lock_connection_bounded` for the acquire path.
     """
     parent_task = asyncio.current_task()
     if parent_task is None:
@@ -474,7 +506,7 @@ async def holder_heartbeat(session, lock_key: int, log_name: str):
         )
     grip_ref: dict = {"lost": False, "error": None}
     hb_task = asyncio.create_task(
-        _al_heartbeat_body(session, lock_key, log_name, parent_task, grip_ref),
+        _al_heartbeat_body(conn, lock_key, log_name, parent_task, grip_ref),
         name=f"al_heartbeat.{log_name}",
     )
     try:
@@ -539,89 +571,96 @@ def pass_timeout_for(is_first_pass: bool) -> float:
     return INGESTION_PASS_TIMEOUT_BOOT_S if is_first_pass else INGESTION_PASS_TIMEOUT_STEADY_S
 
 
-async def acquire_lock_session_bounded(
-    session_factory,
+async def acquire_lock_connection_bounded(
+    engine,
     lock_key: int,
     *,
     log_name: str,
     logger=None,
     timeout_s: float | None = None,
-    use_null_pool: bool = True,
 ):
-    """Bounded session-acquire + advisory-lock-acquire (Layer D.1b).
+    """Layer E-rev-b (2026-08-06): pinned-AsyncConnection acquire.
 
-    Wraps the whole boot-path in asyncio.wait_for(INGESTION_BOOT_TIMEOUT_S).
-    Timeout raises TimeoutError → propagates to supervise → crash-restart.
+    Bounded connection-open + advisory-lock-acquire. Wraps the whole
+    boot-path in asyncio.wait_for(INGESTION_BOOT_TIMEOUT_S). Timeout
+    raises TimeoutError → propagates to supervise → crash-restart.
 
-    Layer B (2026-08-04): `use_null_pool=True` (default) redirects the
-    lock-holding session to `db.advisory_lock_session` — a NullPool-
-    backed engine that closes the connection on session __aexit__ AND
-    on garbage-collection of an orphaned session_cm. Advisory locks
-    release IMMEDIATELY when the session drops, closing the "pool-
-    leaked-lock" flavor of the 2026-08-01 death class as defense-in-
-    depth. Caller passes its usual `session_factory` (pooled) — the
-    helper swaps to `advisory_lock_session` internally when
-    use_null_pool is True and the NullPool engine is available.
-    Set `use_null_pool=False` to force the caller-provided factory
-    (test seams).
+    REPLACES the rev-a helper `acquire_lock_session_bounded`
+    (deleted). Rev-a used SQLAlchemy AsyncSession + session.commit()
+    which RETURNED the DBAPI connection to the pool — under NullPool
+    that closed the connection, releasing the session-level advisory
+    lock at acquisition time. The subsequent heartbeat's session.
+    execute() then autobegin'd a FRESH connection from the pool,
+    proving nothing about the original lock (2026-08-06 behavioral
+    proof: 3/6 lock pids migrated in 10min, zero LockGripLost logs).
 
-    Returns `(session_cm, session, got_lock)`. Caller MUST call
-    `await session_cm.__aexit__(None, None, None)` in a finally block
-    to release the session's connection when done (long-lived lock
-    sessions live for the loop's lifetime; on exception or
-    NotLockHolder, exit unwinds cleanly).
+    Rev-b uses `engine.connect()` (AsyncConnection). AsyncConnection
+    holds the underlying DBAPI connection for its explicit CM
+    lifetime; commit()/rollback() end transactions but do NOT
+    release the connection. Acquire AND heartbeat run on the SAME
+    connection — session-mediated checkout is impossible.
 
-    Shape mirrors kalshi.run / fl.run explicit context-manager usage
-    rather than a plain `async with` because the wait_for wrapping
-    needs to bound the entire acquire operation, not just the
-    try_acquire call."""
+    Additional root-cause layer: `engine` MUST be bound to Neon's
+    DIRECT endpoint (see db.py:advisory_lock_engine ← DATABASE_URL_DIRECT).
+    Session-level advisory locks are incompatible with pgbouncer
+    transaction-mode pooling (multiplexing across backends at every
+    txn boundary makes the "session" ephemeral). Direct endpoint
+    gives us a persistent 1:1 backend binding.
+
+    Returns `(conn_cm, conn, got_lock)`. Caller MUST call
+    `await conn_cm.__aexit__(None, None, None)` in a finally block
+    to release the connection when done. Long-lived AL connections
+    live for the holder's task lifetime; on exception, NotLockHolder,
+    or LockGripLost, exit unwinds cleanly.
+
+    NOTE: The engine argument is required (not optional). The
+    fallback-to-caller pattern from rev-a's `use_null_pool=False`
+    test seam has been removed — tests inject a mock engine
+    directly."""
     if logger is None:
         logger = _log
     if timeout_s is None:
         timeout_s = INGESTION_BOOT_TIMEOUT_S
 
-    # Resolve the lock-holding factory. Import inside the function
-    # so tests can stub `db.advisory_lock_session` without needing
-    # module-level import gymnastics.
-    lock_factory = session_factory
-    if use_null_pool:
-        try:
-            from db import advisory_lock_session as _al
-            if _al is not None:
-                lock_factory = _al
-        except Exception:
-            # No DB available or import failed — fall back to
-            # caller's factory (memory-only / test paths).
-            pass
+    if engine is None:
+        raise RuntimeError(
+            "acquire_lock_connection_bounded: engine is None. "
+            "Callers must pass db.advisory_lock_engine (bound to "
+            "DATABASE_URL_DIRECT). Rev-a fallback removed — see "
+            "PR-Layer-E-rev-b."
+        )
 
     async def _do_acquire():
-        session_cm = lock_factory()
-        session = await session_cm.__aenter__()
+        conn_cm = engine.connect()
+        conn = await conn_cm.__aenter__()
         try:
-            got_lock = await try_acquire_advisory_lock(session, lock_key)
+            # try_acquire on the pinned AsyncConnection. Note we
+            # inline the SELECT here instead of calling
+            # try_acquire_advisory_lock (which takes an AsyncSession);
+            # AsyncConnection.execute has the same shape.
+            result = await conn.execute(
+                text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key},
+            )
+            got_lock = bool(result.scalar())
             if got_lock:
-                # Layer E.1 (2026-08-05): commit-after-acquire.
-                # SQLAlchemy async_session runs `session.execute()` inside
-                # an implicit BEGIN that stays open until the caller
-                # commits/rollbacks. Post-Layer-B on NullPool the AL
-                # session was left BEGIN-open forever — the server-side
-                # `idle_in_transaction_session_timeout=60000` (db.py:75)
-                # then TERMINATED the connection after 60s, silently
-                # releasing the session-level advisory lock. The other
-                # worker's Layer-A supervise re-race then acquired the
-                # now-free lock → dual holders (Day-64 evidence).
+                # End the implicit txn so the AL connection is not
+                # idle-in-txn during the heartbeat sleep cycle
+                # (server-side idle_in_transaction_session_timeout=60s
+                # would terminate the connection and release the
+                # session-level lock).
                 #
-                # Postgres session-level advisory locks are transaction-
-                # independent (only pg_advisory_xact_lock is txn-scoped).
-                # Committing here ends the implicit txn; the lock persists
-                # until the connection closes. Defense against server-
-                # side idle-in-txn kill. E.2 heartbeat additionally
-                # defends against Neon-proxy TCP-idle reap (~5-10min).
-                await session.commit()
+                # KEY FACT: AsyncConnection.commit() ends the txn but
+                # does NOT release the DBAPI connection back to the
+                # pool. The connection is pinned for conn_cm's CM
+                # lifetime; only conn_cm.__aexit__() releases. This is
+                # THE reason rev-b is correct and rev-a wasn't —
+                # AsyncSession.commit() releases; AsyncConnection.commit()
+                # does not.
+                await conn.commit()
         except Exception:
-            await session_cm.__aexit__(None, None, None)
+            await conn_cm.__aexit__(None, None, None)
             raise
-        return session_cm, session, got_lock
+        return conn_cm, conn, got_lock
 
     try:
         return await asyncio.wait_for(_do_acquire(), timeout=timeout_s)
@@ -633,9 +672,27 @@ async def acquire_lock_session_bounded(
         logger.warning(
             "ingestion.task.boot_timeout task=%s timeout_sec=%s note=%s",
             log_name, timeout_s,
-            "lock-session acquire hung; raising to supervise for restart",
+            "lock-connection acquire hung; raising to supervise for restart",
         )
         raise
+
+
+# Rev-a helper name retained as a raising stub so any accidentally-
+# missed caller fails LOUD instead of silently landing on a broken
+# session-mediated path. Delete this stub in a follow-up once the
+# codebase has been verified free of references.
+async def acquire_lock_session_bounded(*_args, **_kwargs):
+    """REMOVED in Layer E-rev-b. See acquire_lock_connection_bounded.
+
+    Rev-a used SQLAlchemy AsyncSession.commit() which released the
+    DBAPI connection back to the pool, closing it under NullPool and
+    releasing the session-level advisory lock at acquisition time.
+    The whole session-mediated AL path is unsound; do not use."""
+    raise RuntimeError(
+        "acquire_lock_session_bounded was removed in Layer E-rev-b. "
+        "Use acquire_lock_connection_bounded(advisory_lock_engine, "
+        "lock_key, log_name=...) instead. See PR-Layer-E-rev-b."
+    )
 
 
 # ── Supervisor: restart-on-crash with exponential backoff ────────

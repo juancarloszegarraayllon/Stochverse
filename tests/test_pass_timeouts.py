@@ -143,35 +143,31 @@ def test_boot_timeout_bound_default_is_60s():
     )
 
 
-def test_acquire_lock_session_bounded_times_out_on_hung_acquire(monkeypatch):
-    """Load-bearing D.1b contract: `acquire_lock_session_bounded`
-    MUST raise TimeoutError if the session/lock acquire hangs past
-    INGESTION_BOOT_TIMEOUT_S. Regression means the boot-path hang
-    flavor reopens (Aug 1 kalshi's death window bracket was consistent
-    with either boot-path OR first-pass; the boot-path bound closes
-    that flavor regardless of which one hit)."""
-    from ingestion.base import acquire_lock_session_bounded
-    import logging
+def test_acquire_lock_connection_bounded_times_out_on_hung_acquire(monkeypatch):
+    """Layer D.1b contract preserved under Layer E-rev-b's pinned-
+    connection design: `acquire_lock_connection_bounded` MUST raise
+    TimeoutError if engine.connect() hangs past INGESTION_BOOT_TIMEOUT_S.
+    Regression reopens the Aug 1 boot-hang flavor of the Kalshi
+    incident class."""
+    from ingestion.base import acquire_lock_connection_bounded
 
-    class HangingSession:
+    class HangingConnCM:
         async def __aenter__(self):
-            # Simulates the exact Aug 1 failure mode: TCP-idle-timed-
-            # out connection whose asyncpg socket read blocks forever.
+            # Simulates a dead-socket asyncpg connect that never
+            # returns bytes.
             await asyncio.Event().wait()
             return self
         async def __aexit__(self, *a):
             pass
 
-    def _hanging_factory():
-        return HangingSession()
+    class HangingEngine:
+        def connect(self):
+            return HangingConnCM()
 
     async def _run():
         with pytest.raises(asyncio.TimeoutError):
-            # Use the helper's default logger (structlog via
-            # ingestion.base._log). Passing a stdlib logger would
-            # need structured-kwarg-compatible mock.
-            await acquire_lock_session_bounded(
-                _hanging_factory,
+            await acquire_lock_connection_bounded(
+                HangingEngine(),
                 lock_key=0x5350F999,
                 log_name="test_boot",
                 timeout_s=0.05,
@@ -180,15 +176,14 @@ def test_acquire_lock_session_bounded_times_out_on_hung_acquire(monkeypatch):
     asyncio.run(_run())
 
 
-def test_acquire_lock_session_bounded_used_by_all_six_surfaces():
-    """Class contract: every advisory-lock-guarded surface MUST use
-    `acquire_lock_session_bounded` for its boot path. Regression to
-    raw `async with session_factory() as lock_session:` at any surface
-    silently reopens the Aug 1 boot-hang flavor on that surface.
-
-    Source inspection because standing up all six against real
-    Postgres to test boot-hang wiring is heavier than needed; the
-    grep is the durable contract."""
+def test_acquire_lock_connection_bounded_used_by_all_six_surfaces():
+    """Class contract preserved from Layer D.1b: every advisory-lock-
+    guarded surface MUST bound its boot path. Under Layer E-rev-b
+    that means `acquire_lock_connection_bounded` (or a direct
+    wait_for(INGESTION_BOOT_TIMEOUT_S) wrapper). Regression to raw
+    `async with session_factory() as lock_session:` at any surface
+    silently reopens the Aug 1 boot-hang flavor AND the session-
+    mediated AL defect (rev-a)."""
     import ingestion.fl
     import ingestion.kalshi
     import main
@@ -203,21 +198,22 @@ def test_acquire_lock_session_bounded_used_by_all_six_surfaces():
         ("main._multi_stage_discovery_loop",
          inspect.getsource(main._multi_stage_discovery_loop)),
     ):
-        # Either use the shared helper (F104-F107 + kalshi via the
-        # helper OR the direct wait_for wrapper pattern kalshi/fl
-        # legitimately use — both bound the boot path).
-        used_helper = "acquire_lock_session_bounded" in src
+        used_helper = "acquire_lock_connection_bounded" in src
         used_direct_wrapper = (
             "INGESTION_BOOT_TIMEOUT_S" in src
             and "asyncio.wait_for" in src
         )
         assert used_helper or used_direct_wrapper, (
             f"{label} does NOT bound its boot path with either "
-            f"acquire_lock_session_bounded or a direct "
+            f"acquire_lock_connection_bounded or a direct "
             f"asyncio.wait_for(INGESTION_BOOT_TIMEOUT_S) wrapper. "
-            f"Layer D.1b regression: boot-hang flavor of the "
-            f"2026-08-01 Kalshi incident class silently reopens "
-            f"on this surface."
+            f"Layer D.1b + E-rev-b regression on this surface."
+        )
+        # E-rev-b regression guard: no surface may use the removed
+        # session-mediated helper name (which now raises).
+        assert "acquire_lock_session_bounded" not in src, (
+            f"{label} still references the removed "
+            f"acquire_lock_session_bounded — rev-a defect regression"
         )
 
 

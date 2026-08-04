@@ -458,20 +458,21 @@ async def _price_prune_loop():
     _log = logging.getLogger("price_prune")
     await asyncio.sleep(10)  # let DB init finish
 
-    from db import async_session, DATABASE_URL
-    if not DATABASE_URL or async_session is None:
-        _log.info("skipping — no DATABASE_URL")
+    from db import async_session, DATABASE_URL, advisory_lock_engine
+    if not DATABASE_URL or async_session is None or advisory_lock_engine is None:
+        _log.info("skipping — no DATABASE_URL or advisory_lock_engine")
         return
 
     from ingestion.base import (
         ADVISORY_LOCK_PRICE_PRUNE,
         NotLockHolder,
-        acquire_lock_session_bounded,
+        acquire_lock_connection_bounded,
         holder_heartbeat,
         pass_timeout_for,
     )
-    session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
-        async_session, ADVISORY_LOCK_PRICE_PRUNE,
+    # Layer E-rev-b: pinned AsyncConnection on DIRECT Neon endpoint.
+    conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
+        advisory_lock_engine, ADVISORY_LOCK_PRICE_PRUNE,
         log_name="price_prune", logger=_log,
     )
     try:
@@ -494,7 +495,7 @@ async def _price_prune_loop():
         # cadence with an unbounded prune_old_prices was invisible for
         # up to an hour on a dead-socket hang; now bounded per pass.
         async with holder_heartbeat(
-            lock_session, ADVISORY_LOCK_PRICE_PRUNE, "price_prune",
+            lock_conn, ADVISORY_LOCK_PRICE_PRUNE, "price_prune",
         ):
             while True:
                 # Layer B: iteration-alive stamp at TOP — proves the loop
@@ -517,7 +518,7 @@ async def _price_prune_loop():
                     _log.error("prune loop error: %s", e)
                 await asyncio.sleep(3600)  # every hour
     finally:
-        await session_cm.__aexit__(None, None, None)
+        await conn_cm.__aexit__(None, None, None)
 
 
 async def _score_flush_loop():
@@ -544,20 +545,21 @@ async def _score_flush_loop():
     await asyncio.sleep(15)  # let feeds warm up before first flush
 
     from db import async_session, DATABASE_URL
-    if not DATABASE_URL or async_session is None:
-        _log.info("skipping — no DATABASE_URL")
+    from db import advisory_lock_engine
+    if not DATABASE_URL or async_session is None or advisory_lock_engine is None:
+        _log.info("skipping — no DATABASE_URL or advisory_lock_engine")
         return
 
     from ingestion.base import (
         ADVISORY_LOCK_SCORE_FLUSH,
         NotLockHolder,
-        acquire_lock_session_bounded,
+        acquire_lock_connection_bounded,
         holder_heartbeat,
         pass_timeout_for,
     )
-    # Layer D.1b: bounded boot-path acquire.
-    session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
-        async_session, ADVISORY_LOCK_SCORE_FLUSH,
+    # Layer E-rev-b: pinned AsyncConnection on DIRECT Neon endpoint.
+    conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
+        advisory_lock_engine, ADVISORY_LOCK_SCORE_FLUSH,
         log_name="score_flush", logger=_log,
     )
     try:
@@ -603,12 +605,14 @@ async def _score_flush_loop():
                 except Exception as e:
                     _log.error("entity seed: %s", e)
 
-        # Layer E (2026-08-05): holder_heartbeat runs SELECT 1 on the
-        # AL session every AL_HEARTBEAT_INTERVAL_S. On grip loss (Neon
-        # proxy reap / connection death), heartbeat cancels the parent
-        # task; the CM re-raises as LockGripLost → supervise re-races.
+        # Layer E-rev-b (2026-08-06): heartbeat SELECT 1 on the PINNED
+        # AsyncConnection holding the lock (not a session — Session.commit
+        # released the DBAPI connection in rev-a, breaking the whole
+        # design). On grip loss (Neon proxy reap / connection death),
+        # heartbeat cancels the parent task; the CM re-raises as
+        # LockGripLost → supervise re-races.
         async with holder_heartbeat(
-            lock_session, ADVISORY_LOCK_SCORE_FLUSH, "score_flush",
+            lock_conn, ADVISORY_LOCK_SCORE_FLUSH, "score_flush",
         ):
             while True:
                 # Layer B (2026-08-04): iteration-alive stamp fires FIRST,
@@ -640,10 +644,10 @@ async def _score_flush_loop():
                     _log.error("score flush loop error: %s", e)
                 await asyncio.sleep(30)
     finally:
-        # Layer D.1b: manual session close matches acquire_lock_session_bounded's
+        # Layer E-rev-b: manual conn close matches acquire_lock_connection_bounded's
         # "caller owns cleanup" contract. Runs on happy path, on
         # NotLockHolder, on LockGripLost, and on any exception.
-        await session_cm.__aexit__(None, None, None)
+        await conn_cm.__aexit__(None, None, None)
 
 UTC = timezone.utc
 
@@ -6303,19 +6307,22 @@ async def _multi_stage_discovery_loop():
     _log = logging.getLogger("stochverse")
     await asyncio.sleep(30)
 
-    from db import async_session, DATABASE_URL
-    if not DATABASE_URL or async_session is None:
-        _log.info("multi_stage_discovery_loop: skipping — no DATABASE_URL")
+    from db import async_session, DATABASE_URL, advisory_lock_engine
+    if not DATABASE_URL or async_session is None or advisory_lock_engine is None:
+        _log.info(
+            "multi_stage_discovery_loop: skipping — no DATABASE_URL or advisory_lock_engine",
+        )
         return
 
     from ingestion.base import (
         ADVISORY_LOCK_MULTI_STAGE_DISC,
         NotLockHolder,
-        acquire_lock_session_bounded,
+        acquire_lock_connection_bounded,
         holder_heartbeat,
     )
-    session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
-        async_session, ADVISORY_LOCK_MULTI_STAGE_DISC,
+    # Layer E-rev-b: pinned AsyncConnection on DIRECT Neon endpoint.
+    conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
+        advisory_lock_engine, ADVISORY_LOCK_MULTI_STAGE_DISC,
         log_name="multi_stage_disc", logger=_log,
     )
     try:
@@ -6328,15 +6335,14 @@ async def _multi_stage_discovery_loop():
         from ingestion.health import register, set_state, STATE_HOLDER_RUNNING
         register("multi_stage_disc")
         set_state("multi_stage_disc", STATE_HOLDER_RUNNING)
-        # Layer E (2026-08-05): heartbeat on the AL session; grip loss
-        # (Neon proxy reap / connection death) → LockGripLost → supervise
-        # re-races. See ingestion.base.holder_heartbeat for semantics.
+        # Layer E-rev-b: heartbeat on the PINNED AsyncConnection holding
+        # the lock. On grip loss → LockGripLost → supervise re-races.
         async with holder_heartbeat(
-            lock_session, ADVISORY_LOCK_MULTI_STAGE_DISC, "multi_stage_disc",
+            lock_conn, ADVISORY_LOCK_MULTI_STAGE_DISC, "multi_stage_disc",
         ):
             await _multi_stage_discovery_loop_body(_log)
     finally:
-        await session_cm.__aexit__(None, None, None)
+        await conn_cm.__aexit__(None, None, None)
 
 
 async def _multi_stage_discovery_loop_body(_log):
@@ -6476,19 +6482,22 @@ async def _tournament_bracket_warm_loop():
     accepts."""
     _log = logging.getLogger("stochverse")
 
-    from db import async_session, DATABASE_URL
-    if not DATABASE_URL or async_session is None:
-        _log.info("tournament_bracket_warm_loop: skipping — no DATABASE_URL")
+    from db import async_session, DATABASE_URL, advisory_lock_engine
+    if not DATABASE_URL or async_session is None or advisory_lock_engine is None:
+        _log.info(
+            "tournament_bracket_warm_loop: skipping — no DATABASE_URL or advisory_lock_engine",
+        )
         return
 
     from ingestion.base import (
         ADVISORY_LOCK_BRACKET_WALK,
         NotLockHolder,
-        acquire_lock_session_bounded,
+        acquire_lock_connection_bounded,
         holder_heartbeat,
     )
-    session_cm, lock_session, got_lock = await acquire_lock_session_bounded(
-        async_session, ADVISORY_LOCK_BRACKET_WALK,
+    # Layer E-rev-b: pinned AsyncConnection on DIRECT Neon endpoint.
+    conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
+        advisory_lock_engine, ADVISORY_LOCK_BRACKET_WALK,
         log_name="bracket_walk", logger=_log,
     )
     try:
@@ -6501,13 +6510,13 @@ async def _tournament_bracket_warm_loop():
         from ingestion.health import register, set_state, STATE_HOLDER_RUNNING
         register("bracket_walk")
         set_state("bracket_walk", STATE_HOLDER_RUNNING)
-        # Layer E (2026-08-05): heartbeat + grip-loss re-race.
+        # Layer E-rev-b: heartbeat on PINNED AsyncConnection.
         async with holder_heartbeat(
-            lock_session, ADVISORY_LOCK_BRACKET_WALK, "bracket_walk",
+            lock_conn, ADVISORY_LOCK_BRACKET_WALK, "bracket_walk",
         ):
             await _tournament_bracket_warm_loop_body(_log)
     finally:
-        await session_cm.__aexit__(None, None, None)
+        await conn_cm.__aexit__(None, None, None)
 
 
 async def _run_bracket_warm_initial_pass_once(_log) -> int:
