@@ -19,44 +19,72 @@ log = logging.getLogger("db")
 # consume.
 _connect_args: dict = {}
 
-_raw_url = os.environ.get("DATABASE_URL", "")
-# Normalize scheme — Railway emits postgres://, asyncpg needs
-# postgresql+asyncpg://. Managed providers usually emit
-# postgresql:// which we also rewrite.
-if _raw_url.startswith("postgres://"):
-    _raw_url = _raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
-elif _raw_url.startswith("postgresql://"):
-    _raw_url = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-if _raw_url:
-    # Parse + strip unsupported query params, route them into
-    # connect_args for asyncpg.
+def _normalize_pg_url(raw_url: str, connect_args: dict) -> str:
+    """Turn a Neon/Supabase/Railway console-pasted Postgres URL into
+    something asyncpg can actually consume, and mutate `connect_args`
+    with the corresponding kwargs.
+
+    E-rev-b-hotfix (2026-08-07): extracted from the original inline
+    block that ran ONLY for DATABASE_URL. DATABASE_URL_DIRECT was
+    added by E-rev-b for the AL engine's direct-endpoint binding but
+    was read raw from the env (`os.environ.get(...) or DATABASE_URL`)
+    — bypassing THIS normalization. Consequence: a console-pasted
+    Neon direct DSN (`postgresql://…?sslmode=require&channel_binding=
+    require`) tripped every failure gate — wrong scheme (needs the
+    +asyncpg suffix), unknown query params (asyncpg rejects sslmode
+    in the DSN and doesn't know channel_binding), sslmode=require
+    not surfaced into connect_args["ssl"]. Result at 23:54Z was AL
+    engine init failure inside the shared try/except (see below),
+    which then wiped the pooled data engine too → ingestion dark on
+    both workers → 4-read-verification failure.
+
+    Contract: same string in → same string out, but scheme rewritten
+    to postgresql+asyncpg:// and libpq-style query params extracted
+    into connect_args. Neon/Supabase hostnames get ssl="require" as
+    an implicit default when no sslmode is provided. Empty raw_url
+    returns "".
+
+    Idempotent: safe to call on an already-normalized URL (scheme
+    check is prefix-based; already-stripped query params are absent
+    from qs so the pops are no-ops)."""
+    if not raw_url:
+        return ""
+    # Normalize scheme — Railway emits postgres://, asyncpg needs
+    # postgresql+asyncpg://. Managed providers usually emit
+    # postgresql:// which we also rewrite.
+    if raw_url.startswith("postgres://"):
+        raw_url = raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif raw_url.startswith("postgresql://"):
+        raw_url = raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     try:
-        parsed = urlparse(_raw_url)
+        parsed = urlparse(raw_url)
         qs = dict(parse_qsl(parsed.query))
         # sslmode: asyncpg accepts ssl="require" / "allow" /
         # "disable" etc. via its own "ssl" connect kwarg. Translate
         # from libpq-style names.
         sslmode = qs.pop("sslmode", None)
         if sslmode:
-            # Map libpq "sslmode=require" → asyncpg ssl="require"
-            _connect_args["ssl"] = sslmode if sslmode != "disable" else False
+            connect_args["ssl"] = sslmode if sslmode != "disable" else False
         # channel_binding: libpq-only param, asyncpg ignores it.
         qs.pop("channel_binding", None)
         # If this is a Neon / Supabase hostname with no explicit
         # sslmode, force SSL on — both providers require it.
-        if "ssl" not in _connect_args and parsed.hostname and any(
+        if "ssl" not in connect_args and parsed.hostname and any(
             marker in parsed.hostname
             for marker in ("neon.tech", "supabase.co", "supabase.com")
         ):
-            _connect_args["ssl"] = "require"
+            connect_args["ssl"] = "require"
         new_query = urlencode(qs)
-        DATABASE_URL = urlunparse(parsed._replace(query=new_query))
+        return urlunparse(parsed._replace(query=new_query))
     except Exception as e:
-        log.warning("failed to parse DATABASE_URL (using raw): %s", e)
-        DATABASE_URL = _raw_url
-else:
-    DATABASE_URL = ""
+        log.warning("failed to parse Postgres URL (using raw): %s", e)
+        return raw_url
+
+
+DATABASE_URL = _normalize_pg_url(
+    os.environ.get("DATABASE_URL", ""), _connect_args,
+)
 
 # ── Server-side defenses against transaction / connection leaks ──
 #
@@ -129,7 +157,38 @@ async_session = None
 # (one persistent connection per holder task); NullPool ensures no
 # pool-side reuse can accidentally hand our AL connection to another
 # caller.
-DATABASE_URL_DIRECT = os.environ.get("DATABASE_URL_DIRECT", "") or DATABASE_URL
+# E-rev-b-hotfix (2026-08-07): DATABASE_URL_DIRECT is now
+# NORMALIZED through the same helper as DATABASE_URL. Pre-hotfix,
+# a raw env read shipped console-pasted DSNs (postgresql://,
+# sslmode=require, channel_binding=require) straight into
+# create_async_engine, which chokes on any of the three defects.
+# 23:54Z evidence: AL engine init failed inside the shared try/
+# except, taking down the pooled data engine too → ingestion dark.
+#
+# The AL engine gets its OWN _al_connect_args dict so if DIRECT
+# has different SSL semantics from DATABASE_URL (unlikely but
+# possible), they don't cross-contaminate.
+_al_connect_args: dict = {}
+DATABASE_URL_DIRECT = _normalize_pg_url(
+    os.environ.get("DATABASE_URL_DIRECT", "") or os.environ.get("DATABASE_URL", ""),
+    _al_connect_args,
+)
+# Copy scalar connect_args from the pooled dict (command_timeout,
+# etc.); skip `ssl` (per-DSN via _al_normalize) and `server_settings`
+# (must be deep-copied so the AL's application_name override doesn't
+# mutate the pooled dict — subtle bug caught by test_application_name_set).
+for _k, _v in _connect_args.items():
+    if _k in ("ssl", "server_settings"):
+        continue
+    _al_connect_args.setdefault(_k, _v)
+# Deep-copy server_settings so we can override application_name
+# without mutating the pooled dict.
+_al_ss: dict = dict(_connect_args.get("server_settings", {}))
+_al_ss["application_name"] = "stochverse-web-al"
+_al_connect_args["server_settings"] = _al_ss
+
+engine = None
+async_session = None
 
 advisory_lock_engine = None
 # Retained as None for import-compat during the E-rev-b transition;
@@ -137,13 +196,20 @@ advisory_lock_engine = None
 # Kept until every caller has migrated to the pinned-connection API.
 advisory_lock_session = None
 
+# E-rev-b-hotfix: pooled data engine and AL engine now init in
+# SEPARATE try/except blocks. Pre-hotfix a shared try wiped the
+# pooled engine to None whenever the AL engine's init failed — the
+# whole database went dark for a mis-typed DATABASE_URL_DIRECT env
+# var. Post-hotfix, an AL failure leaves the pooled engine alive
+# and the AL callers raise NotLockHolder (see
+# acquire_lock_connection_bounded's engine=None guard) so supervise
+# re-races instead of dying.
 if DATABASE_URL:
     try:
         from sqlalchemy.ext.asyncio import (
             create_async_engine,
             async_sessionmaker,
         )
-        from sqlalchemy.pool import NullPool
         # Keep pool small so we stay well under providers' connection
         # limits (Railway: 20, Neon free: 100, Supabase free: 60).
         engine = create_async_engine(
@@ -167,36 +233,80 @@ if DATABASE_URL:
             connect_args=_connect_args,
         )
         async_session = async_sessionmaker(engine, expire_on_commit=False)
+        log.info(
+            "pooled data engine created (pool_size=5, pool_recycle=300; "
+            "ssl=%s)",
+            _connect_args.get("ssl", "default"),
+        )
+    except Exception as e:
+        log.error(
+            "POOLED DATA ENGINE INIT FAILED — application will run in "
+            "memory-only mode: %s", e,
+        )
+        engine = None
+        async_session = None
+else:
+    log.info("DATABASE_URL not set — running in memory-only mode")
 
+# AL engine has its OWN try/except — independent of the pooled data
+# engine. Failure here does NOT touch `engine` / `async_session`;
+# callers (acquire_lock_connection_bounded) see advisory_lock_engine
+# is None and raise NotLockHolder → supervise re-races. Once the
+# operator fixes DATABASE_URL_DIRECT, the retry succeeds without a
+# redeploy.
+if DATABASE_URL_DIRECT:
+    try:
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
         # Layer E-rev-b: AL engine on DIRECT endpoint (bypass pgbouncer
         # txn-mode multiplexing) + NullPool. Callers acquire via
-        # `advisory_lock_engine.connect()` (AsyncConnection, pinned
-        # DBAPI connection for CM lifetime). See ingestion.base.
-        # acquire_lock_connection_bounded. `advisory_lock_session`
-        # (sessionmaker) is intentionally NOT created — session.commit
-        # releases the connection, breaking the lock on NullPool. Any
-        # legacy caller that tries to import it will get None and fail
-        # fast.
+        # advisory_lock_engine.connect() (pinned AsyncConnection).
+        # advisory_lock_session sessionmaker intentionally NOT created —
+        # session.commit releases the DBAPI connection under NullPool,
+        # breaking the lock (rev-a defect).
         advisory_lock_engine = create_async_engine(
             DATABASE_URL_DIRECT,
             poolclass=NullPool,
-            connect_args=_connect_args,
+            connect_args=_al_connect_args,
         )
-
-        _direct_note = "same_as_pooled" if DATABASE_URL_DIRECT == DATABASE_URL else "DIRECT"
-        log.info(
-            "database engines created (pooled pool_size=5, pool_recycle=300; "
-            "advisory_lock NullPool endpoint=%s; ssl=%s)",
-            _direct_note, _connect_args.get("ssl", "default"),
-        )
+        # LOUD endpoint visibility (E-rev-b-hotfix): operator MUST be
+        # able to tell at a glance whether AL is on the DIRECT
+        # endpoint or fell back to pooled. Same-as-pooled means
+        # session-level advisory locks are on pgbouncer transaction-
+        # mode substrate — CHURNY LOCKS EXPECTED (see Day-65 evidence
+        # in PR-Layer-E-rev-b commit message). DIRECT means the real
+        # fix is active.
+        try:
+            _al_host = urlparse(DATABASE_URL_DIRECT).hostname or "unknown"
+        except Exception:
+            _al_host = "unparseable"
+        if DATABASE_URL_DIRECT == DATABASE_URL:
+            log.warning(
+                "advisory_lock_engine SAME AS POOLED (host=%s) — "
+                "session-level advisory locks are on pgbouncer "
+                "transaction-mode substrate; CHURNY LOCKS EXPECTED. "
+                "Set DATABASE_URL_DIRECT to Neon's DIRECT endpoint "
+                "(strip `-pooler` from host) for real single-holder "
+                "semantics.",
+                _al_host,
+            )
+        else:
+            log.info(
+                "advisory_lock_engine on DIRECT endpoint (host=%s; "
+                "NullPool; ssl=%s) — single-holder semantics active",
+                _al_host, _al_connect_args.get("ssl", "default"),
+            )
     except Exception as e:
-        log.warning("failed to create database engine: %s", e)
-        engine = None
-        async_session = None
+        log.error(
+            "AL ENGINE INIT FAILED — advisory-lock-guarded ingestion "
+            "loops (score_flush, price_prune, bracket_walk, "
+            "multi_stage_disc, fl, kalshi) will raise NotLockHolder "
+            "and supervise will re-race indefinitely until this is "
+            "fixed. Check DATABASE_URL_DIRECT format (must be a valid "
+            "Postgres URL; console-paste form accepted). Error: %s",
+            e,
+        )
         advisory_lock_engine = None
-        advisory_lock_session = None
-else:
-    log.info("DATABASE_URL not set — running in memory-only mode")
 
 
 async def init_db():

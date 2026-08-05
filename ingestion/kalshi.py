@@ -358,13 +358,18 @@ async def run(session_factory) -> None:
 
     from db import advisory_lock_engine as _al_engine
     if _al_engine is None:
-        # DATABASE_URL missing or engine init failed — memory-only
-        # mode (runner.py short-circuits earlier so this is defensive).
+        # E-rev-b-hotfix (2026-08-07): raise NotLockHolder instead of
+        # clean-return. Pre-hotfix, clean-return let supervise mark
+        # kalshi STATE_DEAD@attempt1 with no restart — the Day-63
+        # defect class through a new door. Raising NotLockHolder makes
+        # supervise re-race indefinitely (see supervise's Layer A
+        # handler); once the operator fixes DATABASE_URL_DIRECT the
+        # retry lands on a healthy _al_engine WITHOUT a redeploy.
         _log.warning(
             "ingestion.kalshi.no_al_engine",
-            note="advisory_lock_engine is None; skipping",
+            note="advisory_lock_engine unavailable — raising NotLockHolder for supervise re-race",
         )
-        return
+        raise NotLockHolder()
 
     conn_cm, lock_conn, got_lock = await acquire_lock_connection_bounded(
         _al_engine, ADVISORY_LOCK_KALSHI,
