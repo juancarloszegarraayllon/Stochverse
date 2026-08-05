@@ -315,6 +315,124 @@ ADVISORY_LOCK_BRACKET_WALK      = 0x5350_F106   # main._tournament_bracket_warm_
 ADVISORY_LOCK_MULTI_STAGE_DISC  = 0x5350_F107   # main._multi_stage_discovery_loop
 
 
+# All advisory lock keys we own. Used by sweep_orphan_advisory_locks
+# to identify our locks in pg_stat_activity. Do NOT include third-
+# party keys here.
+_ALL_ADVISORY_LOCK_KEYS: tuple = (
+    ADVISORY_LOCK_FL, ADVISORY_LOCK_KALSHI,
+    ADVISORY_LOCK_POLYMARKET, ADVISORY_LOCK_ODDSAPI,
+    ADVISORY_LOCK_SCORE_FLUSH, ADVISORY_LOCK_PRICE_PRUNE,
+    ADVISORY_LOCK_BRACKET_WALK, ADVISORY_LOCK_MULTI_STAGE_DISC,
+)
+
+
+AL_APPLICATION_NAME_EXPECTED: str = "stochverse-web-al"
+
+
+async def sweep_orphan_advisory_locks(
+    engine,
+    *,
+    expected_application_name: str = AL_APPLICATION_NAME_EXPECTED,
+    logger=None,
+) -> list[dict]:
+    """Boot-time diagnostic: scan pg_stat_activity for backends
+    holding OUR advisory lock keys whose application_name is NOT
+    the current AL tag. These are 'churn-era ghosts' — advisory
+    locks acquired via a prior connection that has since
+    disconnected, but pgbouncer kept the backend warm so the lock
+    persists. Log-only. Operator terminates by hand.
+
+    Provenance (2026-08-07 morning): rev-b's pre-hotfix shared-
+    connect_args bug had the AL engine binding to the pooled-endpoint
+    DSN AND sharing `application_name = "stochverse-web"` with the
+    data engine. When those acquires' clients disconnected, pgbouncer's
+    server-keepalive stranded the locks — backend PID stays alive,
+    session-level advisory lock stays held, `state_change` keeps
+    updating from multiplexed traffic on the SAME backend. Result:
+    orphan lock survives indefinitely across worker restarts.
+    Post-hotfix the AL engine is on the DIRECT endpoint with tag
+    "stochverse-web-al" so its own connections are self-identifying;
+    anything holding our keys under a DIFFERENT app-name is a ghost.
+
+    Returns a list of dicts (one per suspect row) so the caller can
+    log or act on them. Never raises — sweep failure logs a warning
+    and returns []. Runs against `engine` — recommended to pass the
+    DIRECT-endpoint engine (advisory_lock_engine) so the sweep
+    connection itself isn't multiplexed."""
+    if logger is None:
+        logger = _log
+    if engine is None:
+        return []
+
+    # Build the key-set in the Postgres representation. pg_locks
+    # exposes advisory locks as (classid, objid) = split of the
+    # 8-byte key: classid = upper 32 bits, objid = lower 32 bits.
+    key_rows = ",".join(
+        f"({k >> 32}::int, {k & 0xFFFFFFFF}::int)"
+        for k in _ALL_ADVISORY_LOCK_KEYS
+    )
+    sql = (
+        "SELECT l.pid, "
+        "       a.application_name, "
+        "       a.state, "
+        "       a.state_change, "
+        "       a.backend_start, "
+        "       l.classid, "
+        "       l.objid "
+        "FROM pg_locks l "
+        "JOIN pg_stat_activity a ON l.pid = a.pid "
+        f"WHERE l.locktype = 'advisory' "
+        f"  AND (l.classid, l.objid) IN ({key_rows}) "
+        f"  AND a.application_name IS DISTINCT FROM :expected_name"
+    )
+
+    try:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text(sql), {"expected_name": expected_application_name},
+            )
+            rows = result.mappings().all()
+    except Exception as e:
+        logger.warning(
+            "al_orphan_sweep failed: %s", e,
+        )
+        return []
+
+    orphans: list[dict] = []
+    for row in rows:
+        # Reconstruct the 8-byte key for operator convenience.
+        key = ((int(row["classid"]) & 0xFFFFFFFF) << 32) | (int(row["objid"]) & 0xFFFFFFFF)
+        entry = {
+            "pid": row["pid"],
+            "application_name": row["application_name"],
+            "state": row["state"],
+            "state_change": str(row["state_change"]) if row["state_change"] else None,
+            "backend_start": str(row["backend_start"]) if row["backend_start"] else None,
+            "advisory_key": hex(key),
+        }
+        orphans.append(entry)
+        logger.warning(
+            "AL ORPHAN LOCK DETECTED — pid=%s app_name=%s state=%s "
+            "advisory_key=%s backend_start=%s. This backend holds our "
+            "advisory lock but was NOT acquired by the current AL "
+            "engine (expected app_name=%s). Likely a churn-era ghost "
+            "(pre-hotfix acquire via pooled endpoint that pgbouncer "
+            "kept warm). Terminate with: "
+            "SELECT pg_terminate_backend(%s);",
+            row["pid"], row["application_name"], row["state"],
+            hex(key), entry["backend_start"],
+            expected_application_name, row["pid"],
+        )
+
+    if not orphans:
+        logger.info(
+            "al_orphan_sweep: clean — no advisory-lock ghosts detected "
+            "(expected app_name=%s)",
+            expected_application_name,
+        )
+    return orphans
+
+
 async def try_acquire_advisory_lock(session: AsyncSession, key: int) -> bool:
     """Acquire a Postgres session-level advisory lock.
 
@@ -630,41 +748,94 @@ async def acquire_lock_connection_bounded(
             "PR-Layer-E-rev-b."
         )
 
-    async def _do_acquire():
-        conn_cm = engine.connect()
-        conn = await conn_cm.__aenter__()
-        try:
-            # try_acquire on the pinned AsyncConnection. Note we
-            # inline the SELECT here instead of calling
-            # try_acquire_advisory_lock (which takes an AsyncSession);
-            # AsyncConnection.execute has the same shape.
-            result = await conn.execute(
-                text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key},
-            )
-            got_lock = bool(result.scalar())
-            if got_lock:
-                # End the implicit txn so the AL connection is not
-                # idle-in-txn during the heartbeat sleep cycle
-                # (server-side idle_in_transaction_session_timeout=60s
-                # would terminate the connection and release the
-                # session-level lock).
-                #
-                # KEY FACT: AsyncConnection.commit() ends the txn but
-                # does NOT release the DBAPI connection back to the
-                # pool. The connection is pinned for conn_cm's CM
-                # lifetime; only conn_cm.__aexit__() releases. This is
-                # THE reason rev-b is correct and rev-a wasn't —
-                # AsyncSession.commit() releases; AsyncConnection.commit()
-                # does not.
-                await conn.commit()
-        except Exception:
-            await conn_cm.__aexit__(None, None, None)
-            raise
-        return conn_cm, conn, got_lock
-
+    # E-rev-b-orphan-hotfix (2026-08-07): rewritten to close two
+    # orphan-connection leaks the previous shape shipped with. Both
+    # observed in production 2026-08-07 morning: bracket_walk lock
+    # (objid 510) held by boot-era pid 11988 permanently while BOTH
+    # workers reported not_holder_polling at attempt 11-12 → dead
+    # task's pinned connection still holding the lock.
+    #
+    # Leak 1 (PRIMARY): the previous `try: … except Exception:` at
+    #   the cleanup site MISSED CancelledError, which is a
+    #   BaseException in Python 3.8+. When supervise (or the outer
+    #   wait_for's timeout) cancels the acquire mid-flight — most
+    #   commonly at `await conn.execute("SELECT pg_try_advisory_lock…")`
+    #   or `await conn.commit()` AFTER pg_try_advisory_lock succeeded
+    #   server-side — the CancelledError propagated up without
+    #   invoking conn_cm.__aexit__. Under NullPool, __aexit__ is what
+    #   closes the DBAPI connection; without it, the backend PID
+    #   keeps the session-level advisory lock. Post-E.1-commit the
+    #   conn is idle-out-of-txn, so no server timeout reaps it —
+    #   ORPHAN IS PERMANENT UNTIL PROCESS RESTART.
+    #
+    # Leak 2 (SECONDARY): `await asyncio.wait_for(_do_acquire(), ...)`
+    #   has a documented completion-vs-timeout race. If _do_acquire
+    #   completes at the same event-loop tick the timeout timer
+    #   fires, wait_for may raise TimeoutError while discarding the
+    #   completed result tuple. Caller never gets (conn_cm, conn,
+    #   got_lock) — same orphan outcome. Boot-tier
+    #   INGESTION_BOOT_TIMEOUT_S=60 makes this plausible against a
+    #   slow DIRECT-endpoint connect + advisory-lock round-trip.
+    #
+    # Fix (three parts):
+    #   1. Inline the acquire — no more `_do_acquire` inner coroutine
+    #      and no outer wait_for wrapping it, so no return-race.
+    #   2. Bound each individual I/O with its own wait_for. Timeouts
+    #      surface as asyncio.TimeoutError inside the try, where the
+    #      cleanup block runs.
+    #   3. Catch BaseException (not Exception) so CancelledError from
+    #      supervise or any outer cancellation is captured. Shield
+    #      the __aexit__ call so a lingering CancelledError can't
+    #      re-abort the cleanup mid-close.
+    conn_cm = engine.connect()
+    conn = None
     try:
-        return await asyncio.wait_for(_do_acquire(), timeout=timeout_s)
+        # (1) Bounded connection-open. If this hangs past timeout_s
+        # or is cancelled, conn is still None and the except clause
+        # is a no-op cleanup (nothing to __aexit__).
+        conn = await asyncio.wait_for(
+            conn_cm.__aenter__(), timeout=timeout_s,
+        )
+        # From here on, conn is known-open; EVERY exit path below
+        # MUST route through the except clause's __aexit__ or we
+        # leak an orphan connection (and the advisory lock it holds).
+
+        # (2) try_acquire on the pinned AsyncConnection.
+        # AsyncConnection.execute has the same shape as AsyncSession.
+        # execute; we inline the SELECT here instead of calling
+        # try_acquire_advisory_lock (which is AsyncSession-typed).
+        result = await asyncio.wait_for(
+            conn.execute(
+                text("SELECT pg_try_advisory_lock(:key)"),
+                {"key": lock_key},
+            ),
+            timeout=timeout_s,
+        )
+        got_lock = bool(result.scalar())
+        if got_lock:
+            # End the implicit txn so the AL connection is not
+            # idle-in-txn during the heartbeat sleep cycle
+            # (server-side idle_in_transaction_session_timeout=60s
+            # would otherwise terminate the connection and release
+            # the session-level lock).
+            #
+            # KEY FACT: AsyncConnection.commit() ends the txn but
+            # does NOT release the DBAPI connection back to the
+            # pool. The connection is pinned for conn_cm's CM
+            # lifetime; only conn_cm.__aexit__() releases. This is
+            # THE reason rev-b is correct and rev-a wasn't —
+            # AsyncSession.commit() releases; AsyncConnection.commit()
+            # does not.
+            await asyncio.wait_for(conn.commit(), timeout=timeout_s)
     except asyncio.TimeoutError:
+        # A per-I/O wait_for above fired. Cleanup + surface as boot
+        # timeout for supervise to crash-restart.
+        if conn is not None:
+            try:
+                # Shield: outer cancellation must not abort cleanup.
+                await asyncio.shield(conn_cm.__aexit__(None, None, None))
+            except BaseException:
+                pass  # best-effort — cleanup exceptions never propagate
         # printf-style format works with BOTH stdlib logging and
         # structlog — the helper is called from mixed logger contexts
         # (main.py's F104-F107 use stdlib loggers; ingestion.* uses
@@ -675,6 +846,18 @@ async def acquire_lock_connection_bounded(
             "lock-connection acquire hung; raising to supervise for restart",
         )
         raise
+    except BaseException:
+        # CATCHES CancelledError — the leak-1 root cause. Every non-
+        # timeout exit (supervise cancel, network drop, unexpected
+        # exception) routes through here so the connection cannot
+        # escape __aexit__.
+        if conn is not None:
+            try:
+                await asyncio.shield(conn_cm.__aexit__(None, None, None))
+            except BaseException:
+                pass
+        raise
+    return conn_cm, conn, got_lock
 
 
 # Rev-a helper name retained as a raising stub so any accidentally-
