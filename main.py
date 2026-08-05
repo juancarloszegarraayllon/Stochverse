@@ -161,6 +161,25 @@ async def startup_event():
         logging.getLogger("stochverse").warning(
             "ingestion health register_all skipped: %s", e,
         )
+    # E-rev-b-orphan-hotfix (2026-08-07): boot-time sweep for AL
+    # ghosts. See ingestion.base.sweep_orphan_advisory_locks for the
+    # rationale — 2026-08-07 morning surfaced a bracket_walk lock
+    # held by a pre-hotfix pooled-endpoint acquire (pid 11988,
+    # application_name="stochverse-web") stranded by pgbouncer's
+    # server-keepalive after the acquiring client disconnected.
+    # Runs against advisory_lock_engine (DIRECT endpoint) so the
+    # sweep query itself is not multiplexed and can see the full
+    # pg_stat_activity truth. Log-only — operator terminates by hand
+    # (SQL emitted in the WARNING log line).
+    try:
+        from db import advisory_lock_engine
+        from ingestion.base import sweep_orphan_advisory_locks
+        if advisory_lock_engine is not None:
+            await sweep_orphan_advisory_locks(advisory_lock_engine)
+    except Exception as e:
+        logging.getLogger("stochverse").warning(
+            "al_orphan_sweep startup skipped: %s", e,
+        )
     # Task #21 Surface A: warm-load the Kalshi /series metadata cache
     # from cache_blobs BEFORE the get_data thread starts. Awaited (not
     # fire-and-forget) because the first _build_cache pass classifies
