@@ -358,6 +358,123 @@ async def shutdown_event():
     log.info("shutdown: complete")
 
 
+# ── Response-size logger (2026-08-07) ─────────────────────────────
+#
+# Egress attribution kit for Investigation #2 (~300 GB/day; +282 GB
+# in 22h; ~$15/day). CPU/RAM flat while egress climbs → response
+# bytes per request, not raw request volume. We need per-request
+# wire-byte data to attribute across the ~130 API routes; nothing
+# in the existing stack logs response size today.
+#
+# Middleware position: added FIRST (before every other middleware).
+# In Starlette semantics `add_middleware(X)` prepends X to
+# `user_middleware`, and `build_middleware_stack` iterates in reverse
+# to wrap the app — so FIRST-added ends up as OUTERMOST-close-to-
+# client. On the response path (route → inner-to-outer), this
+# middleware runs LAST — AFTER GZip has compressed the body — so
+# `len(body)` here is the actual wire bytes crossing the network.
+# The EventsETagMiddleware comment at :382 documents the same
+# reasoning from the opposite direction (it's added LAST → runs
+# FIRST on response → sees raw JSON pre-gzip for stable ETag hashing).
+#
+# Env-gated dark launch:
+#   LOG_RESPONSE_SIZE=1               enables logging (default off).
+#   LOG_RESPONSE_SIZE_MIN_BYTES=1024  filter noise (default 1024 B).
+#
+# Log format (grep-friendly, cardinality-bounded):
+#   resp <status> <method> <path> <bytes> <client_class>
+#
+# Path is the URL path only — NO query string — so `/api/events?
+# offset=48&limit=24&…` collapses to `/api/events` and bytes across
+# all its variants aggregate cleanly. Client class comes from a
+# lightweight User-Agent classifier: browser | bot | unknown. Bot
+# detection is a substring match on common scraper markers; not
+# adversarially robust, but sufficient to tell "80% of egress is
+# from unknown-UA hits on /api/events" from "80% is from browser
+# tabs pre-warming /normalized on hover".
+_LOG_RESPONSE_SIZE: bool = os.environ.get("LOG_RESPONSE_SIZE", "0") == "1"
+_LOG_RESPONSE_SIZE_MIN_BYTES: int = int(
+    os.environ.get("LOG_RESPONSE_SIZE_MIN_BYTES", "1024")
+)
+
+# Lower-cased substring markers. Order matters only for the first
+# match; the classifier stops at the first hit.
+_UA_BOT_MARKERS: tuple = (
+    "bot", "spider", "crawler", "curl", "wget", "python-requests",
+    "python-urllib", "python-httpx", "go-http-client", "java/",
+    "okhttp", "ruby", "postmanruntime", "insomnia", "scrapy",
+    "httpclient", "aiohttp", "libwww-perl", "puppeteer", "headlesschrome",
+    "playwright",
+)
+# Also lower-cased. Order matters only for the first match.
+_UA_BROWSER_MARKERS: tuple = (
+    # Order matters: 'edg/' before 'chrome' (Edge UA contains both).
+    "edg/", "firefox", "safari", "chrome", "opera", "opr/", "mozilla",
+)
+
+
+def _classify_ua(user_agent: str) -> str:
+    """Cheap UA classifier: browser | bot | unknown. Bot check runs
+    first (bot UAs sometimes include browser tokens for evasion; the
+    presence of a bot marker wins). Never raises — malformed UAs
+    return 'unknown'."""
+    if not user_agent:
+        return "unknown"
+    ua_l = user_agent.lower()
+    for marker in _UA_BOT_MARKERS:
+        if marker in ua_l:
+            return "bot"
+    for marker in _UA_BROWSER_MARKERS:
+        if marker in ua_l:
+            return "browser"
+    return "unknown"
+
+
+class ResponseSizeMiddleware(BaseHTTPMiddleware):
+    """Log every response's wire-byte size + method + path + status +
+    client class. Zero effect when LOG_RESPONSE_SIZE is off (env
+    check gates the whole dispatch body). See module docstring above
+    for position rationale and read-back format.
+
+    Buffering cost when enabled: streams response body into memory
+    to measure it, same pattern as EventsETagMiddleware. For an
+    egress-investigation kit that's acceptable; the middleware
+    should be disabled once attribution is complete."""
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if not _LOG_RESPONSE_SIZE:
+            return response
+        body_chunks = []
+        async for chunk in response.body_iterator:
+            body_chunks.append(chunk)
+        body = b"".join(body_chunks)
+        n = len(body)
+        if n >= _LOG_RESPONSE_SIZE_MIN_BYTES:
+            client_class = _classify_ua(request.headers.get("user-agent", ""))
+            logging.getLogger("respsize").info(
+                "resp %d %s %s %d %s",
+                response.status_code,
+                request.method,
+                request.url.path,
+                n,
+                client_class,
+            )
+        # Rebuild response so downstream (or the client) still gets
+        # the body — Response constructor recomputes content-length,
+        # which we pop out of the header dict to avoid a mismatch.
+        new_headers = dict(response.headers)
+        new_headers.pop("content-length", None)
+        return Response(
+            content=body, status_code=response.status_code,
+            headers=new_headers, media_type=response.media_type,
+        )
+
+
+# FIRST-added → outermost on the response path → sees wire bytes.
+# Every add_middleware call BELOW this line will be an INNER wrap,
+# meaning `body` here reflects the final post-gzip bytes.
+app.add_middleware(ResponseSizeMiddleware)
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 # Gzip compression on responses >= 500 bytes. Screener + events JSON
 # responses are typically 20-200KB uncompressed, usually 3-5x smaller
