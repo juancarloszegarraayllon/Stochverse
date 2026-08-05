@@ -97,6 +97,7 @@ DEFAULT_STALENESS_THRESHOLDS_S: dict[str, int] = {
     "bracket_walk":      3600,   # 30-min steady-state × 2 = 3600s
     "multi_stage_disc":  5400,   # 30-min cycle × 3 = 5400s
     "cutover_config_refresh": 30,  # 5s cadence × 6 = 30s
+    "v4_linkage_refresh":    180,  # 30s cadence × 6 = 180s
 }
 
 # Every ingestion surface must appear in this list. `register_all()`
@@ -116,6 +117,9 @@ INGESTION_TASK_NAMES: tuple[str, ...] = (
     "multi_stage_disc",
     # Phase 3 (2026-08-04): cutover config bg refresh loop.
     "cutover_config_refresh",
+    # Phase 3 linkage-cache (2026-08-05): v4 event_ticker → fixture
+    # linkage bg refresh loop.
+    "v4_linkage_refresh",
 )
 
 

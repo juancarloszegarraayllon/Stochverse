@@ -170,12 +170,17 @@ def _hash_for(series_ticker: str) -> int:
 
 
 def _series_universe(cfg: CutoverConfig) -> list[str]:
-    """Current sport-scoped universe from main._SERIES_SPORT_DYNAMIC.
-    Read from RAM only — the sport map is populated by the get_data
-    thread (Kalshi REST + warm-load) and lives in-process."""
+    """Sport-scoped universe (all Kalshi series whose classified
+    sport is in enabled_sports). Read from RAM only.
+
+    Note: this is the RAW sport-classified universe — includes series
+    that have no v4 linkage yet (fixture_id NULL in sp.kalshi_markets).
+    For cohort-membership computation, use _linked_universe() below
+    which filters to LINKED-only. Exposed here for /api/cutover_status
+    observability (operator sees delta between total-classified and
+    exercisable-via-v4)."""
     if not cfg.enabled_sports:
         return []
-    # Import inside function to avoid circular import at module load.
     try:
         from main import _SERIES_SPORT_DYNAMIC
     except Exception:
@@ -187,55 +192,109 @@ def _series_universe(cfg: CutoverConfig) -> list[str]:
     ]
 
 
+def _linked_universe(cfg: CutoverConfig) -> list[str]:
+    """Cohort-eligible universe: sport-scoped AND has ≥1 event_ticker
+    in the linkage map.
+
+    Day-64 dry-run finding (folded into this PR): pct=5 against the
+    raw sport-scoped Soccer universe (~360 series incl. totals/1H/BTTS/
+    futures) produced cohort_size=18 — but only ~30 series have
+    linkage today (game-markets with fixture_id). Most cohort members
+    fell through to v3 silently, real v4 exercise ≈ 1-2.
+
+    Filtering to linked-only ensures cohort membership always
+    exercises the v4 pathway. Consequence: cohort membership shifts
+    as linkage refreshes (series moves in/out of linked_universe as
+    resolver classifies fixture_id). Bounded to the linkage refresh
+    cadence (~30s); documented in the runbook."""
+    if not cfg.enabled_sports:
+        return []
+    try:
+        from linkage import linked_series_set
+    except Exception:
+        return []
+    linked = linked_series_set()
+    return [s for s in _series_universe(cfg) if s in linked]
+
+
 def cohort_series_list(cfg: CutoverConfig | None = None) -> list[str]:
     """Return the current cohort as a list of series_tickers.
-    Deterministic: sort universe by hash, take first N series where
-    N = compute_cohort_size(len(universe), cfg).
+    Deterministic: sort LINKED universe by hash, take first N series
+    where N = compute_cohort_size(len(linked_universe), cfg).
 
-    Used by /api/cutover_status for cohort_sample and by is_v4_cohort()
-    for the membership check. Recomputed on every call — the universe
-    can grow (new series added to _SERIES_SPORT_DYNAMIC by get_data
-    passes) so caching would introduce staleness."""
+    Day-64 fold: cohort membership is drawn from LINKED universe
+    (sport-scoped AND has linkage entry), not raw sport-scoped
+    universe. Guarantees every cohort member can actually be served
+    v4 — no silent fall-through to v3 for cohort members with no
+    linkage.
+
+    Recomputed on every call — the linked universe grows as the
+    linkage cache refreshes (~30s cadence). Caching would introduce
+    staleness at cohort boundaries."""
     if cfg is None:
         cfg = get_current_config()
-    universe = _series_universe(cfg)
-    n = compute_cohort_size(len(universe), cfg)
+    linked = _linked_universe(cfg)
+    n = compute_cohort_size(len(linked), cfg)
     if n <= 0:
         return []
     # Sort by hash ascending → take first N. Ties broken by ticker
     # (stable ordering across calls given identical universe).
-    ranked = sorted(universe, key=lambda s: (_hash_for(s), s))
+    ranked = sorted(linked, key=lambda s: (_hash_for(s), s))
     return ranked[:n]
+
+
+def compute_effective_pct(cohort_size: int, universe_size: int) -> float:
+    """Actual cohort as % of the LINKED universe. Delta vs
+    traffic_pct signals whether MIN-COHORT FLOOR or rounding
+    widened. Zero for empty universe.
+
+    Example (Day-64 dry-run corrected via linked universe):
+      traffic_pct=5, linked=30, min=2 → cohort=2 → effective=6.67
+      traffic_pct=5, linked=30, min=5 → cohort=5 → effective=16.67
+      traffic_pct=25, linked=30, min=2 → cohort=8 → effective=26.67
+    Operator sees BOTH — the delta signals when floor triggered."""
+    if universe_size <= 0:
+        return 0.0
+    return round(cohort_size / universe_size * 100, 2)
 
 
 def is_v4_cohort(series_ticker: str, *, cfg: CutoverConfig | None = None) -> bool:
     """Sole source of truth for cohort membership. Every consumer
     imports this function; NEVER re-implement the hash elsewhere.
 
-    Deterministic given identical universe: same series → same
-    routing across processes, workers, days (until universe grows
-    and shifts the lowest-N-by-hash boundary; documented in the
+    Deterministic given identical linked universe: same series →
+    same routing across processes, workers, days (until the linkage
+    map refreshes and shifts the lowest-N-by-hash boundary; bounded
+    to the ~30s linkage refresh cadence and documented in the
     runbook).
 
-    Sport-scope short-circuits BEFORE the hash so non-cohort sports
-    pay zero measurable cost."""
+    Fast path: sport-scope check + linkage check short-circuit
+    BEFORE building the cohort list, so non-cohort tickers pay ~2
+    dict lookups."""
     if cfg is None:
         cfg = get_current_config()
     if not cfg.enabled_sports or cfg.traffic_pct <= 0:
         return False
     if not series_ticker:
         return False
-    # Fast path: check sport membership BEFORE building the full
-    # cohort list. Only 1 dict lookup per call for sports outside
-    # the enabled set.
+    s_upper = str(series_ticker).upper()
     try:
         from main import _SERIES_SPORT_DYNAMIC
     except Exception:
         return False
-    sport = _SERIES_SPORT_DYNAMIC.get(str(series_ticker).upper())
+    sport = _SERIES_SPORT_DYNAMIC.get(s_upper)
     if sport not in cfg.enabled_sports:
         return False
-    # Slow path (only for sport-in-scope series): compute cohort
-    # and check membership. Cohort is a list of ≤N series; membership
-    # check is O(N) — trivial at N ≤ 100.
+    # Fast path: if the series has no linkage entry, it can never
+    # be in cohort under the Day-64 linked-universe rule. Short-
+    # circuit before building the cohort list.
+    try:
+        from linkage import is_linked
+    except Exception:
+        return False
+    if not is_linked(s_upper):
+        return False
+    # Slow path (only for sport-scoped, linked series): compute
+    # cohort and check membership. Cohort ≤ min(N, linked_universe);
+    # membership check is O(cohort_size), trivial at N ≤ 100.
     return series_ticker in cohort_series_list(cfg)

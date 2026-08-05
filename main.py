@@ -191,6 +191,30 @@ async def startup_event():
         logging.getLogger("stochverse").warning(
             "kalshi_series_meta warm-start skipped: %s", e,
         )
+    # Phase 3 v4 linkage-cache (2026-08-05): warm-load
+    # cache_blobs['v4_linkage_snapshot'] BEFORE serving path opens
+    # so cohort tickers land warm on first request. Wrapped in
+    # asyncio.wait_for per operator's Layer-D boot discipline:
+    # slow Neon MUST NOT stall startup — cold-degraded is fine,
+    # blocked boot is not. On timeout the bg refresh loop populates
+    # within ~30s (V4_LINKAGE_REFRESH_INTERVAL_S).
+    try:
+        _V4_WARM_TIMEOUT_S = float(
+            os.environ.get("V4_LINKAGE_WARM_TIMEOUT_S", "10")
+        )
+        await asyncio.wait_for(
+            _load_v4_linkage_from_db(), timeout=_V4_WARM_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logging.getLogger("stochverse").warning(
+            "v4_linkage warm-load timeout after %ss — bg refresh "
+            "will populate within ~%ss",
+            _V4_WARM_TIMEOUT_S, _V4_LINKAGE_REFRESH_INTERVAL_S,
+        )
+    except Exception as e:
+        logging.getLogger("stochverse").warning(
+            "v4_linkage warm-load skipped: %s", e,
+        )
     # Build the REST snapshot eagerly in a thread so the WS client has
     # tickers to subscribe to without waiting for a first user request.
     threading.Thread(target=get_data, daemon=True).start()
@@ -283,6 +307,14 @@ async def startup_event():
     from ingestion.base import supervise as _supervise
     asyncio.create_task(_supervise(
         "cutover_config_refresh", _cutover_config_refresh_loop,
+    ))
+    # Phase 3 linkage-cache (2026-08-05): supervise-wrapped, Layer-D
+    # bounded, health-registered v4 linkage refresh loop. Populates
+    # _V4_LINKAGE_MAP every V4_LINKAGE_REFRESH_INTERVAL_S seconds
+    # (default 30s). Warm-load above already primed the map from
+    # cache_blobs; this loop keeps it fresh.
+    asyncio.create_task(_supervise(
+        "v4_linkage_refresh", _v4_linkage_refresh_loop,
     ))
     # Prewarm series→stage_id for EVERY sport series in get_data(),
     # not just the ones users have clicked into. This is what was
@@ -1351,27 +1383,104 @@ _CUTOVER_REFRESH_INTERVAL_S = int(
 )
 
 
-def _apply_v4_linkage_placeholder(record: dict) -> None:
-    """Placeholder for the v4 fixture-linkage pathway (deferred to
-    the follow-up linkage-cache PR). Today this function is
-    unreachable — /api/events wiring short-circuits at pct=0 default
-    so no call site enters this body. When the linkage-cache PR
-    lands, this becomes the actual v4 lookup: read the in-memory
-    event_ticker → fixture_id map (bg-loop refreshed) and merge
-    fixture-derived fields into `record`. Kept as an explicit
-    NotImplementedError so any early-firing bug surfaces loudly
-    rather than serving inconsistent state.
+# Phase 3 linkage-cache (2026-08-05): v4 pathway is now real. The
+# placeholder that raised NotImplementedError is REMOVED. /api/events
+# imports `_apply_v4_linkage` directly from the `linkage` module.
+# The bg refresh loop (_v4_linkage_refresh_loop below) populates
+# _V4_LINKAGE_MAP; the warm-load task (_load_v4_linkage_from_db)
+# fills it at boot before the first bg pass completes.
+_V4_LINKAGE_REFRESH_INTERVAL_S = int(
+    os.environ.get("V4_LINKAGE_REFRESH_INTERVAL_S", "30")
+)
 
-    Present in this PR so the branching wiring parses cleanly and
-    the fallback-counter contract is testable end-to-end. Ship
-    order: flag-wiring (this PR, no behavior change at pct=0) →
-    linkage-cache follow-up PR (implements this function) → operator
-    flips pct=5 for soccer."""
-    raise NotImplementedError(
-        "v4 linkage pathway not yet wired — this call is unreachable "
-        "at pct=0 default. Follow-up linkage-cache PR implements "
-        "the actual lookup + merge."
-    )
+
+async def _load_v4_linkage_from_db():
+    """Warm-load _V4_LINKAGE_MAP from cache_blobs at startup so the
+    first cohort request lands on a populated map. Awaited in
+    startup_event (per operator's Layer-D boot discipline: wrap in
+    asyncio.wait_for so slow Neon doesn't stall boot). Cold-degraded
+    is fine, blocked boot is not."""
+    _log = logging.getLogger("v4_linkage")
+    try:
+        from db import load_cache_blob
+        prior = await load_cache_blob("v4_linkage_snapshot")
+        if not isinstance(prior, dict) or not prior:
+            _log.info("v4_linkage warm-start: no prior blob")
+            return
+        import linkage as _linkage
+        _linkage._V4_LINKAGE_MAP = prior
+        _linkage._V4_LINKAGE_MAP_LAST_REFRESHED_TS = time.time()
+        _linkage._V4_LINKAGE_MAP_SOURCE = "warm_load"
+        _log.info(
+            "v4_linkage warm-start: loaded %d entries from cache_blobs",
+            len(prior),
+        )
+    except Exception as e:
+        _log.warning("v4_linkage warm-start failed: %s", e)
+
+
+async def _v4_linkage_refresh_loop():
+    """Every V4_LINKAGE_REFRESH_INTERVAL_S seconds, refresh
+    _V4_LINKAGE_MAP from sp.kalshi_markets ∪ sp.fl_events.
+    Supervise-wrapped in startup_event so it inherits Layer-A
+    NotLockHolder / Layer-D timeouts / Layer-C health-registry
+    semantics.
+
+    Atomic swap: build the new dict fully, then assign to the
+    module var. GIL guarantees single-writer atomicity for the
+    assignment — readers see old-or-new, never partial.
+
+    Persists snapshot to cache_blobs['v4_linkage_snapshot'] on
+    every successful refresh so the next container boot's
+    warm-load has fresh data."""
+    _log = logging.getLogger("v4_linkage_refresh")
+    from ingestion.health import register, stamp_pass_complete, set_state, STATE_HOLDER_RUNNING
+    from ingestion.base import pass_timeout_for
+    import linkage as _linkage
+    import time as _time
+
+    register("v4_linkage_refresh")
+    set_state("v4_linkage_refresh", STATE_HOLDER_RUNNING)
+    first_pass = True
+    while True:
+        # Layer B: iteration-alive stamp at TOP of loop.
+        stamp_pass_complete("v4_linkage_refresh")
+        try:
+            from db import load_v4_linkage_rows, save_cache_blob
+            timeout_s = pass_timeout_for(first_pass)
+            try:
+                rows = await asyncio.wait_for(
+                    load_v4_linkage_rows(), timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                _log.warning(
+                    "v4_linkage_refresh_timeout timeout_sec=%s first_pass=%s",
+                    timeout_s, first_pass,
+                )
+                raise
+            if rows is not None:
+                new_map = {
+                    str(r["event_ticker"]).upper(): {
+                        "fl_event_id":   str(r["fl_event_id"]),
+                        "fixture_id":    r["fixture_id"],
+                        "updated_at_ts": _time.time(),
+                    }
+                    for r in rows
+                }
+                # Atomic swap.
+                _linkage._V4_LINKAGE_MAP = new_map
+                _linkage._V4_LINKAGE_MAP_LAST_REFRESHED_TS = _time.time()
+                _linkage._V4_LINKAGE_MAP_SOURCE = "bg_refresh"
+                _log.info("v4_linkage_refresh loaded=%d", len(new_map))
+                first_pass = False
+                # Persist snapshot for next boot's warm-load.
+                try:
+                    await save_cache_blob("v4_linkage_snapshot", new_map)
+                except Exception as e:
+                    _log.warning("v4_linkage_snapshot save failed: %s", e)
+        except Exception as e:
+            _log.warning("v4_linkage_refresh error: %s", e)
+        await asyncio.sleep(_V4_LINKAGE_REFRESH_INTERVAL_S)
 
 
 async def _cutover_config_refresh_loop():
@@ -2717,11 +2826,13 @@ def get_events(
                 if not _is_v4_cohort(_st, cfg=_cutover_cfg):
                     continue
                 try:
-                    # v4 pathway not yet implemented — placeholder
-                    # for the follow-up linkage-cache PR. Today this
-                    # branch is unreachable because the wiring above
-                    # short-circuits (pct=0 default).
-                    _apply_v4_linkage_placeholder(_r)
+                    # Phase 3 linkage-cache PR: v4 pathway is real.
+                    # Reads _V4_LINKAGE_MAP (bg-refreshed) + FL
+                    # GAMES_BY_EVENT_ID (secondary index) — both RAM.
+                    # Missing linkage silently falls through to v3
+                    # (per _apply_v4_linkage contract, does not raise).
+                    from linkage import _apply_v4_linkage as _v4_apply
+                    _v4_apply(_r)
                 except Exception as _v4_exc:
                     _new_count = _incr_v4_fb()
                     logging.getLogger("stochverse").warning(
@@ -14857,22 +14968,37 @@ def cutover_status():
     picks up within CUTOVER_REFRESH_INTERVAL_S (default 5s)."""
     from cutover import (
         get_current_config, cohort_series_list,
-        fallback_counter_value,
+        fallback_counter_value, compute_effective_pct,
+        _series_universe, _linked_universe,
     )
+    from linkage import snapshot_state as _linkage_snapshot
     from ingestion.health import WORKER_ID
     cfg = get_current_config()
+    universe = _series_universe(cfg)
+    linked_universe = _linked_universe(cfg)
     cohort = cohort_series_list(cfg)
+    linkage_snap = _linkage_snapshot()
+    # cohort_linked_size == cohort_size by construction post-Day-64
+    # fold (cohort is drawn from linked universe), but keep the
+    # field explicit so operator can see the invariant hold.
     return {
-        "traffic_pct":         cfg.traffic_pct,
-        "enabled_sports":      list(cfg.enabled_sports),
-        "min_cohort_series":   cfg.min_cohort_series,
-        "cohort_size":         len(cohort),
-        "cohort_sample":       cohort[:10],
-        "v4_fallback_count":   fallback_counter_value(),
-        "config_source":       cfg.source,
-        "config_loaded_at_ts": cfg.loaded_at_ts if cfg.loaded_at_ts > 0 else None,
-        "worker_id":           WORKER_ID,
-        "checked_at_ts":       time.time(),
+        "traffic_pct":               cfg.traffic_pct,
+        "effective_pct":             compute_effective_pct(len(cohort), len(linked_universe)),
+        "enabled_sports":            list(cfg.enabled_sports),
+        "min_cohort_series":         cfg.min_cohort_series,
+        "universe_size":             len(universe),
+        "linked_universe_size":      len(linked_universe),
+        "cohort_size":               len(cohort),
+        "cohort_linked_size":        len(cohort),
+        "cohort_sample":             cohort[:10],
+        "v4_fallback_count":         fallback_counter_value(),
+        "config_source":             cfg.source,
+        "config_loaded_at_ts":       cfg.loaded_at_ts if cfg.loaded_at_ts > 0 else None,
+        "linkage_map_size":          linkage_snap["linkage_map_size"],
+        "linkage_last_refreshed_ts": linkage_snap["linkage_last_refreshed_ts"],
+        "linkage_source":            linkage_snap["linkage_source"],
+        "worker_id":                 WORKER_ID,
+        "checked_at_ts":             time.time(),
     }
 
 

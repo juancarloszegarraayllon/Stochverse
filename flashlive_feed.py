@@ -167,6 +167,14 @@ ACTIVE_SPORTS = {
     "36": "Esports",
 }
 GAMES: dict = {}    # normalized key → game dict
+# Phase 3 linkage cache (2026-08-05): secondary index by fl_event_id.
+# Values are the SAME dict as the corresponding GAMES entry (not a
+# copy) — any downstream mutation propagates to both indices via
+# reference. Written from _merge_parsed_events_into_games; swept from
+# _sweep_stale_games. Read from linkage._apply_v4_linkage during v4
+# request-path lookup (RAM only, zero DB round-trips per operator's
+# architectural constraint).
+GAMES_BY_EVENT_ID: dict = {}    # str(event_id) → game dict
 
 # Task #21 Surface B b5.ii — per-sport adaptive-cadence state.
 #
@@ -1769,7 +1777,11 @@ def _merge_parsed_events_into_games(events, source_label: str = "") -> tuple[int
     Extracted from the pre-b5.ii loop body so the per-sport TODAY
     workers and the shared TOMORROW sweep share one merge contract.
     Stale-sweep is NOT here — it lives in a separate janitor task
-    so per-sport workers aren't racing on the sweep condition."""
+    so per-sport workers aren't racing on the sweep condition.
+
+    Phase 3 linkage-cache (2026-08-05): also populates
+    GAMES_BY_EVENT_ID secondary index with the SAME dict reference
+    for O(1) fl_event_id lookup on the v4 request path."""
     parsed = 0
     games_by_sport: dict = {}
     for ev in events:
@@ -1777,6 +1789,9 @@ def _merge_parsed_events_into_games(events, source_label: str = "") -> tuple[int
         if g and g.get("home_name") and g.get("away_name"):
             key = f"{g['sport']}:{_normalize(g['home_name'])}:{_normalize(g['away_name'])}"
             GAMES[key] = g
+            event_id = g.get("event_id")
+            if event_id:
+                GAMES_BY_EVENT_ID[str(event_id)] = g
             parsed += 1
             sp = g.get("sport") or "?"
             games_by_sport[sp] = games_by_sport.get(sp, 0) + 1
@@ -1784,8 +1799,9 @@ def _merge_parsed_events_into_games(events, source_label: str = "") -> tuple[int
 
 
 def _sweep_stale_games(now_s: float) -> int:
-    """Drop games not seen in 10 min + their added-time snapshots.
-    Returns the number of entries removed."""
+    """Drop games not seen in 10 min + their added-time snapshots +
+    their GAMES_BY_EVENT_ID entries. Returns the number of entries
+    removed."""
     stale_cutoff_ms = int((now_s - 600) * 1000)
     stale_keys = [k for k, g in list(GAMES.items())
                   if (g.get("captured_at_ms") or 0) < stale_cutoff_ms]
@@ -1795,6 +1811,9 @@ def _sweep_stale_games(now_s: float) -> int:
         GAMES.pop(k, None)
     for eid in stale_event_ids:
         _ADDED_TIME_CACHE.pop(eid, None)
+        # Phase 3: keep GAMES_BY_EVENT_ID in sync with GAMES so v4
+        # lookups never hit a stale FL entry.
+        GAMES_BY_EVENT_ID.pop(str(eid), None)
     return len(stale_keys)
 
 

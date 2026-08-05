@@ -60,10 +60,20 @@ def test_is_v4_cohort_short_circuits_when_sport_not_enabled(monkeypatch):
     ~0 measurable cost. Regression here means every request pays
     the O(N) cohort-list build for tickers we already know are
     out of scope."""
-    import cutover
+    import cutover, linkage
     monkeypatch.setattr(
         "main._SERIES_SPORT_DYNAMIC",
         {"KXBBALL01": "Basketball", "KXSOCCER01": "Soccer"},
+    )
+    # Post-Day-64: cohort drawn from LINKED universe. Both series
+    # need at least one event_ticker in _V4_LINKAGE_MAP to be
+    # eligible.
+    monkeypatch.setattr(
+        "linkage._V4_LINKAGE_MAP",
+        {
+            "KXBBALL01-GAME1":  {"fl_event_id": "fl1", "fixture_id": 1, "updated_at_ts": 0.0},
+            "KXSOCCER01-GAME1": {"fl_event_id": "fl2", "fixture_id": 2, "updated_at_ts": 0.0},
+        },
     )
     cutover.set_current_config(cutover.CutoverConfig(
         traffic_pct=100,
@@ -124,13 +134,26 @@ def test_is_v4_cohort_returns_false_when_enabled_sports_empty(monkeypatch):
 # ── Test #5: MIN-COHORT FLOOR widens up to min ───────────────
 
 def test_min_cohort_floor_widens_pct(monkeypatch):
-    """30-series universe, pct=5, min=2. 30 * 5/100 = 1.5 → 2 (round).
-    max(2, 2) = 2. cohort_size == 2. Confirms the widener produces
-    exactly min_cohort_series when pct-derived would be smaller."""
-    import cutover
+    """30-series linked universe, pct=5, min=2. 30 * 5/100 = 1.5 → 2
+    (round). max(2, 2) = 2. cohort_size == 2. Confirms the widener
+    produces exactly min_cohort_series when pct-derived would be
+    smaller.
+
+    Post-Day-64: cohort drawn from LINKED universe (has linkage
+    entry), so populate both sport map AND linkage map."""
+    import cutover, linkage
     monkeypatch.setattr(
         "main._SERIES_SPORT_DYNAMIC",
         {f"KXFAKE{i:03d}": "Soccer" for i in range(30)},
+    )
+    monkeypatch.setattr(
+        "linkage._V4_LINKAGE_MAP",
+        {
+            f"KXFAKE{i:03d}-GAME1": {
+                "fl_event_id": f"fl{i}", "fixture_id": i, "updated_at_ts": 0.0,
+            }
+            for i in range(30)
+        },
     )
     cfg = cutover.CutoverConfig(
         traffic_pct=5, enabled_sports=("Soccer",),
@@ -318,13 +341,22 @@ def test_pct_zero_default_ships_zero_behavior_change(monkeypatch):
 def test_hash_boundary_uses_lowest_n_not_pct_predicate(monkeypatch):
     """Mutation-check guard. Under the lowest-N-by-hash rule, a
     ticker's cohort membership depends on its RANK in the sorted
-    universe, NOT a `hash % 100 < effective_pct` comparison. This
-    test constructs a universe where a `< vs <=` predicate would
-    differ, and asserts membership follows the rank contract."""
-    import cutover
+    LINKED universe, NOT a `hash % 100 < effective_pct` comparison.
+    Constructs a universe where `< vs <=` would differ and asserts
+    membership follows the rank contract."""
+    import cutover, linkage
     # 5-series universe with known hash ordering.
     universe = {f"KXFAKE{i:03d}": "Soccer" for i in range(5)}
     monkeypatch.setattr("main._SERIES_SPORT_DYNAMIC", universe)
+    monkeypatch.setattr(
+        "linkage._V4_LINKAGE_MAP",
+        {
+            f"KXFAKE{i:03d}-GAME1": {
+                "fl_event_id": f"fl{i}", "fixture_id": i, "updated_at_ts": 0.0,
+            }
+            for i in range(5)
+        },
+    )
     cfg = cutover.CutoverConfig(
         traffic_pct=40, enabled_sports=("Soccer",),
         min_cohort_series=1, source="test", loaded_at_ts=0.0,

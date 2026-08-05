@@ -1044,33 +1044,69 @@ def _diff_pairings(
 
     all_fl_ids = set(legacy_map.keys()) | set(v4_map.keys())
 
-    buckets = {
-        "agree_same_fixture":     0,
-        "agree_partial_coverage": 0,
-        "v4_only":                0,
-        "legacy_only":            0,
-        "both_pair_different":    0,
-        "v4_extraction_excluded": 0,
-    }
-    # Sample every non-agree bucket AND agree_partial_coverage (so the
-    # operator can eyeball whether coverage-diff samples look benign).
+    # Phase 3 (2026-08-05): TWELVE-bucket schema — each of the six
+    # semantic buckets is split into `_cohort` (records whose series
+    # is in the v4 cohort at report-generation time) and `_out_of_cohort`
+    # (everything else). Item 7 gate reads on `..._cohort` counts
+    # only — those are the records USERS SEE served as v4. Out-of-
+    # cohort disagreements are measurement continuity (still tracking
+    # v4 accuracy on the un-served slice); useful for expanding the
+    # gate later but not part of stage-freeze triggers today.
+    _bucket_keys = (
+        "agree_same_fixture", "agree_partial_coverage",
+        "v4_only", "legacy_only", "both_pair_different",
+        "v4_extraction_excluded",
+    )
+    buckets = {}
+    for bk in _bucket_keys:
+        buckets[f"{bk}_cohort"] = 0
+        buckets[f"{bk}_out_of_cohort"] = 0
+    # Import the SOLE cohort-truth source. Every consumer of cohort
+    # membership uses cutover.is_v4_cohort — daily_diff MUST NOT
+    # re-implement the hash.
+    try:
+        from cutover import is_v4_cohort as _is_v4_cohort
+    except Exception:
+        def _is_v4_cohort(series_ticker, cfg=None):  # noqa: ARG001
+            return False
+    # Sample every non-agree bucket AND agree_partial_coverage.
+    # Sample keys use the RAW bucket name (no cohort suffix) — the
+    # sample list gets a `cohort` bool field so operators can filter
+    # a single sample stream by cohort membership at read time.
     samples: dict[str, list[dict]] = {
-        k: [] for k in buckets if k != "agree_same_fixture"
+        bk: [] for bk in _bucket_keys if bk != "agree_same_fixture"
     }
+
+    def _series_of(tickers):
+        # Extract representative series_ticker for cohort membership.
+        # All tickers for one fl_event_id typically share a series
+        # (same market family per fixture); pick the first.
+        for t in tickers:
+            if isinstance(t, str) and "-" in t:
+                return t.split("-", 1)[0]
+        return ""
+
+    def _cohort_bucket(base: str, series: str) -> str:
+        return f"{base}_{'cohort' if _is_v4_cohort(series) else 'out_of_cohort'}"
 
     for fl_id in all_fl_ids:
         legacy_tickers = legacy_map.get(fl_id, set())
         v4_tickers = v4_map.get(fl_id, set())
+        # Representative series for cohort attribution — pick from
+        # any available ticker (v4 preferred, falls back to legacy).
+        _rep_series = _series_of(v4_tickers) or _series_of(legacy_tickers)
+        _cohort = _is_v4_cohort(_rep_series)
 
         # Extraction-exclusion first — a legacy pairing whose Kalshi
         # side is entirely v4-excluded tickers is NOT a regression.
         legacy_non_excluded = legacy_tickers - v4_excluded_tickers
         if legacy_tickers and not legacy_non_excluded and not v4_tickers:
-            buckets["v4_extraction_excluded"] += 1
+            buckets[_cohort_bucket("v4_extraction_excluded", _rep_series)] += 1
             if len(samples["v4_extraction_excluded"]) < SAMPLE_N:
                 samples["v4_extraction_excluded"].append({
                     "fl_event_id":      fl_id,
                     "excluded_tickers": sorted(legacy_tickers),
+                    "cohort":           _cohort,
                 })
             continue
 
@@ -1079,43 +1115,46 @@ def _diff_pairings(
         # Five-bucket classification per §3.5 equal / overlap / disjoint.
         if legacy_effective and v4_tickers:
             if legacy_effective == v4_tickers:
-                buckets["agree_same_fixture"] += 1
+                buckets[_cohort_bucket("agree_same_fixture", _rep_series)] += 1
             elif legacy_effective & v4_tickers:
                 # Non-empty intersection, unequal sets — coverage
-                # difference under a shared fixture. BENIGN, separated
-                # from both_pair_different so Item 7's threshold isn't
-                # set against benign coverage noise.
-                buckets["agree_partial_coverage"] += 1
+                # difference under a shared fixture. BENIGN.
+                buckets[_cohort_bucket("agree_partial_coverage", _rep_series)] += 1
                 if len(samples["agree_partial_coverage"]) < SAMPLE_N:
                     samples["agree_partial_coverage"].append({
                         "fl_event_id":    fl_id,
                         "legacy_tickers": sorted(legacy_effective),
                         "v4_tickers":     sorted(v4_tickers),
                         "overlap":        sorted(legacy_effective & v4_tickers),
+                        "cohort":         _cohort,
                     })
             else:
                 # Disjoint sets — different fixtures under same
                 # fl_event_id. DANGEROUS: silent wrong-linking.
-                buckets["both_pair_different"] += 1
+                # Item 7 gate reads on both_pair_different_cohort only.
+                buckets[_cohort_bucket("both_pair_different", _rep_series)] += 1
                 if len(samples["both_pair_different"]) < SAMPLE_N:
                     samples["both_pair_different"].append({
                         "fl_event_id":    fl_id,
                         "legacy_tickers": sorted(legacy_effective),
                         "v4_tickers":     sorted(v4_tickers),
+                        "cohort":         _cohort,
                     })
         elif v4_tickers:
-            buckets["v4_only"] += 1
+            buckets[_cohort_bucket("v4_only", _rep_series)] += 1
             if len(samples["v4_only"]) < SAMPLE_N:
                 samples["v4_only"].append({
                     "fl_event_id": fl_id,
                     "v4_tickers":  sorted(v4_tickers),
+                    "cohort":      _cohort,
                 })
         elif legacy_effective:
-            buckets["legacy_only"] += 1
+            buckets[_cohort_bucket("legacy_only", _rep_series)] += 1
             if len(samples["legacy_only"]) < SAMPLE_N:
                 samples["legacy_only"].append({
                     "fl_event_id":    fl_id,
                     "legacy_tickers": sorted(legacy_effective),
+                    "cohort":         _cohort,
                 })
         # No else branch — if we fall through here (both sets empty
         # after extraction filtering, and the earlier v4_extraction_
@@ -1144,7 +1183,12 @@ def _sum_diff_dicts(diffs: list[dict]) -> dict:
     Per-sport samples are concatenated then truncated to SAMPLE_N per
     bucket so `report_json` stays bounded regardless of sport count.
     """
-    bucket_keys = [
+    # Phase 3 (2026-08-05): twelve-bucket schema. Each semantic
+    # bucket has _cohort / _out_of_cohort suffix. Also emit
+    # backward-compatible aggregate counts (sum of both suffixes)
+    # so existing render_daily_diff_report + monitoring code that
+    # reads the six unsuffixed keys keeps working.
+    _semantic_keys = [
         "agree_same_fixture",
         "agree_partial_coverage",
         "v4_only",
@@ -1152,13 +1196,24 @@ def _sum_diff_dicts(diffs: list[dict]) -> dict:
         "both_pair_different",
         "v4_extraction_excluded",
     ]
+    bucket_keys = []
+    for bk in _semantic_keys:
+        bucket_keys.append(f"{bk}_cohort")
+        bucket_keys.append(f"{bk}_out_of_cohort")
     if not diffs:
+        empty = {k: 0 for k in bucket_keys}
+        empty.update({k: 0 for k in _semantic_keys})  # BC aggregates
         return {
-            **{k: 0 for k in bucket_keys},
+            **empty,
             "total_evaluated":      0,
             "sample_disagreements": {},
         }
     summed = {k: sum(d.get(k, 0) for d in diffs) for k in bucket_keys}
+    # Backward-compat aggregates: sum both cohort halves so pre-
+    # Phase-3 readers (render script, dashboards) still see the
+    # six unsuffixed counts. Item 7 gate reads on `_cohort` only.
+    for bk in _semantic_keys:
+        summed[bk] = summed.get(f"{bk}_cohort", 0) + summed.get(f"{bk}_out_of_cohort", 0)
     summed["total_evaluated"] = sum(d.get("total_evaluated", 0) for d in diffs)
     # Concatenate sample lists across sports; truncate to SAMPLE_N per
     # bucket. Union of keys handles the case where some sports had
@@ -1495,6 +1550,30 @@ async def _measure(
             # threshold-setting can trust the diff.
             "fixture_linked_in_window_count": len(all_v4_map),
         }
+        # Phase 3 (2026-08-05): cohort_snapshot records who was in
+        # the v4 cohort at report-generation time. Historical
+        # reports remain interpretable if is_v4_cohort semantics
+        # ever change. Full list truncated at 500 series (mirrors
+        # SAMPLE_N logic — bounded blob size).
+        _COHORT_SNAPSHOT_MAX = 500
+        try:
+            from cutover import cohort_series_list, get_current_config
+            _cfg = get_current_config()
+            _cohort = cohort_series_list(_cfg)
+            report_json["cohort_snapshot"] = {
+                "series":             _cohort[:_COHORT_SNAPSHOT_MAX],
+                "size":               len(_cohort),
+                "truncated":          len(_cohort) > _COHORT_SNAPSHOT_MAX,
+                "traffic_pct":        _cfg.traffic_pct,
+                "enabled_sports":     list(_cfg.enabled_sports),
+                "min_cohort_series":  _cfg.min_cohort_series,
+                "config_source":      _cfg.source,
+                "captured_at_ts":     int(datetime.now(timezone.utc).timestamp()),
+            }
+        except Exception as _cs_exc:
+            report_json["cohort_snapshot"] = {
+                "error": f"{type(_cs_exc).__name__}: {str(_cs_exc)[:200]}",
+            }
         log.info(
             "daily_diff.legacy_comparison_computed",
             sports_covered=len(sports_to_diff),
@@ -1506,6 +1585,13 @@ async def _measure(
             v2_both_pair_different=report_json["legacy_v2_diff"].get(
                 "both_pair_different", 0,
             ),
+            v1_both_pair_different_cohort=report_json["legacy_v1_diff"].get(
+                "both_pair_different_cohort", 0,
+            ),
+            v2_both_pair_different_cohort=report_json["legacy_v2_diff"].get(
+                "both_pair_different_cohort", 0,
+            ),
+            cohort_snapshot_size=report_json.get("cohort_snapshot", {}).get("size"),
         )
     else:
         # No sport produced a clean diff — surface, but still write the

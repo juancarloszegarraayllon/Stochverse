@@ -1038,6 +1038,49 @@ async def load_cache_blob(key: str):
         return None
 
 
+async def load_v4_linkage_rows():
+    """Bulk read of the sp.kalshi_markets → sp.fl_events linkage
+    view for the Phase 3 v4 pathway. Called from the background
+    _v4_linkage_refresh_loop in main.py — NEVER from the request
+    path (per the architectural constraint: serving is DB-free).
+
+    Returns a list of dicts with keys: event_ticker, fixture_id,
+    fl_event_id. Returns None on failure (DB unavailable, query
+    error) — caller keeps the previous _V4_LINKAGE_MAP alive.
+
+    Query scope: last 7 days of active markets, resolver-linked
+    (fixture_id IS NOT NULL). ~10-50k rows steady-state.
+    """
+    if not DATABASE_URL or engine is None:
+        return None
+    try:
+        from sqlalchemy import text as _text
+        sql = _text(
+            "SELECT km.ticker AS event_ticker, "
+            "       km.fixture_id, "
+            "       fle.fl_event_id "
+            "FROM sp.kalshi_markets km "
+            "JOIN sp.fl_events fle "
+            "  ON km.fixture_id = fle.fixture_id "
+            "WHERE km.fixture_id IS NOT NULL "
+            "  AND km.last_seen_at > NOW() - INTERVAL '7 days'"
+        )
+        async with engine.begin() as conn:
+            r = await conn.execute(sql)
+            rows = r.all()
+            return [
+                {
+                    "event_ticker": row[0],
+                    "fixture_id":   row[1],
+                    "fl_event_id":  row[2],
+                }
+                for row in rows
+            ]
+    except Exception as e:
+        log.warning("load_v4_linkage_rows failed: %s", e)
+        return None
+
+
 async def load_cutover_config_row():
     """Read the sp.cutover_config singleton row. Returns None on any
     failure (DB unavailable, table missing, no row). Called from the
