@@ -323,10 +323,10 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c2-fav{color:var(--text-muted);text-align:center;cursor:pointer;font-size:14px}
 .sp-c2-fav:hover{color:var(--green)}
 
-/* COL 3 — event detail panel placeholder.
-   Will be populated by the bundle's renderer once an event is
-   selected. The placeholder lives here for both empty-state and
-   loading-state. */
+/* COL 3 — event detail panel. renderCol3 renders tournament context,
+   a score header, and a Markets list inline. For matched events it also
+   mounts the shared block bundle's match-detail tabs (Summary / Stats /
+   Lineups / …) into #sp-c3-tabs-section. Empty-state below. */
 .sp-c3-empty{padding:80px 32px;text-align:center;color:var(--text-muted);font-size:13px}
 .sp-c3-empty-icon{font-size:32px;margin-bottom:12px;opacity:.4}
 .sp-c3-empty-title{font-size:14px;color:var(--text-dim);margin-bottom:6px}
@@ -357,6 +357,14 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 .sp-c3-market-row:hover .sp-c3-market-arrow{color:var(--green)}
 .sp-c3-no-market{color:var(--text-dim);font-size:13px;font-style:italic}
 .sp-c3-stats-placeholder{font-size:12px;color:var(--text-muted);font-style:italic;line-height:1.5;padding:8px 0}
+/* Match-detail tab strip (COL 3). Lazy-mounts block-bundle renderers
+   into .sp-c3-tabpanel. Kept on the .sp-c3-* prefix so nothing overlaps
+   COL 2's .sp-c2-chip-row nodes that PriceWS patches. */
+.sp-c3-tabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:12px}
+.sp-c3-tab{padding:5px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text-dim);font-size:11px;font-weight:600;letter-spacing:.3px;cursor:pointer;transition:background .12s ease,color .12s ease,border-color .12s ease}
+.sp-c3-tab:hover{color:var(--text);border-color:var(--text-dim)}
+.sp-c3-tab.active{background:var(--green-bg);color:var(--green);border-color:var(--green-line)}
+.sp-c3-tabpanel{font-size:12px;color:var(--text);min-height:40px}
 
 /* Mobile fallback — collapse to single column with the existing
    modal pattern. COL 1 + COL 3 hidden, COL 2 expands full-width.
@@ -450,8 +458,9 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:
 
 <script type="module">
 // Phase 2a wiring — top nav, COL 1, COL 2.
-// COL 3 detail rendering ships in a follow-up commit so the user
-// can visually verify the scaffold + nav + leagues + events first.
+// COL 3 detail: renderCol3 renders header + Markets inline; for matched
+// events it lazy-mounts the shared block bundle's match-detail tabs.
+// Desktop-only for now (the <900px drawer is a later phase).
 
 // (Sport icons removed per visual feedback — uppercase text-only
 // labels with active-state underline read more professional.)
@@ -764,6 +773,12 @@ let _eventsCache = null;
 let _matchedKalshiCount = 0;
 let _selectedEventId = null;     // currently-selected FL EVENT_ID for COL 3
 let _selectedTicker = null;      // currently-selected Kalshi ticker (Market view)
+// COL 3 match-detail tab state. _col3ActiveMount is the panel node the
+// active tab rendered into; _col3CommentaryOn tracks whether that tab
+// owns a Commentary poll (main.ts:60-67 — the block owns the timer, the
+// caller must call stopCommentary to release it).
+let _col3ActiveMount = null;
+let _col3CommentaryOn = false;
 let _activeStateFilter = 'live';
 let _activeLeagueFilter = null;  // tournament_stage_id, or null = all
 let _onlyMatched = false;        // toggled by clicking the "X on Kalshi" pill
@@ -2014,6 +2029,12 @@ document.querySelectorAll('.sp-c1-filter').forEach(el => {
 // show the FL data inline since there's no Kalshi modal target.
 async function renderCol3(flEventId, ticker) {
   const col3 = document.getElementById('sp-col3');
+  // Release any Commentary poll owned by the previously-rendered event
+  // BEFORE we overwrite col3.innerHTML below — the old panel node is
+  // about to be discarded, which would otherwise orphan a running
+  // interval (main.ts:60-67). Covers both the re-render-on-new-event
+  // path and the "Event not found" early return.
+  _col3StopActiveCommentary();
   // Find the FL event in our cache so we can render header
   // immediately without an extra fetch.
   let ev = null;
@@ -2086,17 +2107,122 @@ async function renderCol3(flEventId, ticker) {
   }
   html += '</div>';
 
-  // Stats section: placeholder for now (Phase 2c will inline
-  // the existing block components — Stats, Lineups, Player Stats —
-  // pulled from /api/event/{ticker}/normalized for matched events
-  // or directly from FL endpoints for FL-only events).
-  html += '<div class="sp-c3-section">';
-  html += '<div class="sp-c3-section-head">Stats</div>';
-  html += '<div class="sp-c3-stats-placeholder">Stats panel coming in Phase 2c — Summary, Stats, Lineups, Player Stats blocks rendered inline here.</div>';
-  html += '</div>';
+  // Match-detail section. For matched events the block-component tabs
+  // (Summary / Stats / Lineups / …) mount here lazily via
+  // _col3MountTabs(ticker) after a /capabilities probe. For FL-only
+  // events, a light note (D2: no FL-native stats in v1).
+  if (matched) {
+    html += '<div class="sp-c3-section" id="sp-c3-tabs-section"></div>';
+  } else {
+    html += '<div class="sp-c3-section">';
+    html += '<div class="sp-c3-section-head">Match detail</div>';
+    html += '<div class="sp-c3-stats-placeholder">Detailed stats appear for events matched to a Kalshi market.</div>';
+    html += '</div>';
+  }
 
   html += '</div>';
   col3.innerHTML = html;
+  // Progressive enhancement (F2b): only matched events with the bundle
+  // present get tabs; _col3MountTabs no-ops otherwise, leaving the
+  // header + Markets above as the whole panel.
+  if (matched && ticker) _col3MountTabs(ticker);
+}
+
+// Release the Commentary poll if the active COL 3 tab owns one. Safe to
+// call unconditionally — no-op when no commentary tab is mounted, and
+// harmless if the mount was already detached (the block self-clears on
+// a detached node, but we release explicitly per the main.ts:60-67
+// contract rather than relying on that).
+function _col3StopActiveCommentary() {
+  const B = window.StochverseBundle;
+  if (_col3CommentaryOn && _col3ActiveMount && B &&
+      typeof B.stopCommentary === 'function') {
+    try { B.stopCommentary(_col3ActiveMount); } catch (e) {}
+  }
+  _col3CommentaryOn = false;
+  _col3ActiveMount = null;
+}
+
+// The COL 3 match-detail tab set, gated by /api/event/{t}/capabilities.
+// Each entry: bundle hook name (fn), display label, whether the cap probe
+// says data exists (on), optional extra arg (standings type). Bracket/Draw
+// omitted (Decision 2 — degraded without index.html's legacy
+// window._renderBracket); Golf omitted (no /capabilities gate).
+function _col3TabList(caps) {
+  const s = (caps && caps.standings) || {};
+  const on = (k) => !!(caps && caps[k]);
+  return [
+    { key: 'summary',    label: 'Summary',      fn: 'renderSummary',          on: on('summary_incidents') || on('summary') },
+    { key: 'stats',      label: 'Stats',        fn: 'renderStats',            on: on('stats') },
+    { key: 'lineups',    label: 'Lineups',      fn: 'renderLineups',          on: on('lineups') },
+    { key: 'standings',  label: 'Standings',    fn: 'renderStandingsType',    on: !!s.overall, arg: 'overall' },
+    { key: 'h2h',        label: 'H2H',          fn: 'renderH2H',              on: on('h2h') },
+    { key: 'player',     label: 'Player Stats', fn: 'renderPlayerStats',      on: on('player_stats') },
+    { key: 'missing',    label: 'Missing',      fn: 'renderMissingPlayers',   on: on('missing_players') },
+    { key: 'predicted',  label: 'Predicted',    fn: 'renderPredictedLineups', on: on('predicted_lineups') },
+    { key: 'highlights', label: 'Highlights',   fn: 'renderHighlights',       on: on('highlights') },
+    { key: 'points',     label: 'Points',       fn: 'renderPointsHistory',    on: on('points_history') },
+    { key: 'news',       label: 'News',         fn: 'renderNews',             on: on('news') },
+    { key: 'commentary', label: 'Commentary',   fn: 'renderCommentary',       on: on('commentary'), commentary: true },
+    { key: 'darts',      label: 'Darts',        fn: 'renderDarts',            on: on('darts_stats') || on('throw_by_throw') },
+  ];
+}
+
+// Mount the match-detail tab strip for a matched event. Probes
+// /capabilities, filters to tabs whose data exists AND whose bundle
+// hook is present (F2b: bundle absent or no qualifying tab -> no strip,
+// header + Markets stay intact), then lazy-mounts on click.
+async function _col3MountTabs(ticker) {
+  const B = window.StochverseBundle;
+  if (!B) return;                                   // F2b: no bundle -> no tabs
+  const section = document.getElementById('sp-c3-tabs-section');
+  if (!section) return;
+  let caps = {};
+  try {
+    const r = await fetch('/api/event/' + encodeURIComponent(ticker) + '/capabilities');
+    if (r.ok) {
+      const d = await r.json();
+      if (d && !d.error && d.capabilities) caps = d.capabilities;
+    }
+  } catch (e) { /* caps stay empty -> no tabs qualify */ }
+  // Stale guard: user picked a different event while we were probing.
+  if (_selectedTicker !== ticker) return;
+  const tabs = _col3TabList(caps).filter(
+    (t) => t.on && typeof B[t.fn] === 'function');
+  if (!tabs.length) return;                         // F2b: nothing to show
+  // COL 3 detail markup — keep ALL selectors on the .sp-c3-* prefix.
+  // PriceWS (search "const PriceWS") patches only .sp-c2-chip-row nodes
+  // in COL 2; reusing an .sp-c2-* selector here would break that
+  // disjointness and let COL 3 re-renders clobber live price chips.
+  let strip = '<div class="sp-c3-section-head">Match detail</div>';
+  strip += '<div class="sp-c3-tabs" role="tablist">';
+  for (const t of tabs) {
+    strip += '<button class="sp-c3-tab" type="button" data-tab="' +
+             escH(t.key) + '">' + escH(t.label) + '</button>';
+  }
+  strip += '</div><div class="sp-c3-tabpanel" id="sp-c3-tabpanel"></div>';
+  section.innerHTML = strip;
+  const panel = section.querySelector('#sp-c3-tabpanel');
+  const btns = section.querySelectorAll('.sp-c3-tab');
+  btns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tab = tabs.find((x) => x.key === btn.dataset.tab);
+      if (!tab) return;
+      // Release the outgoing tab's Commentary poll before swapping.
+      _col3StopActiveCommentary();
+      btns.forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      panel.innerHTML = '';
+      _col3ActiveMount = panel;
+      _col3CommentaryOn = !!tab.commentary;
+      const args = tab.arg ? [ticker, panel, tab.arg] : [ticker, panel];
+      try {
+        Promise.resolve(B[tab.fn].apply(B, args)).catch(() => {});
+      } catch (e) { /* block threw synchronously; panel stays empty */ }
+    });
+  });
+  // Auto-open the first tab so the panel isn't empty on first paint.
+  if (btns[0]) btns[0].click();
 }
 
 // ── Column splitter: drag-to-resize for COL 1 and COL 3 ──
