@@ -762,20 +762,41 @@ async def _score_flush_loop():
         _seed_counter_ref = {"n": 0}   # only seed entities every 5th cycle
         first_pass = True
 
-        async def _score_flush_pass():
+        # 2026-08-07 (#43 diag): per-substep monotonic timings +
+        # phase attribution. When LOG_SCORE_FLUSH_TIMINGS is off
+        # (default), the timing brackets still fire (cheap monotonic()
+        # calls) but the log emit is gated so steady-state stream
+        # stays clean. Sub-step logs go to the "score_flush_timings"
+        # logger for a distinct grep. Phase is computed BEFORE calling
+        # _score_flush_pass so the caller's pass_timeout log line can
+        # include it even when _score_flush_pass never returned.
+        _tlog = logging.getLogger("score_flush_timings")
+
+        async def _score_flush_pass(phase: str):
+            """phase is either "flush" (plain cycle) or "flush+seed"
+            (every-5th cycle — runs upsert_entities +
+            refresh_alias_sport_cache in addition). Passed in by the
+            caller so timeout attribution has the phase even when
+            the pass never returns."""
             from db import sync_scores_to_db
             flashlive_snap = []
             try:
                 from flashlive_feed import GAMES as FL_GAMES
                 flashlive_snap = list(FL_GAMES.values())
                 if flashlive_snap:
+                    _t0 = time.monotonic()
                     await sync_scores_to_db("flashlive", flashlive_snap)
+                    if _LOG_SCORE_FLUSH_TIMINGS:
+                        _tlog.info(
+                            "score_flush.substep name=sync_scores_to_db "
+                            "phase=%s ms=%d row_count=%d",
+                            phase, int((time.monotonic() - _t0) * 1000),
+                            len(flashlive_snap),
+                        )
             except Exception as e:
                 _log.error("flashlive score flush: %s", e)
 
-            _seed_counter_ref["n"] += 1
-            if _seed_counter_ref["n"] >= 5:
-                _seed_counter_ref["n"] = 0
+            if phase == "flush+seed":
                 try:
                     from entity_seeder import extract_teams
                     from db import upsert_entities, refresh_alias_sport_cache
@@ -789,8 +810,23 @@ async def _score_flush_loop():
                                 g["away_display"] = g.get("away_name", "")
                         all_teams.extend(extract_teams(flashlive_snap, "flashlive"))
                     if all_teams:
+                        _t0 = time.monotonic()
                         await upsert_entities(all_teams)
+                        if _LOG_SCORE_FLUSH_TIMINGS:
+                            _tlog.info(
+                                "score_flush.substep name=upsert_entities "
+                                "phase=%s ms=%d row_count=%d",
+                                phase, int((time.monotonic() - _t0) * 1000),
+                                len(all_teams),
+                            )
+                    _t0 = time.monotonic()
                     await refresh_alias_sport_cache()
+                    if _LOG_SCORE_FLUSH_TIMINGS:
+                        _tlog.info(
+                            "score_flush.substep name=refresh_alias_sport_cache "
+                            "phase=%s ms=%d",
+                            phase, int((time.monotonic() - _t0) * 1000),
+                        )
                 except Exception as e:
                     _log.error("entity seed: %s", e)
 
@@ -808,25 +844,35 @@ async def _score_flush_loop():
                 # before any work — proves the loop is running regardless
                 # of whether this iteration finds work to do.
                 stamp_pass_complete("score_flush")
+                # 2026-08-07 (#43 diag): compute phase HERE so the
+                # pass_timeout log can attribute a trip to the
+                # every-5th "flush+seed" cycle vs the plain "flush"
+                # cycle, even when _score_flush_pass never returns.
+                # Counter is bumped-then-reset here (not inside the
+                # pass) so the pass function is a pure consumer of
+                # the computed phase.
+                _seed_counter_ref["n"] += 1
+                if _seed_counter_ref["n"] >= 5:
+                    phase = "flush+seed"
+                    _seed_counter_ref["n"] = 0
+                else:
+                    phase = "flush"
                 # Layer E.3 (2026-08-05): per-pass wait_for wrap. Pre-E,
                 # this loop had NO wait_for around sync_scores_to_db /
                 # upsert_entities — a hang on a dead socket blocked the
                 # loop indefinitely; stamp-at-top fired once and never
-                # advanced (operator's Day-65 evidence: stale 430-471s
-                # with zero pass_timeout log lines because there was no
-                # wait_for to raise TimeoutError). D.1b covered only the
-                # BOOT path, not per-pass work.
+                # advanced.
                 timeout_s = pass_timeout_for(first_pass)
                 try:
                     await asyncio.wait_for(
-                        _score_flush_pass(), timeout=timeout_s,
+                        _score_flush_pass(phase), timeout=timeout_s,
                     )
                     first_pass = False
                 except asyncio.TimeoutError:
                     _log.warning(
                         "ingestion.task.pass_timeout task=score_flush "
-                        "timeout_sec=%s first_pass=%s",
-                        timeout_s, first_pass,
+                        "timeout_sec=%s first_pass=%s phase=%s",
+                        timeout_s, first_pass, phase,
                     )
                     raise
                 except Exception as e:
@@ -1506,8 +1552,36 @@ _CUTOVER_REFRESH_INTERVAL_S = int(
 # The bg refresh loop (_v4_linkage_refresh_loop below) populates
 # _V4_LINKAGE_MAP; the warm-load task (_load_v4_linkage_from_db)
 # fills it at boot before the first bg pass completes.
+# 2026-08-07 (#43 fix c): default bumped 30 → 60 to break the
+# guaranteed 30s co-schedule collision with _score_flush_loop
+# (which also runs at 30s cadence on the pooled engine, pool_size=5).
+# Pre-change both loops re-armed from `await asyncio.sleep(30)` in
+# lockstep; the linkage loop's 10-50k-row read (load_v4_linkage_rows,
+# db.py) starved score_flush's every-5th-cycle upsert_entities chunk
+# checkouts. Design flaw in #288 — bumping the default is the
+# cheapest structural fix. Env override preserved for operators who
+# want a tighter cadence and can afford the pool budget.
+# 2026-08-07 (#43 diag): env-gated per-substep timing logs for
+# score_flush + linkage loops. Dark-launch pattern (same as
+# LOG_RESPONSE_SIZE). When on, INFO-level logs on the
+# "score_flush_timings" logger record per-substep wall-clock ms +
+# row counts so the operator can attribute a 120s ceiling trip to
+# the specific sub-step (sync_scores_to_db vs upsert_entities vs
+# refresh_alias_sport_cache) and correlate with linkage-loop
+# activity. Set LOG_SCORE_FLUSH_TIMINGS=1 in Railway to enable;
+# default off keeps steady-state log stream clean.
+_LOG_SCORE_FLUSH_TIMINGS: bool = os.environ.get(
+    "LOG_SCORE_FLUSH_TIMINGS", "0",
+) == "1"
+
 _V4_LINKAGE_REFRESH_INTERVAL_S = int(
-    os.environ.get("V4_LINKAGE_REFRESH_INTERVAL_S", "30")
+    os.environ.get("V4_LINKAGE_REFRESH_INTERVAL_S", "60")
+)
+# Startup jitter — 15s sleep before the first pass so this loop and
+# score_flush's every-5th-cycle seed pass do not align on their
+# first collision even under identical env intervals.
+_V4_LINKAGE_STARTUP_JITTER_S = int(
+    os.environ.get("V4_LINKAGE_STARTUP_JITTER_S", "15")
 )
 
 
@@ -1558,6 +1632,11 @@ async def _v4_linkage_refresh_loop():
 
     register("v4_linkage_refresh")
     set_state("v4_linkage_refresh", STATE_HOLDER_RUNNING)
+    # 2026-08-07 (#43 fix c): startup jitter. Prevents this loop
+    # from firing simultaneously with _score_flush_loop's first pass
+    # (which has its own asyncio.sleep(15) at main.py:_score_flush_loop).
+    if _V4_LINKAGE_STARTUP_JITTER_S > 0:
+        await asyncio.sleep(_V4_LINKAGE_STARTUP_JITTER_S)
     first_pass = True
     while True:
         # Layer B: iteration-alive stamp at TOP of loop.
@@ -1566,9 +1645,20 @@ async def _v4_linkage_refresh_loop():
             from db import load_v4_linkage_rows, save_cache_blob
             timeout_s = pass_timeout_for(first_pass)
             try:
+                # 2026-08-07 (#43 diag): monotonic timing around the
+                # DB read so pool-contention severity is measurable
+                # after the stagger lands. Env-gated INFO log; no
+                # cost when LOG_SCORE_FLUSH_TIMINGS is off.
+                _v4l_t0 = _time.monotonic()
                 rows = await asyncio.wait_for(
                     load_v4_linkage_rows(), timeout=timeout_s,
                 )
+                if _LOG_SCORE_FLUSH_TIMINGS:
+                    _v4l_ms = int((_time.monotonic() - _v4l_t0) * 1000)
+                    logging.getLogger("score_flush_timings").info(
+                        "v4_linkage.load_v4_linkage_rows ms=%d row_count=%d",
+                        _v4l_ms, (len(rows) if rows is not None else -1),
+                    )
             except asyncio.TimeoutError:
                 _log.warning(
                     "v4_linkage_refresh_timeout timeout_sec=%s first_pass=%s",
