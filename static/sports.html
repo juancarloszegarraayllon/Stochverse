@@ -2402,5 +2402,12 @@ startLiveTick();
   </div>
 </div>
 
+<!-- Block-component bundle. Loaded here (Deploy 1) but not yet consumed:
+     the bundle's entire top-level execution is the window.StochverseBundle
+     registration + one console.log (src/main.ts:455-476), so loading it is
+     inert until COL 3 wires the render* hooks (Deploy 2). The ?v= is kept
+     in sync with src/main.ts's version by build.mjs (see CACHE_BUSTER_FILES). -->
+<script type="module" src="/static/dist/main.js?v=0.7.50" defer></script>
+
 </body>
 </html>

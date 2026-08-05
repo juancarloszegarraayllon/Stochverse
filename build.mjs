@@ -42,6 +42,11 @@ const config = {
   // eslint complaining at runtime.
 };
 
+// One entry per HTML file that references the bundle with ?v=.
+// build.mjs keeps every listed file's cache-buster in lockstep with
+// src/main.ts's version literal — the 80eaa3c footgun, now x2 files.
+const CACHE_BUSTER_FILES = ['static/index.html', 'static/sports.html'];
+
 function syncCacheBuster() {
   // Pull version from src/main.ts. The `version: 'X.Y.Z'` literal
   // sits inside the StochverseBundle object — single regex covers
@@ -54,20 +59,31 @@ function syncCacheBuster() {
     return;
   }
   const version = match[1];
-  const indexPath = 'static/index.html';
-  const html = readFileSync(indexPath, 'utf8');
   const re = /(\/static\/dist\/main\.js\?v=)[^"']+/;
-  if (!re.test(html)) {
-    console.warn('[build] WARN: cache-buster query not found in', indexPath);
-    return;
+  for (const indexPath of CACHE_BUSTER_FILES) {
+    const html = readFileSync(indexPath, 'utf8');
+    if (!re.test(html)) {
+      // Not an error: a listed file may not (yet) reference the bundle.
+      console.warn('[build] WARN: cache-buster query not found in', indexPath);
+      continue;
+    }
+    const updated = html.replace(re, `$1${version}`);
+    if (updated === html) {
+      console.log(`[build] cache-buster already at ${version} in ${indexPath}`);
+      continue;
+    }
+    writeFileSync(indexPath, updated);
+    console.log(`[build] cache-buster updated → ?v=${version} in ${indexPath}`);
   }
-  const updated = html.replace(re, `$1${version}`);
-  if (updated === html) {
-    console.log(`[build] cache-buster already at ${version}`);
-    return;
+  // Fail loudly if any file that DOES reference the bundle ended up
+  // with a ?v= other than the built version. Files with no reference
+  // are skipped (m === null), so this is safe pre-Deploy-2.
+  for (const p of CACHE_BUSTER_FILES) {
+    const m = readFileSync(p, 'utf8').match(/\/static\/dist\/main\.js\?v=([^"']+)/);
+    if (m && m[1] !== version) {
+      throw new Error(`[build] cache-buster mismatch in ${p}: ${m[1]} !== ${version}`);
+    }
   }
-  writeFileSync(indexPath, updated);
-  console.log(`[build] cache-buster updated → ?v=${version}`);
 }
 
 if (watch) {
