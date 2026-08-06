@@ -831,15 +831,28 @@ async def _score_flush_loop():
                 from flashlive_feed import GAMES as FL_GAMES
                 flashlive_snap = list(FL_GAMES.values())
                 if flashlive_snap:
-                    _t0 = time.monotonic()
-                    await sync_scores_to_db("flashlive", flashlive_snap)
+                    # 2026-08-07 (#43(b)): started+completed bracket
+                    # closes the survivor-bias trap symmetrically
+                    # across all three substeps. See upsert_entities
+                    # bracket below for full rationale.
                     if _LOG_SCORE_FLUSH_TIMINGS:
                         _tlog.info(
                             "score_flush.substep name=sync_scores_to_db "
-                            "phase=%s ms=%d row_count=%d",
-                            phase, int((time.monotonic() - _t0) * 1000),
-                            len(flashlive_snap),
+                            "phase=%s status=started row_count=%d",
+                            phase, len(flashlive_snap),
                         )
+                    _t0 = time.monotonic()
+                    try:
+                        await sync_scores_to_db("flashlive", flashlive_snap)
+                    finally:
+                        if _LOG_SCORE_FLUSH_TIMINGS:
+                            _tlog.info(
+                                "score_flush.substep name=sync_scores_to_db "
+                                "phase=%s status=completed ms=%d "
+                                "row_count=%d",
+                                phase, int((time.monotonic() - _t0) * 1000),
+                                len(flashlive_snap),
+                            )
             except Exception as e:
                 _log.error("flashlive score flush: %s", e)
 
@@ -857,23 +870,52 @@ async def _score_flush_loop():
                                 g["away_display"] = g.get("away_name", "")
                         all_teams.extend(extract_teams(flashlive_snap, "flashlive"))
                     if all_teams:
-                        _t0 = time.monotonic()
-                        await upsert_entities(all_teams)
+                        # 2026-08-07 (#43(b)): started+completed bracket
+                        # to close the survivor-bias trap that hid the
+                        # 120s ceiling trips for 3 days. Pre-fix, the
+                        # bracket log fired ONLY on completion — a hung
+                        # upsert_entities left zero evidence in the
+                        # substep log stream, and operators inferred
+                        # (wrongly) that upsert_entities was fast. The
+                        # started line + try/finally on the completed
+                        # line together guarantee at least ONE bracket
+                        # entry appears for every invocation, even if
+                        # the call gets cancelled mid-await by the
+                        # outer pass_timeout.
                         if _LOG_SCORE_FLUSH_TIMINGS:
                             _tlog.info(
                                 "score_flush.substep name=upsert_entities "
-                                "phase=%s ms=%d row_count=%d",
-                                phase, int((time.monotonic() - _t0) * 1000),
-                                len(all_teams),
+                                "phase=%s status=started row_count=%d",
+                                phase, len(all_teams),
                             )
-                    _t0 = time.monotonic()
-                    await refresh_alias_sport_cache()
+                        _t0 = time.monotonic()
+                        try:
+                            await upsert_entities(all_teams)
+                        finally:
+                            if _LOG_SCORE_FLUSH_TIMINGS:
+                                _tlog.info(
+                                    "score_flush.substep name=upsert_entities "
+                                    "phase=%s status=completed ms=%d "
+                                    "row_count=%d",
+                                    phase, int((time.monotonic() - _t0) * 1000),
+                                    len(all_teams),
+                                )
                     if _LOG_SCORE_FLUSH_TIMINGS:
                         _tlog.info(
                             "score_flush.substep name=refresh_alias_sport_cache "
-                            "phase=%s ms=%d",
-                            phase, int((time.monotonic() - _t0) * 1000),
+                            "phase=%s status=started",
+                            phase,
                         )
+                    _t0 = time.monotonic()
+                    try:
+                        await refresh_alias_sport_cache()
+                    finally:
+                        if _LOG_SCORE_FLUSH_TIMINGS:
+                            _tlog.info(
+                                "score_flush.substep name=refresh_alias_sport_cache "
+                                "phase=%s status=completed ms=%d",
+                                phase, int((time.monotonic() - _t0) * 1000),
+                            )
                 except Exception as e:
                     _log.error("entity seed: %s", e)
 

@@ -739,21 +739,41 @@ async def upsert_entities(teams):
     `teams` is a list of dicts from entity_seeder.extract_teams():
       canonical_name, entity_type, sport, league, aliases [...]
 
-    Uses ON CONFLICT DO NOTHING for entities (keyed on canonical_name)
-    and ON CONFLICT DO NOTHING for aliases (keyed on alias+source),
-    so this is safe to call repeatedly with the same data.
+    Idempotent: ON CONFLICT DO NOTHING on both tables makes repeated
+    calls with the same data safe.
 
-    Transaction strategy: process teams in fixed-size chunks. Each
-    chunk = one short-lived transaction. This bounds the lock
-    duration on entity_aliases so a slow inner loop cannot hold a
-    transaction open for 30+ minutes (production transaction-leak
-    incident on 2026-05-08 traced to this function — single mega-
-    transaction wrapping thousands of inserts).
+    2026-08-07 (Task #43(b) bulk rewrite): rewrote from per-row loop
+    to bulk INSERT with executemany. Previous shape did 2 + N_aliases
+    round-trips PER TEAM (INSERT entity + SELECT id + N alias INSERTs)
+    — documented ~600 round-trips per 100-team chunk at db.py:766-770
+    of the pre-rewrite. At full flashlive_snap peak (~500 teams,
+    ~3-3.5k round-trips), this took 60-180s under Neon pooled
+    latency and consistently hit _score_flush_loop's 120s ceiling
+    every seed cycle (Task #43 evidence: ~280 pass_timeouts, 100%
+    phase=flush+seed, since PR #289 shipped that ceiling on Aug 4).
+    That killed entity/alias seeding wholesale for 3 days — new
+    teams first seen after Aug 4 never made it into entities /
+    entity_aliases, degrading the get_sport_from_entities() alias-
+    fallback for those specific tickers.
 
-    On failure mid-chunk, the chunk's writes roll back via the
-    session.begin() context's __aexit__. Subsequent chunks proceed
-    normally — partial progress is preserved across chunks but
-    NEVER mid-chunk.
+    Post-rewrite shape (3 round-trips per chunk, not per team):
+      1. INSERT ... ON CONFLICT DO NOTHING RETURNING id, canonical_name
+         → returns rows for NEW entities only. rowcount = new count.
+      2. SELECT id, canonical_name WHERE canonical_name IN (chunk)
+         → fetches ids for ALL entities in the chunk (new + pre-
+         existing). Merges into a {name: id} dict.
+      3. INSERT ... ON CONFLICT DO NOTHING (batch VALUES for all
+         aliases in the chunk with resolved entity_ids). SQLAlchemy
+         + asyncpg dispatches this as insertmanyvalues (one query,
+         not one round-trip per row).
+    Target: <5s per seed cycle at flashlive-peak snapshot size.
+    ~500 teams / 100 chunk = 5 chunks × 3 rt = 15 total rt. At
+    50-100ms pooled latency = 0.75-1.5s.
+
+    Per-chunk transaction retained — bounds lock duration on
+    entity_aliases (5-08 transaction-leak incident context) and
+    preserves partial-progress-across-chunks semantics: mid-chunk
+    failure rolls back the chunk, subsequent chunks proceed.
     """
     if not DATABASE_URL or async_session is None or not teams:
         return
@@ -762,10 +782,12 @@ async def upsert_entities(teams):
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         from sqlalchemy import select
 
-        # ENTITY_UPSERT_CHUNK governs the per-transaction scope.
-        # 100 teams × ~5 aliases each = ~600 round-trips per chunk,
-        # well under the 60s statement_timeout / idle_in_transaction
-        # ceiling on Neon. Tune downward if Neon latency ever spikes.
+        # Chunk size is now bulk-scoped, not per-round-trip-scoped.
+        # 100 teams × ~5 aliases = ~500 alias rows per chunk =
+        # one batched INSERT well within Postgres row-limit + memory
+        # bounds. Could safely go to 500 or 1000 teams/chunk given
+        # the bulk shape, but 100 keeps the failure blast radius
+        # small (mid-chunk rollback loses ≤100 teams, not ≤1000).
         CHUNK_SIZE = 100
 
         new_entities = 0
@@ -775,63 +797,94 @@ async def upsert_entities(teams):
 
         for chunk_start in range(0, len(teams), CHUNK_SIZE):
             chunk = teams[chunk_start:chunk_start + CHUNK_SIZE]
+            # Filter chunk to teams with a valid canonical_name upfront
+            # so all three round-trips see a consistent set.
+            valid = [t for t in chunk if t.get("canonical_name")]
+            if not valid:
+                continue
+
             chunk_entities = 0
             chunk_aliases = 0
             try:
                 async with async_session() as session:
                     async with session.begin():
-                        for t in chunk:
-                            canon = t.get("canonical_name", "")
-                            if not canon:
-                                continue
+                        # ── Round-trip 1: batch upsert entities ──
+                        # Values list, single execute. ON CONFLICT DO
+                        # NOTHING + RETURNING gives us rows for NEW
+                        # inserts only — perfect for the new_entities
+                        # counter without a separate count query.
+                        ent_values = [
+                            {
+                                "canonical_name": t["canonical_name"],
+                                "entity_type":    t.get("entity_type", "team"),
+                                "sport":          t.get("sport"),
+                                "league":         t.get("league"),
+                            }
+                            for t in valid
+                        ]
+                        ent_stmt = pg_insert(Entity).values(ent_values).on_conflict_do_nothing(
+                            index_elements=["canonical_name"],
+                        ).returning(Entity.id, Entity.canonical_name)
+                        ent_result = await session.execute(ent_stmt)
+                        new_rows = ent_result.all()  # list[(id, canonical_name)]
+                        chunk_entities = len(new_rows)
+                        # Map for new-inserts. We'll union with the
+                        # SELECT below for pre-existing rows.
+                        name_to_id: dict = {name: eid for eid, name in new_rows}
 
-                            # Upsert entity (DO NOTHING on conflict — first
-                            # writer wins the canonical name).
-                            stmt = pg_insert(Entity).values(
-                                canonical_name=canon,
-                                entity_type=t.get("entity_type", "team"),
-                                sport=t.get("sport"),
-                                league=t.get("league"),
-                            ).on_conflict_do_nothing(
-                                index_elements=["canonical_name"],
-                            )
-                            result = await session.execute(stmt)
-                            if result.rowcount > 0:
-                                chunk_entities += 1
-
-                            # Fetch the entity id (may have been created earlier).
-                            row = await session.execute(
-                                select(Entity.id).where(
-                                    Entity.canonical_name == canon
+                        # ── Round-trip 2: fetch ids for pre-existing ──
+                        # RETURNING above only returned NEW rows; anything
+                        # in `valid` not in name_to_id was a conflict and
+                        # needs its id fetched by SELECT.
+                        missing_names = [
+                            t["canonical_name"] for t in valid
+                            if t["canonical_name"] not in name_to_id
+                        ]
+                        if missing_names:
+                            existing = await session.execute(
+                                select(Entity.id, Entity.canonical_name).where(
+                                    Entity.canonical_name.in_(missing_names)
                                 )
                             )
-                            entity_id = row.scalar_one_or_none()
-                            if entity_id is None:
-                                continue
+                            for eid, name in existing.all():
+                                name_to_id[name] = eid
 
-                            # Upsert aliases
+                        # ── Round-trip 3: batch upsert aliases ──
+                        # Build a single values list across all teams,
+                        # deduping (alias, source) inside the chunk so
+                        # we don't send duplicate rows in one INSERT
+                        # (which would violate the unique constraint
+                        # BEFORE ON CONFLICT could DO NOTHING them).
+                        alias_values: list = []
+                        seen_in_batch: set = set()
+                        for t in valid:
+                            eid = name_to_id.get(t["canonical_name"])
+                            if eid is None:
+                                # Rare: canonical_name has NULL somewhere;
+                                # skip its aliases.
+                                continue
                             for a in t.get("aliases", []):
-                                alias_stmt = pg_insert(EntityAlias).values(
-                                    entity_id=entity_id,
-                                    alias=a["alias"],
-                                    source=a["source"],
-                                    normalized=a["normalized"],
-                                ).on_conflict_do_nothing(
-                                    constraint="uq_alias_source",
-                                )
-                                r = await session.execute(alias_stmt)
-                                if r.rowcount > 0:
-                                    chunk_aliases += 1
-                # Clean __aexit__ from session.begin() commits the chunk;
-                # async_session() __aexit__ closes the session & returns
-                # the connection to the pool.
+                                key = (a["alias"], a["source"])
+                                if key in seen_in_batch:
+                                    continue
+                                seen_in_batch.add(key)
+                                alias_values.append({
+                                    "entity_id":  eid,
+                                    "alias":      a["alias"],
+                                    "source":     a["source"],
+                                    "normalized": a["normalized"],
+                                })
+                        if alias_values:
+                            al_stmt = pg_insert(EntityAlias).values(alias_values).on_conflict_do_nothing(
+                                constraint="uq_alias_source",
+                            ).returning(EntityAlias.id)
+                            al_result = await session.execute(al_stmt)
+                            chunk_aliases = len(al_result.all())
                 new_entities += chunk_entities
                 new_aliases += chunk_aliases
                 chunks_committed += 1
             except Exception as e:
                 # Per-chunk failure does NOT abort the whole call.
-                # The chunk's writes have rolled back via context-manager
-                # __aexit__; subsequent chunks proceed.
                 chunks_failed += 1
                 log.warning(
                     "upsert_entities: chunk %d failed (%d teams), continuing: %s",
@@ -845,9 +898,6 @@ async def upsert_entities(teams):
                 new_entities, new_aliases, chunks_committed, chunks_failed,
             )
     except Exception as e:
-        # Outermost catch — only fires if the chunk loop itself can't
-        # start (e.g., import failure). Per-chunk errors are caught
-        # above and don't reach here.
         log.error("entity seed setup failed: %s", e)
 
 
