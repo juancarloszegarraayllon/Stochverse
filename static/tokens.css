@@ -1,0 +1,77 @@
+/* Stochverse design tokens — semantic, brand-guidelines v1.1.
+   Deploy 3: INERT foundation. Linked BEFORE each page's inline <style>,
+   so any token name shared with a page's inline :root is shadowed by the
+   inline value (later in source order) until Deploy 4/5 remove those
+   shadows. New semantic names here are referenced by nothing until then.
+   version: 1.0.0 */
+
+/* ── Self-hosted fonts (woff2, latin subset). LAZY: not fetched until a
+   matching font-family is actually rendered, so inert until Deploy 4/5
+   set --font-ui / --font-mono on real elements. ── */
+@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/inter-regular.woff2') format('woff2')}
+@font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url('/static/fonts/inter-medium.woff2') format('woff2')}
+@font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url('/static/fonts/inter-semibold.woff2') format('woff2')}
+@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url('/static/fonts/inter-bold.woff2') format('woff2')}
+@font-face{font-family:'Inter';font-style:normal;font-weight:900;font-display:swap;src:url('/static/fonts/inter-black.woff2') format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/jetbrainsmono-regular.woff2') format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:500;font-display:swap;src:url('/static/fonts/jetbrainsmono-medium.woff2') format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:700;font-display:swap;src:url('/static/fonts/jetbrainsmono-bold.woff2') format('woff2')}
+
+/* ── Semantic tokens — DARK (product default, R1). Bare :root = dark, so
+   absence of data-theme AND data-theme="dark" both resolve here. ── */
+:root{
+  /* palette primitives — reference via role tokens, not directly */
+  --void:#000000; --paper:#F0F2F5; --mist:#6B7280; --acid:#B3FF38;
+
+  /* surfaces */
+  --bg:#000000;                      /* Void — equals current #000 */
+  --surface:#0A0A0A;                 /* card lift (Appendix B) */
+  --surface-2:#111111;
+  --border:rgba(107,114,128,0.20);   /* Mist @20% hairline */
+
+  /* text */
+  --text:#F0F2F5;                    /* Paper */
+  --text-secondary:#6B7280;          /* Mist — labels, kickers */
+  --text-muted:rgba(240,242,245,0.45);
+
+  /* brand chrome accent — Paper, NOT green (C4) */
+  --accent:#F0F2F5;
+  --focus:rgba(240,242,245,0.60);
+
+  /* live indicator — Acid, live-tick ONLY (§09) */
+  --live:#B3FF38;
+
+  /* trading semantics ONLY (§06 carve-out) */
+  --up:#16C784; --down:#FF3B3B;
+
+  /* typography (T1/T2) */
+  --font-ui:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+
+  /* spacing scale — 4px base (§11) */
+  --sp-1:4px; --sp-2:8px; --sp-3:16px; --sp-4:24px; --sp-5:48px; --sp-6:96px;
+
+  /* radius — two tokens (Appendix B 6/8px), not radius-0 (S2) */
+  --r-interactive:6px; --r-card:8px; --r-pill:9999px;
+
+  /* layout */
+  --max-content:1280px;
+}
+
+/* ── Semantic tokens — LIGHT (Deploy 6 toggle; defined now per R1).
+   Only color roles change; typography/spacing/radius cascade from :root
+   above (this selector doesn't re-declare them). Attribute selector
+   matches ONLY when data-theme="light", so dark stays default. ── */
+:root[data-theme="light"]{
+  --bg:#F0F2F5;                      /* Paper canvas */
+  --surface:#FFFFFF;
+  --surface-2:#E9ECF0;
+  --border:rgba(107,114,128,0.25);
+  --text:#000000;                    /* Void text */
+  --text-secondary:#6B7280;
+  --text-muted:rgba(0,0,0,0.45);
+  --accent:#000000;                  /* Void chrome accent */
+  --focus:rgba(0,0,0,0.60);
+  --live:#B3FF38;                    /* Acid unchanged across themes */
+  --up:#0E9F6E; --down:#E02424;      /* signal colors tuned for light bg */
+}
