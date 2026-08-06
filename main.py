@@ -430,6 +430,53 @@ def _classify_ua(user_agent: str) -> str:
     return "unknown"
 
 
+# 2026-08-07 (Investigation #42, WS fanout): dark-launch gate for
+# per-connect / per-disconnect / per-subscribe log lines from the
+# /ws/prices handler. Counters (BrowserSubscriber.bytes_sent, per-
+# channel byte totals, top-N snapshot) are always-on and cheap;
+# events add measurable log volume, so gate them. Set
+# LOG_WS_FANOUT_EVENTS=1 in Railway during a read window; turn off
+# after attribution.
+_LOG_WS_FANOUT_EVENTS: bool = os.environ.get(
+    "LOG_WS_FANOUT_EVENTS", "0",
+) == "1"
+
+
+def _hash_ip_class(ip: str) -> str:
+    """Return a stable short bucket identifier for a client IP.
+
+    IPv4: /24 prefix (first 3 octets) → hashed to 8 hex chars.
+    IPv6: /48 prefix (first 3 hextets) → hashed to 8 hex chars.
+    Empty/unparseable → 'unknown'.
+
+    Hashing (instead of returning the raw prefix) keeps raw
+    addresses out of log lines + /api/ws_status. Same client
+    always hashes to the same bucket so aggregation and
+    reconnect-storm attribution work; but the operator cannot
+    reverse the hash to an IP for retaliation / opsec drift.
+    ~16-hex-char space = ~256M buckets; collisions negligible."""
+    import hashlib as _h
+    if not ip:
+        return "unknown"
+    prefix = ip.strip()
+    try:
+        if ":" in prefix:  # IPv6
+            parts = prefix.split(":")
+            # /48 = first 3 non-empty hextets. Pad missing hextets
+            # for URL-shortened forms like `2001:db8::1`.
+            hex_parts = [p for p in parts if p][:3]
+            prefix_str = ":".join(hex_parts)
+        else:  # IPv4
+            octets = prefix.split(".")
+            if len(octets) >= 3:
+                prefix_str = ".".join(octets[:3])
+            else:
+                prefix_str = prefix
+        return _h.sha256(prefix_str.encode("ascii", "replace")).hexdigest()[:8]
+    except Exception:
+        return "unknown"
+
+
 class ResponseSizeMiddleware(BaseHTTPMiddleware):
     """Log every response's wire-byte size + method + path + status +
     client class. Zero effect when LOG_RESPONSE_SIZE is off (env
@@ -5574,9 +5621,24 @@ def refresh():
 @app.get("/api/ws_status")
 def ws_status():
     """Debug endpoint: reports the Kalshi WebSocket connection state,
-    how many markets have received at least one live price tick, and
-    the health of the DB flush pipeline (last successful write,
-    consecutive error count, last error message)."""
+    how many markets have received at least one live price tick, the
+    health of the DB flush pipeline (last successful write, consecutive
+    error count, last error message), and — new 2026-08-07 — the
+    browser_fanout aggregate for Investigation #42.
+
+    browser_fanout answers the drinker side of the firehose:
+      - active_connections: current count
+      - bytes_sent_by_channel / msgs_sent_by_channel: monotonic
+        per-channel totals since process start
+      - top_subscribers: up to top-10 by bytes_sent — each entry
+        shows age_s, ticker_count, bytes_sent, msgs_sent,
+        msgs_dropped, ip_class, ua_class. Spot the 91k-ticker
+        scraper here.
+      - max_tickers_per_conn: highest single-connection ticker count
+      - reconnects_last_1h: connect events in the last hour
+      - recent_events: last 20 connect/disconnect entries
+    All fields are cheap always-on counters; per-event log lines
+    are separately gated by LOG_WS_FANOUT_EVENTS."""
     try:
         from kalshi_ws import STATUS, LIVE_PRICES
         out = {"status": dict(STATUS), "live_count": len(LIVE_PRICES)}
@@ -5587,6 +5649,11 @@ def ws_status():
         out["flush"] = dict(_flush_health)
     except Exception:
         out["flush"] = None
+    try:
+        from kalshi_ws import browser_fanout_snapshot
+        out["browser_fanout"] = browser_fanout_snapshot()
+    except Exception as e:
+        out["browser_fanout"] = {"error": str(e)}
     return out
 
 @app.get("/api/ws_raw")
@@ -15753,8 +15820,21 @@ async def ws_prices(websocket: WebSocket):
     except Exception as e:
         await websocket.close(code=1011)
         return
-    sub = BrowserSubscriber()
+    # 2026-08-07 (Investigation #42): capture IP + UA at connect
+    # time so BrowserSubscriber's instrumentation counters can be
+    # attributed to a client class. IP is hashed to a short prefix
+    # so raw addresses don't leak into log lines / /api/ws_status.
+    # UA classifier reuses the same lightweight logic as the HTTP
+    # response-size logger (browser / bot / unknown).
+    _ip_raw = (websocket.headers.get("x-forwarded-for", "") or "").split(",")[0].strip()
+    _ip_class = _hash_ip_class(_ip_raw) if _ip_raw else "unknown"
+    _ua_class = _classify_ua(websocket.headers.get("user-agent", ""))
+    sub = BrowserSubscriber(ip_class=_ip_class, ua_class=_ua_class)
     register_browser(sub)
+    if _LOG_WS_FANOUT_EVENTS:
+        logging.getLogger("ws_fanout").info(
+            "ws.connect ip_class=%s ua_class=%s", _ip_class, _ua_class,
+        )
     # Initial hello — must be protected: if the browser tab closed
     # between accept() and now (refresh, network drop, dev-tools
     # close), this raises WebSocketDisconnect / ConnectionClosed /
@@ -15779,6 +15859,12 @@ async def ws_prices(websocket: WebSocket):
                 tickers = msg.get("tickers") or []
                 if action == "subscribe":
                     sub.subscribe([t.upper() for t in tickers if t])
+                    if _LOG_WS_FANOUT_EVENTS:
+                        logging.getLogger("ws_fanout").info(
+                            "ws.subscribe ip_class=%s ua_class=%s "
+                            "delta=%d total=%d",
+                            _ip_class, _ua_class, len(tickers), len(sub.tickers),
+                        )
                     snapshot = []
                     for t in tickers:
                         t = (t or "").upper()
@@ -15840,7 +15926,21 @@ async def ws_prices(websocket: WebSocket):
         for task in pending:
             task.cancel()
     finally:
+        # Capture stats BEFORE unregister so the disconnect log line
+        # sees populated counters.
+        _age_s = int(time.time() - sub.connected_at)
+        _bytes_sent = sub.bytes_sent
+        _msgs_sent = sub.msgs_sent
+        _msgs_dropped = sub.msgs_dropped
+        _ticker_count = len(sub.tickers)
         unregister_browser(sub)
+        if _LOG_WS_FANOUT_EVENTS:
+            logging.getLogger("ws_fanout").info(
+                "ws.disconnect ip_class=%s ua_class=%s age_s=%d "
+                "tickers=%d bytes_sent=%d msgs_sent=%d msgs_dropped=%d",
+                _ip_class, _ua_class, _age_s, _ticker_count,
+                _bytes_sent, _msgs_sent, _msgs_dropped,
+            )
         # Clean up any on-demand channel subscriptions this browser had.
         try:
             from kalshi_ws import _ondemand_subs
