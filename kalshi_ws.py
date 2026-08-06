@@ -27,7 +27,18 @@ except ImportError:
 try:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding
-except ImportError:
+except BaseException:
+    # Broadened from `except ImportError` (2026-08-07): some
+    # environments raise pyo3 PanicException (BaseException subclass)
+    # when the cryptography extension can't init its Rust backend
+    # (broken _cffi_backend, wheel/system-lib version mismatch,
+    # etc.). Fall back to None regardless — the fallbacks below
+    # activate the same way, and the only functionality lost is
+    # the RSA-PSS signature helper, which authenticated Kalshi WS
+    # will complain about at connect time (not at import time).
+    # Keeps kalshi_ws importable in dev environments where the
+    # crypto stack is half-broken, so tests + browser_fanout
+    # instrumentation still work.
     serialization = None
     padding = None
     hashes = None
@@ -123,10 +134,34 @@ async def unsubscribe_ondemand(channel: str, ticker: str, sub_id: int):
 # overlaps. The main.py /ws/prices endpoint owns the queue lifetime —
 # it creates one on connect, subscribes to tickers, and drops it on
 # disconnect.
+#
+# 2026-08-07 (Investigation #42, ws-fanout): egress attribution
+# proved the ~$15/day cost is browser fanout, not HTTP responses
+# (respsize logger showed origin HTTP ~nil; Kalshi upstream is 655
+# msg/s → this fanout is the drinker). Instrumentation added:
+#   - per-connection: connected_at, bytes_sent, ip_class, ua_class
+#   - global: _bytes_sent_by_channel, _ws_fanout_events (ring buffer)
+# All counters are ALWAYS-ON (cheap increments). Event logs are
+# env-gated LOG_WS_FANOUT_EVENTS=1 (dark by default).
 class BrowserSubscriber:
-    def __init__(self, tickers: set = None):
+    def __init__(
+        self,
+        tickers: set = None,
+        *,
+        ip_class: str = "unknown",
+        ua_class: str = "unknown",
+    ):
         self.tickers: set = tickers or set()
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+        # Instrumentation (always-on; measured at broadcast time,
+        # not at socket-send time — approximates wire bytes since
+        # payloads are JSON-serialized identically per subscriber).
+        self.connected_at: float = time.time()
+        self.bytes_sent: int = 0
+        self.msgs_sent: int = 0
+        self.msgs_dropped: int = 0  # queue-full drops
+        self.ip_class: str = ip_class
+        self.ua_class: str = ua_class
 
     def subscribe(self, tickers):
         self.tickers.update(tickers)
@@ -137,29 +172,133 @@ class BrowserSubscriber:
 
 _browser_subscribers: set = set()
 
+# Aggregate counters for /api/ws_status browser_fanout snapshot.
+# Keys are msg_type strings from _broadcast_to_browsers ("price",
+# "orderbook_delta", "trade") plus "snapshot" / "hello" if callers
+# ever hit those. All counters monotonic since process start.
+_bytes_sent_by_channel: dict = {
+    "price": 0, "orderbook_delta": 0, "trade": 0,
+}
+_msgs_sent_by_channel: dict = {
+    "price": 0, "orderbook_delta": 0, "trade": 0,
+}
+# Ring buffer of recent connect/disconnect events for reconnect-
+# storm detection. (timestamp_s, event_type, ip_class, ua_class,
+# tickers_count, bytes_sent, age_s). Bounded so a runaway won't
+# eat memory.
+_ws_fanout_events: deque = deque(maxlen=500)
+
 
 def register_browser(sub: "BrowserSubscriber"):
     _browser_subscribers.add(sub)
+    _ws_fanout_events.append({
+        "ts": time.time(),
+        "event": "connect",
+        "ip_class": sub.ip_class,
+        "ua_class": sub.ua_class,
+    })
 
 
 def unregister_browser(sub: "BrowserSubscriber"):
     _browser_subscribers.discard(sub)
+    _ws_fanout_events.append({
+        "ts": time.time(),
+        "event": "disconnect",
+        "ip_class": sub.ip_class,
+        "ua_class": sub.ua_class,
+        "age_s": int(time.time() - sub.connected_at),
+        "tickers": len(sub.tickers),
+        "bytes_sent": sub.bytes_sent,
+        "msgs_sent": sub.msgs_sent,
+        "msgs_dropped": sub.msgs_dropped,
+    })
 
 
 def _broadcast_to_browsers(ticker: str, update: dict, msg_type: str = "price"):
     """Non-blocking fan-out of a single-ticker update to every browser
     subscriber that cares about this ticker. Drops the message on any
-    subscriber whose queue is full (slow consumer protection)."""
+    subscriber whose queue is full (slow consumer protection).
+
+    2026-08-07 (Investigation #42): per-subscriber bytes_sent + msgs_
+    sent counters incremented on successful enqueue; msgs_dropped on
+    queue-full. Payload size is precomputed once per broadcast (same
+    JSON for every matching subscriber). Only successful enqueues
+    are counted — queue-full drops don't inflate bytes_sent."""
     if not _browser_subscribers:
         return
     payload = {"type": msg_type, "ticker": ticker, "data": update}
+    # Precompute wire-byte size once. All matching subscribers will
+    # serialize this same dict via websocket.send_json in main.py's
+    # writer, so this len() is a faithful per-subscriber accounting.
+    try:
+        _size = len(json.dumps(payload).encode("utf-8"))
+    except Exception:
+        _size = 0
     for sub in list(_browser_subscribers):
         if ticker not in sub.tickers:
             continue
         try:
             sub.queue.put_nowait(payload)
+            sub.bytes_sent += _size
+            sub.msgs_sent += 1
         except asyncio.QueueFull:
-            pass
+            sub.msgs_dropped += 1
+            continue
+        _bytes_sent_by_channel[msg_type] = _bytes_sent_by_channel.get(msg_type, 0) + _size
+        _msgs_sent_by_channel[msg_type] = _msgs_sent_by_channel.get(msg_type, 0) + 1
+
+
+def browser_fanout_snapshot(top_n: int = 10) -> dict:
+    """Aggregate summary for /api/ws_status browser_fanout key.
+
+    Always-on: reads the counters BrowserSubscriber + _broadcast_to_
+    browsers maintain during normal operation. Cheap — no per-message
+    overhead added by this function. Called synchronously from the
+    HTTP handler.
+
+    Fields:
+      - active_connections: current registered count
+      - bytes_sent_by_channel: monotonic per-channel byte totals
+      - msgs_sent_by_channel:  monotonic per-channel message totals
+      - top_subscribers: up to top_n subscribers ordered by
+        bytes_sent desc, each with {age_s, ticker_count, bytes_sent,
+        msgs_sent, msgs_dropped, ip_class, ua_class}
+      - max_tickers_per_conn: highest single-connection ticker count
+        (spot the 91k-ticker scraper)
+      - reconnects_last_1h: count of connect events in _ws_fanout_
+        events in the last 3600s
+      - recent_events: last 20 entries from _ws_fanout_events for
+        connect/disconnect visibility"""
+    now = time.time()
+    subs = list(_browser_subscribers)
+    subs_sorted = sorted(subs, key=lambda s: s.bytes_sent, reverse=True)
+    top = [
+        {
+            "age_s": int(now - s.connected_at),
+            "ticker_count": len(s.tickers),
+            "bytes_sent": s.bytes_sent,
+            "msgs_sent": s.msgs_sent,
+            "msgs_dropped": s.msgs_dropped,
+            "ip_class": s.ip_class,
+            "ua_class": s.ua_class,
+        }
+        for s in subs_sorted[:top_n]
+    ]
+    max_tickers = max((len(s.tickers) for s in subs), default=0)
+    cutoff = now - 3600
+    reconnects_last_1h = sum(
+        1 for e in _ws_fanout_events
+        if e.get("event") == "connect" and e.get("ts", 0) >= cutoff
+    )
+    return {
+        "active_connections":    len(subs),
+        "bytes_sent_by_channel": dict(_bytes_sent_by_channel),
+        "msgs_sent_by_channel":  dict(_msgs_sent_by_channel),
+        "top_subscribers":       top,
+        "max_tickers_per_conn":  max_tickers,
+        "reconnects_last_1h":    reconnects_last_1h,
+        "recent_events":         list(_ws_fanout_events)[-20:],
+    }
 
 
 def _extract_orderbook_delta(msg):
