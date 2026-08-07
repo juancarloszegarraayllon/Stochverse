@@ -4,6 +4,18 @@ A SECOND Railway service, on the `preview` branch, that publishes the
 restyled homepage + /sports on live production data. **Read-only. Zero
 production impact.** Parallel publishing channel — **never merges to main.**
 
+> **STATUS: OPERATIONAL (2026-08-07).** `preview.stochverse.com` live; full
+> matrix green (events JSON, `/sports/1` populating + tabs mounting;
+> `/api/prune` + `/api/ws_status` → 403). **Final env set on the service:**
+> - `PREVIEW_SERVICE=1`
+> - `PREVIEW_UPSTREAM=https://<prod service's *.up.railway.app domain>`
+> - `DATABASE_URL=""`, `DATABASE_URL_DIRECT=""`
+> - (`PREVIEW_HOST_HEADER` not needed — removed.)
+>
+> **Gotcha for the record:** the initial 502 was `PREVIEW_UPSTREAM` briefly
+> pointed at the **preview service's own** domain (self-loop). It must point at
+> the **prod** Railway domain, never at itself.
+
 ## What it is / how it's incapable of writes (by construction, infra-hardened)
 - The service boots **only** `serve_preview.py` (via the `Procfile`) — a
   stdlib-only Python HTTP server. It **never imports `main.py`**, so there is
