@@ -858,6 +858,67 @@ _RESOLUTION_LOG_WINDOW_SQL = (
 
 SAMPLE_N = 30
 
+# 2026-08-08 (#47 cross-process cohort attribution): daily_diff runs
+# as a standalone cron process (railway.toml). cutover.is_v4_cohort
+# has three RAM lookups (_CURRENT_CONFIG, _SERIES_SPORT_DYNAMIC,
+# _V4_LINKAGE_MAP) that are ALL populated only in the FastAPI web
+# process — the cron sees them empty and every is_v4_cohort call
+# returns False, mis-attributing every row to *_out_of_cohort and
+# blinding the Item 7 both_pair_different_cohort gate at line 1134.
+#
+# Fix: the web process persists its cohort snapshot to
+# cache_blobs['v4_cohort_snapshot'] on every _v4_linkage_refresh_loop
+# tick (main.py). We load that blob at pass start and shim the
+# is_v4_cohort classifier to check set-membership against it.
+#
+# ACCEPTED LIMITATION (documented, not solved): the snapshot reflects
+# cohort membership at snapshot time. If cohort membership drifts
+# WITHIN a 24h report window (linked_universe growth reorders
+# lowest-N-by-hash), attribution uses the value at snapshot load
+# time — a small class of under-attribution possible but bounded to
+# the linkage refresh cadence (default 60s per _V4_LINKAGE_REFRESH_
+# INTERVAL_S). Soak reset-conditions already watch cohort drift as
+# an operator concern; provenance fields (loaded_at_ts,
+# config_loaded_at_ts) in report_json's cohort_snapshot let future
+# attribution disputes self-adjudicate.
+_COHORT_SNAPSHOT_SET: set = set()
+_COHORT_SNAPSHOT_META: dict = {}
+
+
+async def _load_cohort_snapshot_from_cache_blob() -> None:
+    """Populate _COHORT_SNAPSHOT_SET + _COHORT_SNAPSHOT_META from the
+    web-side persisted cache_blob. Called ONCE at daily_diff() entry;
+    the snapshot is then used throughout the pass.
+
+    On any failure (blob missing, DB unavailable, unexpected shape)
+    the sets stay empty — falling through to every-row-out-of-cohort
+    behavior, which is the pre-fix diff behavior. That preserves
+    forward-compat: an old cron running against a new web deploy
+    that hasn't yet written the blob still produces a report,
+    just with the old attribution accuracy.
+    """
+    global _COHORT_SNAPSHOT_SET, _COHORT_SNAPSHOT_META
+    _log = get_logger("daily_diff.cohort_snapshot")
+    try:
+        from db import load_cache_blob
+        blob = await load_cache_blob("v4_cohort_snapshot")
+    except Exception as e:
+        _log.warning("v4_cohort_snapshot load failed: %s", e)
+        return
+    if not isinstance(blob, dict):
+        return
+    series_list = blob.get("cohort_series") or []
+    _COHORT_SNAPSHOT_SET = {str(s).upper() for s in series_list if s}
+    _COHORT_SNAPSHOT_META = {
+        k: v for k, v in blob.items() if k != "cohort_series"
+    }
+    _log.info(
+        "v4_cohort_snapshot.loaded",
+        size=len(_COHORT_SNAPSHOT_SET),
+        loaded_at_ts=_COHORT_SNAPSHOT_META.get("loaded_at_ts"),
+        config_source=_COHORT_SNAPSHOT_META.get("config_source"),
+    )
+
 # v4 pairing reconstruction — all sports at once, scoped by D2's PKs.
 #   - fle.fixture_id NOT NULL       → v4 has actually resolved this fl_event
 #   - fle.fl_event_id = ANY(:fl_pks) → strict same-population with D2's fl_rows
@@ -1061,14 +1122,27 @@ def _diff_pairings(
     for bk in _bucket_keys:
         buckets[f"{bk}_cohort"] = 0
         buckets[f"{bk}_out_of_cohort"] = 0
-    # Import the SOLE cohort-truth source. Every consumer of cohort
-    # membership uses cutover.is_v4_cohort — daily_diff MUST NOT
-    # re-implement the hash.
-    try:
-        from cutover import is_v4_cohort as _is_v4_cohort
-    except Exception:
-        def _is_v4_cohort(series_ticker, cfg=None):  # noqa: ARG001
+    # 2026-08-08 (#47 fix): cross-process cohort attribution.
+    # daily_diff runs as a standalone cron process where
+    # cutover.is_v4_cohort's three RAM lookups (_CURRENT_CONFIG,
+    # _SERIES_SPORT_DYNAMIC, _V4_LINKAGE_MAP) are ALL empty and
+    # every call returns False → all *_cohort buckets read zero →
+    # Item 7 gate below blind to real cohort danger. The shim below
+    # uses the cohort snapshot the SERVING web process persists to
+    # cache_blobs['v4_cohort_snapshot'] (see
+    # main._v4_linkage_refresh_loop) as the truth source.
+    #
+    # _COHORT_SNAPSHOT_SET is populated at daily_diff() entry via
+    # _load_cohort_snapshot_from_cache_blob(); if the load failed or
+    # the blob is missing, the set is empty and the shim returns
+    # False for every series — same behavior as the pre-fix bug.
+    # That preserves forward-compat: old cron running against new
+    # web deploy that hasn't yet written the blob still produces a
+    # report, just with the pre-fix attribution accuracy.
+    def _is_v4_cohort(series_ticker, cfg=None):  # noqa: ARG001
+        if not series_ticker:
             return False
+        return str(series_ticker).upper() in _COHORT_SNAPSHOT_SET
     # Sample every non-agree bucket AND agree_partial_coverage.
     # Sample keys use the RAW bucket name (no cohort suffix) — the
     # sample list gets a `cohort` bool field so operators can filter
@@ -1550,29 +1624,57 @@ async def _measure(
             # threshold-setting can trust the diff.
             "fixture_linked_in_window_count": len(all_v4_map),
         }
-        # Phase 3 (2026-08-05): cohort_snapshot records who was in
-        # the v4 cohort at report-generation time. Historical
-        # reports remain interpretable if is_v4_cohort semantics
-        # ever change. Full list truncated at 500 series (mirrors
-        # SAMPLE_N logic — bounded blob size).
+        # 2026-08-08 (#47 fix): cohort_snapshot now sourced from
+        # the loaded cache_blob (populated by the SERVING web
+        # process at every _v4_linkage_refresh_loop tick), NOT
+        # from a live cohort_series_list() call. Cron process has
+        # empty RAM state so live-call always returned [] — the
+        # pre-fix bug this PR closes. Reports historical reports
+        # remain interpretable via cohort membership as of the
+        # snapshot's loaded_at_ts.
+        #
+        # Provenance fields (loaded_at_ts, config_source,
+        # config_loaded_at_ts) let future attribution disputes
+        # self-adjudicate: an operator seeing an unexpected cohort
+        # attribution can trace back through the snapshot's own
+        # timestamp + config source to the exact serving-side
+        # state at snapshot capture.
+        #
+        # Empty-snapshot fallback: if the cache_blob load failed
+        # or is missing (fresh deploy, DB unreachable, etc.), the
+        # loaded meta dict is empty; report shows size=0 and
+        # missing=True so the operator can distinguish "cohort is
+        # empty" from "snapshot never loaded".
         _COHORT_SNAPSHOT_MAX = 500
-        try:
-            from cutover import cohort_series_list, get_current_config
-            _cfg = get_current_config()
-            _cohort = cohort_series_list(_cfg)
+        if _COHORT_SNAPSHOT_META or _COHORT_SNAPSHOT_SET:
+            _series_sorted = sorted(_COHORT_SNAPSHOT_SET)
             report_json["cohort_snapshot"] = {
-                "series":             _cohort[:_COHORT_SNAPSHOT_MAX],
-                "size":               len(_cohort),
-                "truncated":          len(_cohort) > _COHORT_SNAPSHOT_MAX,
-                "traffic_pct":        _cfg.traffic_pct,
-                "enabled_sports":     list(_cfg.enabled_sports),
-                "min_cohort_series":  _cfg.min_cohort_series,
-                "config_source":      _cfg.source,
-                "captured_at_ts":     int(datetime.now(timezone.utc).timestamp()),
+                "series":             _series_sorted[:_COHORT_SNAPSHOT_MAX],
+                "size":               len(_series_sorted),
+                "truncated":          len(_series_sorted) > _COHORT_SNAPSHOT_MAX,
+                # Provenance from the snapshot the web process wrote.
+                "loaded_at_ts":       _COHORT_SNAPSHOT_META.get("loaded_at_ts"),
+                "config_source":      _COHORT_SNAPSHOT_META.get("config_source"),
+                "config_loaded_at_ts": _COHORT_SNAPSHOT_META.get("config_loaded_at_ts"),
+                "traffic_pct":        _COHORT_SNAPSHOT_META.get("traffic_pct"),
+                "enabled_sports":     _COHORT_SNAPSHOT_META.get("enabled_sports"),
+                "min_cohort_series":  _COHORT_SNAPSHOT_META.get("min_cohort_series"),
+                "universe_size":      _COHORT_SNAPSHOT_META.get("universe_size"),
+                "effective_pct":      _COHORT_SNAPSHOT_META.get("effective_pct"),
+                "snapshot_version":   _COHORT_SNAPSHOT_META.get("snapshot_version"),
+                # When the cron process read the blob (vs when the
+                # web process WROTE it — both surfaced for clock-
+                # skew diagnosis).
+                "cron_read_at_ts":    int(datetime.now(timezone.utc).timestamp()),
             }
-        except Exception as _cs_exc:
+        else:
             report_json["cohort_snapshot"] = {
-                "error": f"{type(_cs_exc).__name__}: {str(_cs_exc)[:200]}",
+                "series":             [],
+                "size":               0,
+                "truncated":          False,
+                "missing":            True,
+                "cron_read_at_ts":    int(datetime.now(timezone.utc).timestamp()),
+                "note":               "v4_cohort_snapshot cache_blob not found or empty — cohort attribution unavailable this pass",
             }
         log.info(
             "daily_diff.legacy_comparison_computed",
@@ -1683,6 +1785,14 @@ async def daily_diff(
         print("ERROR: DATABASE_URL not set or engine unavailable.",
               file=sys.stderr)
         return 1
+
+    # 2026-08-08 (#47): load the cohort snapshot the serving web
+    # process persisted to cache_blobs['v4_cohort_snapshot'].
+    # Populates _COHORT_SNAPSHOT_SET (used by the _is_v4_cohort
+    # shim in _diff_pairings) + _COHORT_SNAPSHOT_META (surfaced in
+    # report_json for provenance). Called ONCE per pass, before
+    # any classifier work.
+    await _load_cohort_snapshot_from_cache_blob()
 
     # Default window: last 24 hours ending at script start.
     if window_end is None:

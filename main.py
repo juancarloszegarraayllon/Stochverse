@@ -1774,6 +1774,62 @@ async def _v4_linkage_refresh_loop():
                     await save_cache_blob("v4_linkage_snapshot", new_map)
                 except Exception as e:
                     _log.warning("v4_linkage_snapshot save failed: %s", e)
+                # 2026-08-08 (#47): cross-process cohort-snapshot
+                # persistence. daily_diff runs as a standalone cron
+                # (railway.toml) where the three RAM lookups inside
+                # is_v4_cohort (_CURRENT_CONFIG, _SERIES_SPORT_DYNAMIC,
+                # _V4_LINKAGE_MAP) are all empty — every diff-side
+                # is_v4_cohort call returns False, all *_cohort
+                # buckets read zero, Item 7 gate (daily_diff.py:1134)
+                # blind to real cohort danger. Persist the SERVING-
+                # side cohort_series_list here (piggy-backed on the
+                # linkage refresh since cohort membership shifts as
+                # linkage refreshes per cutover.py:206-209). Cron
+                # loads this blob and uses it as its cohort truth
+                # source. See scripts/daily_diff.py for the read side.
+                #
+                # ACCEPTED LIMITATION: the snapshot reflects cohort
+                # membership at snapshot time. If cohort membership
+                # drifts WITHIN a report window (linked_universe
+                # growth reorders lowest-N-by-hash), attribution
+                # uses the snapshot value — a small class of
+                # under-attribution possible but bounded to the
+                # refresh cadence. The soak reset-conditions already
+                # watch cohort drift as an operator concern, so this
+                # is documented-not-solved. Provenance fields
+                # (loaded_at_ts, config_source, universe_size at
+                # snapshot time) let future attribution disputes
+                # self-adjudicate.
+                try:
+                    from cutover import (
+                        get_current_config as _get_cfg,
+                        cohort_series_list as _cohort_list,
+                        compute_effective_pct as _eff_pct,
+                        _linked_universe,
+                    )
+                    _cfg_snap = _get_cfg()
+                    _cohort_snap = _cohort_list(_cfg_snap)
+                    _linked = _linked_universe(_cfg_snap)
+                    cohort_snapshot_blob = {
+                        "cohort_series":        list(_cohort_snap),
+                        "cohort_size":          len(_cohort_snap),
+                        "loaded_at_ts":         _time.time(),
+                        "config_source":        _cfg_snap.source,
+                        "config_loaded_at_ts":  _cfg_snap.loaded_at_ts,
+                        "traffic_pct":          _cfg_snap.traffic_pct,
+                        "enabled_sports":       list(_cfg_snap.enabled_sports),
+                        "min_cohort_series":    _cfg_snap.min_cohort_series,
+                        "universe_size":        len(_linked),
+                        "effective_pct":        _eff_pct(
+                            len(_cohort_snap), len(_linked),
+                        ),
+                        "snapshot_version":     1,
+                    }
+                    await save_cache_blob(
+                        "v4_cohort_snapshot", cohort_snapshot_blob,
+                    )
+                except Exception as e:
+                    _log.warning("v4_cohort_snapshot save failed: %s", e)
         except Exception as e:
             _log.warning("v4_linkage_refresh error: %s", e)
         await asyncio.sleep(_V4_LINKAGE_REFRESH_INTERVAL_S)
