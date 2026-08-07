@@ -62,11 +62,22 @@ preview content. The env-guard protects prod; never-merge is still the rule.
      command — so it runs `serve_preview.py`, not the app. (You do **not**
      need to set a manual start command; if you prefer, the explicit command
      is `python serve_preview.py --host 0.0.0.0 --port $PORT`.)
-   - **Service env (infra #4):** set these three, and NO other secrets:
+   - **Service env:** set these, and NO other secrets:
      - `PREVIEW_SERVICE=1`  — **required to boot.** `serve_preview.py` refuses
        to start (exits 2, loud message) without it — a guard so it can never
        accidentally run on the production web service. Forget it here and the
        preview service won't come up (loud, immediate, self-correcting).
+     - `PREVIEW_UPSTREAM=https://<prod-service>.up.railway.app` — **required on
+       Railway.** The default `https://stochverse.com` **fails from inside
+       Railway** with Cloudflare **Error 1000** ("DNS points to prohibited
+       IP"): the proxy's server-to-server hop resolves to Cloudflare's proxy
+       IP and loops. Point it at the **prod service's direct Railway domain**
+       (read it from the prod service → Settings → Networking) to bypass
+       Cloudflare. The proxy sets `Host` to that domain automatically, which is
+       how Railway routes to the prod service.
+       - *Only if* the prod app issues Host-based redirects to the canonical
+         host, also set `PREVIEW_HOST_HEADER=stochverse.com` (forwards a
+         canonical Host while still connecting to the Railway domain).
      - `DATABASE_URL=""` and `DATABASE_URL_DIRECT=""` (empty strings) — the
        server reads neither; belt-and-suspenders so nothing could ever pick up
        a real connection string.

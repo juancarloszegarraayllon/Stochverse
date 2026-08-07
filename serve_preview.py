@@ -107,7 +107,7 @@ def build(args):
     (here/"sports.preview.html").write_text(spo)
     return repo, idx.encode(), spo.encode(), m1, m2
 
-def make_handler(repo, idx_bytes, spo_bytes, prod):
+def make_handler(repo, idx_bytes, spo_bytes, prod, host_hdr):
     static_dir = repo/"static"
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -139,7 +139,7 @@ def make_handler(repo, idx_bytes, spo_bytes, prod):
                 if k.lower() in ("host","content-length","connection","accept-encoding","cookie"):
                     continue   # Cookie stripped unconditionally on every forward (infra #2)
                 req.add_header(k, v)
-            req.add_header("Host", urllib.request.urlparse(prod).netloc)
+            req.add_header("Host", host_hdr)
             ua = self.headers.get("User-Agent", "")
             req.add_header("User-Agent", (ua + " " if ua else "") + "stochverse-preview/1.0")  # infra #3
             try:
@@ -190,10 +190,17 @@ def main():
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address; use 0.0.0.0 for phone-on-WiFi or a hosted service")
     ap.add_argument("--repo", default=None)
-    ap.add_argument("--prod", default=PROD_DEFAULT)
+    ap.add_argument("--prod", default=os.environ.get("PREVIEW_UPSTREAM") or PROD_DEFAULT,
+                    help="upstream for the /api proxy; env PREVIEW_UPSTREAM overrides "
+                         "(point at the prod *.up.railway.app domain to bypass Cloudflare); "
+                         "default https://stochverse.com")
+    ap.add_argument("--host-header", default=os.environ.get("PREVIEW_HOST_HEADER") or None,
+                    help="override the forwarded Host header; env PREVIEW_HOST_HEADER; "
+                         "default = the upstream's own host")
     args = ap.parse_args()
+    host_hdr = args.host_header or urllib.request.urlparse(args.prod).netloc
     repo, idx, spo, m1, m2 = build(args)
-    H = make_handler(repo, idx, spo, args.prod)
+    H = make_handler(repo, idx, spo, args.prod, host_hdr)
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     srv = socketserver.ThreadingTCPServer((args.host, args.port), H)
     shown = "localhost" if args.host in ("127.0.0.1","localhost") else args.host
@@ -201,7 +208,7 @@ def main():
     print(f"  Stochverse local preview  ->  http://{shown}:{args.port}/")
     print(f"  homepage (D4a look)       ->  http://{shown}:{args.port}/")
     print(f"  /sports  (Deploy-5 look)  ->  http://{shown}:{args.port}/sports/1")
-    print(f"  repo static + /api proxy  ->  {args.prod}")
+    print(f"  repo static + /api proxy  ->  {args.prod}   (Host: {host_hdr})")
     if args.host == "0.0.0.0":
         try:
             import socket
