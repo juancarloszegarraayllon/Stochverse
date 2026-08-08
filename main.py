@@ -3204,18 +3204,12 @@ def get_events(
     now_utc = _dt.now(timezone.utc)
 
     # Import live-score feed — FlashLive is the sole active source.
+    # compact_label / added-time accessors moved to
+    # live_state_builder.py which lazy-imports them per-call.
     try:
-        from flashlive_feed import (
-            match_game as flash_match_game,
-            compact_label,
-            ensure_added_time_cached as _fl_ensure_added_time,
-            get_added_time as _fl_get_added_time,
-        )
+        from flashlive_feed import match_game as flash_match_game
     except Exception:
         flash_match_game = None
-        compact_label = None
-        _fl_ensure_added_time = None
-        _fl_get_added_time = None
 
     # Filter
     # Pre-check: validate the requested subtab actually exists for this
@@ -3530,61 +3524,9 @@ def get_events(
     total = len(results)
     page  = results[offset:offset+limit]
 
-    def _needs_flip(title: str, g: dict) -> bool:
-        """Returns True if the home/away orientation should be flipped
-        to match the Kalshi title order. Uses whichever team phrase
-        appears first in the normalized title to decide."""
-        if not g:
-            return False
-        try:
-            from flashlive_feed import _normalize
-            tl = _normalize(title or "")
-        except Exception:
-            tl = (title or "").lower()
-        def first_pos(phrases):
-            best = -1
-            for p in phrases or ():
-                if not p:
-                    continue
-                idx = tl.find(p)
-                if idx >= 0 and (best == -1 or idx < best):
-                    best = idx
-            return best
-        home_pos = first_pos(g.get("home_phrases", []))
-        away_pos = first_pos(g.get("away_phrases", []))
-        if home_pos >= 0 and (away_pos < 0 or home_pos < away_pos):
-            return False
-        return True
-
-    def _score_display(title: str, g: dict) -> str:
-        """Build an ordered score string whose team order matches how
-        the teams appear in the Kalshi event title."""
-        if not g:
-            return ""
-        hs, as_ = _normalize_scores(g)
-        if hs == "" or as_ == "":
-            return ""
-        ha = g.get("home_abbr", "") or "HOME"
-        aa = g.get("away_abbr", "") or "AWAY"
-        if _needs_flip(title, g):
-            return f"{aa} {as_} - {ha} {hs}"
-        return f"{ha} {hs} - {aa} {as_}"
-
-    def _flip_score_pairs(label: str) -> str:
-        """Flip each "H-A" pair in a space-separated tennis label
-        ("6-3 4-5 30-0" → "3-6 5-4 0-30") so the per-set breakdown
-        matches the Kalshi-title orientation of score_display."""
-        if not label:
-            return label
-        parts = label.split()
-        flipped = []
-        for p in parts:
-            if "-" in p:
-                a, b = p.split("-", 1)
-                flipped.append(f"{b}-{a}")
-            else:
-                flipped.append(p)
-        return " ".join(flipped)
+    # _needs_flip / _score_display / _flip_score_pairs moved to
+    # live_state_builder.py per v4-rendering PR A. Sole callers were
+    # the FL-core enrichment block below (extracted alongside them).
 
     # Pre-compute basketball series state across the full record set
     # (not just `page`). The derivation needs sibling tickers from the
@@ -3674,157 +3616,12 @@ def get_events(
                 except Exception:
                     pass
         if g:
-            # Base compact label from the feed. For tennis we flip
-            # the per-set pairs to match the Kalshi title order so
-            # the "6-3 4-5 30-0" breakdown lines up with the
-            # "ALC 1 - SIN 1" summary to its left.
-            base_label = compact_label(g) if compact_label else ""
-            if g.get("sport") == "Tennis" and _needs_flip(title, g):
-                base_label = _flip_score_pairs(base_label)
-            home_score_n, away_score_n = _normalize_scores(g)
-            # Soccer announced added-time ("+4" board) — snap-once cache.
-            # Trigger a non-blocking fetch when this match is in
-            # regulation stoppage (period 1 past 44 min, period 2 past
-            # 89 min). The first user request lands a fetch, the next
-            # lands the figure from cache. Fire-and-forget so it
-            # doesn't add latency to /api/events.
-            _added_1h = None
-            _added_2h = None
-            if g.get("sport") == "Soccer" and g.get("state") == "in":
-                _evid = g.get("event_id") or ""
-                _per  = g.get("period", 0)
-                _stage_ms = g.get("stage_start_ms", 0) or 0
-                if _evid and _stage_ms and _per in (1, 2) and _fl_ensure_added_time:
-                    import time as _t_added
-                    _elapsed_min = max(0, int((_t_added.time() * 1000 - _stage_ms) / 60000))
-                    _threshold = 44 if _per == 1 else 89
-                    if _elapsed_min >= _threshold:
-                        _fl_ensure_added_time(_evid, _per)
-                if _evid and _fl_get_added_time:
-                    _added_1h = _fl_get_added_time(_evid, 1)
-                    _added_2h = _fl_get_added_time(_evid, 2)
-            rc["_live_state"] = {
-                "label":          base_label,
-                "state":          g.get("state", ""),
-                "short_detail":   g.get("short_detail", ""),
-                "display_clock":  g.get("display_clock", ""),
-                "period":         g.get("period", 0),
-                "stage_start_ms": g.get("stage_start_ms", 0),
-                "league":         g.get("league", ""),
-                "captured_at_ms": g.get("captured_at_ms", 0),
-                "clock_running":  g.get("clock_running", True),
-                "home_abbr":      g.get("home_abbr", ""),
-                "away_abbr":      g.get("away_abbr", ""),
-                "home_display":   g.get("home_display", ""),
-                "away_display":   g.get("away_display", ""),
-                "home_score":     home_score_n,
-                "away_score":     away_score_n,
-                "score_display":  _score_display(title, g),
-                "added_time_1h":  _added_1h,
-                "added_time_2h":  _added_2h,
-                # Title-derived team names so the frontend can match
-                # outcome labels even when Kalshi uses a different name
-                # than ESPN (e.g. "Junin" vs "Sarmiento de Junín").
-                "title_home":     "",
-                "title_away":     "",
-                # Playoff series metadata (only ESPN games surface
-                # these; SofaScore/SportsDB matches leave them empty).
-                "is_playoff":         bool(g.get("is_playoff")),
-                "series_title":       g.get("series_title", ""),
-                "series_summary":     g.get("series_summary", ""),
-                "series_home_wins":   g.get("series_home_wins"),
-                "series_away_wins":   g.get("series_away_wins"),
-                "series_game_number": g.get("series_game_number"),
-                # Two-leg knockout aggregate (soccer cup ties).
-                "is_two_leg":         bool(g.get("is_two_leg")),
-                "aggregate_home":     g.get("aggregate_home"),
-                "aggregate_away":     g.get("aggregate_away"),
-                "leg_number":         g.get("leg_number"),
-                "round_name":         g.get("round_name", ""),
-                "tournament_name":    g.get("tournament_name", "") or g.get("league", ""),
-                "aggregate_winner":   g.get("aggregate_winner", ""),
-                # Cricket-specific score parts. When a Cricket match
-                # is live, raw home_score/away_score carry the runs
-                # only ("225", "212"); the wickets+overs portion
-                # ("/6 (20)") lives in these companion fields. The
-                # frontend's buildScoreMap formats the full
-                # "225/6 (20)" for outcome rows when these are
-                # populated.
-                "cricket_home_wickets": g.get("cricket_home_wickets", ""),
-                "cricket_away_wickets": g.get("cricket_away_wickets", ""),
-                "cricket_home_overs":   g.get("cricket_home_overs", ""),
-                "cricket_away_overs":   g.get("cricket_away_overs", ""),
-                "cricket_live_sentence": g.get("cricket_live_sentence", ""),
-            }
-            # Clock-only ESPN override for stop-clock US sports.
-            # ESPN-as-primary architecture: when sport is in
-            # _ESPN_CLOCK_SPORTS, g already came from ESPN above (see
-            # match_game selection at the top of the formatter). No
-            # override needed — the live state was built directly
-            # from ESPN's data. For non-ESPN-covered sports, g came
-            # from FL with its native clock/period/score.
-            # Parse team names from the Kalshi title ("A vs B")
-            # and assign to title_home / title_away using flip.
-            import re as _re
-            _parts = _re.split(r'\s+(?:vs\.?|v|at)\s+', title, maxsplit=1, flags=_re.IGNORECASE)
-            if len(_parts) == 2:
-                _flip = _needs_flip(title, g)
-                if _flip:
-                    rc["_live_state"]["title_home"] = _parts[1].strip()
-                    rc["_live_state"]["title_away"] = _parts[0].strip()
-                else:
-                    rc["_live_state"]["title_home"] = _parts[0].strip()
-                    rc["_live_state"]["title_away"] = _parts[1].strip()
-            # Tennis: attach structured per-player data so the
-            # frontend can render a vertical 2-row scoreboard
-            # instead of the single-line breakdown. Flip sides
-            # when the Kalshi title lists the away player first.
-            if g.get("sport") == "Tennis":
-                # FlashLive provides tennis data directly as a
-                # pre-built dict; ESPN uses separate fields.
-                fl_tennis = g.get("tennis")
-                if fl_tennis and fl_tennis.get("row1_name"):
-                    rc["_live_state"]["tennis"] = fl_tennis
-                else:
-                    flip = _needs_flip(title, g)
-                    home_key, away_key = ("away", "home") if flip else ("home", "away")
-                    rc["_live_state"]["tennis"] = {
-                        "row1_name":   g.get(f"tennis_{home_key}_name", ""),
-                        "row2_name":   g.get(f"tennis_{away_key}_name", ""),
-                        "row1_sets":   g.get(f"tennis_{home_key}_sets", ""),
-                        "row2_sets":   g.get(f"tennis_{away_key}_sets", ""),
-                        "row1_games":  g.get(f"tennis_{home_key}_games", ""),
-                        "row2_games":  g.get(f"tennis_{away_key}_games", ""),
-                        "row1_point":  g.get(f"tennis_{home_key}_point", ""),
-                        "row2_point":  g.get(f"tennis_{away_key}_point", ""),
-                        "set_history": [
-                            {
-                                "set":  s.get("set"),
-                                "row1": s.get(home_key),
-                                "row2": s.get(away_key),
-                            }
-                            for s in (g.get("tennis_set_history") or [])
-                        ],
-                        "server": (
-                            "row1" if g.get("tennis_server") == home_key
-                            else ("row2" if g.get("tennis_server") == away_key else "")
-                        ),
-                    }
-            # If ESPN or SofaScore gave us the actual scheduled
-            # kickoff time, override our DURATION-based estimate
-            # with it. Kalshi's expected_expiration_time varies per
-            # match, so no fixed DURATION can be universally
-            # accurate — but ESPN's date field and SofaScore's
-            # startTimestamp are authoritative.
-            sched_ms = g.get("scheduled_kickoff_ms")
-            if sched_ms:
-                try:
-                    from datetime import datetime as _dt2
-                    rc["_kickoff_dt"] = _dt2.fromtimestamp(
-                        sched_ms / 1000, tz=timezone.utc
-                    ).isoformat()
-                except Exception:
-                    pass
+            # FL-core enrichment lives in live_state_builder.py per
+            # v4-rendering PR A. Both call sites (this + get_event_
+            # detail at ~4448) go through the same helper so any
+            # future divergence surfaces at both endpoints, not one.
+            from live_state_builder import build_fl_live_state
+            build_fl_live_state(rc, g, title=title)
         # Multi-game series enrichment — Kalshi-derived, independent
         # of ESPN. Fires for any sport whose tickers Kalshi names
         # *GAME-DDMMMDDABBABB and that runs multi-game series:
@@ -4316,18 +4113,12 @@ def get_event_detail(ticker: str):
         return {"error": f"event {ticker!r} not found in cache"}
 
     # Import live-score feed — FlashLive is the sole active source.
+    # compact_label / added-time accessors moved to
+    # live_state_builder.py which lazy-imports them per-call.
     try:
-        from flashlive_feed import (
-            match_game as flash_match_game,
-            compact_label,
-            ensure_added_time_cached as _fl_ensure_added_time,
-            get_added_time as _fl_get_added_time,
-        )
+        from flashlive_feed import match_game as flash_match_game
     except Exception:
         flash_match_game = None
-        compact_label = None
-        _fl_ensure_added_time = None
-        _fl_get_added_time = None
 
     try:
         from kalshi_ws import LIVE_PRICES
@@ -4463,92 +4254,14 @@ def get_event_detail(ticker: str):
             except Exception:
                 pass
     if g:
-        home_score_n, away_score_n = _normalize_scores(g)
-        # Soccer announced added-time — see /api/events for details.
-        _added_1h = None
-        _added_2h = None
-        if g.get("sport") == "Soccer" and g.get("state") == "in":
-            _evid = g.get("event_id") or ""
-            _per  = g.get("period", 0)
-            _stage_ms = g.get("stage_start_ms", 0) or 0
-            if _evid and _stage_ms and _per in (1, 2) and _fl_ensure_added_time:
-                import time as _t_added
-                _elapsed_min = max(0, int((_t_added.time() * 1000 - _stage_ms) / 60000))
-                _threshold = 44 if _per == 1 else 89
-                if _elapsed_min >= _threshold:
-                    _fl_ensure_added_time(_evid, _per)
-            if _evid and _fl_get_added_time:
-                _added_1h = _fl_get_added_time(_evid, 1)
-                _added_2h = _fl_get_added_time(_evid, 2)
-        rc["_live_state"] = {
-            "label":          (compact_label(g) if compact_label else ""),
-            "state":          g.get("state", ""),
-            "short_detail":   g.get("short_detail", ""),
-            "display_clock":  g.get("display_clock", ""),
-            "period":         g.get("period", 0),
-            "stage_start_ms": g.get("stage_start_ms", 0),
-            "league":         g.get("league", ""),
-            "captured_at_ms": g.get("captured_at_ms", 0),
-            "clock_running":  g.get("clock_running", True),
-            "home_abbr":      g.get("home_abbr", ""),
-            "away_abbr":      g.get("away_abbr", ""),
-            "home_display":   g.get("home_display", ""),
-            "away_display":   g.get("away_display", ""),
-            "home_score":     home_score_n,
-            "away_score":     away_score_n,
-            "added_time_1h":  _added_1h,
-            "added_time_2h":  _added_2h,
-            # Playoff series metadata — see /api/events for details.
-            "is_playoff":         bool(g.get("is_playoff")),
-            "series_title":       g.get("series_title", ""),
-            "series_summary":     g.get("series_summary", ""),
-            "series_home_wins":   g.get("series_home_wins"),
-            "series_away_wins":   g.get("series_away_wins"),
-            "series_game_number": g.get("series_game_number"),
-            # Two-leg knockout aggregate (soccer cup ties).
-            "is_two_leg":         bool(g.get("is_two_leg")),
-            "aggregate_home":     g.get("aggregate_home"),
-            "aggregate_away":     g.get("aggregate_away"),
-            "leg_number":         g.get("leg_number"),
-            "round_name":         g.get("round_name", ""),
-            "tournament_name":    g.get("tournament_name", "") or g.get("league", ""),
-            "aggregate_winner":   g.get("aggregate_winner", ""),
-            # Cricket-specific score parts — see /api/events for
-            # rationale. Mirrors the live state shape so the detail
-            # page renders cricket scores the same way as cards.
-            "cricket_home_wickets": g.get("cricket_home_wickets", ""),
-            "cricket_away_wickets": g.get("cricket_away_wickets", ""),
-            "cricket_home_overs":   g.get("cricket_home_overs", ""),
-            "cricket_away_overs":   g.get("cricket_away_overs", ""),
-            "cricket_live_sentence": g.get("cricket_live_sentence", ""),
-        }
-        # ESPN-as-primary handled at the match_game step above for
-        # _ESPN_CLOCK_SPORTS. No override needed here.
-        # Tennis: per-set scoreboard data
-        if g.get("sport") == "Tennis":
-            fl_tennis = g.get("tennis")
-            if fl_tennis and fl_tennis.get("row1_name"):
-                rc["_live_state"]["tennis"] = fl_tennis
-            elif g.get("tennis_home_name"):
-                # ESPN format — home/away already labeled
-                rc["_live_state"]["tennis"] = {
-                    "row1_name":   g.get("tennis_home_name", ""),
-                    "row2_name":   g.get("tennis_away_name", ""),
-                    "row1_sets":   g.get("tennis_home_sets", ""),
-                    "row2_sets":   g.get("tennis_away_sets", ""),
-                    "row1_games":  g.get("tennis_home_games", ""),
-                    "row2_games":  g.get("tennis_away_games", ""),
-                    "row1_point":  g.get("tennis_home_point", ""),
-                    "row2_point":  g.get("tennis_away_point", ""),
-                    "set_history": [
-                        {"set": s.get("set"), "row1": s.get("home"), "row2": s.get("away")}
-                        for s in (g.get("tennis_set_history") or [])
-                    ],
-                    "server": (
-                        "row1" if g.get("tennis_server") == "home"
-                        else ("row2" if g.get("tennis_server") == "away" else "")
-                    ),
-                }
+        # Unified FL-core enrichment — same helper as /api/events per
+        # v4-rendering PR A. Detail endpoint previously omitted
+        # score_display, title_home, title_away and the ESPN sched_ms
+        # kickoff override; unification adds them here. Callers on
+        # the detail page already tolerate absent fields, so the
+        # only visible change is richer live-state on this endpoint.
+        from live_state_builder import build_fl_live_state
+        build_fl_live_state(rc, g, title=title)
 
     # Market-settling lifecycle (mirrors /api/events with the same
     # stricter ticker-date gate). Kalshi's exp_dt can be in the past
@@ -15340,7 +15053,8 @@ def cutover_status():
     picks up within CUTOVER_REFRESH_INTERVAL_S (default 5s)."""
     from cutover import (
         get_current_config, cohort_series_list,
-        fallback_counter_value, compute_effective_pct,
+        fallback_counter_value, no_game_counter_value,
+        compute_effective_pct,
         _series_universe, _linked_universe,
     )
     from linkage import snapshot_state as _linkage_snapshot
@@ -15364,6 +15078,7 @@ def cutover_status():
         "cohort_linked_size":        len(cohort),
         "cohort_sample":             cohort[:10],
         "v4_fallback_count":         fallback_counter_value(),
+        "v4_no_game_count":          no_game_counter_value(),
         "config_source":             cfg.source,
         "config_loaded_at_ts":       cfg.loaded_at_ts if cfg.loaded_at_ts > 0 else None,
         "linkage_map_size":          linkage_snap["linkage_map_size"],

@@ -83,6 +83,19 @@ _CURRENT_CONFIG: CutoverConfig = CutoverConfig(source="default")
 _FALLBACK_COUNTER_LOCK = threading.Lock()
 _FALLBACK_COUNTER = 0
 
+# Per-worker counter incremented every time _apply_v4_linkage sees
+# a valid linkage entry (event_ticker → fl_event_id) but the FL
+# secondary index has no live game for that fl_event_id. Legitimate
+# reasons (game finished + GC'd, cold FL cache, transient sweep-vs-
+# refresh race) — NOT an error, NOT a fallback (v4 didn't raise).
+# Counter surfaces on /api/cutover_status so operator can watch the
+# rate: sustained non-zero at pct>0 = linkage map's fixture universe
+# has drifted out of FL's live-game universe → linkage refresh cadence
+# and FL sweep cadence need re-tuning. Cross-worker aggregate = sum
+# across sample responses (same convention as v4_fallback_count).
+_NO_GAME_COUNTER_LOCK = threading.Lock()
+_NO_GAME_COUNTER = 0
+
 
 def increment_fallback_counter() -> int:
     """Called from /api/events when v4 raises and we serve v3.
@@ -96,6 +109,22 @@ def increment_fallback_counter() -> int:
 def fallback_counter_value() -> int:
     with _FALLBACK_COUNTER_LOCK:
         return _FALLBACK_COUNTER
+
+
+def increment_no_game_counter() -> int:
+    """Called from linkage._apply_v4_linkage when linkage resolves but
+    the FL secondary index has no live game for the fl_event_id.
+    Legitimate state (post-game GC, cold cache) — NOT a fallback.
+    Returns the new value for the caller's log line."""
+    global _NO_GAME_COUNTER
+    with _NO_GAME_COUNTER_LOCK:
+        _NO_GAME_COUNTER += 1
+        return _NO_GAME_COUNTER
+
+
+def no_game_counter_value() -> int:
+    with _NO_GAME_COUNTER_LOCK:
+        return _NO_GAME_COUNTER
 
 
 # ── Public API ───────────────────────────────────────────────────

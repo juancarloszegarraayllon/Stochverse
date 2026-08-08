@@ -98,12 +98,41 @@ def _apply_v4_linkage(record: dict) -> None:
     from flashlive_feed import GAMES_BY_EVENT_ID
     fl_game = GAMES_BY_EVENT_ID.get(str(fl_event_id))
     if not fl_game:
+        # Legitimate no-op class (post-game GC, cold cache, sweep-
+        # vs-refresh race). Increment the observability counter so
+        # the operator can watch the rate on /api/cutover_status —
+        # sustained non-zero at pct>0 means linkage-refresh and FL-
+        # sweep cadences have drifted apart. NOT a fallback (v4
+        # didn't raise), NOT an error (linkage may resolve on the
+        # next request when FL re-populates).
+        try:
+            from cutover import increment_no_game_counter
+            increment_no_game_counter()
+        except Exception:
+            pass
         return
-    # Success — stamp observability markers. V4_OVERLAY_KEYS is
-    # empty this PR; v4-rendering PR populates it and overlays.
-    for key in V4_OVERLAY_KEYS:
-        if key in fl_game:
-            record[key] = fl_game[key]
+
+    # Success — stamp observability markers.
+    #
+    # v4-rendering PR A (Option i) extracted the FL-core `_live_state`
+    # builder to live_state_builder.build_fl_live_state. This call
+    # site is where PR B (v4-rendering populate) wires FL-authored
+    # rendering: once V4_OVERLAY_KEYS is non-empty, we invoke the
+    # helper to overlay the full live_state onto the record before
+    # returning. PR A leaves V4_OVERLAY_KEYS empty so the branch is
+    # dead — cohort tickers still render byte-identically to v3
+    # (main.get_events calls the same helper on its own path).
+    if V4_OVERLAY_KEYS:
+        try:
+            from live_state_builder import build_fl_live_state
+            build_fl_live_state(
+                record, fl_game, title=record.get("title", "")
+            )
+        except Exception:
+            # v4 raised — caller (main.py:/api/events branching)
+            # catches at the try/except around _apply_v4_linkage and
+            # increments the fallback counter. Re-raise.
+            raise
     record["_v4_linked"] = True
     record["_v4_fl_event_id"] = str(fl_event_id)
 
