@@ -1,0 +1,31 @@
+{
+  "ticker": "KXEFLCUPGAME-26AUG08BROREA",
+  "sport": "Soccer",
+  "context_notes": "EFL Cup, mid-match (60'). Cohort-adjacent series family; ticker appears in daily_diff's agree_partial_coverage bucket — exercises the linkage path end-to-end. Soccer sport family exercises: home_score/away_score normalization for state='in', added-time cache path (period 2 past 89' if it reaches stoppage), tournament_name fallback via league, aggregate fields when SofaScore populates two-leg data, and the title-parse flip when Kalshi's team ordering differs from FL's.",
+  "expected_live_state_keys": [
+    "label", "state", "short_detail", "display_clock", "period",
+    "stage_start_ms", "league", "captured_at_ms", "clock_running",
+    "home_abbr", "away_abbr", "home_display", "away_display",
+    "home_score", "away_score", "score_display",
+    "added_time_1h", "added_time_2h",
+    "title_home", "title_away",
+    "is_playoff", "series_title", "series_summary",
+    "series_home_wins", "series_away_wins", "series_game_number",
+    "is_two_leg", "aggregate_home", "aggregate_away", "leg_number",
+    "round_name", "tournament_name", "aggregate_winner",
+    "cricket_home_wickets", "cricket_away_wickets",
+    "cricket_home_overs", "cricket_away_overs", "cricket_live_sentence"
+  ],
+  "expected_additive_delta_at_detail_endpoint": {
+    "_live_state.score_display": "non-empty ('BRO 1 - REA 0' shape) when state='in' and scores populated; empty otherwise",
+    "_live_state.title_home":    "parsed from Kalshi title ('Brentford' or similar); flip-aware",
+    "_live_state.title_away":    "parsed from Kalshi title ('Reading' or similar); flip-aware",
+    "_kickoff_dt":               "ISO-8601 override written IFF scheduled_kickoff_ms populated (ESPN/SofaScore); otherwise unchanged from pre-deploy"
+  },
+  "expected_events_endpoint_delta": "none — byte-identical",
+  "captured_at_utc": null,
+  "prod_host":       null,
+  "phase":           null,
+  "detail_record":   null,
+  "events_record":   null
+}
