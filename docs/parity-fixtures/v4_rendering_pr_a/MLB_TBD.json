@@ -1,0 +1,31 @@
+{
+  "ticker": "TBD",
+  "sport": "Baseball",
+  "context_notes": "Placeholder — MLB slate goes live ~17:15Z 2026-08-08. Operator picks a live ticker at capture time and renames this file (KXMLBGAME-<TICKER>.json) with the ticker filled in. Baseball sport family exercises: home_score/away_score during state='in' (inning-level updates), state='post' finalized-score handling, no tennis/cricket sub-objects, no soccer added-time. Cleanest sport for verifying the byte-identical /api/events contract because it has the fewest branches inside build_fl_live_state.",
+  "expected_live_state_keys": [
+    "label", "state", "short_detail", "display_clock", "period",
+    "stage_start_ms", "league", "captured_at_ms", "clock_running",
+    "home_abbr", "away_abbr", "home_display", "away_display",
+    "home_score", "away_score", "score_display",
+    "added_time_1h", "added_time_2h",
+    "title_home", "title_away",
+    "is_playoff", "series_title", "series_summary",
+    "series_home_wins", "series_away_wins", "series_game_number",
+    "is_two_leg", "aggregate_home", "aggregate_away", "leg_number",
+    "round_name", "tournament_name", "aggregate_winner",
+    "cricket_home_wickets", "cricket_away_wickets",
+    "cricket_home_overs", "cricket_away_overs", "cricket_live_sentence"
+  ],
+  "expected_additive_delta_at_detail_endpoint": {
+    "_live_state.score_display": "'BOS 4 - NYY 3' shape when state='in' and scores populated",
+    "_live_state.title_home":    "parsed from Kalshi title (team-1 name); flip-aware",
+    "_live_state.title_away":    "parsed from Kalshi title (team-2 name); flip-aware",
+    "_kickoff_dt":               "ISO-8601 override written IFF scheduled_kickoff_ms populated (ESPN)"
+  },
+  "expected_events_endpoint_delta": "none — byte-identical",
+  "captured_at_utc": null,
+  "prod_host":       null,
+  "phase":           null,
+  "detail_record":   null,
+  "events_record":   null
+}

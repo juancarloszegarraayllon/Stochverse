@@ -285,28 +285,73 @@ def test_cutover_status_exposes_no_game_count():
     assert v >= 0
 
 
-# ── Component 5: fixture placeholder (populated in doc-import) ───
+# ── Component 5: fixture slot manifest ───────────────────────────
+
+# Three fixture slots reserved with the tickers the operator
+# picked from the 2026-08-08 live slate. The MLB slot goes live
+# ~17:15Z; substituted here in a follow-up commit within the same
+# PR window. Fixture JSON envelopes at
+# docs/parity-fixtures/v4_rendering_pr_a/ carry only the ticker +
+# expected-key set for now — captured response data lives locally
+# in the operator's merge-window working directory (not committed;
+# see the README in that directory for the rationale).
+_FIXTURE_MANIFEST = [
+    ("SOC", "KXEFLCUPGAME-26AUG08BROREA",         "Soccer"),
+    ("TEN", "KXATPCHALLENGERMATCH-26AUG08GENPIR", "Tennis"),
+    ("MLB", "TBD",                                 "Baseball"),
+]
+
+
+def test_fixture_manifest_matches_disk():
+    """Fixture placeholder files at
+    docs/parity-fixtures/v4_rendering_pr_a/ must exist for every
+    slot in the manifest. Guards against a slot being renamed in
+    the test without renaming the fixture file (or vice versa)."""
+    import json
+    from pathlib import Path
+    fixture_dir = (
+        Path(__file__).resolve().parent.parent
+        / "docs" / "parity-fixtures" / "v4_rendering_pr_a"
+    )
+    assert fixture_dir.is_dir(), f"missing fixture dir: {fixture_dir}"
+    for slot, ticker, sport in _FIXTURE_MANIFEST:
+        # Slot files are named <SLOT>_<TICKER>.json; MLB uses
+        # 'TBD' until the operator fills it in.
+        expected = fixture_dir / f"{slot}_{ticker}.json"
+        assert expected.is_file(), (
+            f"fixture placeholder missing: {expected} (slot={slot}, "
+            f"sport={sport}). Either the manifest and disk drifted "
+            f"or the fixture wasn't renamed after ticker substitution."
+        )
+        # Sanity-check envelope carries the ticker + sport we expect.
+        env = json.loads(expected.read_text())
+        assert env["ticker"] == ticker
+        assert env["sport"]  == sport
+
 
 @pytest.mark.skip(
-    reason="Fixture directory populated in doc-import window from "
-           "prod snapshots (MLB / Soccer / Tennis tickers). PR B "
-           "wires the byte-parity assertions; PR A ships the "
-           "scaffold and the skip marker."
+    reason="Automated byte-parity replay is blocked on the "
+           "LOG_LIVE_STATE_G_DUMP env gate that captures the raw "
+           "`g` dict alongside the served response. Until that "
+           "lands, the merge gate is the operator's manual "
+           "PowerShell capture protocol (documented on PR #301) — "
+           "which is the authoritative gate; this test is a "
+           "follow-up hardening step, not the merge blocker."
 )
 def test_byte_parity_against_prod_snapshot():
-    """Placeholder for the byte-parity contract test. Fixtures at
-    docs/parity-fixtures/v4_rendering_pr_a/{ticker}.json capture
-    the response shape from prod (direct-to-prod, not preview) at
-    snapshot time. The test replays the helper against the input g
-    from the fixture and asserts the resulting _live_state dict
-    byte-matches the fixture's expected output.
+    """Placeholder for the automated byte-parity contract test.
 
-    Snapshot capture protocol (from PR body):
-      1. Direct-to-prod curl of /api/event/{ticker} for one live
-         ticker per sport family (MLB / Soccer / Tennis).
-      2. Capture the raw g from the process's FL cache (log-
-         intercept via LOG_LIVE_STATE_G_DUMP env gate — future).
-      3. Store {g, expected_live_state} at fixture path.
-      4. Merge block: the snapshot commit lands in a follow-up
-         merge; this test flips from skip → active in that PR."""
+    When LOG_LIVE_STATE_G_DUMP lands and the operator re-captures
+    with `g` alongside the served response, this test:
+
+      1. Loads each fixture JSON at
+         docs/parity-fixtures/v4_rendering_pr_a/<SLOT>_<TICKER>.json
+      2. Replays build_fl_live_state(rc={}, g=<captured g>, title=<
+         captured title>).
+      3. Asserts the produced rc['_live_state'] byte-matches the
+         fixture's detail_record['_live_state'] (mod the four
+         documented additive fields at /api/event/{ticker}).
+
+    The manual capture protocol on PR #301 is the merge-time
+    gate; this automated test is post-merge hardening."""
     pass
